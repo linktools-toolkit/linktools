@@ -833,10 +833,10 @@ async def test_metadata_batches_run_and_interaction_records_without_skipping_hig
                 return (await archive.get_agent_run(agent_run_id=run.agent_run_id),
                         await archive.list_model_interactions(agent_run_id=run.agent_run_id, limit=1))
             separate_page = await archive.state_store.read(separate)
-            separate_selects = sum(sql.startswith("SELECT") for sql in statements)
+            separate_selects = sum(sql.startswith(("SELECT", "WITH")) for sql in statements)
             statements.clear()
             combined_page = await archive.read_model_interactions_with_run(agent_run_id=run.agent_run_id, limit=1)
-            combined_selects = sum(sql.startswith("SELECT") for sql in statements)
+            combined_selects = sum(sql.startswith(("SELECT", "WITH")) for sql in statements)
         finally:
             event.remove(engine, "before_cursor_execute", capture)
         assert combined_page == separate_page
@@ -844,7 +844,8 @@ async def test_metadata_batches_run_and_interaction_records_without_skipping_hig
             agent_run_id=run.agent_run_id, after_model_request_seq=1, limit=1,
         )
         assert empty_run == run and empty_page == []
-        assert combined_selects < separate_selects
+        assert separate_selects == 2
+        assert combined_selects == 2
         print("run/page SELECT separate, batched:", separate_selects, combined_selects)
         # A row beyond the durable sequence boundary must not become visible.
         await archive.state_store.mutate(lambda transaction: transaction.delete_sequence(archive._stream(run.agent_run_id, "interaction")))
@@ -927,6 +928,7 @@ async def test_model_reads_preserve_custom_archive_overrides() -> None:
         custom = CustomArchive(
             archive.state_store, object_store=None, namespace=_NAMESPACE,
             tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
+            run_registrations=state.run_store.run_registrations,
         )
         page = await _metadata(_service(state, reader=_reader(state, store=custom)))
         assert [item.model_request_seq for item in page] == [1]

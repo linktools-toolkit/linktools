@@ -85,7 +85,7 @@ async def test_stopped_parent_cannot_admit_new_child(tmp_path: Path, backend: st
         await repository.compare_and_swap("parent", tenant_id="tenant", expected_revision=parent.revision,
                                           next_record=replace(parent, status=status, revision=2, recovery=(
                                                  ExecutionRecoveryDetail(agent_run_id="run", pending_tools=PendingToolContinuation("run", calls=(
-                                                     PendingDeferredCall("call", "tool", StoredPayload.inline_json({})),
+                                                     PendingDeferredCall("call", "tool", StoredPayload.inline_json({}), operation_id="test-operation"),
                                                  ))) if status is ExecutionStatus.WAITING_DEFERRED else parent.recovery)))
         reservation = _reservation()
         with pytest.raises(AIError) as blocked:

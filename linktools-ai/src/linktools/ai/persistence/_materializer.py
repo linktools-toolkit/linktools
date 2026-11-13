@@ -33,6 +33,7 @@ from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
 from .repositories import (
     OperationLedgerRepositoryImpl,
+    ToolRepositoryImpl,
     RepositoryBase,
     build_repository_bundle,
 )
@@ -161,7 +162,8 @@ async def materialize_runtime_storage(
         cache = selected if isinstance(selected, CacheBackend) else None
         store: StateStore
         if isinstance(resource, MemoryResource):
-            store = InMemoryStateStore(resource.group, cache=cache)
+            store = InMemoryStateStore(resource.group, cache=cache,
+                                       store_key=state_store_key(namespace, tenant_id, domain.value))
         else:
             store = SqlStateStore(
                 resource.context.engine,
@@ -234,6 +236,14 @@ async def materialize_runtime_storage(
         for bundle in bundles.values()
         for value in bundle.values()
     )
+    from .state import StateContentDependencies
+    checkpoint_store = stores[PersistenceDomain.CHECKPOINT]
+    if checkpoint_store is not execution_store:
+        if isinstance(execution_store, StateContentDependencies):
+            execution_store.bind_content_dependency(checkpoint_store)
+    if checkpoint_store is execution_store or isinstance(execution_store, StateContentDependencies):
+        for component in bundles[PersistenceDomain.EXECUTION].values():
+            component.bind_pending_operation_source(checkpoint_store)
     for component in _unique(components):
         register_cleanup((component.close,))
     for component in _unique(components):
@@ -246,12 +256,16 @@ async def materialize_runtime_storage(
         namespace=namespace, tenant_id=tenant_id,
     )
     register_cleanup((objects.drain_reads, objects.preflight_close))
+    tools = repositories.checkpoint.tools
+    if type(tools) is ToolRepositoryImpl:
+        tools.bind_archive_object_reader(partial(objects.read_archive_object, PersistenceDomain.CHECKPOINT))
     run_store = build_runtime_agent_run_store(
         plan,
         stores,
         objects,
         history_repository=repositories.conversation.histories,
         execution_repository=repositories.execution.executions,
+        tool_repository=repositories.checkpoint.tools,
         namespace=namespace,
         tenant_id=tenant_id,
     )

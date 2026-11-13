@@ -12,7 +12,7 @@ from pydantic_ai_harness.step_persistence import ContinuableSnapshot, InMemorySt
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.steps import native_store_key, encode_native_replay_key
+from linktools.ai.steps import native_store_key, encode_native_replay_key, decode_native_replay_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_backup import NativeStepBackup
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
@@ -48,7 +48,8 @@ async def test_raw_backup_preserves_occurrences_order_and_pruned_identities(tmp_
         assert backup.snapshots[0]["pruned"] is True
         assert backup.snapshots[0]["messages"] == "{}"
         assert len(backup.events) == 2
-        assert all(row["idempotency_key"] is None for row in backup.events)
+        assert all(decode_native_replay_key(row["idempotency_key"]) is None for row in backup.events)
+        assert len({row["idempotency_key"] for row in backup.events}) == 2
         assert [row["step_index"] for row in backup.snapshots] == [7, 2]
         wire = backup.to_json()
         assert NativeStepBackup.from_json(wire).to_json() == wire

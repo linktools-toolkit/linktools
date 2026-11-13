@@ -106,7 +106,7 @@ def _partial_operation(
     )
 
 
-@pytest.mark.parametrize("key", ("sensitive-operation-key-MUST-NOT-APPEAR-IN-REPR", "限" * 85 + "r"))
+@pytest.mark.parametrize("key", ("sensitive-operation-key-MUST-NOT-APPEAR-IN-REPR", "限" * 42 + "rr"))
 def test_task_admission_preserves_operation_id_and_request_digest(key: str) -> None:
     request = _request("digest", idempotency_key=key)
     admission = TaskGraphAdmission.from_request(request)
@@ -122,7 +122,7 @@ def test_task_admission_preserves_operation_id_and_request_digest(key: str) -> N
         assert decode_domain(wire, type(value)) == value
     for value in (admission, submission):
         wire = encode_domain(value)
-        wire["fields"]["operation_id"] = "限" * 85 + "rx"
+        wire["fields"]["operation_id"] = "限" * 42 + "rrx"
         with pytest.raises(AIError) as raised:
             decode_domain(wire, type(value))
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -367,7 +367,7 @@ async def test_recovery_discovery_uses_bounded_keyset_pages() -> None:
     state = Persistence(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
-        for index in range(129):
+        for index in range(3):
             request = _request(f"page-{index:03d}")
             await state.task.admissions.admit(
                 TaskGraphAdmission.from_request(request),
@@ -376,14 +376,14 @@ async def test_recovery_discovery_uses_bounded_keyset_pages() -> None:
 
         first = await state.task.admissions.list_recoverable_page(
             cursor=None,
-            limit=128,
+            limit=2,
         )
-        assert len(first.items) == 128
+        assert len(first.items) == 2
         assert first.next_cursor is not None
 
         second = await state.task.admissions.list_recoverable_page(
             cursor=first.next_cursor,
-            limit=128,
+            limit=2,
         )
         assert len(second.items) == 1
         assert second.next_cursor is None

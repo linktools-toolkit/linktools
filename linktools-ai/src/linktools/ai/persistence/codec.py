@@ -4,7 +4,8 @@
 
 from ..storage import StorageRetentionMode
 from ._archive import ArchiveRoot, ArchiveSlice, decode_archive_scope, validate_archive_content_identity, validate_archive_group_id
-from ._message_root import NativeMessageRoot, NativeMessageSlice
+from ._native_tool_error import NativeToolErrorReference
+from ._message_root import NativeUserInputReference, NativeMessageRoot, NativeMessageSlice, NativeTextReference, NativeToolResultReference, NativeToolArgumentsReference
 
 import base64
 import binascii
@@ -14,7 +15,7 @@ import types
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import MISSING, dataclass, fields, is_dataclass, replace
 from ..steps import NativeStepSource
-from ..execution import ExecutionTimelineRecord, ExecutionView
+from ..execution import ExecutionMetadataRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -36,7 +37,8 @@ from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from ..asset import AssetVersionRef
-from ..spec import CapabilityRef
+from ..spec import CapabilityRef, validate_logical_id
+from ..core import validate_resource_id
 from ..evaluation import (
     CandidateContract,
     CandidateSlotRef,
@@ -160,6 +162,7 @@ from .contracts import (
     ExecutionEventRecord,
     ExecutionHistorySealRecord,
     ExecutionRecord,
+    ExecutionControlRecord,
     ExecutionRunSealHead,
     ExecutionStartClaim,
     ExecutionStartReservation,
@@ -198,6 +201,9 @@ from .contracts import (
     TaskPreparedInputRecord,
     ToolOperationAdmission,
     ToolOperationRecord,
+    ToolOperationMetadata,
+    PendingOperationSource,
+    ExecutionMembershipRecord,
     TranscriptChunk,
     TranscriptHeadRecord,
     TranscriptMessageRef,
@@ -214,7 +220,6 @@ from ._step_contracts import (
     StepEvent,
 )
 from .state import (
-    ALIAS_KEY_MAX_BYTES,
     STREAM_KEY_MAX_BYTES,
     OPERATION_KEY_MAX_BYTES,
     validate_stream_key,
@@ -224,7 +229,6 @@ from .state import (
     validate_parent_key,
     RECORD_KEY_MAX_BYTES,
     PARENT_KEY_MAX_BYTES,
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
@@ -884,7 +888,6 @@ def _decode_v1_object_ref(
     )
 
 
-
 def _encode_v1_stored_payload(
     value: object,
     codec: "_VersionCodec",
@@ -1037,7 +1040,8 @@ def _encode_v1_execution_record(
         name: binding if name == "binding" and binding is not None else
         _encode_domain(getattr(value, name), codec, persisted=persisted)
         for name in _dataclass_fields(ExecutionRecord)
-        if not (persisted and name == "repository_instructions" and value.input_context is not None)
+        if not (persisted and (name == "repository_instructions" and value.input_context is not None
+                              or name in {"memory_scope", "tool_response_ref"} and getattr(value, name) is None))
     }
     recovery = value.recovery
     handoff = None if recovery is None else recovery.terminal_handoff
@@ -1046,8 +1050,14 @@ def _encode_v1_execution_record(
     if (persisted and value.result is not None and handoff is not None
             and handoff.outcome.object_source_domain in {None, PersistenceDomain.EXECUTION}):
         outcome = _execution_outcome_fields(encoded)
+        # Whole templates already share fixed output/diagnostic owners. This
+        # older inline projection is valid only when both inline sources exist;
+        # a Result reference intentionally has no stop_reason/usage fields.
+        result_fields = encoded["result"]["fields"]
+        if outcome is None or "content" in result_fields:
+            return cast(Mapping[str, JsonValue], encoded)
         source = _execution_outcome_source(encoded)
-        if outcome is not None and all(
+        if all(
             canonical_json_bytes(outcome.get(name)) == canonical_json_bytes(item)
             for name, item in source.items()
         ):
@@ -1057,9 +1067,34 @@ def _encode_v1_execution_record(
     return cast(Mapping[str, JsonValue], encoded)
 
 
+def decode_execution_terminal_details(payload: StoredPayload | None) -> Mapping[str, JsonValue]:
+    """Decode the typed empty-diagnostics marker or its verified content owner."""
+    if payload is None:
+        return {"safe_error_details": _encode_persisted_domain({}), "error_diagnostics": None}
+    if not isinstance(payload, StoredPayload) or payload.kind != "inline" or payload.encoding != "json":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    details = payload.decode()
+    if not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return details
+
+
+def _execution_terminal_fields(raw_fields: Mapping[str, object], codec: "_VersionCodec", *, persisted: bool) -> Mapping[str, object]:
+    if "terminal_details" not in raw_fields:
+        return raw_fields
+    if "safe_error_details" in raw_fields or "error_diagnostics" in raw_fields:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    payload = _decode_domain(raw_fields["terminal_details"], StoredPayload | None, codec, persisted=persisted)
+    details = decode_execution_terminal_details(payload)
+    return {**{name: item for name, item in raw_fields.items() if name != "terminal_details"}, **details}
+
+
 def _decode_v1_execution_record(
     raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
 ) -> ExecutionRecord:
+    if "runtime_policy" in raw_fields or "runtime_overrides" in raw_fields:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    raw_fields = _execution_terminal_fields(raw_fields, codec, persisted=persisted)
     outcome = _execution_outcome_fields(raw_fields)
     if outcome is not None and "execution_result" in outcome:
         if not persisted or outcome["execution_result"] is not True:
@@ -1449,26 +1484,6 @@ def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def encode_alias(alias: StoredAlias) -> dict[str, JsonValue]:
-    return {
-        "alias": alias.alias_key.hex(),
-        "record": alias.record_key.hex(),
-    }
-
-
-def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
-    if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_required_keys(value, frozenset({"alias", "record"}))
-    try:
-        return StoredAlias(
-            _alias_key_wire(_string(value, "alias")),
-            _record_key_wire(_string(value, "record")),
-        )
-    except (TypeError, ValueError, KeyError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
 def wire_type_id(value: DomainT | type[DomainT]) -> str:
     """Return the explicit stable protocol id for one persisted type."""
     return _codec_wire_type_id(value, _CURRENT_CODEC)
@@ -1725,6 +1740,10 @@ def _execution_projection_fields(value: Mapping[str, JsonValue]) -> tuple[Mappin
 
 
 def _execution_projection_field(source: Mapping[str, JsonValue], name: str, codec: _VersionCodec) -> object:
+    if name in EXECUTION_POLICY_FIELDS and "runtime_policy" in source:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if name in {"safe_error_details", "error_diagnostics"}:
+        source = _execution_terminal_fields(source, codec, persisted=True)
     target, _init = _dataclass_fields(ExecutionRecord)[name]
     if name in source:
         try:
@@ -1739,6 +1758,88 @@ def _execution_projection_field(source: Mapping[str, JsonValue], name: str, code
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
+def decode_execution_retention(value: Mapping[str, JsonValue]) -> ExecutionRetentionRecord:
+    """Read only closure authority; immutable content remains opaque."""
+    source, codec = _execution_projection_fields(value)
+    try:
+        recovery = source.get("recovery")
+        handoff = False
+        if recovery is not None:
+            _wire_id, raw = _validate_dataclass_wrapper(
+                recovery, ExecutionRecoveryDetail, codec, persisted=True,
+            )
+            declaration = next(field for field in fields(ExecutionRecoveryDetail) if field.name == "handoff_phase")
+            phase = (_decode_domain(raw["handoff_phase"], RecoveryHandoffPhase, codec, persisted=True)
+                     if "handoff_phase" in raw else declaration.default)
+            terminal = raw.get("terminal_handoff")
+            pending = raw.get("pending_tools")
+            if ((phase is RecoveryHandoffPhase.NONE and terminal is not None)
+                    or (phase is RecoveryHandoffPhase.PREPARED and terminal is None)
+                    or (phase is not RecoveryHandoffPhase.NONE and pending is not None)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            handoff = phase is RecoveryHandoffPhase.PREPARED
+        result = ExecutionRetentionRecord(**{
+            field.name: _execution_projection_field(source, field.name, codec)
+            for field in fields(ExecutionRetentionRecord) if field.name != "recovery_handoff"
+        }, recovery_handoff=handoff)
+        if result.revision < 0 or not result.execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def decode_execution_result(value: Mapping[str, JsonValue], *, codec: _VersionCodec | None = None) -> ExecutionResultRecord:
+    """Decode result fields using the canonical owner's omission semantics."""
+    source, stored_codec = _execution_projection_fields(value)
+    try:
+        return ExecutionResultRecord(**{
+            field.name: _execution_projection_field(source, field.name, codec or stored_codec)
+            for field in fields(ExecutionResultRecord)
+        })
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def decode_tool_operation_metadata(value: Mapping[str, JsonValue]) -> ToolOperationMetadata:
+    """Decode the effect fields needed by history, not its receipt payloads."""
+    envelope = decode_envelope(value)
+    codec = _VERSION_CODECS.get(envelope.version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    try:
+        payload = envelope.value["payload"]
+        if (envelope.value["type"] != "tool_operation" or payload["$dataclass"] != "tool_operation"
+                or type(payload["schema"]) is not int or payload["schema"] != envelope.version):
+            raise ValueError("invalid tool operation projection")
+        fields = payload["fields"]
+        identities = tuple(validate_resource_id(fields[name]) for name in
+                           ("tool_operation_id", "execution_id", "tool_call_id"))
+        status = _decode_domain(fields["status"], ToolOperationStatus, codec, persisted=True)
+        return ToolOperationMetadata(*identities, status)
+    except (ValueError, TypeError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def decode_execution_membership(value: Mapping[str, JsonValue]) -> ExecutionMembershipRecord:
+    """Validate only the current facts used to authorize cached presentation."""
+    source, codec = _execution_projection_fields(value)
+    names = ("execution_id", "session_id", "parent_execution_id", "principal_id", "principal_kind",
+             "status", "created_at", "completed_at")
+    values = {name: _execution_projection_field(source, name, codec) for name in names}
+    try:
+        for name in ("execution_id", "session_id", "parent_execution_id"):
+            if values[name] is not None:
+                validate_resource_id(values[name])
+        if (not values["principal_id"] or not values["principal_kind"]
+                or values["created_at"].tzinfo is None
+                or values["completed_at"] is not None and values["completed_at"].tzinfo is None):
+            raise ValueError("invalid execution membership")
+        return ExecutionMembershipRecord(**values)
+    except (AIError, TypeError, ValueError, AttributeError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 def decode_execution_header(value: Mapping[str, JsonValue], *, tenant_id: str) -> ResourceRef:
     """Decode the execution's authorization identity without loading content."""
     source, codec = _execution_projection_fields(value)
@@ -1751,32 +1852,93 @@ def decode_execution_header(value: Mapping[str, JsonValue], *, tenant_id: str) -
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def decode_execution_producer_control(
+def decode_execution_producer_authority(
     value: Mapping[str, JsonValue],
-) -> tuple[int, ExecutionStatus, bool, str | None]:
-    """Decode producer authority without reading input, output, or binding content."""
+) -> tuple[int, ExecutionStatus, str | None]:
+    """Validate dispatch authority without borrowing Runtime policy content."""
     source, codec = _execution_projection_fields(value)
+    payload = decode_envelope(value).value["payload"]
+    policy = runtime_policy_reference(payload)
+    if policy is not None:
+        overrides = source.get("runtime_overrides", {})
+        if (set(source).intersection(EXECUTION_POLICY_FIELDS) or not isinstance(overrides, Mapping)
+                or set(overrides) - set(EXECUTION_POLICY_FIELDS)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for name in overrides:
+            _execution_projection_field(overrides, name, codec)
     generation = _execution_projection_field(source, "producer_generation", codec)
     claim = _execution_projection_field(source, "producer_claim_id", codec)
     status = _execution_projection_field(source, "status", codec)
-    durable_trace = _execution_projection_field(source, "durable_trace", codec)
     seal = _execution_projection_field(source, "history_seal_digest", codec)
     if (generation < 0 or claim is not None and (not claim or generation < 1)
-            or seal is not None and (not durable_trace or len(seal) != 64)):
+            or seal is not None and (len(seal) != 64 or any(char not in "0123456789abcdef" for char in seal))):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return generation, status, seal
+
+
+def decode_execution_producer_control(
+    value: Mapping[str, JsonValue],
+) -> tuple[int, ExecutionStatus, bool, str | None]:
+    """Validate history retention after its fixed Runtime policy is resolved."""
+    source, codec = _execution_projection_fields(value)
+    generation, status, seal = decode_execution_producer_authority(value)
+    durable_trace = _execution_projection_field(source, "durable_trace", codec)
+    if seal is not None and not durable_trace:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return generation, status, durable_trace, seal
 
 
-def _validate_execution_view(view: ExecutionView, binding: AgentBindingContract | TaskBindingContract) -> None:
+def decode_execution_event_control(value: Mapping[str, JsonValue]) -> tuple[str, int, int]:
+    """Read the owner's event cursor and revision without restoring payloads."""
+    source, codec = _execution_projection_fields(value)
+    identity, sequence, revision = (
+        _execution_projection_field(source, name, codec)
+        for name in ("execution_id", "event_seq", "revision")
+    )
+    try:
+        validate_resource_id(identity)
+        if type(sequence) is not int or sequence < 0 or type(revision) is not int or revision < 0:
+            raise ValueError("invalid execution event control")
+        return identity, sequence, revision
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def decode_execution_control(value: Mapping[str, JsonValue]) -> ExecutionControlRecord:
+    """Project the fields consumed by producer and history publication guards."""
+    source, codec = _execution_projection_fields(value)
+    generation, status, seal = decode_execution_producer_authority(value)
+    names = ("execution_id", "producer_claim_id", "budget_scope_id", "retention_closed")
+    values = {name: _execution_projection_field(source, name, codec) for name in names}
+    try:
+        validate_resource_id(values["execution_id"])
+        budget_scope = values["budget_scope_id"]
+        if budget_scope is not None and (not isinstance(budget_scope, str) or not budget_scope.strip()):
+            raise ValueError("execution budget scope is invalid")
+        if not isinstance(values["retention_closed"], bool):
+            raise TypeError("execution retention_closed must be bool")
+        return ExecutionControlRecord(**values, status=status, producer_generation=generation,
+                                      history_seal_digest=seal)
+    except (AIError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _validate_execution_view(view: ExecutionView, summary: Mapping[str, JsonValue]) -> None:
     # Preserve the owner's invariants for fields consumed by this projection.
-    if isinstance(binding, AgentBindingContract):
+    if view.budget_scope_id is not None and (
+        not isinstance(view.budget_scope_id, str) or not view.budget_scope_id.strip()
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if view.revision < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if summary["kind"] == "agent":
         if view.task_attempt != 0 or view.task_deadline_at is not None or view.task_next_attempt_at is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     else:
         if (view.session_id is not None or view.lineage_kind is not ExecutionLineageKind.RUN
                 or view.parent_execution_id is not None or view.parent_invocation_id is not None
                 or view.agent_run_seq != 0
-                or view.task_attempt < 0 or view.task_attempt > binding.max_attempts):
+                or view.task_attempt < 0 or view.task_attempt > summary["max_attempts"]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if view.lineage_kind is ExecutionLineageKind.SUBAGENT:
         if not view.parent_execution_id or not view.parent_invocation_id:
@@ -1786,13 +1948,13 @@ def _validate_execution_view(view: ExecutionView, binding: AgentBindingContract 
 
 
 def decode_execution_view(value: Mapping[str, JsonValue], *, tenant_id: str) -> tuple[ResourceRef, ExecutionView]:
-    """Decode the public view and admitted principal from an expanded binding row."""
+    """Decode state from the verified admitted binding, without input or output."""
     source, codec = _execution_projection_fields(value)
     names = ("execution_id", "status", "lineage_kind", "parent_execution_id", "root_execution_id",
              "parent_invocation_id", "session_id", "task_attempt", "task_deadline_at",
-             "task_next_attempt_at", "event_seq", "started_at", "agent_run_seq", "durable_trace", "created_at")
+             "task_next_attempt_at", "event_seq", "revision", "started_at", "agent_run_seq", "durable_trace", "restart_checkpoints", "created_at", "budget_scope_id")
     values = {name: _execution_projection_field(source, name, codec) for name in names}
-    binding = _execution_projection_field(source, "binding", codec)
+    summary = _execution_binding_summary(_execution_projection_field(source, "binding", codec))
     principal_id = _execution_projection_field(source, "principal_id", codec)
     if not isinstance(principal_id, str) or not principal_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1812,20 +1974,40 @@ def decode_execution_view(value: Mapping[str, JsonValue], *, tenant_id: str) -> 
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         view = ExecutionView(**values,
-            agent_id=binding.agent_spec.id if isinstance(binding, AgentBindingContract) else None,
-            task_id=binding.id if isinstance(binding, TaskBindingContract) else None,
-            binding_kind="agent" if isinstance(binding, AgentBindingContract) else "task",
+            agent_id=summary["id"] if summary["kind"] == "agent" else None,
+            task_id=summary["id"] if summary["kind"] == "task" else None,
+            binding_kind=summary["kind"],
             terminal_at=terminal_at)
-        _validate_execution_view(view, binding)
+        _validate_execution_view(view, summary)
         return ResourceRef(ResourceKind.EXECUTION, view.execution_id, tenant_id, principal_id), view
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+def decode_execution_metadata(value: Mapping[str, JsonValue], *, tenant_id: str) -> ExecutionMetadataRecord:
+    """Project diagnostic metadata from the verified admitted binding."""
+    header, view = decode_execution_view(value, tenant_id=tenant_id)
+    source, codec = _execution_projection_fields(value)
+    summary = _execution_binding_summary(_execution_projection_field(source, "binding", codec))
+    names = ("updated_at", "error_code", "safe_error_details")
+    values = {name: _execution_projection_field(source, name, codec) for name in names}
+    refs = (None if summary["kind"] == "task" else
+            _decode_domain(summary["capability_refs"], tuple[CapabilityRef, ...], codec, persisted=True))
+    if values["updated_at"].tzinfo is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return ExecutionMetadataRecord(view=view, principal_id=header.owner_principal_id,
+                                   capability_refs=refs, binding_digest=summary["binding_digest"], **values)
+
+
 _PAYLOAD_PATHS = (
     ("stored_user_input",),
+    ("terminal_details",),
+    ("result",),
     ("result", "fields", "output"),
-    ("recovery", "fields", "terminal_handoff", "fields", "outcome", "fields", "output"),
+    ("recovery", "fields", "pending_tools"),
+    ("recovery", "fields", "terminal_handoff"),
+    ("recovery", "fields", "terminal_handoff", "fields", "output"),
+    ("recovery", "fields", "terminal_handoff", "fields", "terminal_details"),
 )
 
 
@@ -1842,10 +2024,99 @@ def execution_payload_slots(value: object) -> tuple[tuple[tuple[str, ...], Mappi
         for name in path:
             item = item.get(name) if isinstance(item, Mapping) else None
         if item is not None:
-            if not isinstance(item, Mapping) or item.get("$dataclass") != ("stored_user_input" if path == _PAYLOAD_PATHS[0] else "stored_payload"):
+            expected = {"stored_user_input": "stored_user_input", "pending_tools": "pending_tool_continuation",
+                        "terminal_handoff": "recovery_terminal_handoff", "result": "result_record"}.get(path[-1], "stored_payload")
+            if not isinstance(item, Mapping) or item.get("$dataclass") != expected:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if native_text_reference(item) is not None and path not in {("result", "fields", "output"), ("recovery", "fields", "terminal_handoff", "fields", "output")}:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if native_user_input_reference(item) is not None and path != ("stored_user_input",):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if pending_operation_reference(item) is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append((path, item))
+            if path == ("recovery", "fields", "pending_tools") and "content" in item["fields"]:
+                arguments = item["fields"].get("arguments")
+                if not isinstance(arguments, Mapping) or set(arguments) != {str(index) for index in range(len(arguments))}:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for index in range(len(arguments)):
+                    argument = arguments[str(index)]
+                    if not isinstance(argument, Mapping) or argument.get("$dataclass") != "stored_payload":
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if native_text_reference(argument) is not None or native_user_input_reference(argument) is not None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    result.append(((*path, "fields", "arguments", str(index)), argument))
     return tuple(result)
+
+
+def native_user_input_reference(value: Mapping) -> NativeUserInputReference | None:
+    """Recognize a projection only within the declared accepted-input slot."""
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    content = fields.get("content")
+    if not isinstance(content, Mapping) or "$native_user_input" not in content:
+        return None
+    _validate_dataclass_wrapper(value, StoredUserInput, _CURRENT_CODEC, persisted=True)
+    if set(fields) != {"content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return NativeUserInputReference.from_json(content)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def validate_native_user_input(reference: NativeUserInputReference, value: object) -> StoredUserInput:
+    from ..model import plain_text_input_content
+
+    if (not isinstance(reference, NativeUserInputReference) or not isinstance(value, StoredUserInput)
+            or plain_text_input_content(value) is None):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def native_text_reference(value: Mapping) -> NativeTextReference | None:
+    """Recognize a projection only inside its declared result payload slot."""
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    content = fields.get("content")
+    if not isinstance(content, Mapping) or "$native_text" not in content:
+        return None
+    _validate_dataclass_wrapper(value, StoredPayload, _CURRENT_CODEC, persisted=True)
+    if set(fields) != {"content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return NativeTextReference.from_json(content)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def validate_native_text_payload(reference: NativeTextReference, payload: object) -> StoredPayload:
+    if (not isinstance(payload, StoredPayload) or payload.kind != "inline" or payload.encoding != "json"
+            or not isinstance(reference, NativeTextReference)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    value = payload.decode()
+    if ((reference.projection == "text" and not isinstance(value, str))
+            or (reference.projection == "assistant-text-output" and
+                (not isinstance(value, dict) or set(value) != {"text"} or not isinstance(value["text"], str)))
+            or (reference.projection == "tool-call-output" and not isinstance(value, dict))):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return payload
+
+
+def pending_operation_reference(value: Mapping) -> str | None:
+    """Recognize an admitted operation only in a pending argument owner slot."""
+    fields = value.get("fields")
+    content = fields.get("content") if isinstance(fields, Mapping) else None
+    if not isinstance(content, Mapping) or "$pending_operation" not in content:
+        return None
+    _validate_dataclass_wrapper(value, StoredPayload, _CURRENT_CODEC, persisted=True)
+    identity = content["$pending_operation"]
+    if (set(fields) != {"content"} or set(content) != {"$pending_operation", "source"} or content.get("source") != "checkpoint"
+            or not isinstance(identity, str) or not identity):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return identity
 
 
 def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
@@ -1854,27 +2125,65 @@ def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if "content" not in fields:
         return None
+    target = {"stored_user_input": StoredUserInput, "stored_payload": StoredPayload,
+              "pending_tool_continuation": PendingToolContinuation,
+              "recovery_terminal_handoff": RecoveryTerminalHandoff, "result_record": ResultRecord}.get(value.get("$dataclass"))
+    if target is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _validate_dataclass_wrapper(value, target, _CURRENT_CODEC, persisted=True)
+    if (native_user_input_reference(value) is not None or native_text_reference(value) is not None
+            or pending_operation_reference(value) is not None):
+        return None
     reference = execution_payload_reference(fields["content"])
-    if reference is None or set(fields) != {"content"}:
+    expected = ({"content", "output", "terminal_details"} if target is RecoveryTerminalHandoff else
+                {"content", "output"} if target is ResultRecord else
+                {"content", "arguments"} if target is PendingToolContinuation else {"content"})
+    if reference is None or set(fields) != expected:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return reference
 
 
 def map_execution_payload_slots(value: Mapping, mapper: Callable[[Mapping], JsonValue]) -> dict:
     fields = dict(value["fields"])
-    for path, payload in execution_payload_slots(value):
+    # Child reference slots must be rewritten before replacing their whole
+    # typed parent; a restored handoff no longer has the wrapper-only output slot.
+    for path, payload in reversed(execution_payload_slots(value)):
         current = fields
         for name in path[:-1]:
             current[name] = dict(current[name])
             current = current[name]
-        current[path[-1]] = mapper(payload)
+        current[path[-1]] = mapper(current[path[-1]])
     return {**value, "fields": fields}
 
+
+EXECUTION_POLICY_FIELDS = (
+    "mode", "planning", "thinking", "tool_effects", "session_context",
+    "restart_checkpoints", "durable_trace", "conversation",
+)
+
+
+def runtime_policy_reference(value: object) -> tuple[str, str, str] | None:
+    """Read the fixed policy owner only from its declared execution slot."""
+    if not isinstance(value, Mapping) or value.get("$dataclass") != "execution_record":
+        return None
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    reference = fields.get("runtime_policy")
+    if reference is None:
+        if "runtime_overrides" in fields:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return None
+    if not isinstance(reference, Mapping) or "$runtime_policy" not in reference:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _execution_content_reference(reference, "$runtime_policy")
 
 
 def encode_execution_content(
     value: ExecutionRecord, payloads: Mapping[int, JsonValue],
-    *, binding: JsonValue | None = None,
+    *, binding: JsonValue | None = None, policy: JsonValue | None = None,
+    policy_overrides: Mapping[str, JsonValue] | None = None,
+    terminal_details: JsonValue | None = None,
 ) -> JsonValue:
     """Encode references only in the declared input and result owner slots."""
     def input_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
@@ -1886,12 +2195,30 @@ def encode_execution_content(
             if name == "output" and id(getattr(item, name)) in payloads else
             _encode_domain(getattr(item, name), codec, persisted=persisted))
             for name in _dataclass_fields(type(item))}
+    def recovery_content_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
+        if id(item) in payloads:
+            return payloads[id(item)]["fields"]
+        return {name: _encode_domain(getattr(item, name), codec, persisted=persisted)
+                for name in _dataclass_fields(type(item))}
     def execution_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
-        return _encode_v1_execution_record(item, codec, persisted, binding=binding)
+        encoded = dict(_encode_v1_execution_record(item, codec, persisted, binding=binding))
+        if policy is not None:
+            for name in EXECUTION_POLICY_FIELDS:
+                encoded.pop(name)
+            encoded["runtime_policy"] = policy
+            if policy_overrides:
+                encoded["runtime_overrides"] = dict(policy_overrides)
+        if terminal_details is not None or not item.safe_error_details and item.error_diagnostics is None:
+            encoded.pop("safe_error_details", None)
+            encoded.pop("error_diagnostics", None)
+            encoded["terminal_details"] = terminal_details
+        return encoded
     codec = replace(_CURRENT_CODEC, dataclass_encoders={**_CURRENT_CODEC.dataclass_encoders,
         "execution_record": execution_encoder,
-        "stored_user_input": input_encoder, "result_record": output_encoder,
+        "stored_user_input": input_encoder, "result_record": recovery_content_encoder,
         "recovery_terminal_outcome": output_encoder,
+        "pending_tool_continuation": recovery_content_encoder,
+        "recovery_terminal_handoff": recovery_content_encoder,
     })
     return _encode_domain(value, codec, persisted=True)
 
@@ -1900,32 +2227,134 @@ def execution_payload_reference(value: object) -> tuple[str, str, str] | None:
     """Recognize a storage reference only in a typed StoredPayload slot."""
     if not isinstance(value, Mapping) or "$execution_payload" not in value:
         return None
-    return binding_reference({"$execution_binding": value["$execution_payload"],
-        **{key: item for key, item in value.items() if key != "$execution_payload"}})
+    return _execution_content_reference(value, "$execution_payload")
+
+
+def _restore_pending_arguments(template: Mapping, arguments: Mapping, operations: Mapping = {}) -> dict:
+    if not isinstance(arguments, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    fields_value = dict(template["fields"])
+    index = 0
+    for name in ("approvals", "calls"):
+        sequence = fields_value.get(name)
+        if not isinstance(sequence, Mapping) or set(sequence) != {"$tuple"} or not isinstance(sequence["$tuple"], list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        restored = []
+        for call in sequence["$tuple"]:
+            if not isinstance(call, Mapping) or call.get("$dataclass") != "pending_deferred_call" or str(index) not in arguments:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            argument = arguments[str(index)]
+            identity = pending_operation_reference(argument)
+            if identity is None:
+                restored.append({**call, "fields": {**call["fields"], "arguments_payload": argument}})
+            else:
+                source = operations.get(("pending-operation", identity))
+                fields = call.get("fields")
+                if (not isinstance(source, (ToolOperationRecord, PendingOperationSource)) or source.arguments_payload is None
+                        or not isinstance(fields, Mapping) or set(fields) != {"operation_id", "metadata"}
+                        or fields["operation_id"] != identity or source.tool_operation_id != identity):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                restored.append({**call, "fields": {
+                    "operation_id": identity, "metadata": fields["metadata"],
+                    "tool_call_id": source.tool_call_id, "tool_name": source.tool_name,
+                    "capability_ref": _encode_persisted_domain(source.capability_ref),
+                    "arguments_payload": _encode_persisted_domain(source.arguments_payload),
+                }})
+            index += 1
+        fields_value[name] = {"$tuple": restored}
+    if set(arguments) != {str(position) for position in range(index)}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return {**template, "fields": fields_value}
+
+
+def _execution_payload_codec(codec: _VersionCodec, payloads: Mapping) -> _VersionCodec:
+    def decoder(original: DataclassDecoder) -> DataclassDecoder:
+        def decode_payload(raw: Mapping[str, object], current: _VersionCodec, persisted: bool) -> object:
+            content = raw.get("content")
+            if isinstance(content, Mapping) and "$native_user_input" in content:
+                if original is not _decode_v1_stored_user_input:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    reference = NativeUserInputReference.from_json(content)
+                except (TypeError, ValueError, KeyError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            elif isinstance(content, Mapping) and "$native_text" in content:
+                if original is not _decode_v1_stored_payload:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    reference = NativeTextReference.from_json(content)
+                except (TypeError, ValueError, KeyError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            else:
+                reference = execution_payload_reference(content)
+            if reference is None:
+                return original(raw, current, persisted)
+            if set(raw) not in ({"content"}, {"content", "output"}, {"content", "arguments"}, {"content", "output", "terminal_details"}) or reference not in payloads:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            selected = payloads[reference]
+            if isinstance(selected, Mapping) and selected.get("$dataclass") == "pending_tool_continuation":
+                if set(raw) != {"content", "arguments"}:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                restored = _restore_pending_arguments(selected, raw["arguments"], payloads)
+                return _decode_domain(restored, PendingToolContinuation, current, persisted=True)
+            if isinstance(selected, Mapping) and selected.get("$dataclass") in {"result_record", "recovery_terminal_handoff"}:
+                expected = {"content", "output", "terminal_details"} if selected["$dataclass"] == "recovery_terminal_handoff" else {"content", "output"}
+                if set(raw) != expected:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                output = _decode_domain(raw["output"], StoredPayload | None, current, persisted=True)
+                restored = dict(selected)
+                fields_value = dict(restored["fields"])
+                if selected["$dataclass"] == "result_record":
+                    fields_value["output"] = _encode_domain(output, current, persisted=True)
+                    target = ResultRecord
+                else:
+                    outcome = dict(fields_value["outcome"])
+                    details_payload = _decode_domain(raw["terminal_details"], StoredPayload | None, current, persisted=True)
+                    details = decode_execution_terminal_details(details_payload)
+                    outcome["fields"] = {**outcome["fields"], **details, "output": _encode_domain(output, current, persisted=True)}
+                    fields_value["outcome"] = outcome
+                    target = RecoveryTerminalHandoff
+                restored["fields"] = fields_value
+                return _decode_domain(restored, target, current, persisted=True)
+            if isinstance(reference, NativeUserInputReference):
+                return validate_native_user_input(reference, selected)
+            return validate_native_text_payload(reference, selected) if isinstance(reference, NativeTextReference) else selected
+        return decode_payload
+    current = replace(codec, dataclass_decoders={**codec.dataclass_decoders,
+        "result_record": decoder(lambda raw, current, persisted:
+            _decode_dataclass_fields(raw, ResultRecord, current, persisted=persisted)),
+        "stored_payload": decoder(_decode_v1_stored_payload),
+        "stored_user_input": decoder(_decode_v1_stored_user_input),
+        "pending_tool_continuation": decoder(lambda raw, current, persisted:
+            _decode_dataclass_fields(raw, PendingToolContinuation, current, persisted=persisted)),
+        "recovery_terminal_handoff": decoder(lambda raw, current, persisted:
+            _decode_dataclass_fields(raw, RecoveryTerminalHandoff, current, persisted=persisted)),
+    })
+    return current
+
+
+def decode_execution_payload(value: Mapping, payloads: Mapping) -> object:
+    targets = {"stored_user_input": StoredUserInput, "stored_payload": StoredPayload,
+               "pending_tool_continuation": PendingToolContinuation,
+               "recovery_terminal_handoff": RecoveryTerminalHandoff, "result_record": ResultRecord}
+    target = targets.get(value.get("$dataclass"))
+    if target is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _decode_domain(value, target, _execution_payload_codec(_CURRENT_CODEC, payloads), persisted=True)
 
 
 def decode_execution_content(
-    value: Mapping[str, JsonValue], payloads: Mapping[tuple[str, str, str], StoredPayload | StoredUserInput],
-    *, timeline: bool = False,
-) -> ExecutionRecord | ExecutionTimelineRecord:
+    value: Mapping[str, JsonValue], payloads: Mapping[tuple[str, str, str] | NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput],
+    *, timeline: bool = False, result: bool = False,
+) -> ExecutionRecord | ExecutionTimelineRecord | ExecutionResultRecord:
     """Inject verified immutable bodies without encoding or decoding them again."""
     envelope = decode_envelope(value)
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    def decoder(original: DataclassDecoder) -> DataclassDecoder:
-        def decode_payload(raw: Mapping[str, object], current: _VersionCodec, persisted: bool) -> object:
-            reference = execution_payload_reference(raw.get("content"))
-            if reference is None:
-                return original(raw, current, persisted)
-            if set(raw) != {"content"} or reference not in payloads:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return payloads[reference]
-        return decode_payload
-    current = replace(codec, dataclass_decoders={**codec.dataclass_decoders,
-        "stored_payload": decoder(_decode_v1_stored_payload),
-        "stored_user_input": decoder(_decode_v1_stored_user_input),
-    })
+    current = _execution_payload_codec(codec, payloads)
+    if result:
+        return decode_execution_result(value, codec=current)
     if timeline:
         return decode_execution_timeline(value, codec=current)
     if envelope.value.get("type") != "execution_record":
@@ -1946,9 +2375,10 @@ def decode_execution_timeline(value: Mapping[str, JsonValue], *, codec: _Version
         if type(payload["schema"]) is not int or payload["schema"] != envelope.version:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         source = payload["fields"]
-        if not isinstance(source, Mapping):
+        if not isinstance(source, Mapping) or "runtime_policy" in source or "runtime_overrides" in source:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         codec = codec or _VERSION_CODECS[envelope.version]
+        source = _execution_terminal_fields(source, codec, persisted=True)
         values = {}
         for name, (target, _init) in _dataclass_fields(ExecutionTimelineRecord).items():
             if name in source:
@@ -2013,17 +2443,144 @@ def _decode_enveloped_domain(
     return _decode_domain(payload, target, codec, persisted=True)
 
 
-def binding_reference(value: object) -> tuple[str, str, str] | None:
-    """Recognize only the typed complete-binding content reference."""
-    if not isinstance(value, Mapping) or "$execution_binding" not in value:
-        return None
-    if set(value) != {"$execution_binding", "archive_scope", "content_scope"}:
+def _execution_binding_summary(binding: AgentBindingContract | TaskBindingContract) -> dict[str, JsonValue]:
+    """Derive read-only view fields from the complete admitted contract."""
+    if isinstance(binding, AgentBindingContract):
+        return {"kind": "agent", "id": binding.agent_spec.id,
+                "revision": binding.agent_spec.revision, "max_attempts": None,
+                "capability_refs": _encode_persisted_domain(binding.capability_refs), "binding_digest": binding.binding_digest}
+    return {"kind": "task", "id": binding.id, "revision": binding.revision,
+            "max_attempts": binding.max_attempts, "capability_refs": None, "binding_digest": binding.binding_digest}
+
+
+def _execution_content_reference(value: Mapping, marker: str) -> tuple[str, str, str]:
+    expected = {marker, "archive_scope", "content_scope"}
+    if set(value) != expected:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    identity, scope, content_scope = value["$execution_binding"], value["archive_scope"], value["content_scope"]
+    identity, scope, content_scope = value[marker], value["archive_scope"], value["content_scope"]
     validate_archive_group_id(scope)
     decode_archive_scope(content_scope)
     validate_archive_content_identity(identity)
     return scope, content_scope, identity
+
+
+TOOL_PAYLOAD_CODEC = "execution-payload"
+_TOOL_PAYLOAD_SLOTS = ("arguments_payload", "result_payload", "error_payload")
+
+
+def tool_payload_slots(value: object) -> Iterator[tuple[str, Mapping]]:
+    if not isinstance(value, Mapping) or value.get("$dataclass") != "tool_operation":
+        return
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    for name in _TOOL_PAYLOAD_SLOTS:
+        payload = fields.get(name)
+        if payload is not None:
+            if not isinstance(payload, Mapping) or payload.get("$dataclass") != "stored_payload":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if native_tool_result_reference(payload) is not None and name != "result_payload":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if native_tool_arguments_reference(payload) is not None and name != "arguments_payload":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if native_tool_error_reference(payload) is not None and name != "error_payload":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            yield name, payload
+
+
+def native_tool_result_reference(payload: Mapping) -> NativeToolResultReference | None:
+    """Recognize only the declared immutable tool receipt projection wrapper."""
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    content = fields.get("content")
+    if not isinstance(content, Mapping) or "$native_tool_result" not in content:
+        return None
+    _validate_dataclass_wrapper(payload, StoredPayload, _CURRENT_CODEC, persisted=True)
+    if set(fields) != {"content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return NativeToolResultReference.from_json(content)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def native_tool_arguments_reference(payload: Mapping) -> NativeToolArgumentsReference | None:
+    """Recognize only the declared immutable tool argument projection wrapper."""
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    content = fields.get("content")
+    if not isinstance(content, Mapping) or "$native_tool_arguments" not in content:
+        return None
+    _validate_dataclass_wrapper(payload, StoredPayload, _CURRENT_CODEC, persisted=True)
+    if set(fields) != {"content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return NativeToolArgumentsReference.from_json(content)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def native_tool_error_reference(payload: Mapping) -> NativeToolErrorReference | None:
+    """Recognize the fixed event source only in a declared tool failure slot."""
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    content = fields.get("content")
+    if not isinstance(content, Mapping) or "$native_tool_error" not in content:
+        return None
+    _validate_dataclass_wrapper(payload, StoredPayload, _CURRENT_CODEC, persisted=True)
+    if set(fields) != {"content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return NativeToolErrorReference.from_json(content)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def tool_payload_reference(payload: Mapping) -> tuple[str, str, str] | None:
+    """Tool facts use the same canonical Step payload owner as continuations."""
+    if native_tool_result_reference(payload) is not None or native_tool_arguments_reference(payload) is not None or native_tool_error_reference(payload) is not None:
+        return None
+    return payload_reference(payload)
+
+
+def map_tool_payload_slots(value: Mapping, mapper: Callable[[Mapping], JsonValue]) -> dict:
+    slots = tuple(tool_payload_slots(value))
+    if not slots:
+        return dict(value)
+    fields = dict(value["fields"])
+    for name, payload in slots:
+        fields[name] = mapper(payload)
+    return {**value, "fields": fields}
+
+
+def encode_agent_binding_content(binding: AgentBindingContract) -> bytes:
+    """Use the canonical complete contract shared by execution and capture owners."""
+    if not isinstance(binding, AgentBindingContract):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return canonical_json_bytes(_encode_persisted_domain(binding))
+
+
+def decode_agent_binding_content(raw: bytes) -> AgentBindingContract:
+    """Validate the persisted contract wrapper before restoring a capture slot."""
+    try:
+        return _decode_domain(json.loads(raw), AgentBindingContract, _CURRENT_CODEC, persisted=True)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def agent_binding_content_summary(binding: AgentBindingContract) -> dict[str, JsonValue]:
+    """Derive the existing execution binding view, never a second identity."""
+    return _execution_binding_summary(binding)
+
+
+def binding_reference(value: object) -> tuple[str, str, str] | None:
+    """Recognize only the fixed complete-binding owner, without a derived copy."""
+    if not isinstance(value, Mapping) or "$execution_binding" not in value:
+        return None
+    return _execution_content_reference(value, "$execution_binding")
 
 
 def iter_runtime_object_refs(
@@ -2111,12 +2668,23 @@ def _iter_runtime_object_refs(
                     and isinstance(prompt, Mapping) and prompt.get("kind") == "stored-user-content-v1"):
                 stored = cast(StoredUserInput, _decode_domain(prompt.get("value"), StoredUserInput, codec))
                 yield from _iter_runtime_object_refs(stored.payload, PersistenceDomain.TASK, codec)
+        if dataclass_name == codec.wire_ids.get(ToolOperationRecord):
+            for _name, payload in tool_payload_slots(value):
+                reference = native_tool_result_reference(payload)
+                if reference is not None:
+                    for attachment in reference.object_refs():
+                        yield domain, attachment
+            fields_value = map_tool_payload_slots(value,
+                lambda payload: None if tool_payload_reference(payload) is not None or native_tool_result_reference(payload) is not None or native_tool_arguments_reference(payload) is not None or native_tool_error_reference(payload) is not None else payload)["fields"]
+            for item in fields_value.values():
+                yield from _iter_runtime_object_refs(item, domain, codec)
+            return
         if dataclass_name == codec.wire_ids.get(ExecutionRecord):
             fields_value = value.get("fields")
             if not isinstance(fields_value, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             def skip_content(payload: Mapping) -> JsonValue:
-                return None if payload_reference(payload) is not None else payload
+                return None if payload_reference(payload) is not None or native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None else payload
             fields_value = map_execution_payload_slots(value, skip_content)["fields"]
             for key, item in fields_value.items():
                 if (
@@ -2439,13 +3007,13 @@ def _dataclass_fields(
     })
 
 
-def _decode_dataclass(
+def _validate_dataclass_wrapper(
     value: object,
     target: type,
     codec: _VersionCodec,
     *,
     persisted: bool = False,
-) -> object:
+) -> tuple[str, Mapping[str, object]]:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if persisted:
@@ -2474,6 +3042,17 @@ def _decode_dataclass(
         if schema != codec.version:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
+    return wire_id, raw_fields
+
+
+def _decode_dataclass(
+    value: object,
+    target: type,
+    codec: _VersionCodec,
+    *,
+    persisted: bool = False,
+) -> object:
+    wire_id, raw_fields = _validate_dataclass_wrapper(value, target, codec, persisted=persisted)
     decoder = codec.dataclass_decoders.get(wire_id)
     if decoder is not None:
         try:
@@ -2733,15 +3312,6 @@ def _bool(value: Mapping[str, object], key: str) -> bool:
     return result
 
 
-def _alias_key_wire(value: str) -> bytes:
-    if not 0 < len(value) <= 2 * ALIAS_KEY_MAX_BYTES:
-        raise ValueError("alias key exceeds its byte limit")
-    result = bytes.fromhex(value)
-    if result.hex() != value:
-        raise ValueError("alias key must be canonical lowercase hex")
-    return result
-
-
 def _operation_key_wire(value: str) -> bytes:
     if not 2 <= len(value) <= 2 * OPERATION_KEY_MAX_BYTES:
         raise ValueError("operation key encoding length is invalid")
@@ -2873,4 +3443,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["decode_execution_event_control", "decode_tool_operation_metadata", "decode_execution_membership", "pending_operation_reference", "native_tool_error_reference", "native_tool_arguments_reference", "decode_execution_producer_authority", "decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

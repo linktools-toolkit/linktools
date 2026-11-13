@@ -81,7 +81,7 @@ async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
         await repository.create(_session())
         row = repository._stored_timeline_commit(_commit())
         source_records = (*await repository.state_store.read(lambda tx: tx.scan_records()), row)
-        aliases, sequences = canonical_snapshot_indexes(
+        sequences = canonical_snapshot_indexes(
             namespace="turn-codec", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
             records=source_records, facts=(), operations=(),
         )
@@ -93,7 +93,7 @@ async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
         with pytest.raises(AIError) as raised:
             validate_snapshot_domain(namespace="turn-codec", tenant_id="tenant",
                 domain=PersistenceDomain.CONVERSATION, records=records, facts=(), operations=(),
-                aliases=aliases, sequences=sequences)
+                sequences=sequences)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()

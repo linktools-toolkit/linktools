@@ -48,9 +48,12 @@ class _ExecutionViewSource(Protocol):
     task_deadline_at: datetime | None
     task_next_attempt_at: datetime | None
     event_seq: int
+    revision: int
     started_at: datetime | None
     result: "ResultRecord | None"
     durable_trace: bool
+    restart_checkpoints: bool
+    budget_scope_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,9 +80,12 @@ class ExecutionView:
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
     event_seq: int = 0
+    revision: int = 0
     started_at: datetime | None = None
     terminal_at: datetime | None = None
     durable_trace: bool = False
+    restart_checkpoints: bool = False
+    budget_scope_id: str | None = None
 
 
 def project_execution_view(source: object) -> ExecutionView:
@@ -96,6 +102,8 @@ def project_execution_view(source: object) -> ExecutionView:
         agent_run_seq=value.agent_run_seq,
         created_at=value.created_at,
         durable_trace=value.durable_trace,
+        restart_checkpoints=value.restart_checkpoints,
+        budget_scope_id=value.budget_scope_id,
         session_id=value.session_id,
         binding_kind=value.binding_kind,
         task_id=value.task_id,
@@ -103,6 +111,7 @@ def project_execution_view(source: object) -> ExecutionView:
         task_deadline_at=value.task_deadline_at,
         task_next_attempt_at=value.task_next_attempt_at,
         event_seq=value.event_seq,
+        revision=value.revision,
         started_at=value.started_at,
         terminal_at=None if value.result is None else value.result.created_at,
     )

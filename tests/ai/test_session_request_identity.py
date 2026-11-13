@@ -30,7 +30,7 @@ def storage(request: pytest.FixtureRequest, tmp_path: "Path") -> PersistenceStor
             else PersistenceStorage.sqlite(tmp_path / "state.db"))
 
 
-@pytest.mark.parametrize("key", ("update", "é" * 128))
+@pytest.mark.parametrize("key", ("update", "é" * 64))
 async def test_session_request_identity_update_replays_original_patch(storage: PersistenceStorage, key: str) -> None:
     async with Persistence.open("session-identity", storage=storage, tenant_id="tenant") as state:
         manager = _manager(state, canonicalize_path=_canonicalize)

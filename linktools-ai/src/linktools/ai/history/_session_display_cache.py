@@ -26,7 +26,7 @@ from ..inputs import stored_user_input_view
 from ._session_timeline import SessionTimelineCapture, SessionTimelineTranscriptStore, load_stored_input_view
 from ..persistence.runs import ConversationPersistence
 from ..persistence.codec import decode_domain, encode_domain
-from ..persistence.contracts import ConversationRepositories, ExecutionRepository
+from ..persistence.contracts import ConversationRepositories, ExecutionRepository, ExecutionMembershipRecord
 from ..execution import ExecutionRecord, ExecutionTimelineRecord
 from ..session import SessionRecord, SessionTurnCommit
 from ..persistence.repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
@@ -74,7 +74,7 @@ class SessionDisplayCache:
                 record.history_id, record.created_at)
 
     @staticmethod
-    def _display_execution_identity(record: ExecutionRecord | ExecutionTimelineRecord) -> tuple[object, ...]:
+    def _display_execution_identity(record: ExecutionRecord | ExecutionTimelineRecord | ExecutionMembershipRecord) -> tuple[object, ...]:
         return (record.execution_id, record.session_id, record.parent_execution_id,
                 record.created_at, record.principal_id, record.principal_kind,
                 record.completed_at)
@@ -213,7 +213,9 @@ class SessionDisplayCache:
             current_revision = record.revision == detail.session.revision
             if current_revision and record.active_execution_id is not None and record.active_execution_id not in identities:
                 ids += (record.active_execution_id,)
-            records = await self._executions.get_timeline_many(ids, tenant_id=principal.tenant_id) if ids else {}
+            records = (await self._executions.get_membership_many(ids, tenant_id=principal.tenant_id)
+                       if isinstance(self._executions, ExecutionRepositoryImpl) else
+                       await self._executions.get_timeline_many(ids, tenant_id=principal.tenant_id)) if ids else {}
             if len(records) != len(ids):
                 # A pre-admission negative cache entry can outlive the source
                 # capture. Only authoritative absence is an integrity failure.

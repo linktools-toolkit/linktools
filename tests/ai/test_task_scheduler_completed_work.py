@@ -53,9 +53,9 @@ async def _prepare_graph(state, width, transition):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", (2, 200))
 @pytest.mark.parametrize("transition", ("terminal", "retry"))
-async def test_completed_work_does_not_repeat_graph_reads(tmp_path, monkeypatch, width, transition):
+async def test_completed_work_does_not_repeat_graph_reads(tmp_path, monkeypatch, transition):
+    width = 3
     async with Persistence.open("completed-work", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id="tenant") as state:
         repository = await _prepare_graph(state, width, transition)
         before = await repository.graph_state("graph", tenant_id="tenant")

@@ -62,7 +62,7 @@ class _TurnRecords:
 
     def key(self, scope: str, kind: str, identity: str) -> bytes:
         TurnScopeIdentity.validate_scope(scope)
-        maximum = 393 if kind == "turn_session" else 385 if kind == "turn_request" else 128
+        maximum = 265 if kind == "turn_session" else 257 if kind == "turn_request" else 128
         if not isinstance(identity, str) or not identity or len(identity.encode("utf-8")) > maximum:
             raise ValueError("turn record identity exceeds its owner byte limit")
         return record_key(self.namespace, self.tenant_id, "execution", kind, (scope, identity))
@@ -143,6 +143,12 @@ class _Graph:
         ])
 
 
+class _TurnGraphReadError(AIError):
+    def __init__(self, anchor: StoredRecord) -> None:
+        super().__init__(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self.anchor = anchor
+
+
 class StateTurnCoordination:
     """Atomic S/R/E admissions over one borrowed, initialized StateStore.
 
@@ -206,14 +212,19 @@ class StateTurnCoordination:
                       "turn_session": _text(anchor.data["session_key"])}
         keys = {kind: self._records.key(scope, kind, identity)
                 for kind, identity in identities.items() if kind != anchor.kind}
-        found = await tx.get_records(tuple(keys.values()))
-        records = {anchor.kind: anchor}
-        for kind, key in keys.items():
-            record = found.get(key)
-            if record is None:
-                raise _integrity()
-            records[kind] = self._records.validate(record)
-        return self._records.graph(records["turn_execution"], records["turn_request"], records["turn_session"])
+        try:
+            found = await tx.get_records(tuple(keys.values()))
+            records = {anchor.kind: anchor}
+            for kind, key in keys.items():
+                record = found.get(key)
+                if record is None:
+                    raise _integrity()
+                records[kind] = self._records.validate(record)
+            return self._records.graph(records["turn_execution"], records["turn_request"], records["turn_session"])
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                raise _TurnGraphReadError(anchor) from error
+            raise
 
     async def _anchor(self, tx: StateTransaction, scope: str, kind: str, identity: str) -> _Graph | None:
         anchor = await self._load(tx, scope, kind, identity)
@@ -227,24 +238,36 @@ class StateTurnCoordination:
                 for key in ({"scope", "execution_id"} if kind == "turn_execution"
                             else {"scope", "execution_id", "session_key", "request_key", "request_digest"})
             ):
-                raise _integrity()
+                raise _TurnGraphReadError(anchor)
             return None
         return await self._graph(tx, anchor)
+
+    async def _anchor_advanced(self, error: _TurnGraphReadError) -> bool:
+        # A fresh source scope must bypass the failed callback's record cache.
+        current = await self._store.read(lambda tx: tx.get_record(error.anchor.key))
+        if current is None:
+            return False
+        self._records.validate(current)
+        return current.storage_revision > error.anchor.storage_revision
 
     async def _observe(self, scope: str, kind: str, identity: str) -> _Graph | None:
         self._outside_transaction()
         _text(scope)
         _text(identity)
         for attempt in range(3):
-            first = await self._store.read(lambda tx: self._anchor(tx, scope, kind, identity))
-            if first is None:
-                return None
-            sampled = await self._store.read(lambda tx: tx.now())
-            second = await self._store.read(lambda tx: self._anchor(tx, scope, kind, identity))
-            if second is None:
-                return None
-            if first.signature() == second.signature():
-                return None if second.session.lease_expires_at <= sampled else second
+            try:
+                first = await self._store.read(lambda tx: self._anchor(tx, scope, kind, identity))
+                if first is None:
+                    return None
+                sampled = await self._store.read(lambda tx: tx.now())
+                second = await self._store.read(lambda tx: self._anchor(tx, scope, kind, identity))
+                if second is None:
+                    return None
+                if first.signature() == second.signature():
+                    return None if second.session.lease_expires_at <= sampled else second
+            except _TurnGraphReadError as error:
+                if not await self._anchor_advanced(error):
+                    raise
             if attempt < 2:
                 await asyncio.sleep(0)
         raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -300,6 +323,13 @@ class StateTurnCoordination:
         for attempt in range(3):
             try:
                 return await self._store.mutate(callback)
+            except _TurnGraphReadError as error:
+                # The failed mutation has rolled back before rechecking authority.
+                if not await self._anchor_advanced(error):
+                    raise
+                if attempt == 2:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+                await asyncio.sleep(0)
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_CONFLICT and attempt < 2:
                     await asyncio.sleep(0)
@@ -382,7 +412,7 @@ class StateTurnCoordination:
                 if anchor is not None and anchor.state == "ACTIVE":
                     graph = await self._anchor(tx, local_scope, kind, _text(anchor.data[_IDENTITIES[kind]]))
                     if graph is None:
-                        raise _integrity()
+                        raise _TurnGraphReadError(anchor)
                     graphs[graph.session.key] = graph
                 elif kind == "turn_request" and anchor is not None:
                     await self._anchor(tx, local_scope, kind, request_key)

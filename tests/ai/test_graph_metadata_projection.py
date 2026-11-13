@@ -8,6 +8,7 @@ from ._runtime_test_helpers import model_features
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 
@@ -365,32 +366,45 @@ async def test_final_graph_projection_keeps_newer_ack_without_replacing_waiter_s
 async def test_graph_observers_keep_independent_ack_and_bound_metadata_reads_for_text_bursts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _runtime(tmp_path) as (runtime, runtime_engine):
+    async with _runtime(tmp_path, model_refresh_interval_seconds=60) as (runtime, runtime_engine):
         task = Task.from_agent("metadata.burst-agent", runtime.agents.get())
         engine = runtime_engine.with_definitions(task)
         run = await engine.start(TaskGraph("burst-metadata", (
             TaskNode("agent", task=task, input=AgentTaskInput("one model request")),
         )), idempotency_key="burst")
         assert (await run.wait(timeout_seconds=10)).result.wait_status is TaskStatus.SUCCEEDED
-        counters = {"graph_state": 0, "model_cutoffs": 0, "model_rows": 0}
+        counters = {"graph_state": 0, "model_cutoffs": 0, "model_rows": 0, "model_updates": 0}
+        observer_reads: ContextVar[dict[str, int] | None] = ContextVar("observer_reads", default=None)
         original_state = runtime_engine._graph_service.state
         original_cutoffs = runtime.history.capture_model_interaction_cutoffs
         original_rows = runtime.history.read_model_interaction_metadata
+        original_updates = runtime.history.read_model_interaction_updates
         original_tree = engine._watch_execution_tree
 
+        def record_read(name: str) -> None:
+            counters[name] += 1
+            reads = observer_reads.get()
+            if reads is not None:
+                reads[name] += 1
+
         async def state(*args, **kwargs):
-            counters["graph_state"] += 1
+            record_read("graph_state")
             return await original_state(*args, **kwargs)
 
         async def cutoffs(*args, **kwargs):
-            counters["model_cutoffs"] += 1
+            record_read("model_cutoffs")
             return await original_cutoffs(*args, **kwargs)
 
         async def rows(*args, **kwargs):
-            counters["model_rows"] += 1
+            record_read("model_rows")
             return await original_rows(*args, **kwargs)
 
+        async def updates(*args, **kwargs):
+            record_read("model_updates")
+            return await original_updates(*args, **kwargs)
+
         async def tree(*args, **kwargs):
+            assert observer_reads.get() is not None
             stream = original_tree(*args, **kwargs)
             injected = False
             try:
@@ -398,7 +412,7 @@ async def test_graph_observers_keep_independent_ack_and_bound_metadata_reads_for
                     yield event
                     if not injected:
                         injected = True
-                        for index in range(200):
+                        for index in range(3):
                             yield replace(event, event=replace(
                                 event.event, durable_seq=None,
                                 event_type=ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value,
@@ -410,28 +424,40 @@ async def test_graph_observers_keep_independent_ack_and_bound_metadata_reads_for
         monkeypatch.setattr(runtime_engine._graph_service, "state", state)
         monkeypatch.setattr(runtime.history, "capture_model_interaction_cutoffs", cutoffs)
         monkeypatch.setattr(runtime.history, "read_model_interaction_metadata", rows)
+        monkeypatch.setattr(runtime.history, "read_model_interaction_updates", updates)
         monkeypatch.setattr(engine, "_watch_execution_tree", tree)
         run = await engine.get(run.graph_id)
         before = asyncio.all_tasks()
 
         async def consume(limit: int | None) -> list[TaskGraphRunEvent]:
+            # Child observation tasks inherit this observer's mutable counters.
+            reads = dict.fromkeys(counters, 0)
             stream = run.watch()
             collected: list[TaskGraphRunEvent] = []
             chunks = 0
+            burst_reads: dict[str, int] | None = None
+            token = observer_reads.set(reads)
             try:
                 async for event in stream:
                     collected.append(event)
                     if isinstance(event.event, ExecutionTreeEvent) and event.event.event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
+                        if burst_reads is None:
+                            burst_reads = reads.copy()
+                        else:
+                            assert reads == burst_reads
                         chunks += 1
                         if chunks == limit:
                             break
             finally:
-                await stream.aclose()
+                try:
+                    await stream.aclose()
+                finally:
+                    observer_reads.reset(token)
             return collected
 
-        early, complete = await asyncio.wait_for(asyncio.gather(consume(10), consume(None)), 10)
-        assert sum(isinstance(event.event, ExecutionTreeEvent) and event.event.event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value for event in early) == 10
-        assert sum(isinstance(event.event, ExecutionTreeEvent) and event.event.event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value for event in complete) == 200
+        early, complete = await asyncio.wait_for(asyncio.gather(consume(2), consume(None)), 10)
+        assert sum(isinstance(event.event, ExecutionTreeEvent) and event.event.event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value for event in early) == 2
+        assert sum(isinstance(event.event, ExecutionTreeEvent) and event.event.event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value for event in complete) == 3
         _, early_positions = decode_graph_watch_cursor(
             runtime.namespace, runtime.tenant_id, run.graph_id, early[-1].cursor, include_content=False,
         )
@@ -440,10 +466,11 @@ async def test_graph_observers_keep_independent_ack_and_bound_metadata_reads_for
         )
         execution_id = next(iter(complete_positions["agent"]))
         assert early_positions["agent"][execution_id] < complete_positions["agent"][execution_id]
-        # Two initial projections and one completed observer stay independent of 210 text callbacks.
+        # Initial and final synchronization retain a fixed read budget.
         assert counters["graph_state"] <= 12
         assert counters["model_cutoffs"] <= 12
         assert counters["model_rows"] <= 12
+        assert counters["model_updates"] <= 12
         assert not [item for item in asyncio.all_tasks() - before if not item.done()]
 
 

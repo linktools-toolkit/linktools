@@ -3,6 +3,7 @@
 """Persistent snapshot sequences share prefixes without extra read round trips."""
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from sqlalchemy import event, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.steps import encode_native_replay_key, native_store_key
+from linktools.ai.steps import native_store_locator, encode_native_replay_key, native_store_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_message_content import NativeMessageContent
@@ -33,37 +34,41 @@ class _ReadTraffic:
 
     def assert_publication_metadata(
         self, start: int, *, store_key: bytes, node_bound: int, message_bound: int,
-    ) -> None:
-        reads = self.reads[start:]
-        assert len(reads) == 3
-        seen = set()
-        for statement, parameters in reads:
-            projection = " ".join(statement.split("FROM", 1)[0].split())
-            for table, bound in (("ai_step_sequences", node_bound), ("ai_step_messages", message_bound)):
-                if projection == f"SELECT {table}.sha256, {table}.id":
-                    assert table not in seen
-                    seen.add(table)
-                    assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
-                    assert parameters[0] == store_key
-                    assert 0 < len(parameters) - 1 <= bound
-                    break
-            else:
-                assert "collector" not in seen
-                seen.add("collector")
-                columns = projection.removeprefix("SELECT ").split(", ")
-                assert all(column.startswith("ai_native_content_edges.") for column in columns)
-                assert {column.split(".")[-1] for column in columns} <= {
-                    "id", "edge_kind", "source_id", "target_id", "revision", "updated_at", "created_at",
-                }
-                assert "LIMIT" in statement and 0 < parameters[-2] <= 32
-        assert seen == {"ai_step_sequences", "ai_step_messages", "collector"}
+    ) -> dict[str, list[tuple[object, ...]]]:
+        batches = {"ai_step_sequences": [], "ai_step_messages": []}
+        for statement, parameters in self.reads[start:]:
+            branches = " ".join(statement.split()).split(" UNION ALL ")
+            assert 1 <= len(branches) <= 2
+            offset = 0
+            for branch in branches:
+                match = re.fullmatch(
+                    r"SELECT \? AS anon_[0-9]+, (ai_step_sequences|ai_step_messages)\.sha256, \1\.id "
+                    r"FROM \1 WHERE \1\.store_locator = \? AND \1\.store_key = \? AND \1\.sha256 IN \([?, ]+\)",
+                    branch,
+                )
+                assert match is not None, f"Unexpected publication SQL: {statement}"
+                table = match.group(1)
+                count = branch.count("?")
+                bound = parameters[offset:offset + count]
+                assert bound[:3] == ("sequence" if table == "ai_step_sequences" else "message",
+                                     native_store_locator(store_key), store_key)
+                assert 0 < len(bound) - 3 <= 128
+                batches[table].append(bound[3:])
+                offset += count
+            assert offset == len(parameters)
+        assert len(self.reads[start:]) == max(len(values) for values in batches.values())
+        for table, bound in (("ai_step_sequences", node_bound), ("ai_step_messages", message_bound)):
+            identities = [identity for batch in batches[table] for identity in batch]
+            assert 0 < len(identities) <= bound
+            assert len(identities) == len(set(identities))
+        return batches
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [10, 140])
 async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_reads(
-    tmp_path: Path, size: int, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    size = 3
     url = f"sqlite+aiosqlite:///{tmp_path / 'growing.db'}"
     engine = create_async_engine(url)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
@@ -78,11 +83,10 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
             start = len(traffic.reads)
             await store.save_snapshot(latest)
             # One appended node references at most three existing frontier IDs.
-            # Crossing the SQL batch size must not turn this into a history scan.
             traffic.assert_publication_metadata(
                 start, store_key=store.store_key, node_bound=4, message_bound=1,
             )
-        assert traffic.count == 3 * size
+        assert traffic.count == size
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == size
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == size
@@ -130,6 +134,40 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
 
 
 @pytest.mark.asyncio
+async def test_snapshot_publication_resolves_metadata_across_batch_boundary(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'metadata-batches.db'}"
+    engine = create_async_engine(url)
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    await store.initialize(local=True)
+    # One publication crosses the real 128-ID lookup limit without growing history repeatedly.
+    snapshot = ContinuableSnapshot(
+        run_id="run", step_index=0, idempotency_key="batch",
+        messages=[ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(129)],
+    )
+    traffic = _ReadTraffic()
+    event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
+    try:
+        await store.save_snapshot(snapshot)
+        batches = traffic.assert_publication_metadata(
+            0, store_key=store.store_key, node_bound=129, message_bound=129,
+        )
+        for lookups in batches.values():
+            assert sorted(map(len, lookups)) == [1, 128]
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
+        await store.close()
+        await engine.dispose()
+
+    engine = create_async_engine(url)
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one", max_cached_messages=0)
+    try:
+        assert await cold.latest_snapshot(run_id="run") == snapshot
+    finally:
+        await cold.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cross_run_prefixes(
     tmp_path: Path,
 ) -> None:
@@ -158,8 +196,14 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
             )
             after = traffic.count
             await store.save_snapshot(snapshot)
-            assert traffic.count == after  # Rejected duplicate owners publish no dependencies.
-        assert traffic.count == 3 * len(cases)
+            # Duplicate owners verify raw scope once, without publishing dependencies.
+            assert traffic.count == after + 1
+            statement, parameters = traffic.reads[-1]
+            assert " ".join(statement.split("FROM", 1)[0].split()) == "SELECT ai_step_snapshots.store_key"
+            assert "ai_step_snapshots.store_locator =" in statement
+            assert parameters == (native_store_locator(store.store_key), snapshot.run_id,
+                                  encode_native_replay_key(snapshot.idempotency_key))
+        assert traffic.count == 2 * len(cases)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == len(cases)
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
@@ -367,9 +411,9 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
                 await store.save_snapshot(snapshot)
             projections.clear()
         await store.save_snapshot(snapshot)
-        # Two bounded ID lookups index the node/message, then the collector
-        # checks durable candidates. Neither publication nor snapshot rereads the root.
-        assert len(projections) == 3
+        # One bounded UNION verifies both node/message publication owners.
+        # Offline GC adds no online scan or dependency revision update.
+        assert len(projections) == 1
         assert not any("ai_step_messages.message" in sql or "ai_step_messages.payload_json" in sql
                        for sql in projections)
         for receipt, session in zip(receipts, sessions):

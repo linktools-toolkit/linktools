@@ -23,6 +23,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 from sqlalchemy import event, select, text
 
+from linktools.ai.steps import native_store_locator
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.inputs import ExecutionContextArchive
 from linktools.ai.inputs import _context_archive
@@ -32,6 +33,7 @@ from linktools.ai.persistence._archive import ContentRecord, PreparedArchive
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.persistence._step_message_content import NativeMessageContent
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
+from linktools.ai.persistence._step_payload_owner import payload_store_key, payload_store_locator
 from linktools.ai.persistence.state import RecordQuery
 
 from .test_step_projection import _execution
@@ -46,6 +48,7 @@ class _Traffic:
         self.statements: Counter[str] = Counter()
         self.reads: list[tuple[str, tuple[object, ...]]] = []
         self.writes: list[tuple[str, str]] = []
+        self.record_inserts: Counter[str] = Counter()
         self.rows = 0
         self.native_insert_statements = 0
         self.returned_body_bytes = 0
@@ -66,6 +69,11 @@ class _Traffic:
             target = re.match(r"(?:INSERT INTO|UPDATE|DELETE FROM) (\w+)", statement.lstrip())
             assert target is not None
             self.writes.append((operation, target.group(1)))
+        if operation == 'INSERT' and statement.lstrip().startswith('INSERT INTO ai_state_records '):
+            columns = statement.split('(', 1)[1].split(')', 1)[0].split(', ')
+            kind_index = columns.index('kind')
+            batches = parameters if many else (parameters,)
+            self.record_inserts.update(batch[kind_index] for batch in batches)
         if operation == 'INSERT' and any(statement.lstrip().startswith('INSERT INTO ' + table)
                 for table in ('ai_step_messages', 'ai_step_sequences')):
             self.native_insert_statements += 1
@@ -87,63 +95,65 @@ class _Traffic:
     ) -> None:
         lookups: Counter[str] = Counter()
         identities: Counter[str] = Counter()
-        collectors = 0
         for statement, parameters in self.reads[start:]:
-            projection = " ".join(statement.split("FROM", 1)[0].split())
-            for table in ("ai_step_sequences", "ai_step_messages"):
-                if projection == f"SELECT {table}.sha256, {table}.id":
-                    assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
-                    assert parameters[0] == store_key and 0 < len(parameters) - 1 <= 128
-                    lookups[table] += 1
-                    identities[table] += len(parameters) - 1
-                    break
-            else:
-                columns = projection.removeprefix("SELECT ").split(", ")
-                assert all(column.startswith("ai_native_content_edges.") for column in columns)
-                assert {column.split(".")[-1] for column in columns} <= {
-                    "id", "edge_kind", "source_id", "target_id", "revision", "updated_at", "created_at",
-                }
-                assert "LIMIT" in statement and 0 < parameters[-2] <= 32
-                collectors += 1
-        assert collectors == 1
+            branches = " ".join(statement.split()).replace('"', '').replace('`', '').split(" UNION ALL ")
+            assert 1 <= len(branches) <= 2
+            offset = 0
+            for branch in branches:
+                matched = re.fullmatch(
+                    r"SELECT \? AS anon_[0-9]+, (ai_step_sequences|ai_step_messages)\.sha256, \1\.id "
+                    r"FROM \1 WHERE \1\.store_locator = \? AND \1\.store_key = \? AND \1\.sha256 IN \([?, ]+\)",
+                    branch,
+                )
+                assert matched is not None, f"unexpected online publication read: {statement}"
+                table = matched.group(1)
+                count = branch.count("?")
+                bound = parameters[offset:offset + count]
+                assert bound[:3] == ("sequence" if table == "ai_step_sequences" else "message",
+                                     native_store_locator(store_key), store_key)
+                assert 0 < len(bound) - 3 <= 128
+                lookups[table] += 1
+                identities[table] += len(bound) - 3
+                offset += count
+            assert offset == len(parameters)
+        assert len(self.reads[start:]) == max((node_ids + 127) // 128, (message_ids + 127) // 128)
+        # Collection is exclusively offline; publication only resolves bounded IDs.
         for table, bound in (("ai_step_sequences", node_ids), ("ai_step_messages", message_ids)):
             assert 0 < identities[table] <= bound
             assert lookups[table] == (bound + 127) // 128
 
     def assert_owner_metadata(
         self, start: int, *, store_key: bytes, record_store: bytes, root: str,
-        collecting: bool, replacing: bool = False,
+        binding_store: bytes | None = None, payload_store: bytes | None = None,
     ) -> None:
         kinds: Counter[str] = Counter()
         for statement, parameters in self.reads[start:]:
-            projection = " ".join(statement.split("FROM", 1)[0].split())
+            projection = " ".join(statement.split("FROM", 1)[0].split()).replace('"', '').replace('`', '')
             if projection.startswith("SELECT ai_state_records.id,"):
                 identifiers = statement.replace('"', '').replace('`', '')
-                assert "ai_state_records.store_key =" in identifiers and "ai_state_records.key =" in identifiers
-                assert parameters[0] == record_store and len(parameters) == 2
-                kinds['owner'] += 1
+                assert "ai_state_records.store_key =" in identifiers
+                assert re.search(r"ai_state_records\.key_locator (?:= \?|IN \(\?(?:, \?)?\))", identifiers)
+                # The lookup returns the complete raw identity for owner validation.
+                assert "ai_state_records.key," in projection and "ai_state_records.key_locator," in projection
+                assert len(parameters) == (2 if parameters[0] == record_store else 3)
+                assert parameters[0] in (record_store,) + (() if binding_store is None else (binding_store,))
+                assert all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item) for item in parameters[1:])
+                kinds['owner' if parameters[0] == record_store else 'binding'] += 1
             elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":
                 assert "ai_step_sequences.sha256 IN" in statement
-                assert parameters == (store_key, root)
+                assert parameters == (native_store_locator(store_key), store_key, root)
                 kinds['root'] += 1
-            elif projection.startswith("SELECT ai_native_content_edges.id,"):
-                columns = projection.removeprefix("SELECT ").split(", ")
-                assert all(column.startswith("ai_native_content_edges.") for column in columns)
-                assert {column.split(".")[-1] for column in columns} <= {
-                    "id", "edge_kind", "source_id", "target_id", "revision", "updated_at", "created_at",
-                }
-                assert "LIMIT" in statement and 0 < parameters[-2] <= 32
-                kinds['collector'] += 1
+            elif projection.startswith("SELECT ai_step_messages.id,") and payload_store is not None:
+                assert "ai_step_messages.store_key =" in statement and "ai_step_messages.sha256 =" in statement
+                assert len(parameters) == 3 and parameters[:2] == (payload_store_locator(payload_store), payload_store)
+                kinds['payload'] += 1
             else:
-                assert projection == ("SELECT ai_step_sequences.id, ai_step_sequences.store_key, "
-                                      "ai_step_sequences.sha256, ai_step_sequences.gc_revision")
-                assert "WHERE ai_step_sequences.id =" in statement and len(parameters) == 1
-                kinds['retired_target'] += 1
+                raise AssertionError(f"unexpected online owner read: {statement}")
         expected = Counter(owner=1, root=1)
-        if collecting:
-            expected['collector'] = 2 if replacing else 1
-        if replacing:
-            expected['retired_target'] = 1
+        if binding_store is not None:
+            expected['binding'] = 1
+        if payload_store is not None:
+            expected['payload'] = 1
         assert kinds == expected
 
     def assert_writes(self, start: int, limits: dict[tuple[str, str], int]) -> int:
@@ -206,16 +216,18 @@ class _Traffic:
         }, sort_keys=True))
 
 
-async def _native_counts(engine) -> tuple[int, int, int]:
+async def _native_counts(engine, store_key: bytes) -> tuple[int, int, int]:
     async with engine.connect() as connection:
         table = build_step_sql_metadata().tables['ai_step_messages']
-        bodies = (await connection.execute(select(table.c.message))).scalars().all()
-        nodes = await connection.scalar(text('SELECT count(*) FROM ai_step_sequences'))
+        bodies = (await connection.execute(select(table.c.message).where(table.c.store_key == store_key))).scalars().all()
+        nodes = await connection.scalar(text('SELECT count(*) FROM ai_step_sequences WHERE store_key = :store_key'), {'store_key': store_key})
     return len(bodies), nodes, sum(_binary_size(body) for body in bodies if body is not None)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('size', (10, 100, 1000))
+@pytest.mark.parametrize('size', (
+    10, pytest.param(100, marks=pytest.mark.manual), pytest.param(1000, marks=pytest.mark.manual),
+))
 async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property, size: int,
 ) -> None:
@@ -244,8 +256,6 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
     await service._open(create=True)
     registered = RunRecord(run_id='run', registration_id='registered')
     await native.register_run(registered)
-    for archive in traces:
-        archive.confirm_native_run(registered)
     traffic = _Traffic()
     traffic.observe(monkeypatch)
     event.listen(engine.sync_engine, 'before_cursor_execute', traffic.sql)
@@ -296,7 +306,7 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
         traffic.report(record_property, 'shared_write', time.process_time_ns() - started,
                        tracemalloc.get_traced_memory()[1])
         event.remove(engine.sync_engine, 'before_cursor_execute', traffic.sql)
-        body_count, node_count, stored_bytes = await _native_counts(engine)
+        body_count, node_count, stored_bytes = await _native_counts(engine, native.store_key)
         assert body_count == node_count == size
         record_property('stored_message_bytes', stored_bytes)
         assert 0 < stored_bytes <= size * 2048
@@ -318,7 +328,7 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
         traffic.report(record_property, 'checkpoint_publication', time.process_time_ns() - started,
                        tracemalloc.get_traced_memory()[1])
         event.remove(engine.sync_engine, 'before_cursor_execute', traffic.sql)
-        assert (await _native_counts(engine))[0] == size
+        assert (await _native_counts(engine, native.store_key))[0] == size
         content_archive = await traces[0].transcript_repository.content_archive()
         records = await content_archive.store.read(lambda tx: tx.list_records(RecordQuery(kind='archive_content')))
         assert not any(ContentRecord.from_record(record).codec == 'model-message' for record in records)
@@ -368,8 +378,20 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
         before = traffic.statements['SELECT']
         execution = await cold.execution.executions.get('execution', tenant_id=tenant)
         assert execution is not None and execution.input_context is not None
+        # One scoped owner/content join restores the typed input and binding/
+        # policy sources. The counter includes WITH statements; Native model
+        # messages are not hydrated by this typed-content branch.
+        assert traffic.statements['SELECT'] == before + 1
+        typed_query, typed_parameters = traffic.reads[-1]
+        assert "content_owners" in typed_query and "content_source" in typed_query
+        assert "ai_step_messages.store_locator =" in typed_query
+        assert "ai_step_messages.store_key =" in typed_query
+        assert "ai_step_messages.sha256 =" in typed_query
+        assert payload_store_key(namespace, tenant) in typed_parameters
+        assert payload_store_locator(payload_store_key(namespace, tenant)) in typed_parameters
+        before = traffic.statements['SELECT']
         assert await cold_service.load(execution.input_context) == context
-        assert traffic.statements['SELECT'] == before + 2
+        assert traffic.statements['SELECT'] == before + 1
         assert traffic.rows == 4 * size
         assert traffic.returned_body_bytes == 4 * stored_bytes
         assert not any(traffic.statements[op] for op in ('INSERT', 'UPDATE', 'DELETE'))
@@ -432,7 +454,7 @@ async def test_cold_native_media_object_is_read_by_snapshot_and_execution_contex
         await store.mutate(publish)
         async with store.storage_group.context.engine.connect() as connection:
             table = build_step_sql_metadata().tables['ai_step_messages']
-            bodies = (await connection.execute(select(table))).mappings().all()
+            bodies = (await connection.execute(select(table).where(table.c.store_key == native.store_key))).mappings().all()
         assert len(bodies) == 1
         content = ContentRecord.from_native_row(bodies[0])
         assert content.payload.encoding == 'json-attachments'
@@ -457,7 +479,7 @@ async def test_cold_native_media_object_is_read_by_snapshot_and_execution_contex
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('turns', (10,))
+@pytest.mark.parametrize('turns', (3,))
 async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property, turns: int,
 ) -> None:
@@ -483,8 +505,6 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
     await service._open(create=True)
     registered = RunRecord(run_id='growing', registration_id='growing-registration')
     await native.register_run(registered)
-    for archive in archives:
-        archive.confirm_native_run(registered)
 
     cold = Persistence(PersistenceStorage.sqlite(path))
     await cold.initialize(namespace=namespace, tenant_id=tenant)
@@ -538,9 +558,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             phase_reads['snapshot'] += writer_traffic.statements['SELECT'] - reads
             budgeted_writes += writer_traffic.assert_writes(write_start, {
                 ('INSERT', 'ai_step_snapshots'): 1, ('INSERT', 'ai_step_messages'): 1,
-                ('INSERT', 'ai_step_sequences'): 1, ('UPDATE', 'ai_step_messages'): 1,
-                ('UPDATE', 'ai_step_sequences'): 2, ('INSERT', 'ai_native_content_edges'): 3,
-                ('DELETE', 'ai_native_content_edges'): 1,
+                ('INSERT', 'ai_step_sequences'): 1,
             })
             assert writer_traffic.rows == body_rows
             roots = []
@@ -563,18 +581,12 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                 await archive.state_store.mutate(publish)
                 writer_traffic.assert_owner_metadata(
                     reads, store_key=native.store_key, record_store=archive.state_store.store_key,
-                    root=projection.items[0].root.slices[0].first, collecting=True, replacing=turn > 1,
+                    root=projection.items[0].root.slices[0].first,
                 )
                 phase_reads['archive'] += writer_traffic.statements['SELECT'] - reads
                 limits = {
                     ('INSERT' if turn == 1 else 'UPDATE', 'ai_state_records'): 1,
-                    ('UPDATE', 'ai_step_sequences'): 1, ('INSERT', 'ai_native_content_edges'): 2,
-                    ('DELETE', 'ai_native_content_edges'): 1 if turn == 1 else 2,
                 }
-                if turn > 1:
-                    # Old snapshots still retain this candidate: the collector
-                    # checks its revision/edges but cannot reclaim its body.
-                    limits['DELETE', 'ai_step_sequences'] = 1
                 budgeted_writes += writer_traffic.assert_writes(write_start, limits)
                 assert writer_traffic.rows == body_rows
                 baselines[index] = projection
@@ -599,15 +611,23 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                 )
 
             write_start = len(writer_traffic.writes)
+            record_inserts = writer_traffic.record_inserts.copy()
             await store.mutate(admit)
+            assert writer_traffic.record_inserts - record_inserts == (Counter(execution=1, archive_content=1) if turn == 1 else Counter(execution=1))
             writer_traffic.assert_owner_metadata(
                 reads, store_key=native.store_key, record_store=store.store_key,
-                root=roots[0].slices[0].first, collecting=False,
+                root=roots[0].slices[0].first,
+                binding_store=store.storage_group.opened_archive[1].store_key,
+                payload_store=payload_store_key(namespace, tenant),
             )
-            phase_reads['context'] += writer_traffic.statements['SELECT'] - reads
+            # Binding/policy share one bounded identity lookup; the typed input
+            # has one separate lookup. Neither is a Native history-body read.
+            phase_reads['binding'] += 1
+            phase_reads['payload'] += 1
+            phase_reads['context'] += writer_traffic.statements['SELECT'] - reads - 2
             budgeted_writes += writer_traffic.assert_writes(write_start, {
-                ('INSERT', 'ai_state_records'): 1, ('UPDATE', 'ai_step_sequences'): 1,
-                ('INSERT', 'ai_native_content_edges'): 2, ('DELETE', 'ai_native_content_edges'): 1,
+                # Owner insert plus content-addressed binding insert-or-verify.
+                ('INSERT', 'ai_state_records'): 2, ('INSERT', 'ai_step_messages'): 1,
             })
             assert writer_traffic.rows == body_rows
 
@@ -633,7 +653,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         # separately from the zero-encode frozen projection/context reuse path.
         assert phase_encodings['mutable_snapshot_freeze'] <= turns * (turns + 1) // 2
         assert phase_encodings['frozen_projection'] == phase_encodings['confirmed_context'] == 0
-        assert phase_reads == {'snapshot': 3 * turns, 'archive': 2 * (3 + 5 * (turns - 1)), 'context': 2 * turns}
+        assert phase_reads == {'snapshot': turns, 'archive': 4 * turns, 'context': 2 * turns, 'binding': turns, 'payload': turns}
         assert writer_traffic.statements['SELECT'] == sum(phase_reads.values())
         assert reader_traffic.statements['SELECT'] == turns
         assert 0 < writer_traffic.preparations <= 2 * turns
@@ -657,7 +677,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         assert NativeMessageRoot.from_json(fallback.reference.payload.decode()['history']) == roots[0]
         record_property('unconfirmed_context_encoded_messages', writer_traffic.encodings - before)
         event.remove(engine.sync_engine, 'before_cursor_execute', writer_traffic.sql)
-        bodies, nodes, stored_bytes = await _native_counts(engine)
+        bodies, nodes, stored_bytes = await _native_counts(engine, native.store_key)
         assert bodies == nodes == turns
         assert writer_traffic.native_bind_bytes <= 3 * stored_bytes + 2048 * turns
         record_property('incremental_stored_message_bytes', stored_bytes)

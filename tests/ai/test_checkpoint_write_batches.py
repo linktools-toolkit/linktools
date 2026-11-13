@@ -99,11 +99,13 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
                 if native_messages is not None:
                     archive.transcript_repository.bind_native_message_store(native_messages)
             archives.append(archive)
-        messages = [ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(133)]
+        # Cross the 128-message seek boundary, then append and replay checkpoints.
+        initial_message_count = 129
+        messages = [ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(initial_message_count + 3)]
         checkpoints = (
-            AgentRunCheckpoint("run", 1, messages[:130], transcript_message_count_before=0),
-            AgentRunCheckpoint("run", 2, messages, transcript_message_count_before=130),
-            AgentRunCheckpoint("run", 3, messages, transcript_message_count_before=133),
+            AgentRunCheckpoint("run", 1, messages[:initial_message_count], transcript_message_count_before=0),
+            AgentRunCheckpoint("run", 2, messages, transcript_message_count_before=initial_message_count),
+            AgentRunCheckpoint("run", 3, messages, transcript_message_count_before=len(messages)),
         )
         run = AgentRunRecord("run")
         counts = [Counter(), Counter()]
@@ -229,7 +231,8 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
                 background_tasks=set(),
             )
             results.append(await commands.commit_terminal_checkpoint(commit))
-            snapshots.append(await _snapshot(repository.state_store))
+            scope, _archive = repository.state_store.storage_group.opened_archive
+            snapshots.append(await _snapshot(repository.state_store, scope_mapping={scope: "canonical"}))
         assert calls == (["seal"] if trace else []) + ["terminal"]
         assert results[0].execution == results[1].execution
         assert results[0].result == results[1].result

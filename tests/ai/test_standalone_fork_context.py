@@ -9,6 +9,7 @@ from ._runtime_test_helpers import workspace_features
 
 import asyncio
 from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 
@@ -175,7 +176,12 @@ async def test_pending_confirmation_rejects_missing_or_corrupt_fork_context(tmp_
     async with _turn_state("sqlite", tmp_path) as state:
         turn = _standalone(state)
         await _commit(state, turn)
+        original = await state.commands.read_pending_turn(turn.reservation, expected_session=None)
         await _damage_fork_context(state.storage.run_store.read_store(PersistenceDomain.CONVERSATION).state_store, damage)
+        if damage == "projection_digest":
+            assert original is not None
+            assert await state.commands.read_pending_turn(turn.reservation, expected_session=None) == original
+            return
         with pytest.raises(AIError) as raised:
             await state.commands.read_pending_turn(turn.reservation, expected_session=None)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -205,12 +211,18 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
         await _damage_fork_context(runtime._run_store.read_store(PersistenceDomain.CONVERSATION).state_store, damage)
     reopened_group = None
     try:
-        with pytest.raises(AIError) as raised:
+        with (nullcontext() if damage == "projection_digest" else pytest.raises(AIError)) as raised:
             async with Persistence.open('corrupt-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)) as persistence_200, Runtime.attach(persistence=persistence_200, features=model_features(models, group)) as runtime:
                 reopened_group = persistence_200.execution.executions.state_store.storage_group
                 source = await runtime.executions.get(source_id)
                 fork = await source.fork("fork")
-                await fork.wait(timeout_seconds=5)
+                result = await fork.wait(timeout_seconds=5)
+                assert result.result.status is ExecutionStatus.SUCCEEDED
+                assert len(calls) == 2
+                assert any(isinstance(part, UserPromptPart) and part.content == "source"
+                           for message in calls[1] for part in message.parts)
+                assert any(isinstance(part, TextPart) and part.content == "answer"
+                           for message in calls[1] for part in message.parts)
     finally:
         if reopened_group is not None:
             # Integrity rejection can prevent owner cleanup after work has settled.
@@ -233,8 +245,9 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
             await reopened_group.close()
             await reopened_group.context.close()
             assert reopened_group.context.closed
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert len(calls) == 1
+    if damage != "projection_digest":
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert len(calls) == 1
 
 
 @pytest.mark.asyncio

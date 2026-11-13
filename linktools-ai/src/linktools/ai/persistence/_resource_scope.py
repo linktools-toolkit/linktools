@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..errors import AIError, ErrorCode
 from ..observe.stream import await_stream_cleanup
 from ..storage import (
+    CacheBackend,
     FilesystemMutationLock,
     SqlStorageContext,
     StorageRoute,
@@ -34,6 +35,14 @@ class StorageResourceRequest:
     configure_schema: Callable[["MetaData"], None] | None = None
     uses_archive: bool = False
     native_content_index: bool = False
+
+
+def _shared_archive_cache(requests: tuple[StorageResourceRequest, ...]) -> CacheBackend | None:
+    """A shared archive cannot borrow a different route's cache policy."""
+    caches = tuple(request.route.cache for request in requests if request.uses_archive)
+    if not caches or caches[0] is None or any(cache is not caches[0] for cache in caches):
+        return None
+    return caches[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +95,8 @@ class StorageResourceScope:
         if len({request.name for request in requests}) != len(requests):
             raise ValueError("storage resource request names must be unique")
         resources: dict[int, MemoryResource | SqlResource] = {}
-        memory = MemoryResource(InMemoryStateStorageGroup(read_only=read_only))
+        memory = MemoryResource(InMemoryStateStorageGroup(read_only=read_only,
+            archive_cache=_shared_archive_cache(tuple(request for request in requests if request.route.kind == "memory"))))
         self._close_actions.append(memory.group.close)
         sql_groups: dict[tuple[str, object], list[int]] = {}
         for index, request in enumerate(requests):
@@ -148,6 +158,7 @@ class StorageResourceScope:
                 context, metadata, read_only=read_only,
                 uses_archive=any(requests[index].uses_archive for index in indices),
                 native_content_index=any(requests[index].native_content_index for index in indices),
+                archive_cache=_shared_archive_cache(tuple(requests[index] for index in indices)),
             )
             self._close_actions.append(group.close)
             resource = SqlResource(group, context, metadata)

@@ -49,12 +49,13 @@ async def test_binary_sort_prefix_and_pagination_match_byte_order(tmp_path: Path
     try:
         sorts = (b"A-one", b"A-two", b"a-one", b"\x00", b"\x00\xff", b"%_",
                  b"\x7f", b"\x80", b"\xff", b"\xff\x00", b"\xff\xff",
-                 b"x" * 1205)
+                 b"x" * 1205, b"p" * 128 + b"a", b"p" * 128 + b"b",
+                 b"p" * 128 + b"b" + b"x" * 1024, b"p" * 128 + b"c")
         records = tuple(_record(value) for value in sorts)
         tied = replace(_record(b"A-one"), key=b"\xff" * 32)
         await store.mutate(lambda tx: tx.insert_records((*records, tied)))
         ordered = tuple(sorted((*records, tied), key=lambda record: (record.sort_key, record.key)))
-        for prefix in (None, b"A", b"a", b"\x00", b"%_", b"\xff", b"\xff\xff", b"x" * 1205):
+        for prefix in (None, b"A", b"a", b"\x00", b"%_", b"\xff", b"\xff\xff", b"x" * 1205, b"p" * 128 + b"b"):
             found = []
             cursor = None
             while True:
@@ -180,8 +181,8 @@ def test_relation_address_enforces_the_complete_encoded_byte_budget(address: _Re
     for identity in ("x" * (RELATION_KEY_MAX_BYTES - overhead + 1), "x" * 65536):
         with pytest.raises(ValueError):
             address(*prefix, (identity,))
-    assert len(address("n" * 256, "t" * 128, "task", "task_graph_binding_capture", "owner", ("p" * 256,))) == (694 if address is scope_key else 695)
-    assert len(address("n" * 256, "t" * 128, "execution", "turn", "scope", ("s" * 256,))) == (677 if address is scope_key else 678)
+    assert len(address("n" * 128, "t" * 128, "task", "task_graph_binding_capture", "owner", ("p" * 128,))) == (438 if address is scope_key else 439)
+    assert len(address("n" * 128, "t" * 128, "execution", "turn", "scope", ("s" * 128,))) == (421 if address is scope_key else 422)
 
 
 @pytest.mark.parametrize("relation", (b"\x00", bytes(range(256)), b"\xff" * RELATION_KEY_MAX_BYTES))
@@ -219,17 +220,17 @@ def test_relation_query_indexes_preserve_full_relations_and_mysql_sort_prefix() 
         assert column_type.compile(dialect=postgresql.dialect()) == "BYTEA"
         assert column_type.compile(dialect=sqlite.dialect()) == "BLOB"
         assert column_type.compile(dialect=mysql.dialect()) == f"VARBINARY({PARENT_KEY_MAX_BYTES if name == 'parent_key' else RELATION_KEY_MAX_BYTES})"
-        index, = (index for index in records.indexes if index.info.get("ddl_dialect") == "portable"
-                      and tuple(column.name for column in index.columns) == (name, "sort_key"))
-        assert index.columns.sort_key.type.length is None
-        mysql_index, = (index for index in records.indexes if index.info.get("ddl_dialect") == "mysql"
-                        and tuple(column.name for column in index.columns) == (name, "sort_key"))
-        assert not mysql_index.unique
-        assert mysql_index.dialect_options["mysql"]["length"] == {"sort_key": 128}
+        locator = name.removesuffix("_key") + "_locator"
+        index, = (index for index in records.indexes
+                  if index.info.get("ddl_dialect") == "mysql"
+                  and tuple(column.name for column in index.columns) == (locator, "sort_prefix"))
+        assert not index.unique
+        assert index.columns.sort_prefix.type.length == 128
+        assert all(name not in index.columns for index in records.indexes)
     subject_index, = (index for index in records.indexes
-                      if index.info.get("ddl_dialect") == "portable"
-                      and tuple(column.name for column in index.columns) == ("scope_key", "subject_id"))
-    assert sum(column.type.length for column in subject_index.columns) == 1152
+                     if index.info.get("ddl_dialect") == "mysql"
+                     and tuple(column.name for column in index.columns) == ("scope_locator", "subject_id"))
+    assert tuple(column.type.length for column in subject_index.columns) == (64, 128)
 
 
 def test_relation_fields_do_not_reveal_raw_owners_in_repr() -> None:

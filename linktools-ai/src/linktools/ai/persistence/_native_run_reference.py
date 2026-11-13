@@ -3,27 +3,26 @@
 """Trace run projections whose common fields belong to a native registration."""
 
 import json
-from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, replace
-from datetime import datetime
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
 from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeStepEvent
 
-from ..core import canonical_json_bytes, canonical_sha256, validate_resource_id
 from ..errors import AIError, ErrorCode
-from ..steps import encode_native_replay_key
-from ._official_step_reader import OfficialStepReader
+from ..steps import native_store_locator, encode_native_replay_key
+from ._run_registration import RunRegistrationReference
+from ._record_owner import record_owner_rows
+from ._run_counters import run_counter_address, run_counter_streams
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
 from ._sql import SqlStateStore
 from ._step_contracts import AgentRunRecord
 from ._step_schema import build_step_sql_metadata
 from ._step_store import SqlStepStore, StepWriteReceipt
-from .codec import _encode_step_envelope, decode_envelope, encode_envelope
+from .codec import _encode_step_envelope
 from .state import RecordScanCursor, RecordQuery, SqlStateRecordReader, StateTransaction, StoredRecord
 
 if TYPE_CHECKING:
@@ -31,8 +30,7 @@ if TYPE_CHECKING:
 
 
 _RUN_ADAPTER = TypeAdapter(RunRecord)
-_TYPE = "native_agent_run_reference"
-_KEYS = frozenset({"run", "registration", "projection_sha256", "metadata", "removed", "started_at"})
+_TYPE = "run_reference"
 
 
 def is_native_run_reference(data: Mapping[str, object]) -> bool:
@@ -41,22 +39,22 @@ def is_native_run_reference(data: Mapping[str, object]) -> bool:
 
 
 class NativeRunReferences:
-    """Resolve a native source in the same SELECT as its Trace sidecar.
+    """Resolve Step admissions and their canonical source in one SELECT.
 
-    Only source-confirmed registrations may create references. The physical
-    record keeps distinct Runtime evidence and a byte-integrity digest, never
+    Only source-confirmed registrations may create admissions. Each local
+    admission keeps distinct Runtime projection differences, never
     another copy of the native lineage, agent or shared metadata.
     """
 
     def __init__(self, state: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
         self._state = state
         self._store_key = SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
+        self._store_locator = native_store_locator(self._store_key)
         self._native: SqlStepStore | None = None
-        self._confirmed: OrderedDict[str, str] = OrderedDict()
         self._projections: WeakKeyDictionary[StateTransaction, dict[bytes, tuple[Mapping[str, object], Mapping[str, object]]]] = WeakKeyDictionary()
         metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE}))
         build_step_sql_metadata(metadata=metadata)
-        self._records = metadata.tables["ai_state_records"]
+        self._record_metadata = metadata
         self._runs = metadata.tables["ai_step_runs"]
         self._events = metadata.tables["ai_step_events"]
 
@@ -68,93 +66,27 @@ class NativeRunReferences:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._native = native
 
-    def confirm(self, record: RunRecord) -> None:
-        if (self._native is None or not record.registration_id
-                or self._native.confirmed_run(record.run_id) != record):
-            return
-        previous = self._confirmed.get(record.run_id)
-        if previous is not None and previous != record.registration_id:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self._confirmed[record.run_id] = record.registration_id
-        self._confirmed.move_to_end(record.run_id)
-        while len(self._confirmed) > 128:
-            self._confirmed.popitem(last=False)
-
-    def invalidate(self, run_id: str) -> None:
-        self._confirmed.pop(run_id, None)
-
     def clear(self) -> None:
-        self._confirmed.clear()
         self._projections.clear()
 
     def encode(self, run: AgentRunRecord, *, source_receipt: StepWriteReceipt | None = None) -> dict[str, object] | None:
         if self._native is None:
             return None
-        if source_receipt is None:
-            source = self._native.confirmed_run(run.agent_run_id)
-            if source is None or self._confirmed.get(run.agent_run_id) != source.registration_id:
-                return None
-        else:
-            # The caller just published this source in the enclosing transaction.
-            # Do not promote its provisional receipt to committed cache knowledge.
-            source = self._native.run_from_receipt(source_receipt)
-            if source is None or source.run_id != run.agent_run_id or not source.registration_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        projected = OfficialStepReader.project_run(source)
-        if (projected.agent_conversation_id, projected.parent_agent_run_id, projected.agent_id) != (
-                run.agent_conversation_id, run.parent_agent_run_id, run.agent_id):
+        source = (self._native.confirmed_run(run.agent_run_id) if source_receipt is None
+                  else self._native.run_from_receipt(source_receipt))
+        if source is None:
             return None
-        encoded_run = _encode_step_envelope(run)
-        reference = encode_envelope({"type": _TYPE, "payload": {
-            "run": source.run_id,
-            "registration": source.registration_id,
-            "projection_sha256": canonical_sha256(encoded_run),
-            "metadata": {key: value for key, value in run.metadata.items()
-                         if projected.metadata.get(key) != value},
-            "removed": sorted(projected.metadata.keys() - run.metadata.keys()),
-            "started_at": (None if run.started_at.isoformat() == projected.started_at.isoformat()
-                           else run.started_at.isoformat()),
-        }})
-        return reference if len(canonical_json_bytes(reference)) < len(canonical_json_bytes(encoded_run)) else None
+        return RunRegistrationReference.capture(source, run).to_data()
 
     @classmethod
     def decode_reference(cls, data: Mapping[str, object]) -> Mapping[str, object]:
-        envelope = decode_envelope(data)
-        value = envelope.value
-        payload = value.get("payload")
-        if (set(value) != {"type", "payload"} or value["type"] != _TYPE
-                or not isinstance(payload, Mapping) or set(payload) != _KEYS):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        digest = payload["projection_sha256"]
-        if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(payload["registration"], str) or not payload["registration"]:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            validate_resource_id(payload["run"])
-        except AIError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        metadata, removed = payload["metadata"], payload["removed"]
-        if (not isinstance(metadata, Mapping) or any(not isinstance(key, str) or not isinstance(value, str)
-                                                   for key, value in metadata.items())
-                or not isinstance(removed, (list, tuple)) or any(not isinstance(key, str) for key in removed)
-                or list(removed) != sorted(set(removed)) or set(removed).intersection(metadata)):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        started = payload["started_at"]
-        if started is not None:
-            try:
-                timestamp = datetime.fromisoformat(started)
-                if timestamp.tzinfo is None or timestamp.isoformat() != started:
-                    raise ValueError("invalid timestamp")
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        return payload
+        reference = RunRegistrationReference.from_data(data)
+        return {"run": reference.run_id, "registration": reference.registration_id}
 
-    @classmethod
-    def matches(cls, data: Mapping[str, object], run: AgentRunRecord) -> bool:
-        reference = cls.decode_reference(data)
-        return (reference["run"] == run.agent_run_id
-                and reference["projection_sha256"] == canonical_sha256(_encode_step_envelope(run)))
+    def matches(self, data: Mapping[str, object], run: AgentRunRecord, *, transaction: StateTransaction) -> bool:
+        expected = _encode_step_envelope(run)
+        return any(physical == data and projection == expected
+                   for physical, projection in self._projections.get(transaction, {}).values())
 
     def project(self, data: Mapping[str, object], source: RunRecord, *, store_key: bytes) -> AgentRunRecord:
         return self.project_source(data, source, store_key=store_key, expected_store_key=self._store_key)
@@ -162,54 +94,57 @@ class NativeRunReferences:
     @classmethod
     def project_source(cls, data: Mapping[str, object], source: RunRecord, *,
                        store_key: bytes, expected_store_key: bytes) -> AgentRunRecord:
-        """Verify a detached native registration with the online projection contract."""
-        reference = cls.decode_reference(data)
-        if (store_key != expected_store_key or reference["run"] != source.run_id
-                or reference["registration"] != source.registration_id):
+        """Project an immutable registration without a second whole-run identity."""
+        if store_key != expected_store_key:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        run = OfficialStepReader.project_run(source)
-        for key in reference["removed"]:
-            run.metadata.pop(key, None)
-        run.metadata.update(reference["metadata"])
-        if reference["started_at"] is not None:
-            run.started_at = datetime.fromisoformat(reference["started_at"])
-        if not cls.matches(data, run):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return run
+        return RunRegistrationReference.from_data(data).project(source)
 
     def remember_prepared(self, transaction: StateTransaction, record: StoredRecord, run: AgentRunRecord,
-                          *, source_receipt: StepWriteReceipt | None = None) -> None:
-        """Retain a source-proven projection only for its exact transaction row."""
+                          *, source_receipt: StepWriteReceipt | None = None,
+                          registration: RunRecord | None = None) -> None:
+        """Retain a projection proven by its receipt or prepared canonical owner."""
         if not is_native_run_reference(record.data):
             return
-        if self.encode(run, source_receipt=source_receipt) != record.data:
+        expected = (self.encode(run, source_receipt=source_receipt)
+                    if source_receipt is not None or registration is None
+                    else RunRegistrationReference.capture(registration, run).to_data())
+        if expected != record.data:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._projections.setdefault(transaction, {})[record.key] = (record.data, _encode_step_envelope(run))
 
     async def read_physical(self, transaction: StateTransaction, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         """Resolve existing sources in the write prefetch, retaining physical CAS records."""
-        await self.read(transaction, keys=keys)
+        sequence_keys = tuple(stream for key in keys for stream in
+                              run_counter_streams(key, store_key=self._state.store_key))
+        await self.read(transaction, keys=keys, sequence_keys=sequence_keys)
+        # A previously cached admission may not have captured its counters.
+        # The existing sequence reader fills only those still absent.
+        if sequence_keys:
+            await transaction.get_sequences(sequence_keys)
         assert isinstance(transaction, SqlStateRecordReader)
         return {key: record for key, record in transaction.cached_records(keys).items() if record is not None}
 
     def statement(self, *, keys: Sequence[bytes] | None = None, query: RecordQuery | None = None,
                   scan: tuple[RecordScanCursor | None, int] | None = None,
                   expected_start: NativeStepEvent | None = None,
-                  expected_terminal: NativeStepEvent | None = None) -> "Select":
+                  expected_terminal: NativeStepEvent | None = None, include_run_counters: bool = False) -> "Select":
+        from ._sql import _key_matches, _keys_match
         from sqlalchemy import JSON, and_, bindparam, cast, select, type_coerce
         from sqlalchemy import literal_column
         from sqlalchemy.sql import visitors
         from sqlalchemy.sql.elements import BindParameter
 
-        records, runs = self._records, self._runs
+        records = record_owner_rows(self._record_metadata, keys=keys, kind="agent_run" if query is not None else None,
+                                    include_run_counters=include_run_counters)
+        runs = self._runs
         encoded = type_coerce(records.c.payload_json, JSON)[()].as_string()
         payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
         reference = payload["value"]["payload"]
-        source_run = reference["run"].as_string()
+        source_run = reference["run_id"].as_string()
         run_join = and_(
-            records.c.kind == "agent_run", runs.c.store_key == self._store_key,
+            records.c.kind == "agent_run", runs.c.store_locator == self._store_locator, runs.c.store_key == self._store_key,
             runs.c.run_id == source_run,
-            runs.c.registration_id == reference["registration"].as_string(),
+            runs.c.registration_id.is_not_distinct_from(reference["registration_id"].as_string()),
         )
         source_columns = tuple(column.label("native_" + column.name) for column in runs.c)
         expected = expected_start if expected_start is not None else expected_terminal
@@ -218,14 +153,14 @@ class NativeRunReferences:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             # Inline Run views also require full pending lifecycle proof in
             # this existing SELECT, never a second source read.
-            run_join = and_(records.c.kind == "agent_run", runs.c.store_key == self._store_key,
+            run_join = and_(records.c.kind == "agent_run", runs.c.store_locator == self._store_locator, runs.c.store_key == self._store_key,
                             runs.c.run_id == bindparam("source_run_id", expected.run_id))
         joined = records.outerjoin(runs, run_join)
         for prefix, event in (("start", expected_start), ("terminal", expected_terminal)):
             if event is None:
                 continue
             events = self._events if prefix == "start" else self._events.alias("terminal_source")
-            joined = joined.outerjoin(events, and_(events.c.store_key == runs.c.store_key,
+            joined = joined.outerjoin(events, and_(events.c.store_locator == runs.c.store_locator, events.c.store_key == runs.c.store_key,
                 events.c.run_id == runs.c.run_id,
                 events.c.idempotency_key == bindparam("source_event_key" if prefix == "start" else "source_terminal_key",
                                                 encode_native_replay_key(event.idempotency_key))))
@@ -248,14 +183,14 @@ class NativeRunReferences:
 
         statement = visitors.replacement_traverse(statement, {}, inline_constant).where(records.c.store_key == self._state.store_key)
         if keys is not None:
-            statement = statement.where(records.c.key.in_(tuple(keys)))
+            statement = statement.where(_keys_match(records.c.key, tuple(keys)))
         if query is not None:
             statement = statement.where(records.c.kind == "agent_run")
             if query.scope_key is not None:
-                statement = statement.where(records.c.scope_key == query.scope_key)
+                statement = statement.where(_key_matches(records.c.scope_key, query.scope_key))
             if query.parent_key is not None:
-                statement = statement.where(records.c.parent_key == query.parent_key)
-            statement = statement.order_by(records.c.sort_key, records.c.key)
+                statement = statement.where(_key_matches(records.c.parent_key, query.parent_key))
+            statement = statement.order_by(records.c.sort_prefix, records.c.sort_key, records.c.key)
         if scan is not None:
             after, limit = scan
             if type(limit) is not int or not 1 <= limit <= 1000:
@@ -271,6 +206,7 @@ class NativeRunReferences:
         expected_start: NativeStepEvent | None = None,
         expected_terminal: NativeStepEvent | None = None,
         expected_run: RunRecord | None = None,
+        sequence_keys: Sequence[bytes] = (),
     ) -> tuple[StoredRecord, ...]:
         expected = expected_start if expected_start is not None else expected_terminal
         if (expected is None) != (expected_run is None):
@@ -304,10 +240,27 @@ class NativeRunReferences:
             missing = tuple(dict.fromkeys(unresolved))
             if not missing:
                 return tuple(values[key] for key in dict.fromkeys(keys) if key in values)
-        rows = await transaction.read_joined_records(
-            self._state.context, self.statement(keys=missing, query=query, scan=scan, expected_start=expected_start,
-                expected_terminal=expected_terminal), keys=missing or (),
-        )
+        batches = (missing,)
+        if missing:
+            # Each key binds both its indexed locator and complete raw identity.
+            # Count fixed JOIN/filter binds in the actual dialect before batching.
+            probe = self.statement(keys=missing[:1], query=query, scan=scan,
+                                   expected_start=expected_start, expected_terminal=expected_terminal)
+            compiled = probe.compile(dialect=self._state.context.engine.dialect,
+                                     compile_kwargs={"render_postcompile": True})
+            count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
+            batch_size = 1 + (999 - count) // 2
+            if batch_size < 1:
+                raise ValueError("native record read exceeds the SQL parameter budget")
+            batches = tuple(missing[offset:offset + batch_size] for offset in range(0, len(missing), batch_size))
+        rows = []
+        for batch in batches:
+            rows.extend(await transaction.read_joined_records(
+                self._state.context, self.statement(keys=batch, query=query, scan=scan, expected_start=expected_start,
+                    expected_terminal=expected_terminal, include_run_counters=bool(sequence_keys)),
+                keys=batch or (), sequence_keys=tuple(key for key in sequence_keys
+                    if (address := run_counter_address(key)) is not None and (batch is None or address[0] in batch)),
+            ))
         ordered: list[StoredRecord] = []
         for record, row in rows:
             if expected is not None:

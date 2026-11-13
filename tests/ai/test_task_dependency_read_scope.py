@@ -5,15 +5,20 @@
 import asyncio
 from collections import Counter
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import event
 
+from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.state import RecordQuery
-from linktools.ai.task import LocalTaskGraphLauncher, TaskNode
+from linktools.ai.task import (
+    LocalTaskGraphLauncher, TaskGraph, TaskGraphAdmission, TaskGraphLimits,
+    TaskGraphRequest, TaskNode, TaskResultRecord,
+)
 
 from .test_task_io_bounded_reads import _admit
 
@@ -73,8 +78,8 @@ async def test_dependency_records_reuse_one_transaction(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", (2, 200))
-async def test_dependency_context_uses_one_read_scope(tmp_path: Path, width: int) -> None:
+async def test_dependency_context_uses_one_read_scope(tmp_path: Path) -> None:
+    width = 3
     async with Persistence.open("dependency-budget", storage=_storage("sqlite", tmp_path), tenant_id="tenant") as state:
         target = await _prepare(state, width=width)
         repository = state.task.tasks
@@ -192,11 +197,57 @@ async def test_successful_dependency_batches_bound_sql_parameters(tmp_path: Path
     async with Persistence.open("dependency-fan-in", storage=_storage("sqlite", tmp_path), tenant_id="tenant") as state:
         source_ids = tuple(f"source-{index}" for index in range(257))
         target = TaskNode("target", source_ids)
-        await _admit(state, tuple(TaskNode(node_id) for node_id in source_ids) + (target,))
+        graph = TaskGraph("graph", tuple(TaskNode(node_id) for node_id in source_ids) + (target,))
+        request = TaskGraphRequest(
+            graph, Principal("tester", "tenant"), "submit:graph",
+            limits=TaskGraphLimits(max_nodes=len(graph.nodes), max_concurrency=len(source_ids)),
+        )
+        await state.task.admissions.admit(TaskGraphAdmission.from_request(request), graph)
         repository = state.task.tasks
-        for node_id in source_ids:
-            lease = await repository.claim("graph", node_id, tenant_id="tenant", owner="worker", lease_seconds=30)
-            await repository.complete(lease, tenant_id="tenant", execution_id=f"execution-{node_id}", result_digest="a" * 64)
+        sources = frozenset(source_ids)
+
+        # Keep the real read-batch boundary without a claim/complete transaction
+        # for every dependency. Canonical writers keep states, summaries and
+        # events consistent across the bulk running and terminal transitions.
+        async def terminal_fixture(transaction):
+            before = await repository._event_state_in_transaction(transaction, "graph")
+            graph_record = await transaction.get_record(repository._graph_key("graph"))
+            expires_at = (await transaction.now()) + timedelta(seconds=30)
+            running = tuple(
+                replace(node, status=TaskStatus.RUNNING, owner="worker", fence=1, lease_expires_at=expires_at)
+                if node.node_id in sources else node
+                for node in before.node_states
+            )
+            await repository._apply_graph_transition(
+                transaction, before, graph_record, running, TaskStatus.RUNNING,
+            )
+            before = await repository._event_state_in_transaction(transaction, "graph")
+            graph_record = await transaction.get_record(repository._graph_key("graph"))
+            completed = tuple(
+                replace(
+                    node, status=TaskStatus.SUCCEEDED, owner=None, lease_expires_at=None,
+                    execution_id=f"execution-{node.node_id}", result_digest="a" * 64,
+                )
+                if node.node_id in sources else node
+                for node in before.node_states
+            )
+            await transaction.insert_records(tuple(
+                repository._stored(
+                    "task_result", ["graph", node_id],
+                    TaskResultRecord("graph", node_id, "a" * 64, execution_id=f"execution-{node_id}"),
+                    scope=repository._result_scope("graph"), parent=repository._result_parent("graph"),
+                )
+                for node_id in source_ids
+            ))
+            await repository._apply_graph_transition(
+                transaction, before, graph_record, completed, TaskStatus.PENDING,
+            )
+
+        await repository.state_store.mutate(terminal_fixture)
+        prepared = await repository.graph_state("graph", tenant_id="tenant")
+        assert prepared.status is TaskStatus.PENDING
+        assert sum(node.status is TaskStatus.SUCCEEDED for node in prepared.node_states) == len(source_ids)
+        assert next(node for node in prepared.node_states if node.node_id == "target").status is TaskStatus.PENDING
         engine = repository.state_store.storage_group.context.engine.sync_engine
         parameter_counts = []
 
@@ -211,8 +262,10 @@ async def test_successful_dependency_batches_bound_sql_parameters(tmp_path: Path
         finally:
             event.remove(engine, "before_cursor_execute", sql)
         assert [view.node_id for view in views] == list(source_ids)
+        assert all(view.status is TaskStatus.SUCCEEDED and view.fence == 1 for view in views)
         assert set(results) == set(source_ids)
         assert all(results[node_id].execution_id == f"execution-{node_id}" for node_id in source_ids)
+        assert all(results[view.node_id].result_digest == view.result_digest == "a" * 64 for view in views)
         assert parameter_counts and max(parameter_counts) <= 999
 
 

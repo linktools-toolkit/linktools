@@ -24,7 +24,7 @@ from .test_session_timeline import _execution
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
-async def test_large_payloads_survive_ten_control_cas_without_body_reads_or_reencoding(
+async def test_large_payloads_survive_repeated_control_cas_without_body_reads_or_reencoding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
     state = Persistence(_storage(backend, tmp_path))
@@ -38,10 +38,13 @@ async def test_large_payloads_survive_ten_control_cas_without_body_reads_or_reen
         raw = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
         assert len(canonical_json_bytes(raw.data)) < 12000
         refs = tuple(iter_archive_content_refs(raw.data))
-        assert len(refs) == 3
+        assert len(refs) == 5
         _, archive = repository.state_store.storage_group.opened_archive
         before = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
-        assert len(before) == 3
+        assert len(before) == 5
+        assert sorted(ContentRecord.from_record(row).codec for row in before) == [
+            "execution-binding", "execution-payload", "execution-payload", "execution-payload", "runtime-policy",
+        ]
         original = ContentArchive.read_contents
 
         async def reject_body(*args, **kwargs):
@@ -57,7 +60,7 @@ async def test_large_payloads_survive_ten_control_cas_without_body_reads_or_reen
             return encode(item)
 
         monkeypatch.setattr(content_module, "canonical_json_bytes", no_body_encoding)
-        for _ in range(10):
+        for _ in range(2):
             changed = replace(value, revision=value.revision + 1, event_seq=value.event_seq + 1)
             await repository.compare_and_swap(value.execution_id, tenant_id="tenant",
                 expected_revision=value.revision, next_record=changed)
@@ -76,6 +79,18 @@ async def test_large_payloads_survive_ten_control_cas_without_body_reads_or_reen
                 next_record=replace(value, revision=value.revision + 1,
                     result=replace(value.result, output=StoredPayload.inline_json("changed " * 20000))))
         assert immutable.value.code is ErrorCode.EXECUTION_RESULT_CONFLICT
+        # Retaining an existing immutable reference is not consuming its body.
+        # A control CAS must not recreate a missing source from the candidate;
+        # the next actual consumer must still reject that missing source.
+        policy_row = next(row for row in before if ContentRecord.from_record(row).codec == "runtime-policy")
+        await archive.mutate(lambda tx: tx.delete_record(policy_row.key))
+        changed = replace(value, revision=value.revision + 1, event_seq=value.event_seq + 1)
+        await repository.compare_and_swap(value.execution_id, tenant_id="tenant",
+            expected_revision=value.revision, next_record=changed)
+        assert await archive.read_record(policy_row.key) is None
+        with pytest.raises(AIError) as missing:
+            await repository.get_fresh(value.execution_id, tenant_id="tenant")
+        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
 
@@ -132,7 +147,7 @@ async def test_payload_publication_rolls_back_and_complete_reads_require_present
         await repository.create_execution(value)
         assert await repository.get_fresh(value.execution_id, tenant_id="tenant") == value
         rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
-        body = rows[0]
+        body = next(row for row in rows if row.data["codec"] == "execution-payload")
         if corruption == "missing":
             await archive.mutate(lambda tx: tx.delete_record(body.key, expected_storage_revision=body.storage_revision))
         else:
@@ -286,7 +301,8 @@ async def test_terminal_cas_accepts_declared_default_omission_with_content_refs(
         record = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
         from copy import deepcopy
         data = deepcopy(dict(record.data))
-        del data["value"]["payload"]["fields"]["conversation"]
+        assert not value.retention_closed
+        del data["value"]["payload"]["fields"]["retention_closed"]
         await repository.state_store.mutate(lambda tx: tx.replace_record(replace(record, data=data, storage_revision=record.storage_revision + 1),
             expected_storage_revision=record.storage_revision))
         changed = replace(value, revision=value.revision + 1, retention_closed=True)
@@ -363,3 +379,41 @@ async def test_cold_content_snapshot_restarts_after_another_reader_opens_its_arc
         assert captures == 2
         assert records[value.execution_id].stored_user_input == value.stored_user_input
         assert records[value.execution_id].result == value.result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slot", ("stored_user_input", "output"))
+@pytest.mark.parametrize("schema", (999, None, True))
+async def test_execution_reference_wrapper_damage_is_rejected_before_hydration(
+    tmp_path: Path, slot: str, schema: object,
+) -> None:
+    from copy import deepcopy
+
+    async with Persistence.open("payloads", tenant_id="tenant", storage=_storage("memory", tmp_path)) as state:
+        repository = state.execution.executions
+        value = _execution("execution", status=ExecutionStatus.SUCCEEDED, prompt="input " * 20000)
+        value = replace(value, result=replace(value.result, output=StoredPayload.inline_json("output " * 20000)))
+        await repository.create_execution(value)
+        record = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
+        scope, archive = repository.state_store.storage_group.opened_archive
+        rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
+        contents = {(scope, archive_scope_token(row.scope_key), row.sort_key.decode("utf-8")):
+                    ContentRecord.from_record(row) for row in rows}
+        data = deepcopy(dict(record.data))
+        fields = data["value"]["payload"]["fields"]
+        wrapper = fields["stored_user_input"] if slot == "stored_user_input" else fields["result"]["fields"]["output"]
+        assert "content" in wrapper["fields"]
+        if schema is None:
+            del wrapper["schema"]
+        else:
+            wrapper["schema"] = schema
+        damaged = replace(record, data=data)
+        expected = ErrorCode.STORAGE_VERSION_UNSUPPORTED if schema == 999 else ErrorCode.STORAGE_INTEGRITY_ERROR
+        # Supply corrupted stored bytes directly: public writes correctly reject
+        # these wrappers before they can be installed in the database.
+        with pytest.raises(AIError) as runtime_error:
+            await repository._execution_content.decode(damaged)
+        assert runtime_error.value.code is expected
+        with pytest.raises(AIError) as offline_error:
+            expand_snapshot_execution_content(damaged, contents, namespace="payloads", tenant_id="tenant")
+        assert offline_error.value.code is expected

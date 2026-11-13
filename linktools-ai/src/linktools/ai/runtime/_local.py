@@ -26,6 +26,7 @@ from pydantic_ai.tools import (
     DeferredToolRequests,
 )
 
+from ..asset import AssetStoreReader
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
 from ..spec import CapabilityRef, RepositoryInstructionResolver, RepositoryInstructions
@@ -56,6 +57,7 @@ from ..model.attachments import read_attachment_payload, store_attachment_payloa
 from ._execution_buffer import _ExecutionPayloadBuffer, _ExecutionPayloadCapture
 from ._pending_turn import _PendingExecutionTurn, _PendingExecutionTurns
 from ..core import (
+    deterministic_id,
     CommitPolicy,
     ExecutionEventType,
     ExecutionMode,
@@ -91,6 +93,8 @@ from ..storage import (
     TurnCoordination,
     TurnScope,
 )
+from ..execution import tool_operation_id, tool_operation_references
+
 from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
 from ..observe.service import (
@@ -162,7 +166,7 @@ from ..persistence.commands import RuntimeRecoveryCommands
 from ..persistence.repositories import operation_identity_matches
 from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
 from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction
-from ..persistence import SqlStepStore, StepWriteReceipt
+from ..persistence import NativeToolErrorReference, SqlStepStore, StepWriteReceipt
 from ..storage import SqlStorageContext
 
 
@@ -304,6 +308,7 @@ class LocalExecutionBackend:
         *,
         archive_objects: ObjectStore | None = None,
         archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
+        asset_sources: Mapping[str, AssetStoreReader] | None = None,
         restore_binding: "Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None" = None,
         native_step_source: Callable[[AgentBinding], Awaitable[NativeStepSource | None]] | None = None,
         workspace: "Workspace | None",
@@ -345,7 +350,7 @@ class LocalExecutionBackend:
         self._checkpoint = checkpoint
         self._execution_objects = execution_objects
         self._context_archive = ExecutionContextArchive(execution_state.executions.state_store, archive_objects or execution_objects,
-            namespace=namespace, tenant_id=tenant_id, object_reader=archive_object_reader)
+            namespace=namespace, tenant_id=tenant_id, object_reader=archive_object_reader, asset_sources=asset_sources)
         self._checkpoint_objects = checkpoint_objects
         self._metric_recorder = metric_recorder
         self._worker_completed = worker_completed
@@ -2335,85 +2340,13 @@ class LocalExecutionBackend:
             else CancelEffectOutcome.UNKNOWN
         )
 
-    @classmethod
-    def _decode_repository_instruction_object(
-        cls,
-        data: bytes,
-    ) -> Mapping[str, object]:
-        del cls
-
-        def reject_duplicate_keys(
-            pairs: list[tuple[str, object]],
-        ) -> dict[str, object]:
-            result: dict[str, object] = {}
-            for key, value in pairs:
-                if key in result:
-                    raise ValueError("duplicate JSON object key")
-                result[key] = value
-            return result
-
-        def reject_constant(value: str) -> object:
-            raise ValueError(f"invalid JSON constant: {value}")
-
-        try:
-            raw = json.loads(
-                data.decode("utf-8"),
-                object_pairs_hook=reject_duplicate_keys,
-                parse_constant=reject_constant,
-            )
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if not isinstance(raw, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return raw
-
     async def load_repository_instructions(
         self,
         reference: RuntimePayloadRef | None,
     ) -> RepositoryInstructions | None:
         if reference is None:
             return None
-        if reference.source_domain not in {
-            PersistenceDomain.EXECUTION,
-            PersistenceDomain.CHECKPOINT,
-        }:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        objects = (
-            self._execution_objects
-            if reference.source_domain is PersistenceDomain.EXECUTION
-            else self._checkpoint_objects
-        )
-        payload = reference.payload
-        if payload.kind == "inline":
-            if payload.encoding != "json":
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                raw = payload.decode()
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if not isinstance(raw, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        elif payload.kind == "object":
-            if payload.ref is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            data = await read_runtime_object(objects, payload.ref)
-            raw = self._decode_repository_instruction_object(data)
-        else:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            instructions = RepositoryInstructions.from_payload(raw)
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
-                raise
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if canonical_sha256(instructions.to_payload()) != payload.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return instructions
+        return await self._context_archive.load_repository_instruction_payload(reference)
 
     async def reconcile_deferred(
         self,
@@ -2444,7 +2377,7 @@ class LocalExecutionBackend:
         request = ExecutionRequest(
             user_prompt=await self.restore_user_input(current),
             principal=principal,
-            idempotency_key=f"recovery:{current.execution_id}",
+            idempotency_key=deterministic_id("recovery", current.execution_id),
             memory_scope=current.memory_scope,
             mode=current.mode,
             planning=current.planning,
@@ -2463,6 +2396,22 @@ class LocalExecutionBackend:
             current.execution_id,
         )
 
+    async def _tool_operation_references(
+        self, execution: ExecutionRecord, source_agent_run_id: str,
+    ) -> dict[str, str]:
+        domain = (PersistenceDomain.CHECKPOINT if execution.restart_checkpoints else
+                  PersistenceDomain.TRACE if execution.durable_trace else PersistenceDomain.CONVERSATION)
+        events = await self._get_run_store(domain).list_events(agent_run_id=source_agent_run_id)
+        result = tool_operation_references(events)
+        pending = None if execution.recovery is None else execution.recovery.pending_tools
+        if pending is not None and pending.source_agent_run_id == source_agent_run_id:
+            for call in (*pending.approvals, *pending.calls):
+                if call.operation_id is None or (call.tool_call_id in result
+                        and result[call.tool_call_id] != call.operation_id):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result[call.tool_call_id] = call.operation_id
+        return result
+
     async def materialize_deferred_call(
         self,
         execution: ExecutionRecord,
@@ -2472,6 +2421,7 @@ class LocalExecutionBackend:
         *,
         repository_instruction_frontier: str | None = None,
         capability_ref: CapabilityRef | None = None,
+        operation_id: str | None,
     ) -> PendingDeferredCall:
         try:
             arguments = normalize_json_value(call.args_as_dict())
@@ -2517,13 +2467,18 @@ class LocalExecutionBackend:
             raw_metadata["linktools"] = {
                 "repository_instruction_frontier": repository_instruction_frontier,
             }
-        arguments_payload = StoredPayload.inline_json(arguments)
+        operation_id = operation_id or tool_operation_id(
+            tenant_id=self._tenant_id, execution_id=execution.execution_id,
+            agent_run_id=source_agent_run_id, tool_call_id=call.tool_call_id,
+        )
+        arguments_payload = StoredPayload.inline_bytes(canonical_json_bytes(arguments))
         return PendingDeferredCall(
             call.tool_call_id,
             call.tool_name,
             arguments_payload,
             raw_metadata,
             capability_ref=capability_ref,
+            operation_id=operation_id,
         )
 
     async def commit_deferred_frontier(
@@ -2678,7 +2633,12 @@ class LocalExecutionBackend:
                 payload, read_object=lambda ref: read_runtime_object(self._checkpoint_objects, ref),
             ))
         elif payload.kind == "inline":
-            value = payload.decode()
+            try:
+                value = payload.decode()
+                if payload.encoding == "base64":
+                    value = json.loads(value)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         else:
             if payload.ref is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4185,6 +4145,7 @@ class LocalExecutionBackend:
         checkpoint: ExecutionRecord | None = None
         agent_run_id: str | None = None
         recovery_history_agent_run_id: str | None = None
+        recovery_operation_ids: dict[str, str] = {}
         metric_recorder = self._metric_recorder
         metric_id = uuid.uuid4().hex if metric_recorder is not None else None
         metric_started = monotonic_ns() if metric_id is not None else None
@@ -4359,18 +4320,29 @@ class LocalExecutionBackend:
                     recovery_history_agent_run_id = None
                     exact_recovery_context = False
                 elif self._tool_operations is not None:
-                    unresolved = tuple(
-                        operation
-                        for operation in await self._tool_operations.list_by_agent_run(
-                            recovery_history_agent_run_id,
-                            tenant_id=self._tenant_id, execution_id=execution_id,
-                        )
-                        if operation.status
-                        not in {
-                            ToolOperationStatus.COMPLETED,
-                            ToolOperationStatus.FAILED,
-                        }
+                    recovery_operation_ids = await self._tool_operation_references(current, recovery_history_agent_run_id)
+                    # The effect owner can precede its event in a split publication.
+                    # Reuse these records for reconciliation, including unprojected admissions.
+                    admitted = await self._tool_operations.list_by_agent_run(
+                        recovery_history_agent_run_id, tenant_id=self._tenant_id, execution_id=execution_id,
                     )
+                    operations = {operation.tool_operation_id: operation for operation in admitted}
+                    for operation in admitted:
+                        if (operation.execution_id != execution_id
+                                or operation.agent_run_id != recovery_history_agent_run_id
+                                or operation.tool_call_id in recovery_operation_ids
+                                and recovery_operation_ids[operation.tool_call_id] != operation.tool_operation_id):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        recovery_operation_ids[operation.tool_call_id] = operation.tool_operation_id
+                    missing = tuple(identity for identity in recovery_operation_ids.values() if identity not in operations)
+                    if missing:
+                        for operation in await self._tool_operations.get_operations(missing, tenant_id=self._tenant_id):
+                            if (operation.execution_id != execution_id
+                                    or recovery_operation_ids.get(operation.tool_call_id) != operation.tool_operation_id):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            operations[operation.tool_operation_id] = operation
+                    unresolved = tuple(operation for operation in operations.values()
+                        if operation.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED})
                     if unresolved:
                         try:
                             await self._reconcile_unresolved_tool_operations(
@@ -4654,6 +4626,7 @@ class LocalExecutionBackend:
                     owner=current.producer_claim_id,
                     background_tasks=execution_tasks,
                     recovery_agent_run_id=recovery_history_agent_run_id,
+                    operation_ids=recovery_operation_ids,
                     fresh_execution=original.agent_run_seq == 0 and current.agent_run_seq == 1,
                     producer_generation=producer_generation,
                     terminal_commands=self._runtime_commands,
@@ -5671,7 +5644,7 @@ class LocalExecutionBackend:
         initial_observed = owner.observed
 
         async def event_writer(event):
-            prepared = await native.prepare_step(events=(event,))
+            prepared = await native.prepare_step(events=(event,), fixed_error_sources=event.kind == "tool_call_failed")
             async def write(group):
                 await native.write_prepared_step(group.transaction(state), prepared)
             async def readback():
@@ -5698,6 +5671,7 @@ class LocalExecutionBackend:
         async def settle_tool(operation_id, *, tenant_id, owner: str, fence, observed, event,
                               result_payload=None, error_code=None, error_payload=None):
             write, readback = await event_writer(event)
+            source = native.backup_source
             async with turn_owner.boundary:
                 # A known external result remains a fact after cancellation or
                 # producer loss. Its own effect fence protects manual/new decisions.
@@ -5705,6 +5679,8 @@ class LocalExecutionBackend:
                     operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
                     execution=turn_owner.observed or initial_observed, observed=observed,
                     result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+                    error_source=(None if error_payload is None or source is None else NativeToolErrorReference(
+                        source.group_id, source.store_key, event.run_id, event.idempotency_key)),
                     write=write, readback_write=readback, stores=(state,),
                 )
                 return receipt.operation, False
@@ -6455,9 +6431,11 @@ class LocalExecutionBackend:
     ) -> None:
         if self._tool_operations is None:
             return
-        operation = await self._tool_operations.get_by_call(
-            source_agent_run_id, tool_call_id, tenant_id=self._tenant_id,
-        )
+        references = await self._tool_operation_references(execution, source_agent_run_id)
+        operation_id = references.get(tool_call_id)
+        if operation_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        operation = await self._tool_operations.get_operation(operation_id, tenant_id=self._tenant_id)
         if operation is None:
             return
         if operation.execution_id != execution.execution_id:
@@ -6476,9 +6454,11 @@ class LocalExecutionBackend:
     ) -> None:
         if self._tool_operations is None:
             return
-        operation = await self._tool_operations.get_by_call(
-            source_agent_run_id, tool_call_id, tenant_id=self._tenant_id,
-        )
+        references = await self._tool_operation_references(execution, source_agent_run_id)
+        operation_id = references.get(tool_call_id)
+        if operation_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        operation = await self._tool_operations.get_operation(operation_id, tenant_id=self._tenant_id)
         if operation is None:
             return
         if supplied.resolution_kind == "succeeded":
@@ -6561,8 +6541,8 @@ class LocalExecutionBackend:
         execution: ExecutionRecord,
         instructions: RepositoryInstructions,
     ) -> RuntimePayloadRef:
-        return RuntimePayloadRef(
-            StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.CHECKPOINT,
+        return await self._context_archive.prepare_repository_instruction_payload(
+            instructions, source_domain=PersistenceDomain.CHECKPOINT,
         )
 
     async def commit_repository_instruction_barrier(

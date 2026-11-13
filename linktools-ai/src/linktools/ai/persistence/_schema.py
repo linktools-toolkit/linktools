@@ -11,21 +11,19 @@ from ..storage import (
     sql_blob,
     sql_id_column,
     sql_query_index,
+    sql_sha256,
     sql_state,
     sql_table_options,
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from .state import STORE_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
+from .state import STORE_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
 
 _RECORD_COMMENT = "Current durable state for runtime and step resources persisted as versioned records."
-_ALIAS_COMMENT = (
-    "Secondary unique lookup identities that resolve to canonical runtime records."
-)
 _FACT_COMMENT = (
     "Immutable ordered runtime facts including events, checkpoints, and effects."
 )
@@ -40,7 +38,7 @@ def build_runtime_sql_metadata(
     *,
     metadata: "MetaData | None" = None,
 ) -> "MetaData":
-    """Build the five canonical Runtime primitive tables."""
+    """Build Runtime primitive tables and the selected business-domain tables."""
     from sqlalchemy import (
         TIMESTAMP,
         BigInteger,
@@ -58,6 +56,23 @@ def build_runtime_sql_metadata(
 
     if metadata is None:
         metadata = MetaData()
+    if isinstance(plan, frozenset):
+        # Execution's default Trace route owns retained history in this schema.
+        trace_selected = bool(plan.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}))
+    else:
+        trace_selected = plan.route(PersistenceDomain.TRACE).retention.value == "durable"
+    if trace_selected:
+        from ._trace_schema import build_trace_sql_metadata
+        build_trace_sql_metadata(metadata=metadata)
+    # Every State group can own archived typed content, even when no Native
+    # runtime domain is selected. Provision its canonical shared message table
+    # with the group rather than waiting for a later route to add Step tables.
+    if "ai_step_messages" not in metadata.tables:
+        from ._step_schema import build_step_sql_metadata
+        existing = set(metadata.tables)
+        build_step_sql_metadata(metadata=metadata)
+        for name in set(metadata.tables) - existing - {"ai_step_messages"}:
+            metadata.remove(metadata.tables[name])
     if "ai_state_records" in metadata.tables:
         return metadata
     if isinstance(plan, frozenset) and not plan:
@@ -67,131 +82,13 @@ def build_runtime_sql_metadata(
     ):
         raise ValueError("at least one durable PersistenceDomain is required")
 
-    records = Table(
-        "ai_state_records",
-        metadata,
-        sql_id_column(),
-        Column(
-            "store_key",
-            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Exact bounded binary identity of the physical State store partition.",
-        ),
-        Column(
-            "key",
-            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Exact bounded binary identity of the persisted runtime record.",
-        ),
-        Column(
-            "scope_key",
-            LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
-            nullable=True,
-            comment="Bounded binary grouping identity used by the record kind's primary list query.",
-        ),
-        Column(
-            "subject_id",
-            LargeBinary(RESOURCE_ID_MAX_BYTES).with_variant(mysql.VARBINARY(RESOURCE_ID_MAX_BYTES), "mysql"),
-            nullable=True,
-            comment="Exact UTF-8 subject identifier used for lookups within a record scope.",
-        ),
-        Column(
-            "parent_key",
-            LargeBinary(PARENT_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(PARENT_KEY_MAX_BYTES), "mysql"),
-            nullable=True,
-            comment="Bounded binary parent identity used by hierarchical list queries.",
-        ),
-        Column(
-            "kind",
-            String(32),
-            nullable=False,
-            comment="Stable persisted record kind such as session, execution, task_node, or agent_run.",
-        ),
-        Column(
-            "sort_key",
-            sql_blob(),
-            nullable=False,
-            comment="Stable canonical ordering token used for deterministic keyset pagination.",
-        ),
-        Column(
-            "state",
-            sql_state(),
-            nullable=True,
-            comment="Current SQL-queryable state for record kinds with persisted state-machine semantics.",
-        ),
-        Column(
-            "storage_revision",
-            BigInteger,
-            nullable=False,
-            comment="Physical compare-and-swap revision incremented by every record mutation.",
-        ),
-        Column(
-            "lease_owner",
-            Text,
-            nullable=True,
-            comment="Current durable lease owner for record kinds using claim and fencing semantics.",
-        ),
-        Column(
-            "lease_fence",
-            BigInteger,
-            nullable=False,
-            server_default=text("0"),
-            comment="Monotonic fencing token for the current durable record lease.",
-        ),
-        Column(
-            "lease_expires_at",
-            TIMESTAMP(timezone=True).with_variant(mysql.TIMESTAMP(fsp=6), "mysql"),
-            nullable=True,
-            comment="Database-authoritative expiry time of the current durable lease.",
-        ),
-        Column(
-            "payload_json",
-            JSON(),
-            nullable=False,
-            comment="Canonical domain JSON encoded as a JSON string preserving numeric representations.",
-        ),
-        Column("payload_bytes", sql_blob(), nullable=True,
-               comment="Optional binary content body owned by this record; ordinary domain state remains JSON."),
-        *_audit(),
-        comment=_RECORD_COMMENT,
-        **sql_table_options(),
-    )
-    sql_unique(records, "store_key", "key")
-    sql_query_index(records, "store_key", "kind", "sort_key", mysql_length=128)
-    sql_query_index(records, "scope_key", "sort_key", mysql_length=128)
-    sql_query_index(records, "scope_key", "subject_id")
-    sql_query_index(records, "parent_key", "sort_key", mysql_length=128)
-    sql_audit_indexes(records)
+    from ._record_owner_schema import build_record_owner_table
+    build_record_owner_table(metadata, name="ai_state_records", comment=_RECORD_COMMENT)
+    build_record_owner_table(metadata, name="ai_step_tool_operations",
+                             comment="Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.")
+    from ._run_admission_schema import build_run_admission_sql_metadata
+    build_run_admission_sql_metadata(metadata)
 
-    aliases = Table(
-        "ai_state_aliases",
-        metadata,
-        sql_id_column(),
-        Column(
-            "store_key",
-            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Exact bounded binary identity of the physical State store partition.",
-        ),
-        Column(
-            "alias_key",
-            LargeBinary(ALIAS_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(ALIAS_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Binary secondary lookup address with a maximum of 1024 bytes.",
-        ),
-        Column(
-            "record_key",
-            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Exact bounded binary identity of the runtime record resolved by this alias.",
-        ),
-        *_audit(),
-        comment=_ALIAS_COMMENT,
-        **sql_table_options(),
-    )
-    sql_unique(aliases, "store_key", "alias_key")
-    sql_query_index(aliases, "store_key", "record_key")
-    sql_audit_indexes(aliases)
 
     facts = Table(
         "ai_state_facts",
@@ -245,17 +142,21 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Canonical immutable fact JSON encoded as a JSON string preserving numeric representations.",
         ),
+        Column("stream_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete stream_key; raw identity must also match."),
+        Column("owner_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete owner_key; raw identity must also match."),
         *_audit(),
         comment=_FACT_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(facts, "store_key", "stream_key", "sequence")
-    sql_query_index(facts, "owner_key")
-    sql_query_index(facts, "stream_key", "subject_id", "sequence")
+    sql_unique(facts, "store_key", "stream_locator", "sequence")
+    sql_query_index(facts, "owner_locator")
+    sql_query_index(facts, "stream_locator", "subject_id", "sequence")
     sql_audit_indexes(facts)
 
     sequences = Table(
-        "ai_state_sequences",
+        "ai_state_counters",
         metadata,
         sql_id_column(),
         Column(
@@ -276,11 +177,13 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Last committed value allocated by the sequence.",
         ),
+        Column("stream_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete stream_key; raw identity must also match."),
         *_audit(),
         comment=_SEQUENCE_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(sequences, "store_key", "stream_key")
+    sql_unique(sequences, "store_key", "stream_locator")
     sql_audit_indexes(sequences)
 
     operations = Table(
@@ -297,7 +200,7 @@ def build_runtime_sql_metadata(
             "operation_key",
             LargeBinary(OPERATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(OPERATION_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Binary operation address, at most 1152 bytes.",
+            comment="Binary operation address, at most 768 bytes.",
         ),
         Column(
             "stream_key",
@@ -329,13 +232,17 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Canonical operation JSON encoded as a JSON string preserving numeric representations.",
         ),
+        Column("operation_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete operation_key; raw identity must also match."),
+        Column("stream_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete stream_key; raw identity must also match."),
         *_audit(),
         comment=_OPERATION_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(operations, "store_key", "operation_key")
-    sql_unique(operations, "store_key", "stream_key", "sequence")
-    sql_query_index(operations, "stream_key", "state", "sequence")
+    sql_unique(operations, "store_key", "operation_locator")
+    sql_unique(operations, "store_key", "stream_locator", "sequence")
+    sql_query_index(operations, "stream_locator", "state", "sequence")
     sql_audit_indexes(operations)
     return metadata
 
@@ -346,15 +253,15 @@ def required_runtime_sql_tables(plan: PersistencePlan) -> frozenset[str]:
         plan.route(domain).retention.value == "durable" for domain in PersistenceDomain
     ):
         return frozenset()
-    return frozenset(
-        {
-            "ai_state_records",
-            "ai_state_aliases",
-            "ai_state_facts",
-            "ai_state_sequences",
-            "ai_state_operations",
-        }
-    )
+    tables = {
+        "ai_state_records",
+        "ai_state_facts",
+        "ai_state_counters",
+        "ai_state_operations",
+    }
+    if plan.route(PersistenceDomain.TRACE).retention.value == "durable":
+        tables.add("ai_trace_events")
+    return frozenset(tables)
 
 
 def _audit() -> tuple[object, object]:

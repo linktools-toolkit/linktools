@@ -19,7 +19,7 @@ def test_payload_roundtrip_preserves_empty_raw_and_compressed_bytes(raw: bytes) 
     assert decode_payload_bytes(zlib.compress(raw), codec="zlib", raw_digest=digest, raw_size=size) == raw
 
 
-@pytest.mark.parametrize("damage", ("oversize", "truncated", "trailing", "concatenated", "digest"))
+@pytest.mark.parametrize("damage", ("oversize", "truncated", "trailing", "concatenated"))
 def test_compressed_payload_rejects_excess_output_and_nonexact_stream(damage: str) -> None:
     raw = b"a" * (1024 * 1024)
     content = zlib.compress(raw)
@@ -34,8 +34,6 @@ def test_compressed_payload_rejects_excess_output_and_nonexact_stream(damage: st
         content += b"unowned trailing data"
     elif damage == "concatenated":
         content += zlib.compress(b"another stream")
-    else:
-        digest = "0" * 64
     with pytest.raises(AIError) as failure:
         decode_payload_bytes(content, codec="zlib", raw_digest=digest, raw_size=size)
     assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

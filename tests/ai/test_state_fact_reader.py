@@ -122,7 +122,14 @@ class _CustomFactReader(_LegacyTransaction):
         return await self._transaction.get_facts(stream_key, sequences)
 
 
-class _CustomSqlFactReader(_CustomFactReader):
+class _LegacySqlTransaction(_LegacyTransaction):
+    async def read_sql_rows(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> "tuple[Mapping[str, SqlValue], ...]":
+        return await self._transaction.read_sql_rows(context, statement)
+
+
+class _CustomSqlFactReader(_CustomFactReader, _LegacySqlTransaction):
     async def read_joined_facts(
         self, context: "SqlStorageContext", statement: "Select",
     ) -> "tuple[tuple[StoredFact, Mapping[str, SqlValue]], ...]":
@@ -154,7 +161,8 @@ async def test_custom_fact_capability_and_legacy_fallback_keep_history_contract(
         arguments = dict(agent_run_id=run_id, message_seqs=(), tool_call_ids=("call-4", "call-0", "call-4", "call-8"),
                          event_high_water=5)
         expected = await archive.read_history_associations(**arguments)
-        wrapper = (_CustomSqlFactReader if backend == "sql" else _CustomFactReader) if capable else _LegacyTransaction
+        wrapper = ((_CustomSqlFactReader if backend == "sql" else _CustomFactReader) if capable
+                   else (_LegacySqlTransaction if backend == "sql" else _LegacyTransaction))
         _custom_transactions(monkeypatch, backend, wrapper)
 
         async def inspect(transaction):
@@ -170,9 +178,16 @@ async def test_custom_fact_capability_and_legacy_fallback_keep_history_contract(
 
         async def remove(transaction):
             await transaction.delete_fact_streams(archive._agent_run_key(run_id))
-        await archive.state_store.mutate(remove)
+        if backend == "sql":
+            from .test_history_association_integrity import _change_trace_row
+            await _change_trace_row(archive, run_id, 1)
+        else:
+            await archive.state_store.mutate(remove)
         with pytest.raises(AIError) as raised:
-            await archive.read_history_associations(**arguments)
+            if backend == "sql":
+                await archive.list_event_range(agent_run_id=run_id, start=0, end=1)
+            else:
+                await archive.read_history_associations(**arguments)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()

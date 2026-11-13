@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Only retained turn ownership can replace a fresh source control observation."""
 from pathlib import Path
+from collections.abc import Mapping, Sequence
+from linktools.ai.persistence.state import StoredRecord
 import pytest
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
 from linktools.ai.errors import AIError, ErrorCode
@@ -18,15 +20,15 @@ async def test_unowned_control_reads_each_boundary_and_rejects_changed_generatio
     async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
         await _seed(state, restart=True)
         repository = state.execution.executions
-        read = repository.state_store.read
+        read = repository.state_store.refresh_records
         reads = []
-        async def counted(callback):
-            reads.append(1)
-            return await read(callback)
-        monkeypatch.setattr(repository.state_store, "read", counted)
+        async def counted(keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+            reads.append(tuple(keys))
+            return await read(keys)
+        monkeypatch.setattr(repository.state_store, "refresh_records", counted)
         for _ in range(10):
             await state.run_store.require_active_producer("run")
-        assert len(reads) == 10
+        assert reads == [(repository.execution_record_key("execution"),)] * 10
         await _advance_execution(repository)
         with pytest.raises(AIError) as error:
             await state.run_store.require_active_producer("run")
@@ -73,14 +75,14 @@ async def test_owner_observation_cannot_publish_stale_local_permission(tmp_path:
         await _seed(state, restart=True)
         store = state.run_store
         repository = state.execution.executions
-        original = repository.state_store.read
+        original = repository.state_store.refresh_records
         entered, finish = asyncio.Event(), asyncio.Event()
-        async def delayed(callback):
-            value = await original(callback)
+        async def delayed(keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+            value = await original(keys)
             entered.set()
             await finish.wait()
             return value
-        monkeypatch.setattr(repository.state_store, 'read', delayed)
+        monkeypatch.setattr(repository.state_store, 'refresh_records', delayed)
         active = [True]
         def guard(*_args):
             if not active[0]:
@@ -105,7 +107,7 @@ async def test_owner_observation_cannot_publish_stale_local_permission(tmp_path:
             with pytest.raises((AIError, asyncio.CancelledError)):
                 await request
         active[0] = True
-        monkeypatch.setattr(repository.state_store, 'read', original)
+        monkeypatch.setattr(repository.state_store, 'refresh_records', original)
         if outcome != 'rebind':
             await store.require_active_producer('run')
             await _advance_execution(repository)

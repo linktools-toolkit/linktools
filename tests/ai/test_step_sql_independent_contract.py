@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.errors import AIError
 
+from .test_step_content_cleanup import _Offline
+
 
 @pytest.mark.asyncio
 async def test_independent_engines_publish_prune_and_replay_consistently(tmp_path: Path) -> None:
@@ -35,10 +37,28 @@ async def test_independent_engines_publish_prune_and_replay_consistently(tmp_pat
         await asyncio.gather(*(stores[i % 2].save_snapshot(snapshot) for i, snapshot in enumerate(snapshots)))
         assert await stores[0].latest_snapshot(run_id="same") == terminal
         async with engines[0].connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 2
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == len(snapshots) + 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == len(snapshots) + 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 0 AND sequence_root IS NOT NULL")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == 13
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 1 AND messages = '{}' AND sequence_root IS NULL")) == 12
+        # Pruning retires snapshot owners, not their shared bodies. Drain the
+        # other adapter before the explicit offline collector scans all roots.
+        await stores[1].close()
+        collected = await stores[0].purge_unreferenced_content(exclusive=_Offline())
+        assert collected.deleted_sequences == collected.deleted_messages == len(snapshots) - 1
+        assert collected.retained_sequences == collected.retained_messages == 2
+        cold = SqlStepStore(engines[1], namespace="same", tenant_id="same", max_snapshots_per_run=1)
+        try:
+            assert await cold.latest_snapshot(run_id="same") == terminal
+            await cold.save_snapshot(snapshots[0])
+            assert await cold.list_snapshots(run_id="same") == [terminal]
+            async with engines[1].connect() as connection:
+                assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 2
+                assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 2
+                assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == 13
+        finally:
+            await cold.close()
     finally:
         for store in stores:
             await store.close()

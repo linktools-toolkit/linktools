@@ -29,7 +29,7 @@ from linktools.ai.agent import AgentInputCaptureRef
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionStatus, JsonValue, OperationKind, OperationLedgerRecord, OperationStatus, Principal,
-    TaskStatus, canonical_sha256, service_principal,
+    TaskStatus, canonical_sha256, deterministic_id, service_principal,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
@@ -945,7 +945,7 @@ async def test_reconcile_attempts_every_owned_scope_cleanup_when_one_exit_fails(
                 TaskNode("target", task=tasks[0], input={"answer": "private case input"}),
             ))
             submission = await engine.describe_submission(graph, principal=PRINCIPAL,
-                idempotency_key=f"evaluation:{run.experiment_id}:{slot}",
+                idempotency_key=deterministic_id(run.experiment_id, "evaluation", slot),
                 correlation={"evaluation_experiment": run.experiment_id,
                              "evaluation_trial": trial.trial_id, "evaluation_slot": slot})
             await engine.persistence.evaluation.records.register_launch_intent(run.experiment_id,
@@ -1110,7 +1110,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
             TaskNode("target", task=tasks[0], input={"answer": "private case input"}),
         ))
         submission = await engine.describe_submission(graph, principal=PRINCIPAL,
-            idempotency_key=f"evaluation:{run.experiment_id}:{slot}",
+            idempotency_key=deterministic_id(run.experiment_id, "evaluation", slot),
             correlation={"evaluation_experiment": run.experiment_id,
                          "evaluation_trial": trial.trial_id, "evaluation_slot": slot})
         await engine.persistence.evaluation.records.register_launch_intent(run.experiment_id,
@@ -1126,7 +1126,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
         TaskEngine.open(*tasks, persistence=persistence_1069, context=ExecutionContext(tmp_path)) as engine,
         Evaluations.open(engine) as evaluations,
     ):
-        resumed = await evaluations.reconcile(run.experiment_id, principal=PRINCIPAL, idempotency_key="resume-live")
+        resumed = await evaluations.reconcile(run.experiment_id, principal=PRINCIPAL, idempotency_key="界" * 42 + "ab")
         view = (await resumed.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         current = await engine.persistence.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
@@ -1139,7 +1139,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
         assert (await resumed.scores()).items[0].score.dimensions == {"quality": 1.0}
         graph = await engine.persistence.task.tasks.graph_state(submission.graph.graph_id, tenant_id=PRINCIPAL.tenant_id)
         assert graph.node_states[0].execution_id == completed_trial.subject.execution_id
-        await evaluations.reconcile(run.experiment_id, principal=PRINCIPAL, idempotency_key="resume-live")
+        await evaluations.reconcile(run.experiment_id, principal=PRINCIPAL, idempotency_key="界" * 42 + "ab")
         assert (await resumed.trials()).items[0].graph_ref == completed_trial.graph_ref
         assert calls == ["target"]
 

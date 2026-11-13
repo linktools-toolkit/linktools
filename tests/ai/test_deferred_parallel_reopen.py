@@ -58,8 +58,19 @@ class _Approval(AbstractCapability):
 @pytest.mark.parametrize("buffered_trace", [False, True])
 async def test_completed_parallel_return_survives_reopen(
     tmp_path: Path, decision: ApprovalDecision, completed_count: int, pending_count: int,
-    buffered_trace: bool,
+    buffered_trace: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from linktools.ai.runtime._local import LocalExecutionBackend
+
+    reference_reads = 0
+    read_references = LocalExecutionBackend._tool_operation_references
+
+    async def counted_references(self, *args, **kwargs):
+        nonlocal reference_reads
+        reference_reads += 1
+        return await read_references(self, *args, **kwargs)
+
+    monkeypatch.setattr(LocalExecutionBackend, "_tool_operation_references", counted_references)
     calls = []
 
     async def stream(messages: "list[ModelMessage]", info: "AgentInfo") -> AsyncIterator[str | dict[int, DeltaToolCall]]:
@@ -111,6 +122,7 @@ async def test_completed_parallel_return_survives_reopen(
         assert state.status.value == "WAITING_DEFERRED"
         approvals = await runtime.approvals.list(execution.execution_id, principal=principal)
         assert len(approvals) == pending_count
+        assert reference_reads == 1
     assert sorted(calls) == list(range(completed_count))
     async with Runtime.open("parallel-reopen", features=features.borrow(), storage=storage) as runtime:
         for approval in approvals:

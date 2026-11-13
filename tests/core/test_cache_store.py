@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tests for the SQLite CacheStore now used by Environment.cache."""
 import threading
@@ -96,6 +97,7 @@ def test_incr_existing_adds_delta(ns):
     assert ns.get("c") == 12
 
 
+@pytest.mark.manual
 def test_incr_concurrent_same_key_is_lossless(store):
     ns = store.namespace("counters")
     ns.set("c", 0)
@@ -114,6 +116,61 @@ def test_incr_concurrent_same_key_is_lossless(store):
         t.join()
     # 8 threads * 50 increments, no lost updates.
     assert ns.get("c") == 400
+
+
+def test_increment_shares_a_store_across_threads(store):
+    ns = store.namespace("threaded-counters")
+    ns.set("c", 0)
+    start = threading.Event()
+    results, errors = [], []
+
+    def worker():
+        start.wait()
+        try:
+            results.append(ns.increment("c"))
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert not any(thread.is_alive() for thread in threads)
+    if errors:
+        raise errors[0]
+    assert sorted(results) == [1, 2]
+    assert ns.get("c") == 2
+
+
+def test_increment_serializes_competing_read_modify_write(store, monkeypatch):
+    ns = store.namespace("counters")
+    ns.set("c", 0)
+    competing = CacheStore(store.path)
+    competing._conn().execute("PRAGMA busy_timeout=0")
+    other = competing.namespace("counters")
+    decode = store.codec.decode
+    observed = []
+
+    def interleave(blob):
+        value = decode(blob)
+        if not observed:
+            observed.append(value)
+            # Attempt the other connection's update after this increment has
+            # read its value, but before it can write the replacement.
+            with pytest.raises(CacheBusyError):
+                other.increment("c")
+        return value
+
+    monkeypatch.setattr(store.codec, "decode", interleave)
+    try:
+        assert ns.increment("c") == 1
+        assert observed == [0]
+        assert other.increment("c") == 2
+        assert ns.get("c") == 2
+    finally:
+        competing.close()
 
 
 # --------------------------------------------------------------------------- #

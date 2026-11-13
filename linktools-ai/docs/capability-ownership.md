@@ -111,8 +111,9 @@ tests remain necessary; a successful example does not replace them.
 ## Task to Agent: complete current integration surface
 
 `AgentExecutionPort` is exported from `linktools.ai.runtime.agent_execution`
-and reachable as `Agent.execution_port`. Its dataclass fields and overridable
-methods are a public surface. Task currently consumes the following paths:
+and reachable as `Agent.execution_port`. Task uses its public operations;
+underscore-prefixed producer collaborators remain private. Task currently
+consumes the following paths:
 
 | Consumer path | Current operation / result | Contract that a narrower boundary must preserve |
 | --- | --- | --- |
@@ -122,18 +123,19 @@ methods are a public surface. Task currently consumes the following paths:
 | Durable binding validation | `resolve_contract(contract)` → `AgentBindingContract` | Preserve the admitted Agent, hooks and child contracts; new business/MCP calls and Skill reads use current candidates within the recorded selectors |
 | Start and get | Overridable `start(...)` / `get(execution_id, principal)` → `Execution` | Original principal, output contract, correlation, graph budget scope, invocation-capture requirement and dependency hold |
 | Invocation capture | `record_invocation(execution_id, invocation)` → None | The producer selects its optional capture owner; persist Task-to-execution capture before releasing the handoff obligation |
-| Authorized reads | `service.inspect`, `result`, `result_payload_size`, `wait`, `list_children`, `budget_usage` | Existing authorization and exact producer service. Service `wait` returns `ExecutionResult`, not the observer's `WaitResult` |
-| History and live observation | `operations.history` cutoff/read/subscribe operations; `watch_tree` | Root/child producer routing, cursors, readiness, stream cleanup and observation lifetime |
-| Task execution handle | `operations`, `watch_tree` plus Task-owned cancel callback | Node cancellation must also settle the graph. Returning ordinary `port.get()` alone loses that callback |
-| Cancellation | `service.cancel(execution_id, CancelExecutionRequest(principal, key, force))` → `CancelExecutionResult` | Graph settlement distinguishes confirmed, unconfirmed and unknown effects; observer cancellation does not imply producer cancellation |
-| Retention | `service.acquire_dependency_hold(..., tenant_id, hold_id)` → bool; release → None | The principal-based `port.acquire_hold(...)` returns None and is independently overridable; it is not an equivalent replacement |
-| Terminal handoff | `service.request_terminal_handoff(..., tenant_id, terminal_commit=False)` → None | Forward the terminal flag and keep existing holds/readback. A missing producer only permits already-settled, durable no-op cleanup under the existing checks |
+| Authorized reads | `inspect`, `result`, `result_payload_size`, `wait`, `list_children`, `budget_usage` | Existing authorization and exact producer service. Port `wait` returns `ExecutionResult`, not the observer's `WaitResult` |
+| History and live observation | `capture_model_interaction_cutoffs`, `read_model_interaction_updates`, `read_model_interaction_metadata`, `subscribe_model_interactions`; `watch_tree` | Root/child producer routing, cursors, readiness, stream cleanup and observation lifetime |
+| Task execution handle | `get(execution_id, principal, cancel=...)` with Task-owned cancel callback | Node cancellation must also settle the graph. Omitting the callback loses graph-aware cancellation |
+| Cancellation | `cancel(execution_id, CancelExecutionRequest(principal, key, force))` → `CancelExecutionResult` | Graph settlement distinguishes confirmed, unconfirmed and unknown effects; observer cancellation does not imply producer cancellation |
+| Retention | `acquire_dependency_hold(..., tenant_id, hold_id)` → bool; release → None | Keep tenant-scoped hold identity and the boolean acquisition result; release uses `release_dependency_hold` |
+| Terminal handoff | `request_terminal_handoff(..., tenant_id, terminal_commit=False)` → None | Forward the terminal flag and keep existing holds/readback. A missing producer only permits already-settled, durable no-op cleanup under the existing checks |
 | Recovery | `owns_execution(execution_id, *, tenant_id)` → bool; `recover_bound_execution(record, *, recovery_operation)` → `ExecutionRecord` | Task validates the graph/node binding and recovery actor; Agent resumes the original execution identity under current fencing |
 
-The existing regression in `test_agent_task_binding_owner.py` deliberately
-allows `port.service` and `port.operations.service` to differ. Start/get overrides
-also remain independent from service dispatch. A blanket equality requirement,
-replacement with a handle, or use of `acquire_hold` would change this contract.
+The producer service and execution-handle binding may remain distinct internally.
+The port's read/control methods delegate to its selected service; handle and
+history operations use its execution binding. Task calls public port operations
+rather than inspecting those private collaborators. Start/get overrides remain
+independent; custom get implementations must accept the Task cancellation callback.
 
 Borrowing compatibility is validated by the existing port before Task engine
 initialization and before Agent-node binding. `validate_persistence(persistence)`
@@ -149,25 +151,19 @@ execution ID and `TaskNodeInvocation` to the producer's `InputCaptures` when
 configured, and is a no-op otherwise. It neither re-resolves admission nor
 changes the invocation principal. Failure or cancellation propagates to the
 existing Task handoff logic; returning from this operation is not permission to
-release the hold early. The public `captures` constructor field remains
-available for producer composition. Ordinary application calls do not change.
-This operation does not complete the remaining read/history/handle boundary.
+release the hold early. The port keeps the optional capture collaborator private. Ordinary application
+calls do not change.
 
-### Remaining public port design
+### Current operation boundary
 
-The next boundary design must specify whether it retains existing public
-collaborators with narrower protocol types, or replaces direct access with
-producer operations and an explicit transition for existing port implementers.
-It must cover the whole table, including history, graph-aware cancellation and
-tenant-level retention. Merely adding wrappers for start/get/inspect leaves the
-rest unchanged and adds another maintenance surface.
+The port now exposes read, control, retention and history operations together
+with graph-aware handle construction. Task does not need direct service or
+execution-binding access for these paths. This boundary preserves the original
+producer, authorization, tenant-level holds and cancellation settlement; it adds
+no separate lifecycle or durable state owner.
 
-Beyond the borrowing-validation and invocation-capture operations above, no replacement port names,
-parameters, default values, constructor shape or lifecycle are adopted here.
-Ordinary `Task.from_agent` and Runtime composition remain unchanged.
-Runtime's current execution/turn authority
-and Persistence contracts are not part of this API decision.
-
+Ordinary `Task.from_agent` and Runtime composition remain unchanged. Broader
+capability and recovery work is separate from this operation boundary.
 
 ## Planning store ownership
 

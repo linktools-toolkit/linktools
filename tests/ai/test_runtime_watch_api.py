@@ -22,7 +22,6 @@ from linktools.ai.execution.handle import ExecutionBinding
 from linktools.ai.runtime import Runtime
 from linktools.ai.task.engine import TaskGraphRun
 from linktools.ai.core import _signed_cursor as _cursor
-from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
 from linktools.ai.execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from linktools.ai.observe.cursors import decode_graph_watch_cursor, encode_graph_watch_cursor
 from linktools.ai.execution import ExecutionEvent, ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView, ModelInteractionReadBoundary, TaskGraphProjection, TaskModelProjection
@@ -1385,60 +1384,6 @@ async def test_task_graph_wait_outer_cancel_cleans_waiter() -> None:
 
     await asyncio.wait_for(service.wait_cancelled.wait(), 1)
     await _assert_no_graph_observer_tasks()
-
-
-def test_runtime_does_not_expose_stream_tree() -> None:
-    assert not hasattr(Runtime, "stream_tree")
-
-
-def test_runtime_domain_facades_match_the_supported_method_sets() -> None:
-    execution_methods = {
-        name
-        for name, value in vars(RuntimeExecutions).items()
-        if callable(value) and not name.startswith("_")
-    }
-    session_methods = {
-        name
-        for name, value in vars(RuntimeSessions).items()
-        if callable(value) and not name.startswith("_")
-    }
-
-    assert execution_methods == {
-        "get",
-        "inspect",
-        "list",
-        "list_children",
-        "result",
-        "wait",
-        "retry",
-        "fork",
-        "cancel",
-        "recovery_effects",
-        "resolve_tool_effect",
-        "recover",
-        "trace",
-        "transcript",
-        "history",
-        "model_interactions",
-        "capture_input",
-        "budget_usage",
-    }
-    assert session_methods == {
-        "get",
-        "inspect",
-        "create_view",
-        "lookup_admission",
-        "create",
-        "reconcile",
-        "wait_inactive",
-        "refresh",
-        "list",
-        "history",
-        "timeline",
-        "fork",
-        "update",
-        "close",
-    }
 
 
 def test_task_run_event_rejects_execution_without_node() -> None:

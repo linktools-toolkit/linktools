@@ -14,6 +14,8 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelMessage, UserPromptPart
@@ -27,7 +29,7 @@ from linktools.ai.evaluation import (
     DatasetSpec, DimensionContract, EvidencePolicy, EvaluationPolicy, EvaluationSpec, GatePolicy,
     GraphTargetSpec, HumanScoreRequest, LabelProvenance, RescoreRequest, ScoreAttemptView, ScoreBundle, ScoreComparisonSelection,
     ScoreNotApplicable, ScoreSelection, ScorerSpec, ScoringInput,
-    StartEvaluationRequest, TaskCaseInput, TrialFilter,
+    StartEvaluationRequest, TargetTrialRef, TaskCaseInput, TrialFilter,
 )
 from linktools.ai.evaluation.engine import EvaluationRun
 from linktools.ai.inputs import AgentTaskInputContext
@@ -642,3 +644,37 @@ async def test_binary_agent_input_reaches_scorer_as_authorized_retained_evidence
             with pytest.raises(AIError) as raised:
                 await evaluations.read_evidence_attachment(bundle.ref, attachment.attachment_id, principal=service_principal(TENANT, "other-owner"))
             assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+@pytest.mark.asyncio
+async def test_evidence_capture_replay_identity_preserves_experiment_trial_and_execution() -> None:
+    class CapturedAtBoundary(Exception):
+        pass
+
+    captures = SimpleNamespace(capture_input=AsyncMock(side_effect=CapturedAtBoundary))
+    service = SimpleNamespace(
+        _captures=captures,
+        _history=SimpleNamespace(attachment_facts=AsyncMock(
+            return_value=SimpleNamespace(items=(object(),), next_cursor=None))),
+    )
+    experiment, trial_id, execution_id = "e" * 128, "t" * 128, "界" * 42 + "ab"
+    identities = (
+        (experiment, trial_id, execution_id),
+        (experiment, trial_id, execution_id),
+        ("f" * 128, trial_id, execution_id),
+        (experiment, "u" * 128, execution_id),
+        (experiment, trial_id, "界" * 42 + "ac"),
+    )
+    keys = []
+    for experiment, trial_id, execution_id in identities:
+        with pytest.raises(CapturedAtBoundary):
+            await Evaluations._capture_attachments(
+                service, TargetTrialRef(experiment, trial_id), (execution_id,), PRINCIPAL, selected=True,
+            )
+        args = captures.capture_input.call_args.args
+        assert args[0] == execution_id
+        assert args[1].principal == PRINCIPAL and args[1].context_policy == "clean"
+        keys.append(args[1].idempotency_key)
+    assert all(len(key) == 36 for key in keys)
+    assert keys[0] == keys[1]
+    assert len({keys[0], *keys[2:]}) == 4

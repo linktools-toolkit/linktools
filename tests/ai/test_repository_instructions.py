@@ -290,6 +290,10 @@ async def test_rule_assets_follow_capability_capture_and_reject_duplicate_source
             RepositoryInstructionDocument("rule:nested/review", "src", "first"),
         )
 
+        document = capture.instructions.documents[0]
+        assert document.asset_source_id == "rules"
+        assert document.asset == (await store.resolve_versions((key,)))[0]
+        assert RepositoryInstructions.from_payload(capture.instructions.to_payload()).to_payload() == capture.instructions.to_payload()
         await store.put(key, b"---\nscope: src\n---\nsecond")
         assert capture.instructions.documents[0].content == "first"
         fresh = await asset_features.resolve()

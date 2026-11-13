@@ -25,6 +25,7 @@ from ..session import ConversationCursor
 
 
 if TYPE_CHECKING:
+    from ._api import ExecutionView
     from ..session import SessionRecord
 
 
@@ -282,6 +283,99 @@ class ExecutionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionMetadataRecord:
+    """Diagnostic metadata, with an optional same-snapshot terminal result."""
+    view: ExecutionView
+    principal_id: str
+    updated_at: datetime
+    binding_digest: str | None
+    capability_refs: tuple[CapabilityRef, ...] | None
+    error_code: str | None
+    safe_error_details: Mapping[str, JsonValue]
+    result_record: ExecutionResultRecord | None = None
+
+    @property
+    def execution_id(self) -> str:
+        return self.view.execution_id
+
+    @property
+    def status(self) -> ExecutionStatus:
+        return self.view.status
+
+    @property
+    def session_id(self) -> str | None:
+        return self.view.session_id
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionControlRecord:
+    """Read-only publication authority, without executable or payload content."""
+    execution_id: str
+    status: ExecutionStatus
+    producer_generation: int
+    producer_claim_id: str | None
+    history_seal_digest: str | None
+    budget_scope_id: str | None
+    retention_closed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRetentionRecord:
+    """Current handoff authority without executable or model-visible content."""
+    execution_id: str
+    session_id: str | None
+    status: ExecutionStatus
+    conversation: bool
+    started_at: datetime | None
+    retention_closed: bool
+    dependency_hold_ids: tuple[str, ...]
+    recovery_handoff: bool
+    revision: int
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        holds = self.dependency_hold_ids
+        if (any(not isinstance(value, str) or not value.strip() for value in holds) or len(set(holds)) != len(holds)
+                or tuple(sorted(holds)) != holds):
+            raise ValueError("execution dependency holds must be sorted and unique")
+        if self.started_at is not None and self.started_at.tzinfo is None:
+            raise ValueError("execution started_at must be timezone-aware")
+
+    @property
+    def invalidates_session_history(self) -> bool:
+        return self.session_id is not None and not self.conversation and self.status is ExecutionStatus.SUCCEEDED
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionResultRecord:
+    """Authorized result and handoff metadata, without execution input or binding."""
+    execution_id: str
+    principal_id: str
+    status: ExecutionStatus
+    session_id: str | None
+    conversation: bool
+    started_at: datetime | None
+    retention_closed: bool
+    result: ResultRecord | None
+    error_code: str | None
+    safe_error_details: Mapping[str, JsonValue]
+    error_diagnostics: ErrorDiagnostics | None
+    completed_at: datetime | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.principal_id, str) or not self.principal_id:
+            raise ValueError("execution principal id is invalid")
+        if self.status is not ExecutionStatus.FAILED and self.error_diagnostics is not None:
+            raise ValueError("only failed execution can carry error diagnostics")
+        if self.started_at is not None and self.started_at.tzinfo is None:
+            raise ValueError("execution started_at must be timezone-aware")
+        if self.completed_at is not None:
+            if not isinstance(self.completed_at, datetime) or self.completed_at.tzinfo is None:
+                raise ValueError("execution completed_at must be timezone-aware")
+            _validate_terminal(self)
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionTimelineRecord:
     """Read-only projection of the Execution owner, without its executable binding."""
     execution_id: str
@@ -324,7 +418,7 @@ class ExecutionTimelineRecord:
         )
 
 
-def _validate_terminal(value: ExecutionRecord | ExecutionTimelineRecord) -> None:
+def _validate_terminal(value: ExecutionRecord | ExecutionTimelineRecord | ExecutionResultRecord) -> None:
     if (value.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
             or value.result is None or value.completed_at is None
             or value.completed_at.tzinfo is None):
@@ -541,9 +635,13 @@ class PendingDeferredCall:
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
     capability_ref: CapabilityRef | None = None
 
+    operation_id: str = field(kw_only=True)
+
     def __post_init__(self) -> None:
         if not self.tool_call_id or not self.tool_name:
             raise ValueError("deferred call identity is required")
+        if not isinstance(self.operation_id, str) or not self.operation_id:
+            raise ValueError("deferred operation identity is invalid")
         if self.capability_ref is not None and not isinstance(self.capability_ref, CapabilityRef):
             raise ValueError("deferred call capability reference is invalid")
         try:
@@ -712,4 +810,4 @@ class ExecutionRecoveryDetail:
             raise ValueError("terminal recovery cannot retain deferred continuation")
 
 
-__all__ = ['ExecutionTimelineRecord', 'PendingDeferredCall', 'PendingToolContinuation', 'RepositoryInstructionBarrier', 'ExecutionRecoveryState', 'RecoveryHandoffPhase', 'RecoveryTerminalOutcome', 'RecoveryConversationIntent', 'RecoveryTerminalHandoff', 'ExecutionRecoveryDetail', 'RuntimePayloadRef', 'StoredUserInput', 'ExecutionRecord', 'ExecutionStartClaim', 'ExecutionStartUnknownCommit', 'ExecutionCancelRequestCommit', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'IdempotencyRecord', 'ResultRecord', 'ExecutionTerminalCommit', 'IdempotencyTerminalUpdate', 'OperationTerminalUpdate', 'ExecutionTerminalCommitResult']
+__all__ = ["ExecutionMetadataRecord", 'ExecutionControlRecord', 'ExecutionResultRecord', 'ExecutionRetentionRecord', 'ExecutionTimelineRecord', 'PendingDeferredCall', 'PendingToolContinuation', 'RepositoryInstructionBarrier', 'ExecutionRecoveryState', 'RecoveryHandoffPhase', 'RecoveryTerminalOutcome', 'RecoveryConversationIntent', 'RecoveryTerminalHandoff', 'ExecutionRecoveryDetail', 'RuntimePayloadRef', 'StoredUserInput', 'ExecutionRecord', 'ExecutionStartClaim', 'ExecutionStartUnknownCommit', 'ExecutionCancelRequestCommit', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'IdempotencyRecord', 'ResultRecord', 'ExecutionTerminalCommit', 'IdempotencyTerminalUpdate', 'OperationTerminalUpdate', 'ExecutionTerminalCommitResult']

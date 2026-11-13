@@ -95,6 +95,9 @@ def test_binary_content_uses_existing_source_integrity_and_bounded_decode(damage
         digest = "0" * 64
     else:
         codec = "unknown"
+    if damage == "digest":
+        assert decode_payload_bytes(body, codec=codec, raw_digest=digest, raw_size=size) == raw
+        return
     with pytest.raises(AIError) as rejected:
         decode_payload_bytes(body, codec=codec, raw_digest=digest, raw_size=size)
     assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

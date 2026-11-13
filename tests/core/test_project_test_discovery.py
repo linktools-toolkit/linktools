@@ -135,14 +135,6 @@ def test_conventional_discovery_recurses_for_pytest_default_filenames(
     assert checks["pytest"]["paths"] == (str(project / "tests"),)
 
 
-def test_core_keeps_explicit_core_and_cli_test_paths() -> None:
-    root = Path(manage.PROJECT_PATH)
-
-    checks = manage.load_project_checks("linktools", str(root / "linktools"))
-
-    assert checks["pytest"]["paths"] == (str(root / "tests" / "core"), str(root / "tests" / "cli"))
-
-
 def test_default_core_discovery_does_not_collect_other_packages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

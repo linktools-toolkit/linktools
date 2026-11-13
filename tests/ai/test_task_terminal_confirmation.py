@@ -35,7 +35,7 @@ async def test_control_confirmation_retries_same_receipt_immediately(
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite", object_store=store)
     principal = Principal("actor", "tenant")
     calls = 0
-    operation_id = "控" * 85 + "r"
+    operation_id = "控" * 42 + "rr"
 
     async def body(ctx):
         nonlocal calls
@@ -194,7 +194,7 @@ async def test_supply_final_projection_is_confirmation_but_initial_load_and_publ
         _assert_confirmation(projection.value, fault, "task_terminal_confirmation")
         assert (await service.supply_task_input(started.execution_id, principal=principal, value="accepted")).status is ExecutionStatus.SUCCEEDED
         with monkeypatch.context() as patch:
-            patch.setattr(service, "load_authorized", unavailable)
+            patch.setattr(service.manager, "load_result_authorized", unavailable)
             with pytest.raises(AIError) as public:
                 await service.result(started.execution_id, principal=principal)
         assert public.value is fault

@@ -283,13 +283,14 @@ async def test_sql_concurrent_boundary_retries_publish_once(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_sql_media_round_trip_and_deduplicated_message_batches(tmp_path: Path) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'media.db'}")
+async def test_sql_large_message_round_trip_and_snapshot_deduplication(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'media.db'}"
+    engine = create_async_engine(url)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore())
     try:
         await store.initialize(local=True)
-        messages = [ModelRequest(parts=[UserPromptPart("x" * 81920)])]
-        messages.extend(ModelResponse(parts=[TextPart(str(i))]) for i in range(1100))
+        messages = [ModelRequest(parts=[UserPromptPart("x" * 81920)]),
+                    ModelResponse(parts=[TextPart("response")])]
         first = ContinuableSnapshot(run_id="run", step_index=0, messages=messages, idempotency_key="first")
         second = replace(first, step_index=1, idempotency_key="second")
         await store.save_snapshot(first)
@@ -300,6 +301,15 @@ async def test_sql_media_round_trip_and_deduplicated_message_batches(tmp_path: P
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == len(messages)
     finally:
         await store.close()
+        await engine.dispose()
+
+    engine = create_async_engine(url)
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one", max_cached_messages=0)
+    try:
+        assert await cold.latest_snapshot(run_id="run") == second
+        assert await cold.list_snapshots(run_id="run") == [first, second]
+    finally:
+        await cold.close()
         await engine.dispose()
 
 
@@ -443,11 +453,11 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
     metadata = build_step_sql_metadata()
     kind = "mysql" if dialect.name == "mysql" else "portable"
     expected = {
-        "runs": {("store_key", "run_id"): True,
-                 ("store_key", "conversation_id"): False, ("store_key", "parent_run_id"): False},
-        "events": {("store_key", "run_id", "idempotency_key"): True, ("store_key", "run_id"): False},
-        "snapshots": {("store_key", "run_id", "pruned"): False,
-                      ("store_key", "run_id", "idempotency_key"): True},
+        "runs": {("store_locator", "run_id"): True,
+                 ("store_locator", "conversation_id"): False, ("store_locator", "parent_run_id"): False},
+        "events": {("store_locator", "run_id", "idempotency_key"): True, ("store_locator", "run_id"): False},
+        "snapshots": {("store_locator", "run_id", "pruned"): False,
+                      ("store_locator", "run_id", "idempotency_key"): True},
     }
     for name, lookups in expected.items():
         table = metadata.tables["ai_step_" + name]
@@ -473,7 +483,7 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
                 key_bytes = sum(column.type.length * (1 if isinstance(column.type, LargeBinary) else 4)
                                 if getattr(column.type, "length", None) else 1
                                 for column in (table.c[name] for name in columns))
-                assert key_bytes == (1426 if "idempotency_key" in columns else 915 if "pruned" in columns else 914)
+                assert key_bytes == (896 if "idempotency_key" in columns else 769 if "pruned" in columns else 768)
                 assert key_bytes <= 3072
 
 
@@ -497,12 +507,7 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
             assert len(index.columns) <= 3
             if index.unique:
                 nullable = {column.name for column in index.columns if column.nullable}
-                if (table.name in {"ai_step_events", "ai_step_snapshots"}
-                        and "idempotency_key" in index.columns):
-                    # NULL replay keys append independent occurrences; non-NULL keys deduplicate.
-                    assert nullable == {"idempotency_key"}
-                else:
-                    assert not nullable
+                assert not nullable
             else:
                 assert not any(column.primary_key for column in index.columns)
             assert index.name == ("uk_" if index.unique else "ix_") + "_".join(column.name for column in index.columns)

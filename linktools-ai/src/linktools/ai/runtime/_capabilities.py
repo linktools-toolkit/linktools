@@ -20,7 +20,7 @@ from ..persistence.capabilities import CapabilityPersistence
 from ..capability.steps import AtomicStepPersistence, StepRunRegistration
 from ._agent_run_recorder import AgentRunRecorder
 from ._step_store import RuntimeStepStore
-from ._tool import ToolOperationBridge
+from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
 from ..capability import ExecutionCapability, MemoryCapability, tool_effect_policy_from_metadata
@@ -159,6 +159,9 @@ async def compose_platform_capabilities(
             agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
             require_durable=True,
         )
+
+    if isinstance(tool_operations, RuntimeToolOperationBridge):
+        tool_operations.bind_operation_observer(run_recorder.remember_tool_operation)
 
     persistence = AgentRunCapture(
         recorder=run_recorder,

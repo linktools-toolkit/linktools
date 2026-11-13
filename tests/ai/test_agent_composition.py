@@ -22,16 +22,7 @@ from linktools.ai.core import Principal, PrincipalKind, SessionStatus
 from pydantic_ai.capabilities import AbstractCapability
 
 
-def test_top_level_public_surface_is_exact() -> None:
-    assert ai.__all__ == [
-        "Agent",
-        "RuntimeFeatures",
-        "Execution",
-        "AgentContext",
-        "Runtime",
-        "Session",
-        "Workspace",
-    ]
+def test_top_level_exports_preserve_identity_and_pickle() -> None:
     from linktools.ai import capability, execution, runtime, workspace
 
     expected = {
@@ -49,7 +40,7 @@ def test_top_level_public_surface_is_exact() -> None:
         assert pickle.loads(pickle.dumps(getattr(ai, name))) is value
     imported: dict[str, object] = {}
     exec("from linktools.ai import *", imported)
-    assert {name: imported[name] for name in ai.__all__} == expected
+    assert {name: imported[name] for name in expected} == expected
 
 
 @pytest.mark.parametrize("first", ["capability", "agent", "runtime"])
@@ -248,6 +239,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     capture = _CaptureSessionExecution()
     service._authorization = _AllowAuthorization()
     service._execution = capture
+    service._admission_execution = capture
 
     @asynccontextmanager
     async def _consumer(session_id: str, tenant_id: str):
@@ -256,8 +248,9 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
 
     prepared_session = SimpleNamespace(agent_id="agent", cwd=None, status=SessionStatus.OPEN)
 
-    async def _authorized(session_id: str, principal: object, action: object) -> object:
-        del session_id, principal, action
+    async def _authorized(session_id: str, principal: object, action: object,
+                          *, read_session: object = None) -> object:
+        del session_id, principal, action, read_session
         return prepared_session
 
     async def _reconcile(record: object) -> object:

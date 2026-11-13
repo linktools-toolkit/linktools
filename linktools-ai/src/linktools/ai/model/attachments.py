@@ -6,7 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from typing import cast
 
 from ..core import JsonValue, canonical_json_bytes
@@ -127,6 +127,17 @@ def validate_attachment_payload(raw: bytes, payload: StoredPayload) -> None:
     attachment_payload_objects(raw, payload)
 
 
+def restore_attachment_payload(
+    raw: bytes, *, format: str, attachments: Sequence[Mapping[str, JsonValue]],
+) -> StoredPayload:
+    """Rebuild a verified existing file manifest without writing any object bytes."""
+    content, _bodies = _split(raw, format)
+    payload = StoredPayload("inline", "json-attachments", hashlib.sha256(raw).hexdigest(), len(raw),
+                            {"format": format, "content": content, "attachments": [dict(item) for item in attachments]})
+    validate_attachment_payload(raw, payload)
+    return payload
+
+
 async def store_attachment_payload(
     raw: bytes, *, format: str, write_object: Callable[[bytes], Awaitable[ObjectRef]],
 ) -> StoredPayload | None:
@@ -175,4 +186,4 @@ async def read_attachment_payload(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-__all__ = ["store_attachment_payload", "read_attachment_payload", "validate_attachment_payload", "attachment_payload_objects"]
+__all__ = ["restore_attachment_payload", "store_attachment_payload", "read_attachment_payload", "validate_attachment_payload", "attachment_payload_objects"]

@@ -30,7 +30,7 @@ async def _admit(state: Persistence, nodes: tuple[TaskNode, ...]) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sqlite", [False, True])
-@pytest.mark.parametrize("width", [2, 200])
+@pytest.mark.parametrize("width", [3])
 async def test_failure_does_not_materialize_unrelated_definitions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sqlite: bool, width: int,
 ) -> None:

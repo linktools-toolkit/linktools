@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload
 from ..storage import ObjectRef
+from ..steps import native_store_locator, validate_native_store_key
 from ._archive_closure import (
     NativeMessageClosure, iter_native_message_roots, require_known_retention,
     validate_native_message_content,
@@ -20,7 +21,7 @@ from ._payload import decode_payload_bytes
 from .state import FactScanCursor, OperationScanCursor, RecordScanCursor, StateStorageGroup
 
 if TYPE_CHECKING:
-    from sqlalchemy import MetaData
+    from sqlalchemy import MetaData, Table
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from ..storage import SqlStorageContext
@@ -57,11 +58,48 @@ async def inspect_native_message_tables(
     content = {"ai_step_sequences", "ai_step_messages"}
     if require_content:
         required.update(content)
+    if actual == {"ai_step_messages"} and required.issubset(actual):
+        # Typed archive payloads share the message relation without owning a
+        # Native sequence tree. Never skip a Native or malformed partition.
+        from ._step_schema import build_step_sql_metadata
+        table = build_step_sql_metadata().tables["ai_step_messages"]
+        async with context.sessions() as session:
+            await context.dialect.begin_consistent_read(session)
+            if await native_message_partitions(context, session, table):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return ()
     if (not required.issubset(actual)
             or bool(actual.intersection(content)) != content.issubset(actual)
             or "ai_step_snapshots" in actual and not content.issubset(actual)):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return tuple(name for name in names if name in actual)
+
+
+async def native_message_partitions(
+    context: "SqlStorageContext", session: "AsyncSession", table: "Table",
+) -> tuple[bytes, ...]:
+    """Inventory only Native tuples in the shared physical content relation.
+
+    Step payload tuples belong to the logical archive adapter instead. Unknown
+    or malformed partitions are corruption, not content to silently omit.
+    """
+    from sqlalchemy import select
+    from ._step_payload_owner import payload_store_parts, payload_store_locator
+
+    rows = await context.run_statement(session.execute(select(table.c.store_key, table.c.store_locator).distinct()))
+    partitions = []
+    for store_key, locator in rows:
+        try:
+            validate_native_store_key(store_key)
+        except (TypeError, ValueError):
+            payload_store_parts(store_key)
+            if locator != payload_store_locator(store_key):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        else:
+            if locator != native_store_locator(store_key):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            partitions.append(store_key)
+    return tuple(partitions)
 
 
 async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeMessageRoot, ...]:
@@ -129,7 +167,7 @@ async def purge_step_content(
         async with context.engine.connect() as connection:
             has_state = await connection.run_sync(lambda connection: any(
                 inspect(connection).has_table(name)
-                for name in ("ai_state_records", "ai_state_facts", "ai_state_operations")
+                for name in ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_state_facts", "ai_state_operations")
             ))
         if has_state:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
@@ -149,14 +187,16 @@ async def purge_step_content(
     sequences = metadata.tables["ai_step_sequences"]
     messages = metadata.tables["ai_step_messages"]
 
+    locator = native_store_locator(store_key)
+
     async def mutate(session: "AsyncSession") -> StepContentCleanupResult:
         roots = [] if snapshots is None else (await session.execute(select(
             snapshots.c.store_key, snapshots.c.sequence_root, snapshots.c.messages, snapshots.c.pruned,
-        ).where(snapshots.c.store_key == store_key))).mappings().all()
+        ).where(snapshots.c.store_locator == locator, snapshots.c.store_key == store_key))).mappings().all()
         rows = (await session.execute(select(
             sequences.c.store_key, sequences.c.sha256, sequences.c.message_sha256, sequences.c.tree_count,
             sequences.c.left_sha256, sequences.c.right_sha256, sequences.c.next_sha256,
-        ).where(sequences.c.store_key == store_key))).mappings().all()
+        ).where(sequences.c.store_locator == locator, sequences.c.store_key == store_key))).mappings().all()
         closure = NativeMessageClosure(rows)
         for snapshot in roots:
             closure.mark_snapshot(snapshot)
@@ -166,7 +206,7 @@ async def purge_step_content(
         # Candidate discovery reads identities only: orphan bodies may dominate
         # the namespace's bytes and are not needed to prove retained integrity.
         body_ids = set((await session.execute(select(messages.c.sha256).where(
-            messages.c.store_key == store_key,
+            messages.c.store_locator == locator, messages.c.store_key == store_key,
         ))).scalars())
         retained_nodes = {identity for _, identity in closure.retained_sequences}
         retained_messages = {identity for _, identity in closure.retained_messages}
@@ -179,7 +219,7 @@ async def purge_step_content(
                 messages.c.store_key, messages.c.sha256, messages.c.message,
                 messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ).where(
-                messages.c.store_key == store_key, messages.c.sha256.in_(batch),
+                messages.c.store_locator == locator, messages.c.store_key == store_key, messages.c.sha256.in_(batch),
             ))).mappings().all()
             if {row["sha256"] for row in body_rows} != set(batch):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -198,20 +238,8 @@ async def purge_step_content(
         for table, identities in ((sequences, unused_nodes), (messages, unused_messages)):
             for offset in range(0, len(identities), 128):
                 batch = identities[offset:offset + 128]
-                from ._native_content_index import replace_owner_edges
-                if table is sequences:
-                    sources = select(table.c.id).where(table.c.store_key == store_key, table.c.sha256.in_(batch))
-                    await replace_owner_edges(context, session, "sequence", sources, ())
-                    await replace_owner_edges(context, session, "message", sources, ())
-                edge_table = metadata.tables["ai_native_content_edges"]
-                target_ids = select(table.c.id).where(table.c.store_key == store_key, table.c.sha256.in_(batch))
-                edge_kinds = (("record", "fact", "operation", "snapshot", "sequence", "candidate_sequence")
-                              if table is sequences else ("message", "candidate_message"))
-                await session.execute(delete(edge_table).where(
-                    edge_table.c.edge_kind.in_(edge_kinds), edge_table.c.target_id.in_(target_ids),
-                ))
                 removed = await session.execute(delete(table).where(
-                    table.c.store_key == store_key, table.c.sha256.in_(batch),
+                    table.c.store_locator == locator, table.c.store_key == store_key, table.c.sha256.in_(batch),
                 ))
                 if removed.rowcount != len(batch):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -222,4 +250,4 @@ async def purge_step_content(
     return await context.run_mutation(mutate, domain="steps.content_cleanup")
 
 
-__all__ = ["StepContentCleanupResult", "scan_native_message_roots", "inspect_native_message_tables"]
+__all__ = ["StepContentCleanupResult", "scan_native_message_roots", "inspect_native_message_tables", "native_message_partitions"]

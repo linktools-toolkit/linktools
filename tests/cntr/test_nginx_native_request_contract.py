@@ -3,6 +3,7 @@
 """Optional native nginx request tests; mock WAF is not the SafeLine release gate."""
 import base64
 import contextlib
+import errno
 import hashlib
 import http.client
 import http.server
@@ -14,6 +15,7 @@ import ssl
 import subprocess
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -30,10 +32,134 @@ def _native_site(port):
                            proxy="http://127.0.0.1:" + str(port))
 
 
-def _port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def _reserve_port(reservations):
+    # Keep wildcard reservations until spawn so fixture listeners cannot reuse a port.
+    sock = reservations.enter_context(socket.socket())
+    sock.bind(("0.0.0.0", 0))
+    return sock.getsockname()[1]
+
+
+def _stop_nginx(process):
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _start_nginx(stack, reservations, command, tmp_path, port):
+    output = stack.enter_context((tmp_path / "startup.log").open("wb"))
+    # nginx must bind its own sockets; an external bind can still race this handoff.
+    reservations.close()
+    process = subprocess.Popen(command + ["-g", "daemon off; master_process off;"],
+                               stdout=output, stderr=subprocess.STDOUT)
+    stack.callback(_stop_nginx, process)
+    address = ("127.0.0.1", port)
+    deadline = time.monotonic() + 5
+    last_error = None
+    while process.poll() is None:
+        try:
+            with socket.create_connection(address, timeout=.1):
+                if process.poll() is None:
+                    return
+        except OSError as error:
+            last_error = error
+        if process.poll() is not None or time.monotonic() >= deadline:
+            break
+        time.sleep(.02)
+
+    returncode = process.poll()
+    reason = "exited before readiness" if returncode is not None else "readiness timed out after 5 seconds"
+    details = ["nginx %s at %s:%s (exit code: %s; last connection error: %s)" %
+               (reason, address[0], address[1], returncode, last_error)]
+    for name in ("startup.log", "error.log"):
+        path = tmp_path / name
+        details.append("%s:\n%s" % (name, path.read_text(errors="replace") if path.exists() else "<missing>"))
+    pytest.fail("\n".join(details), pytrace=False)
+
+
+def test_native_port_reservations_keep_listener_ports_distinct() -> None:
+    with contextlib.ExitStack() as reservations:
+        ports = [_reserve_port(reservations) for _ in range(4)]
+        assert len(set(ports)) == len(ports)
+        for port in ports:
+            with socket.socket() as other:
+                with pytest.raises(OSError) as caught:
+                    other.bind(("127.0.0.1", port))
+                assert caught.value.errno == errno.EADDRINUSE
+
+
+@pytest.mark.parametrize("outcome", ["exit", "timeout", "ready", "terminate_timeout"])
+def test_native_startup_preserves_diagnostics_and_cleanup(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str) -> None:
+    calls = []
+    outputs = []
+
+    def record(action):
+        assert not outputs[0].closed
+        calls.append(action)
+
+    def wait(timeout):
+        record(("wait", timeout))
+        if outcome == "terminate_timeout" and calls.count(("wait", timeout)) == 1:
+            raise subprocess.TimeoutExpired("nginx", timeout)
+
+    process = SimpleNamespace(
+        poll=lambda: 1 if outcome == "exit" else None,
+        terminate=lambda: record("terminate"),
+        wait=wait,
+        kill=lambda: record("kill"),
+    )
+
+    def start(command, stdout, stderr):
+        assert command == ["nginx", "-g", "daemon off; master_process off;"]
+        assert stderr == subprocess.STDOUT
+        assert calls == ["release ports"]
+        outputs.append(stdout)
+        stdout.write(b"native startup stderr\n")
+        stdout.flush()
+        (tmp_path / "error.log").write_text("native nginx error log\n")
+        return process
+
+    def connect(address, timeout):
+        calls.append(("connect", address, timeout))
+        if outcome in ("ready", "terminate_timeout"):
+            return contextlib.ExitStack()
+        raise ConnectionRefusedError("fixture listener refused the connection")
+
+    def sleep(seconds):
+        pytest.fail("An exited process or expired deadline must not wait again")
+
+    clock = iter((10, 15))
+    monkeypatch.setattr(subprocess, "Popen", start)
+    monkeypatch.setattr(socket, "create_connection", connect)
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(time, "sleep", sleep)
+    with contextlib.ExitStack() as stack:
+        reservations = stack.enter_context(contextlib.ExitStack())
+        reservations.callback(calls.append, "release ports")
+        port = 12345
+        if outcome in ("ready", "terminate_timeout"):
+            _start_nginx(stack, reservations, ["nginx"], tmp_path, port)
+        else:
+            with pytest.raises(pytest.fail.Exception) as caught:
+                _start_nginx(stack, reservations, ["nginx"], tmp_path, port)
+            message = str(caught.value)
+            assert "127.0.0.1:%s" % port in message
+            assert "exit code: %s" % (1 if outcome == "exit" else None) in message
+            assert "startup.log:\nnative startup stderr" in message
+            assert "error.log:\nnative nginx error log" in message
+            assert ("exited before readiness" if outcome == "exit" else "timed out after 5 seconds") in message
+            if outcome == "timeout":
+                assert "fixture listener refused the connection" in message
+    assert outputs[0].closed
+    if outcome == "terminate_timeout":
+        assert calls[-4:] == ["terminate", ("wait", 5), "kill", ("wait", 5)]
+    else:
+        assert calls[-2:] == ["terminate", ("wait", 5)]
+    assert len([call for call in calls if isinstance(call, tuple) and call[0] == "connect"]) == (
+        0 if outcome == "exit" else 1)
 
 
 def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path):
@@ -44,7 +170,6 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
     events = []
     auth_responses = []
     release_stream = threading.Event()
-    origin_port = _port()
 
     class Backend(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -100,6 +225,8 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
                                         "method": self.command, "path": self.path}).encode())
 
     with contextlib.ExitStack() as stack:
+        reservations = stack.enter_context(contextlib.ExitStack())
+        origin_port = _reserve_port(reservations)
         def backend(kind, host="127.0.0.1", port=0):
             server = http.server.ThreadingHTTPServer((host, port), Backend)
             server.kind = kind
@@ -110,7 +237,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
 
         app_port = backend("app")
         auth_port = backend("auth")
-        http_port, https_port, health_port = _port(), _port(), _port()
+        http_port, https_port, health_port = (_reserve_port(reservations) for _ in range(3))
         config = {"NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
                   "NGINX_WAF_PORT": origin_port, "NGINX_ROOT_DOMAIN": "test",
                   "SAFELINE_SUBNET_PREFIX": "127.0.0"}
@@ -190,17 +317,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         if b"Operation not permitted" in validation.stdout:
             pytest.skip("Sandbox cannot create the configured native nginx socket")
         assert validation.returncode == 0, validation.stdout.decode()
-        process = subprocess.Popen(command + ["-g", "daemon off; master_process off;"])
-        stack.callback(process.wait, timeout=5)
-        stack.callback(process.terminate)
-        deadline = time.monotonic() + 5
-        while True:
-            try:
-                with socket.create_connection(("127.0.0.1", https_port), timeout=.1):
-                    break
-            except OSError:
-                assert time.monotonic() < deadline, "nginx did not begin listening"
-                time.sleep(.02)
+        _start_nginx(stack, reservations, command, tmp_path, https_port)
 
         def request(path, headers=None):
             request_headers = {"Host": "app.test:" + str(https_port), "Authorization": "Bearer client",
@@ -444,6 +561,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
             self.wfile.write(payload)
 
     with contextlib.ExitStack() as stack:
+        reservations = stack.enter_context(contextlib.ExitStack())
         def start_backend(kind):
             server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
             server.kind = kind
@@ -456,7 +574,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
 
         app = start_backend("app")
         auth = start_backend("auth")
-        http_port, https_port = _port(), _port()
+        http_port, https_port = (_reserve_port(reservations) for _ in range(2))
         config = {
             "NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
             "NGINX_ROOT_DOMAIN": "test",
@@ -499,7 +617,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         root = root.replace("/var/log/nginx/access.log", str(tmp_path / "access.log"))
         root = root.replace("/var/run/nginx.pid", str(tmp_path / "nginx.pid"))
         if os.environ.get("CNTR_NGINX_TEST_TCP_HEALTH") == "1":
-            root = root.replace("unix:/run/nginx-health.sock", "127.0.0.1:" + str(_port()))
+            root = root.replace("unix:/run/nginx-health.sock", "127.0.0.1:" + str(_reserve_port(reservations)))
         else:
             root = root.replace("/run/nginx-health.sock", str(tmp_path / "health.sock"))
         root = root.replace("worker_processes auto", "worker_processes 1")
@@ -516,17 +634,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         if "Operation not permitted" in check.stderr:
             pytest.skip("Native nginx listener is unavailable in this environment")
         assert check.returncode == 0, check.stderr
-        process = subprocess.Popen(command + ["-g", "daemon off; master_process off;"])
-        stack.callback(process.wait, timeout=5)
-        stack.callback(process.terminate)
-        for _ in range(100):
-            try:
-                with socket.create_connection(("127.0.0.1", https_port), timeout=0.1):
-                    break
-            except OSError:
-                time.sleep(0.05)
-        else:
-            pytest.fail("Native nginx did not start")
+        _start_nginx(stack, reservations, command, tmp_path, https_port)
 
         def request(path):
             connection = http.client.HTTPSConnection(
@@ -593,11 +701,12 @@ def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager
             self.end_headers()
 
     with contextlib.ExitStack() as stack:
+        reservations = stack.enter_context(contextlib.ExitStack())
         app = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
         stack.callback(app.server_close)
         stack.callback(app.shutdown)
         threading.Thread(target=app.serve_forever, daemon=True).start()
-        public_port, origin_port = _port(), _port()
+        public_port, origin_port = (_reserve_port(reservations) for _ in range(2))
         config = {"NGINX_HTTP_PORT": public_port, "NGINX_WAF_PORT": origin_port,
                   "SAFELINE_SUBNET_PREFIX": "127.0.0"}
         producer = SimpleNamespace(name="body-fixture", config=Config(None, ConfigSchema(), [DictSource(config)]))
@@ -642,7 +751,8 @@ server {
                          ("/run/nginx-health.sock", "health.sock")):
             root = root.replace(old, str(tmp_path / new))
         if os.environ.get("CNTR_NGINX_TEST_TCP_HEALTH") == "1":
-            root = root.replace("unix:" + str(tmp_path / "health.sock"), "127.0.0.1:" + str(_port()))
+            root = root.replace("unix:" + str(tmp_path / "health.sock"),
+                                "127.0.0.1:" + str(_reserve_port(reservations)))
         root = root.rsplit("}", 1)[0] + server + "\n}\n"
         (tmp_path / "logs").mkdir()
         (tmp_path / "nginx.conf").write_text(root)
@@ -651,18 +761,7 @@ server {
         if "Operation not permitted" in check.stderr:
             pytest.skip("Native nginx listener is unavailable in this environment")
         assert check.returncode == 0, check.stderr
-        process = subprocess.Popen(command + ["-g", "daemon off; master_process off;"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        stack.callback(process.wait, timeout=5)
-        stack.callback(process.terminate)
-        deadline = time.monotonic() + 5
-        while True:
-            try:
-                with socket.create_connection(("127.0.0.1", public_port), timeout=.1):
-                    break
-            except OSError:
-                assert time.monotonic() < deadline, "nginx did not begin listening"
-                time.sleep(.02)
+        _start_nginx(stack, reservations, command, tmp_path, public_port)
 
         def request(size, chunked, path="/"):
             connection = http.client.HTTPConnection("127.0.0.1", public_port, timeout=10)

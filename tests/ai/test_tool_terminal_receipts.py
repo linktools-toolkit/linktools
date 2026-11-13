@@ -40,13 +40,14 @@ async def state(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator
 
 def _bridge(
     state: Persistence, *, fresh: bool = True, recovery_run: str | None = None,
+    operation_ids: dict[str, str] | None = None,
 ) -> RuntimeToolOperationBridge:
     return RuntimeToolOperationBridge(
         state.checkpoint.tools, InMemoryObjectStore(), namespace="terminal-receipts",
         tenant_id="default", execution_id="execution", agent_run_id="run",
         binding_digest="b" * 64, owner="owner", background_tasks=set(),
          fresh_execution=fresh,
-        recovery_agent_run_id=recovery_run,
+        recovery_agent_run_id=recovery_run, operation_ids=operation_ids,
     )
 
 
@@ -64,13 +65,13 @@ async def test_complete_fresh_receipts_replace_only_terminal_scan(
 ) -> None:
     bridge = _bridge(state)
     scans = []
-    read = state.checkpoint.tools.list_by_agent_run
+    read = state.checkpoint.tools.get_operations
 
     async def source(*args, **kwargs):
         scans.append(args)
         return await read(*args, **kwargs)
 
-    monkeypatch.setattr(state.checkpoint.tools, "list_by_agent_run", source)
+    monkeypatch.setattr(state.checkpoint.tools, "get_operations", source)
     assert bridge.confirmed_terminal_operations() == ()
     assert await bridge.list_operations() == ()
     decision = await _admit(bridge)
@@ -86,7 +87,7 @@ async def test_complete_fresh_receipts_replace_only_terminal_scan(
     assert records[0].status is (ToolOperationStatus.FAILED if failed else ToolOperationStatus.COMPLETED)
     assert await bridge.list_operations() == records
     assert len(scans) == 1
-    cold = _bridge(state, fresh=False)
+    cold = _bridge(state, fresh=False, operation_ids={"call": decision.operation_id})
     assert cold.confirmed_terminal_operations() is None
     assert await cold.list_operations() == records
     assert len(scans) == 2
@@ -123,7 +124,7 @@ async def test_missing_or_nonterminal_receipts_require_source_facts(
     assert bridge.confirmed_terminal_operations() is None
     records = await bridge.list_operations()
     assert len(records) == 1 and records[0].status is expected
-    recovery = _bridge(state, recovery_run="run")
+    recovery = _bridge(state, recovery_run="run", operation_ids={"call": records[0].tool_operation_id})
     assert recovery.confirmed_terminal_operations() is None
     assert await recovery.list_operations() == records
 

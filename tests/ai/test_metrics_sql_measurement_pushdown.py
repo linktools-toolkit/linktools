@@ -4,6 +4,7 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
@@ -107,7 +108,7 @@ async def _seed(metrics: Metrics, observations: tuple[Observation, ...]) -> None
         await metrics.record_observations(observations[offset : offset + 256])
 
 
-def _queries(window: MetricWindow) -> tuple[MetricQuery, ...]:
+def _queries(window: MetricWindow, *, percentile: float = 0.95) -> tuple[MetricQuery, ...]:
     common = {
         "window": window,
         "group_by": ("group",),
@@ -177,7 +178,7 @@ def _queries(window: MetricWindow) -> tuple[MetricQuery, ...]:
         MetricQuery(
             "business.measurement.distribution",
             aggregation=MetricAggregation.PERCENTILE,
-            percentile=0.95,
+            percentile=percentile,
             **common,
         ),
         MetricQuery(
@@ -324,11 +325,12 @@ async def test_measurement_pushdown_preserves_metric_type_integrity_checks(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sample_count", (
-    pytest.param(100, id="representative"),
+    pytest.param(4, id="representative"),
     pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
 ))
 async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     sample_count: int,
 ) -> None:
     path = tmp_path / "measurement-statements.db"
@@ -367,14 +369,21 @@ async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
     try:
         await provision_metrics_database(engine)
         await _seed(metrics, observations)
+        monkeypatch.setattr(
+            metrics._store, "scan_observations",
+            AsyncMock(side_effect=AssertionError("SQL aggregation must not scan raw observations")),
+        )
         event.listen(engine.sync_engine, "before_cursor_execute", before_cursor_execute)
         window = MetricWindow.between(start, start + timedelta(seconds=1))
 
-        for query in _queries(window):
+        for query in _queries(window, percentile=0.5):
             statements.clear()
-            await metrics.query(query)
+            result = await metrics.query(query)
+            assert len(result.points) == 1
+            assert result.points[0].sample_count == sample_count
+            if query.aggregation is MetricAggregation.PERCENTILE:
+                assert result.points[0].value == (sample_count - 1) // 2 + 0.25
             assert len(statements) == 1
-            assert "with bounded_observations" in statements[0]
     finally:
         if event.contains(
             engine.sync_engine,

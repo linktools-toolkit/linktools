@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import stat
 from pathlib import Path
@@ -141,6 +142,10 @@ def _read_verified_instruction_file(
             return None
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
     except OSError as error:
+        if error.errno == errno.ENAMETOOLONG:
+            raise AIError(ErrorCode.STORAGE_PATH_INVALID, safe_details={
+                "reason": "repository_instruction_target_path_too_long",
+            }) from error
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
     lexical_is_symlink = stat.S_ISLNK(lexical_stat.st_mode)
     if lexical_is_symlink and not allow_lexical_symlink:

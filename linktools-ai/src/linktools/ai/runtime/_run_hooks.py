@@ -60,7 +60,6 @@ class AgentRunCapture(AbstractCapability[None]):
         repr=False,
         compare=False,
     )
-    _replay_request_captured: bool = field(default=False, init=False, repr=False, compare=False)
     _live_messages: Sequence[ModelMessage] | None = field(
         default=None,
         init=False,
@@ -99,6 +98,9 @@ class AgentRunCapture(AbstractCapability[None]):
         if self._registered:
             return
         self._live_messages = ctx.messages
+        if self.native_registration is not None:
+            source = await self.native_registration.prepare_registration(conversation_id=ctx.conversation_id)
+            self.recorder.stage_run_source(source)
         if self.native_registration is not None and self.native_registration.share_started:
             try:
                 await self.native_registration.prepare_started(conversation_id=ctx.conversation_id, step_index=ctx.run_step)
@@ -121,7 +123,6 @@ class AgentRunCapture(AbstractCapability[None]):
             )
         )
         self.context.start()
-        self._replay_request_captured = self.recorder.request_already_captured(ctx.messages)
         self._registered = True
 
     async def before_model_request(
@@ -136,11 +137,11 @@ class AgentRunCapture(AbstractCapability[None]):
         self._live_messages = ctx.messages
         if (ctx.messages and isinstance(ctx.messages[-1], ModelRequest)
                 and self._captured_request is not ctx.messages[-1]):
+            initial_request = self._captured_request is None
             self._captured_request = ctx.messages[-1]
-            if self._replay_request_captured:
-                # A resumed outstanding request already has its raw occurrence.
-                self._replay_request_captured = False
-            else:
+            # Deferred results can extend the initial request after before_run.
+            # Compare only the first actual request at its model boundary.
+            if not initial_request or not self.recorder.request_already_captured(ctx.messages):
                 self.recorder.append_transcript_message(ctx.messages[-1])
         return request_context
 

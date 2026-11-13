@@ -27,7 +27,7 @@ from ...asset import AssetStoreReader, AssetVersionRef
 from ...core import (
     AuthorizationAction, AuthorizationPolicy, CursorPayload, CursorSigner, HmacCursorSigner,
     ExecutionStatus, IdempotencyStatus, JsonValue, Page, Principal,
-    ResourceKind, ResourceRef, TaskStatus, UsageMetrics, canonical_json_bytes, canonical_sha256,
+    ResourceKind, ResourceRef, TaskStatus, UsageMetrics, canonical_json_bytes, canonical_sha256, deterministic_id,
     normalize_json_value, principal_identity_payload, validate_idempotency_key,
     validate_page_limit,
 )
@@ -602,7 +602,7 @@ class Evaluations:
                         if result.admitted and result.result.status not in _TERMINAL:
                             run = await selected.get(intent.submission.graph.graph_id, principal=principal)
                             try:
-                                await run.recover(idempotency_key=f"{idempotency_key}:{intent.slot_id}")
+                                await run.recover(idempotency_key=deterministic_id(idempotency_key, "evaluation-recover", intent.slot_id))
                             except AIError as error:
                                 if error.code is not ErrorCode.TASK_NOT_READY:
                                     raise
@@ -1376,7 +1376,7 @@ class Evaluations:
             return
         planning = engine if scorer is None else engine.with_definitions(self._recorder)
         submission = await planning.describe_submission(graph, principal=record.manifest.principal,
-            idempotency_key=f"evaluation:{record.experiment_id}:{slot}", limits=limits,
+            idempotency_key=deterministic_id(record.experiment_id, "evaluation", slot), limits=limits,
             tool_effects=policy.external_effects,
             correlation={"evaluation_experiment": record.experiment_id, "evaluation_trial": trial.trial_id,
                          "evaluation_slot": slot})
@@ -1575,7 +1575,7 @@ class Evaluations:
                 continue
             try:
                 capture = await self._captures.capture_input(execution_id, CaptureInputRequest(principal,
-                    f"evaluation-evidence:{trial.target_experiment_id}:{trial.trial_id}:{execution_id}", "clean"))
+                    deterministic_id(trial.target_experiment_id, "evaluation-evidence", trial.trial_id, execution_id), "clean"))
                 sources[execution_id] = capture_mapping(capture)
                 content = ((await self._captures.read_agent(capture, principal=principal)).prompt
                            if isinstance(capture, AgentInputCaptureRef) else ())

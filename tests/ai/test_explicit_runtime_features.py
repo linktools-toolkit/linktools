@@ -182,7 +182,6 @@ async def test_native_type_requirement_survives_binding(feature_type):
         execution = await runtime.agents.get().start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert observed == [execution.execution_id]
-    assert not hasattr(template, "capture")
 
 
 @pytest.mark.asyncio

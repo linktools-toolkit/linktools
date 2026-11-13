@@ -290,7 +290,7 @@ async def test_targeted_deferred_recovery_observes_concurrent_cancellation() -> 
     waiting = replace(
         port.execution, status=ExecutionStatus.WAITING_DEFERRED,
         recovery=replace(port.execution.recovery, pending_tools=PendingToolContinuation(
-            "run", calls=(PendingDeferredCall("call", "tool", StoredPayload.inline_json({})),),
+            "run", calls=(PendingDeferredCall("call", "tool", StoredPayload.inline_json({}), operation_id="test-operation"),),
         )),
     )
     cancelling = replace(waiting, status=ExecutionStatus.CANCELLING, revision=waiting.revision + 1,

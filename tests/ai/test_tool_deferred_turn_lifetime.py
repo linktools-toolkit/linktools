@@ -53,6 +53,16 @@ async def test_deferred_result_resumes_after_cold_worker_and_long_delay(
         )
         await asyncio.wait_for(runtime.handoff(), 5)
         assert effects == [] and len(entries) == 1
+        from linktools.ai.persistence.codec import decode_envelope, pending_operation_reference
+        repository = persistence.execution.executions
+        physical = await repository.state_store.read_record(repository.execution_record_key(execution.execution_id))
+        assert physical is not None
+        fields = decode_envelope(physical.data).value["payload"]["fields"]
+        arguments = fields["recovery"]["fields"]["pending_tools"]["fields"]["arguments"]
+        call, = (*waiting.recovery.pending_tools.approvals, *waiting.recovery.pending_tools.calls)
+        assert pending_operation_reference(arguments["0"]) == call.operation_id
+        operation = await persistence.checkpoint.tools.get_operation(call.operation_id, tenant_id="default")
+        assert operation is not None and call.arguments_payload == operation.arguments_payload
 
     future = datetime.now(timezone.utc) + timedelta(days=7)
 

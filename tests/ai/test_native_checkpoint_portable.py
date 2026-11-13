@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Complete native owners survive portable restore without replaying writers."""
 
+import base64
 import json
 import hashlib
 from copy import deepcopy
@@ -12,7 +13,10 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
+from sqlalchemy import event as sql_event
+from sqlalchemy.engine import Engine
 
+from linktools.ai.steps import decode_native_replay_key
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import NativeCheckpoint, Persistence, PersistenceStorage
@@ -32,7 +36,7 @@ async def _manifest(objects, reference):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", ("empty", "inline", "object"))
+@pytest.mark.parametrize("content", ("empty", "inline", "object", "many"))
 async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstones(tmp_path: Path, content: str) -> None:
     storage = PersistenceStorage.sqlite(tmp_path / "source.db")
     objects = InMemoryObjectStore("portable")
@@ -48,7 +52,9 @@ async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstone
             await native.append_event(event)
             await native.append_event(event)
             if content != "empty":
-                messages = [ModelRequest(parts=[UserPromptPart("payload" * (10000 if content == "object" else 1))])]
+                messages = ([ModelRequest(parts=[UserPromptPart(f"message-{index}")]) for index in range(128)]
+                            if content == "many" else
+                            [ModelRequest(parts=[UserPromptPart("payload" * (10000 if content == "object" else 1))])])
                 for index in (1, 2):
                     snapshot = ContinuableSnapshot(run_id="run", step_index=index, messages=messages,
                                                    timestamp=now, idempotency_key=str(index))
@@ -60,11 +66,24 @@ async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstone
     original = await _manifest(objects, reference)
     backup = original["native_checkpoints"][0]
     assert len(backup["events"]) == 2
-    assert all(row["idempotency_key"] is None for row in backup["events"])
+    assert all(decode_native_replay_key(base64.b64decode(row["idempotency_key"])) is None
+               for row in backup["events"])
+    assert len({row["idempotency_key"] for row in backup["events"]}) == 2
     if content != "empty":
         assert [row["pruned"] for row in backup["snapshots"]] == [True, False]
+    assert backup["run_refs"] == [{"run_id": "run", "managed_start_key": None}]
+    assert [row["run_id"] for row in original["run_registrations"]] == ["run"]
     entry_count, _ = _storage_snapshot_usage(original)
-    assert entry_count >= len(backup["runs"]) + len(backup["events"]) + len(backup["snapshots"])
+    expected_entries = len(original["objects"]) + len(original["run_registrations"])
+    expected_entries += sum(len(rows) for domain in original["domains"].values() for rows in domain.values())
+    for group_name, fields in (
+        ("archives", ("records",)),
+        ("native_messages", ("sequences", "messages")),
+        ("native_checkpoints", ("run_refs", "events", "snapshots")),
+        ("native_projections", ("records", "facts")),
+    ):
+        expected_entries += sum(len(group[field]) for group in original.get(group_name, []) for field in fields)
+    assert entry_count == expected_entries
     if content != "empty":
         corrupted = deepcopy(original)
         row = corrupted["native_checkpoints"][0]["snapshots"][-1]
@@ -83,7 +102,22 @@ async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstone
         assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert not rejected_root.exists()
     root = tmp_path / "restored"
-    await Persistence.restore_snapshot(reference, object_store=objects, root=root, limits=LIMITS)
+    sequence_parameters = []
+
+    def check_restore_binds(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO ai_step_sequences "):
+            assert not executemany
+            assert len(parameters) <= 999
+            sequence_parameters.append(len(parameters))
+
+    sql_event.listen(Engine, "before_cursor_execute", check_restore_binds)
+    try:
+        await Persistence.restore_snapshot(reference, object_store=objects, root=root, limits=LIMITS)
+    finally:
+        sql_event.remove(Engine, "before_cursor_execute", check_restore_binds)
+    if content == "many":
+        assert len(sequence_parameters) >= 2
+        assert sum(count // 8 for count in sequence_parameters) >= 128
     async with Persistence.open("native-backup", storage=PersistenceStorage.from_root(root),
                                 tenant_id="tenant", read_only=True) as reader:
         execution = await reader.execution.executions.get("execution", tenant_id="tenant")

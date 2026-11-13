@@ -141,6 +141,7 @@ class SqlObjectStore:
                 insert(table).values(
                     store_id=self.store_id,
                     object_key=key.encode("utf-8"),
+                    object_locator=_object_locator(key),
                     content_digest=digest,
                     size=size,
                 )
@@ -177,7 +178,7 @@ class SqlObjectStore:
                     await self._context.run_statement(session.execute(
                         select(table).where(
                             table.c.store_id == self.store_id,
-                            table.c.object_key == key.encode("utf-8")
+                            table.c.object_locator == _object_locator(key)
                         )
                     ))
                 )
@@ -188,6 +189,8 @@ class SqlObjectStore:
             await session.close()
         if row is None:
             return None
+        if bytes(row["object_key"]) != key.encode("utf-8"):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         return ObjectStat(key, str(row["content_digest"]), int(row["size"]))
 
     async def validate_integrity(self) -> None:
@@ -224,6 +227,7 @@ class SqlObjectStore:
                             select(
                                 objects.c.id,
                                 objects.c.object_key,
+                                objects.c.object_locator,
                             )
                             .where(
                                 objects.c.store_id == self.store_id,
@@ -245,6 +249,8 @@ class SqlObjectStore:
                 try:
                     object_key = bytes(header["object_key"]).decode("utf-8")
                     _validate_key(object_key)
+                    if header["object_locator"] != _object_locator(object_key):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 except (UnicodeDecodeError, TypeError, ValueError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 stream = self._stream_open(object_key)
@@ -274,6 +280,8 @@ class SqlObjectStore:
         finally:
             await session.close()
         for row in rows:
+            if row["object_locator"] != _object_locator(bytes(row["object_key"]).decode("utf-8")):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             yield ObjectStat(
                 bytes(row["object_key"]).decode("utf-8"),
                 str(row["content_digest"]),
@@ -299,14 +307,16 @@ class SqlObjectStore:
             table = self._metadata.tables["ai_objects"]
             current = (
                 await self._context.run_statement(session.execute(
-                    select(table.c.id, table.c.content_digest).where(
-                        table.c.object_key == key.encode("utf-8"),
+                    select(table.c.id, table.c.object_key, table.c.content_digest).where(
+                        table.c.object_locator == _object_locator(key),
                         table.c.store_id == self.store_id,
                     )
                 ))
             ).one_or_none()
             if current is None:
                 return False
+            if bytes(current.object_key) != key.encode("utf-8"):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             if str(current.content_digest) != expected_digest:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await self._context.run_statement(session.execute(
@@ -318,7 +328,7 @@ class SqlObjectStore:
             result = await self._context.run_statement(session.execute(
                 delete(table).where(
                     table.c.id == current.id,
-                    table.c.object_key == key.encode("utf-8"),
+                    table.c.object_locator == _object_locator(key),
                     table.c.store_id == self.store_id,
                 )
             ))
@@ -361,7 +371,7 @@ class SqlObjectStore:
             # Transmit header metadata once rather than with every content chunk.
             header_columns = tuple(
                 case((first, column)).label(column.name)
-                for column in (table.c.content_digest, table.c.size)
+                for column in (table.c.object_key, table.c.content_digest, table.c.size)
             )
 
             async def start_stream() -> None:
@@ -371,7 +381,7 @@ class SqlObjectStore:
                     .select_from(table.outerjoin(chunks, chunks.c.object_id == table.c.id))
                     .where(
                         table.c.store_id == self.store_id,
-                        table.c.object_key == key.encode("utf-8"),
+                        table.c.object_locator == _object_locator(key),
                     )
                     .order_by(chunks.c.chunk_index)
                 )
@@ -390,6 +400,8 @@ class SqlObjectStore:
                 if row["chunk_index"] is not None and int(row["chunk_index"]) != expected_index:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if header is None:
+                    if bytes(row["object_key"]) != key.encode("utf-8"):
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
                     header = ObjectStat(key, str(row["content_digest"]), int(row["size"]))
                 if row["chunk_index"] is None:
                     continue
@@ -461,11 +473,17 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
             nullable=False,
             comment="Exact immutable object size in bytes.",
         ),
+        Column(
+            "object_locator",
+            sql_sha256(),
+            nullable=False,
+            comment="Single SHA-256 lookup projection of the complete object_key; raw identity must also match.",
+        ),
         *sql_audit_columns(),
         comment="Immutable ObjectStore headers containing canonical object identity, content digest, and size.",
         **sql_table_options(),
     )
-    sql_unique(objects, "store_id", "object_key")
+    sql_unique(objects, "store_id", "object_locator")
     sql_audit_indexes(objects)
     chunks = Table(
         "ai_object_chunks",
@@ -496,6 +514,10 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
     sql_unique(chunks, "object_id", "chunk_index")
     sql_audit_indexes(chunks)
     return metadata
+
+
+def _object_locator(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def _read_payload_batch(

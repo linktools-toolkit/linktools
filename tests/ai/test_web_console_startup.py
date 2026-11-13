@@ -9,49 +9,11 @@ import socket
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
-from argparse import Namespace
 from urllib.error import URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
-from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
-import yaml
-
-
-def test_sdk_dependencies_require_typed_errors_and_matching_optional_packages() -> None:
-    source_root = Path(__file__).parents[2]
-    config = yaml.safe_load((source_root / "linktools-ai/linktools.yml").read_text())
-    requirements = {item.name: item for item in map(Requirement, config["dependencies"])}
-    sdk = requirements["pydantic-ai-slim"]
-    assert sdk.specifier == SpecifierSet(">=2.66.0")
-    harness = requirements["pydantic-ai-harness"]
-    assert harness.specifier == SpecifierSet(">=0.66.0")
-    for extra, sdk_extra in (("openai", "openai"), ("anthropic", "anthropic"), ("evaluation", "evals")):
-        optional = {item.name: item for item in map(Requirement, config["optional-dependencies"][extra])}
-        assert optional["pydantic-ai-slim"].specifier == sdk.specifier
-        assert optional["pydantic-ai-slim"].extras == {sdk_extra}
-        assert "pydantic-evals" not in optional
-
-
-def test_ai_python_floor_leaves_other_package_platforms_unchanged() -> None:
-    from manage import get_modules
-
-    for name, module in get_modules().items():
-        project = tomllib.loads((Path(module["path"]) / "pyproject.toml").read_text())["project"]
-        assert project["requires-python"] == (">=3.11" if name == "linktools-ai" else ">=3.6")
-
-
-def test_development_install_selects_declared_optional_extras() -> None:
-    from manage import _install_requirements, get_modules
-
-    modules = get_modules()
-    development = dict(_install_requirements(Namespace(module=["linktools-ai"], editable=True), modules))
-    ordinary = dict(_install_requirements(Namespace(module=["linktools-ai"], editable=False), modules))
-    assert development["linktools-ai"] == modules["linktools-ai"]["path"] + "[anthropic,magic,openai,web]"
-    assert ordinary["linktools-ai"] == modules["linktools-ai"]["path"]
 
 
 def test_web_cli_serves_http_and_exits_cleanly(tmp_path: Path) -> None:

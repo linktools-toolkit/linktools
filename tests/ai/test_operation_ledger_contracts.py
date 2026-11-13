@@ -234,7 +234,7 @@ async def test_operation_cas_output_survives_snapshot_restore(
     state = Persistence(state)
     await state.initialize(namespace="operations", tenant_id="tenant")
     try:
-        current = await state.conversation.operations.append(replace(_operation(), operation_id="界" * 85 + "x"))
+        current = await state.conversation.operations.append(replace(_operation(), operation_id="界" * 42 + "ab"))
         candidate = replace(current, status=OperationStatus.RUNNING, updated_at=_NOW + timedelta(seconds=1))
         await state.conversation.operations.compare_and_swap(
             current.operation_id,
@@ -273,7 +273,7 @@ async def test_operation_cas_output_survives_snapshot_restore(
 @pytest.mark.asyncio
 async def test_operation_ids_keep_exact_utf8_addresses_replay_and_scan_order(storage: Persistence) -> None:
     operations = storage.conversation.operations
-    ids = ("A", "a", "é", "e\u0301", "a" * 64, "x" * 256, "界" * 85 + "x")
+    ids = ("A", "a", "é", "e\u0301", "a" * 64, "x" * 128, "界" * 42 + "ab")
     values = tuple([await operations.append(replace(_operation(), operation_id=value)) for value in ids])
     assert tuple(value.sequence for value in values) == tuple(range(1, len(ids) + 1))
     assert await operations.append(replace(_operation(), operation_id=ids[-1])) == values[-1]
@@ -298,7 +298,7 @@ async def test_operation_ids_keep_exact_utf8_addresses_replay_and_scan_order(sto
     assert await operations.state_store.read(lambda tx: tx.get_sequence(stream)) == len(ids)
 
 
-@pytest.mark.parametrize("identity", ("", "x" * 257, "界" * 86, " leading", "trailing ", "a\nb", "\ud800"))
+@pytest.mark.parametrize("identity", ("", "x" * 129, "界" * 43, " leading", "trailing ", "a\nb", "\ud800"))
 def test_operation_address_rejects_invalid_idempotency_ids(identity: str) -> None:
     with pytest.raises(AIError) as error:
         operation_key("operations", "tenant", "conversation", identity)
@@ -364,7 +364,7 @@ async def test_capability_receipts_and_markers_keep_separate_operation_families(
     name = "capability-partitions"
     ordinary = StoredOperation(operation_key("operations", "tenant", "conversation", name), b"o" * 32, 0, "ordinary", False, {})
     await store.mutate(lambda tx: tx.insert_operation(ordinary))
-    write_key = "界" * 85 + "a"
+    write_key = "界" * 42 + "ab"
     scopes = (("one", "tenant"), ("two", "tenant"), ("one", "other"))
     for index, (namespace, tenant) in enumerate(scopes):
         address = capability_receipt_key(namespace, tenant, "probe", 1, "run", write_key)
@@ -394,7 +394,7 @@ async def test_capability_receipts_and_markers_keep_separate_operation_families(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("field", "identity"), (("operation_id", "other"), ("operation_id", "x" * 257),
+@pytest.mark.parametrize(("field", "identity"), (("operation_id", "other"), ("operation_id", "x" * 129),
                                                  ("operation_id", "a\nb"), ("tenant_id", "other")))
 async def test_operation_readers_reject_corrupt_persisted_identity(storage: Persistence, field: str, identity: str) -> None:
     from linktools.ai.persistence import PersistenceDomain
@@ -415,7 +415,7 @@ async def test_operation_readers_reject_corrupt_persisted_identity(storage: Pers
     assert listed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     with pytest.raises(AIError) as snapshot:
         validate_snapshot_domain(namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
-                                 records=(), aliases=(), facts=(), operations=(corrupted,),
+                                 records=(), facts=(), operations=(corrupted,),
                                  sequences={corrupted.stream_key: corrupted.sequence})
     assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
@@ -441,5 +441,5 @@ async def test_operation_readers_reject_foreign_physical_scope(storage: Persiste
         decode_ledger_operation(corrupted, namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION)
     with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
         validate_snapshot_domain(namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
-                                 records=(), aliases=(), facts=(), operations=(corrupted,),
+                                 records=(), facts=(), operations=(corrupted,),
                                  sequences={corrupted.stream_key: corrupted.sequence})

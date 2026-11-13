@@ -201,10 +201,21 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                 for source in sources.values():
                     patch.setattr(source, "open", reject_content)
 
+                read_content = ContentArchive._read_content
+
+                async def metadata_content(self: ContentArchive, body: ContentRecord) -> bytes:
+                    raw = await read_content(self, body)
+                    if body.codec not in {"execution-binding", "runtime-policy"}:
+                        value = json.loads(raw)
+                        if (body.codec != "execution-payload" or value.get("$dataclass") != "result_record"
+                                or value["fields"]["output"] is not None):
+                            raise AssertionError("metadata read decoded archived message content")
+                    return raw
+
                 async def reject_body(*args: object, **kwargs: object) -> bytes:
                     raise AssertionError("metadata read decoded archived message content")
 
-                patch.setattr(ContentArchive, "_read_content", reject_body)
+                patch.setattr(ContentArchive, "_read_content", metadata_content)
                 patch.setattr(NativeMessageContent, "read_hydrated_ranges", reject_body)
 
                 async def reject_projection(*args: object, **kwargs: object) -> None:

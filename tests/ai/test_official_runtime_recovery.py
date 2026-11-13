@@ -237,17 +237,20 @@ async def test_native_cold_cancel_keeps_late_tool_result_after_owner_drains(
             active = await persistence.execution.executions.get_recovery(execution.execution_id, tenant_id="default")
             assert active is not None and active.recovery is not None
             run_id = active.recovery.agent_run_id
+            from linktools.ai.execution._tool_identity import tool_operation_id
+            operation_id = tool_operation_id(tenant_id="default", execution_id=execution.execution_id,
+                                             agent_run_id=run_id, tool_call_id="work-1")
             cancellation = await remote.executions.cancel(
                 execution.execution_id, CancelExecutionRequest(owner.default_principal, "stop", force=force),
             )
             assert not cancellation.cancelled
             current = await persistence.execution.executions.get(execution.execution_id, tenant_id="default")
             assert current.status is ExecutionStatus.CANCELLING
-            uncertain = await persistence.checkpoint.tools.get_by_call(run_id, "work-1", tenant_id="default")
+            uncertain = await persistence.checkpoint.tools.get_operation(operation_id, tenant_id="default")
             assert uncertain.status is ToolOperationStatus.CLAIMED
             release.set()
             operation = await _wait_for_committed(
-                lambda: persistence.checkpoint.tools.get_by_call(run_id, "work-1", tenant_id="default"),
+                lambda: persistence.checkpoint.tools.get_operation(operation_id, tenant_id="default"),
                 lambda value: value is not None and value.status is ToolOperationStatus.COMPLETED,
             )
             assert operation.result_payload is not None
@@ -266,14 +269,14 @@ async def test_native_cold_cancel_keeps_late_tool_result_after_owner_drains(
         finally:
             release.set()
     async with _runtime(database, model, work) as (runtime, persistence, _):
-        operation = await persistence.checkpoint.tools.get_by_call(run_id, "work-1", tenant_id="default")
+        operation = await persistence.checkpoint.tools.get_operation(operation_id, tenant_id="default")
         assert operation is not None and operation.status is ToolOperationStatus.COMPLETED
         assert operation.result_payload == saved_payload
         outcome = await runtime.executions.wait(
             execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
         )
         assert outcome.result.status is ExecutionStatus.CANCELLED
-        operation = await persistence.checkpoint.tools.get_by_call(run_id, "work-1", tenant_id="default")
+        operation = await persistence.checkpoint.tools.get_operation(operation_id, tenant_id="default")
         assert operation is not None and operation.status is ToolOperationStatus.COMPLETED
         assert operation.result_payload == saved_payload
         assert len(requests) == 1 and effects == ["performed"]

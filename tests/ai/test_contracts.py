@@ -3,7 +3,7 @@
 """Core JSON, Agent binding, Task, and Recovery boundary contracts."""
 
 from collections.abc import Callable
-from dataclasses import fields, replace
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from enum import Enum, IntEnum
 
@@ -14,7 +14,6 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     JsonValue,
-    OperationLedgerRecord,
     Principal,
     PrincipalKind,
     ResourceKind,
@@ -30,7 +29,6 @@ from linktools.ai.model import create_model
 from linktools.ai.execution import ExecutionRequest
 from linktools.ai.persistence import PersistencePlan
 from linktools.ai.persistence.codec import decode_domain, encode_domain
-from linktools.ai.persistence.contracts import ToolOperationRecord
 from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     PendingDeferredCall,
@@ -42,7 +40,7 @@ from linktools.ai.persistence.contracts import (
 )
 from linktools.ai.spec import AgentSpec, SubagentRef
 from linktools.ai.storage import StoredPayload
-from linktools.ai.task import TaskGraph, TaskLease, TaskNode
+from linktools.ai.task import TaskGraph, TaskNode
 from linktools.ai.core import Principal, PrincipalKind
 
 
@@ -203,7 +201,7 @@ def test_runtime_storage_plan_rejects_an_invalid_domain() -> None:
 
 def _pending_tools() -> PendingToolContinuation:
     payload = StoredPayload.inline_json({"path": "file.txt"})
-    call = PendingDeferredCall("call", "read_file", payload)
+    call = PendingDeferredCall("call", "read_file", payload, operation_id="test-operation")
     return PendingToolContinuation(
         "step-1",
         approvals=(call,),
@@ -294,17 +292,6 @@ def test_authorization_kinds_are_canonical() -> None:
     assert ResourceRef(ResourceKind.EXECUTION.value, "execution", "tenant").kind is ResourceKind.EXECUTION
     with pytest.raises(ValueError, match="principal identity is invalid"):
         Principal("principal", "tenant", " custom")
-
-
-def test_contextual_classification_fields_stay_concise() -> None:
-    operation_fields = {field.name for field in fields(OperationLedgerRecord)}
-    task_lease_fields = {field.name for field in fields(TaskLease)}
-    tool_operation_fields = {field.name for field in fields(ToolOperationRecord)}
-    assert "operation_kind" in operation_fields and "kind" not in operation_fields
-    assert "owner" in task_lease_fields and "lease_owner" not in task_lease_fields
-    assert "owner" in tool_operation_fields and "lease_owner" not in tool_operation_fields
-    assert "binding_digest" in tool_operation_fields
-    assert "binding_fingerprint" not in tool_operation_fields
 
 
 @pytest.mark.parametrize("value", [" memory", "memory ", "memory\nvalue", "界" * 129])

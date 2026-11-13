@@ -15,19 +15,8 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.steps import native_store_locator
 from linktools.ai.persistence import SqlStepStore
-
-
-@pytest.fixture(autouse=True)
-def _exercise_explicit_offline_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    from linktools.ai.persistence import _native_content_index
-
-    async def defer(_context, **kwargs) -> None:
-        pass
-
-    # These tests deliberately accumulate orphans for the explicit offline
-    # collector. Automatic collection has its own owner/concurrency coverage.
-    monkeypatch.setattr(_native_content_index, "maintain_native_content", defer)
 
 
 class _Offline:
@@ -220,13 +209,14 @@ async def test_cleanup_reads_only_retained_bodies_in_bounded_batches(tmp_path: P
             # Observe the SQL boundary: no query may materialize orphan bodies
             # or the entire retained message corpus in one result.
             assert "ai_step_messages.sha256 IN" in statement
-            body_batches.append(set(parameters[1:]))
+            body_batches.append(set(parameters) - {store.store_key, native_store_locator(store.store_key)})
 
     try:
         await store.save_snapshot(_snapshot("run", 1, "orphan"))
         async with engine.connect() as connection:
             orphan_id = await connection.scalar(text("SELECT sha256 FROM ai_step_messages"))
-        current = _snapshot("run", 2, *(f"retained-{index}" for index in range(260)))
+        # One full validation batch and one tail message exercise bounded reads.
+        current = _snapshot("run", 2, *(f"retained-{index}" for index in range(129)))
         await store.save_snapshot(current)
         async with engine.connect() as connection:
             all_ids = set((await connection.execute(text("SELECT sha256 FROM ai_step_messages"))).scalars())
@@ -234,10 +224,10 @@ async def test_cleanup_reads_only_retained_bodies_in_bounded_batches(tmp_path: P
         result = await store.purge_unreferenced_content(exclusive=_Offline())
         event.remove(engine.sync_engine, "before_cursor_execute", observe)
         assert result.deleted_messages == 1
-        assert result.retained_messages == 260
+        assert result.retained_messages == 129
         assert body_batches and max(map(len, body_batches)) <= 128
         assert set.union(*body_batches) == all_ids - {orphan_id}
-        assert sum(map(len, body_batches)) == 260
+        assert sum(map(len, body_batches)) == 129
         assert await store.latest_snapshot(run_id="run") == current
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", observe):
@@ -252,13 +242,16 @@ async def test_cleanup_validates_late_retained_batch_before_deleting(tmp_path: P
     store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
     await store.initialize(local=True)
     deletions = []
+    body_batches = []
 
     def observe(connection, cursor, statement, parameters, context, many):
         if statement.lstrip().upper().startswith("DELETE"):
             deletions.append(statement)
+        if statement.lstrip().upper().startswith("SELECT") and "ai_step_messages.message" in statement:
+            body_batches.append(set(parameters) - {store.store_key, native_store_locator(store.store_key)})
 
     try:
-        current = _snapshot("run", 1, *(f"retained-{index}" for index in range(130)))
+        current = _snapshot("run", 1, *(f"retained-{index}" for index in range(129)))
         await store.save_snapshot(current)
         async with engine.begin() as connection:
             # The highest digest belongs to the last bounded validation batch.
@@ -271,11 +264,47 @@ async def test_cleanup_validates_late_retained_batch_before_deleting(tmp_path: P
         with pytest.raises(AIError) as failure:
             await store.purge_unreferenced_content(exclusive=_Offline())
         assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert len(body_batches) > 1 and body_batches[-1] == {damaged}
+        assert sum(map(len, body_batches)) == 129
         assert not deletions
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 131
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 130
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", observe):
             event.remove(engine.sync_engine, "before_cursor_execute", observe)
         await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partition", ("typed", "native", "invalid"))
+async def test_typed_only_message_table_is_not_an_incomplete_native_schema(tmp_path: Path, partition: str) -> None:
+    from sqlalchemy import MetaData, insert
+    from linktools.ai.persistence._step_maintenance import inspect_native_message_tables
+    from linktools.ai.persistence._step_payload_owner import payload_store_key, payload_store_locator
+    from linktools.ai.persistence._step_schema import build_step_sql_metadata
+    from linktools.ai.steps import native_store_key
+    from linktools.ai.storage import create_sql_storage_context
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'typed-only.db'}")
+    metadata = MetaData()
+    table = build_step_sql_metadata().tables["ai_step_messages"].to_metadata(metadata)
+    context = create_sql_storage_context(engine)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(metadata.create_all)
+            store_key = (native_store_key("scope", "tenant") if partition == "native"
+                         else payload_store_key("scope", "tenant"))
+            locator = native_store_locator(store_key) if partition == "native" else payload_store_locator(store_key)
+            await connection.execute(insert(table).values(store_key=store_key,
+                store_locator="invalid" if partition == "invalid" else locator,
+                sha256="a" * 64, message=b"{}", compression="raw", raw_size=2))
+        if partition == "typed":
+            assert await inspect_native_message_tables(context, metadata) == ()
+            with pytest.raises(AIError, match=ErrorCode.STORAGE_INTEGRITY_ERROR.value):
+                await inspect_native_message_tables(context, metadata, require_content=True)
+        else:
+            with pytest.raises(AIError, match=ErrorCode.STORAGE_INTEGRITY_ERROR.value):
+                await inspect_native_message_tables(context, metadata)
+    finally:
         await engine.dispose()

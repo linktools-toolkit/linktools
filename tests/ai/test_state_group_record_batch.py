@@ -21,7 +21,7 @@ from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStore, _SqlGroupTransaction
 from linktools.ai.persistence.state import (
     RecordReplacement, StateGroupTransaction, StateStore, StateTransaction,
-    StoredAlias, StoredFact, StoredRecord,
+    StoredFact, StoredRecord,
 )
 from linktools.ai.storage import CacheBackend, InMemoryCacheBackend, SqlStorageContext
 
@@ -240,12 +240,11 @@ async def _partition_handles(
 async def test_physical_partition_handles_observe_each_others_writes(tmp_path: Path) -> None:
     async with _partition_handles(tmp_path / "views.db") as (first, alias):
         record = _record("owner")
-        alias_key, sequence_key = _key("alias"), _key("sequence")
+        sequence_key = _key("sequence")
         await first.mutate(lambda tx: tx.insert_record(record))
 
         async def write(group: StateGroupTransaction) -> None:
             tx = group.transaction(first)
-            assert await tx.resolve_alias(alias_key) is None
             assert await tx.get_sequence(sequence_key) == 0
             assert await tx.guard_record_revision(record.key, expected_storage_revision=0) == 1
 
@@ -256,11 +255,9 @@ async def test_physical_partition_handles_observe_each_others_writes(tmp_path: P
                     replace(current, storage_revision=2, data={"value": "changed"}),
                     expected_storage_revision=1,
                 )
-                await other.insert_alias(StoredAlias(alias_key, record.key))
                 assert await other.next_sequence(sequence_key) == 1
 
             await alias.mutate(nested)
-            assert await tx.resolve_alias(alias_key) == record.key
             assert await first.read(lambda current: current.get_sequence(sequence_key)) == 1
             assert await tx.guard_record_revision(record.key, expected_storage_revision=0) == 2
             current = await tx.get_record(record.key)
@@ -274,7 +271,6 @@ async def test_physical_partition_handles_observe_each_others_writes(tmp_path: P
             for store in (first, alias):
                 tx = group.transaction(store)
                 assert await tx.get_sequence(sequence_key) == 2
-                assert await tx.resolve_alias(alias_key) == record.key
                 current = await tx.get_record(record.key)
                 assert current is not None and current.storage_revision == 2
 
@@ -286,17 +282,14 @@ async def test_physical_partition_handles_observe_each_others_writes(tmp_path: P
 async def test_physical_partition_owner_deletion_revokes_guards(tmp_path: Path, batch: bool) -> None:
     async with _partition_handles(tmp_path / "owner.db") as (first, alias):
         record = _record("owner")
-        alias_key = _key("alias")
 
         async def seed(tx: StateTransaction) -> None:
             await tx.insert_record(record)
-            await tx.insert_alias(StoredAlias(alias_key, record.key))
 
         await first.mutate(seed)
 
         async def delete(group: StateGroupTransaction) -> None:
             tx, other = group.transaction(first), group.transaction(alias)
-            assert await tx.resolve_alias(alias_key) == record.key
             assert await tx.guard_record_revision(record.key, expected_storage_revision=0) == 1
             if batch:
                 await other.delete_records((record.key,))
@@ -304,15 +297,11 @@ async def test_physical_partition_owner_deletion_revokes_guards(tmp_path: Path, 
                 assert await other.delete_record(record.key)
             with pytest.raises(RuntimeError, match="owner must be guarded"):
                 await tx.insert_fact(StoredFact(_key("stream"), 1, record.key, "probe", None, None, {}))
-            with pytest.raises(RuntimeError, match="owner must be guarded"):
-                await tx.insert_alias(StoredAlias(_key("new-alias"), record.key))
             assert await tx.guard_record_revision(record.key, expected_storage_revision=1) is None
-            assert await tx.resolve_alias(alias_key) is None
 
         await first.storage_group.mutate((first, alias), delete)
         assert await first.read(lambda tx: tx.get_record(record.key)) is None
         assert await first.read(lambda tx: tx.scan_facts()) == ()
-        assert await first.read(lambda tx: tx.scan_aliases()) == ()
         await first.validate_integrity()
 
 

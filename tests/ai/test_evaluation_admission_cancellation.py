@@ -146,7 +146,7 @@ async def test_admission_cancellation_preserves_authorization_and_request_identi
             )), principal=PRINCIPAL, idempotency_key="dataset")
             request = StartEvaluationRequest(EvaluationSpec(
                 dataset, (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),),
-            ), PRINCIPAL, "界" * 85 + "x")
+            ), PRINCIPAL, "界" * 42 + "ab")
             assert request.idempotency_key not in repr(request)
             for action in (AuthorizationAction.EVALUATION_RUN, AuthorizationAction.EVALUATION_CANCEL):
                 authorization.denied = action

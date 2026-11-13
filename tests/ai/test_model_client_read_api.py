@@ -476,24 +476,30 @@ async def test_exact_client_reads_reopen_cold_archive_without_sdk_content(
         group = storage.execution.executions.state_store.storage_group
         assert group.opened_archive is None
 
-        async def forbidden_archive(*args, **kwargs):
-            raise AssertionError("metadata-only reads must not open the content archive")
+        read_content = ContentArchive._read_content
+        control_codecs = {"execution-binding", "runtime-policy"}
+        metadata_reads = []
+
+        async def read_control_only(owner, content):
+            assert content.codec in control_codecs, "metadata read hydrated message or client content"
+            metadata_reads.append(content.codec)
+            return await read_content(owner, content)
 
         with monkeypatch.context() as metadata_patch:
-            metadata_patch.setattr(group, "open_archive", forbidden_archive)
+            metadata_patch.setattr(ContentArchive, "_read_content", read_control_only)
             metadata, = await history.read_model_interactions(
                 "execution", principal=principal, identities=((1, 1),),
             )
         assert not metadata.content_included and not metadata.client_requests_included
         assert metadata.client_requests is None
-        assert group.opened_archive is None
+        assert "runtime-policy" in metadata_reads
 
-        read_content = ContentArchive._read_content
         decoded = []
 
         async def decode_outside_scope(owner, content):
-            assert active_state_scope() is None
-            decoded.append(content.raw_digest)
+            if content.codec not in control_codecs:
+                assert active_state_scope() is None
+                decoded.append(content.raw_digest)
             return await read_content(owner, content)
 
         monkeypatch.setattr(ContentArchive, "_read_content", decode_outside_scope)

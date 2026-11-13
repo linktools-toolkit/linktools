@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """Immutable references to canonical native message occurrence ranges."""
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 
 from ..core import JsonValue
+from ..storage import ObjectRef
 from ..steps import validate_native_store_key, encode_native_store_key, decode_native_store_key
 
 
@@ -156,4 +157,177 @@ class NativeMessageRoot:
         return NativeMessageRoot(self.group_id, self.store_key, _slice_ranges(self.slices, start, end))
 
 
-__all__ = ["NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]
+@dataclass(frozen=True, slots=True)
+class NativeTextReference:
+    """A fixed response part projected into the exact accepted JSON output."""
+    root: NativeMessageRoot
+    projection: str = "text"
+    part_index: int = 0
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
+            raise ValueError("native output reference requires one message")
+        _count(self.part_index)
+        if self.projection not in {"text", "assistant-text-output", "tool-call-output"}:
+            raise ValueError("unknown native output projection")
+        if self.projection == "tool-call-output":
+            if any(not isinstance(value, str) or not value for value in (self.tool_name, self.tool_call_id)):
+                raise ValueError("native output tool identity is required")
+        elif self.tool_name is not None or self.tool_call_id is not None:
+            raise ValueError("text projection cannot carry tool identity")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        result = {"$native_text": self.root.to_json()}
+        if self.projection != "text":
+            result["projection"] = self.projection
+        if self.part_index:
+            result["part_index"] = self.part_index
+        if self.tool_name is not None:
+            result.update(tool_name=self.tool_name, tool_call_id=self.tool_call_id)
+        return result
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeTextReference":
+        if (not isinstance(value, Mapping) or "$native_text" not in value
+                or set(value) - {"$native_text", "projection", "part_index", "tool_name", "tool_call_id"}):
+            raise ValueError("native output reference wire is invalid")
+        return cls(NativeMessageRoot.from_json(value["$native_text"]), value.get("projection", "text"),
+                   value.get("part_index", 0), value.get("tool_name"), value.get("tool_call_id"))
+
+
+@dataclass(frozen=True, slots=True)
+class NativeToolResultReference:
+    """Project one published return into an exact original operation receipt."""
+
+    root: NativeMessageRoot
+    part_index: int
+    tool_name: str
+    tool_call_id: str
+    template: str
+    digest: str
+    size: int
+    attachment_format: str | None = None
+    attachments: tuple[tuple[tuple[str | int, ...], ObjectRef], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
+            raise ValueError("native tool result requires one message")
+        _count(self.part_index)
+        _digest(self.digest)
+        _count(self.size)
+        if any(not isinstance(value, str) or not value for value in
+               (self.tool_name, self.tool_call_id, self.template)):
+            raise ValueError("native tool result identity is invalid")
+
+        if self.attachment_format is None:
+            if self.attachments:
+                raise ValueError("attachment format is required")
+        elif self.attachment_format != "model-messages" or not self.attachments:
+            raise ValueError("invalid tool receipt attachment format")
+        if not isinstance(self.attachments, tuple):
+            raise ValueError("attachment entries must be immutable")
+        paths = set()
+        for path, reference in self.attachments:
+            if (not isinstance(path, tuple) or not path or path in paths
+                    or any(not isinstance(item, str) and (type(item) is not int or item < 0) for item in path)
+                    or not isinstance(reference, ObjectRef)):
+                raise ValueError("invalid tool receipt attachment entry")
+            paths.add(path)
+
+    def object_refs(self) -> tuple[ObjectRef, ...]:
+        return tuple(reference for _path, reference in self.attachments)
+
+    def attachment_entries(self) -> list[dict[str, JsonValue]]:
+        return [{"path": list(path), "ref": {"store_id": ref.store_id, "key": ref.key,
+                "digest": ref.digest, "size": ref.size}} for path, ref in self.attachments]
+
+    def map_object_refs(self, mapper: Callable[[ObjectRef], ObjectRef]) -> "NativeToolResultReference":
+        entries = []
+        for path, ref in self.attachments:
+            target = mapper(ref)
+            if (target.digest, target.size) != (ref.digest, ref.size):
+                raise ValueError("relocated receipt attachments must keep their bytes")
+            entries.append((path, target))
+        return replace(self, attachments=tuple(entries))
+
+    def to_json(self) -> dict[str, JsonValue]:
+        result = {"$native_tool_result": self.root.to_json(), "part_index": self.part_index,
+                  "tool_name": self.tool_name, "tool_call_id": self.tool_call_id,
+                  "template": self.template, "digest": self.digest, "size": self.size}
+        if self.attachment_format is not None:
+            result.update(attachment_format=self.attachment_format, attachments=self.attachment_entries())
+        return result
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeToolResultReference":
+        required = {"$native_tool_result", "part_index", "tool_name", "tool_call_id", "template", "digest", "size"}
+        if (not isinstance(value, Mapping) or set(value) not in (required, required | {"attachment_format", "attachments"})):
+            raise ValueError("native tool result wire is invalid")
+        entries = value.get("attachments", [])
+        if not isinstance(entries, list):
+            raise ValueError("native tool attachment entries are invalid")
+        attachments = []
+        for entry in entries:
+            if (not isinstance(entry, Mapping) or set(entry) != {"path", "ref"} or not isinstance(entry["path"], list)
+                    or not isinstance(entry["ref"], Mapping) or set(entry["ref"]) != {"store_id", "key", "digest", "size"}):
+                raise ValueError("native tool attachment entry is invalid")
+            attachments.append((tuple(entry["path"]), ObjectRef(**entry["ref"])))
+        return cls(NativeMessageRoot.from_json(value["$native_tool_result"]), value["part_index"],
+                   value["tool_name"], value["tool_call_id"], value["template"], value["digest"], value["size"],
+                   value.get("attachment_format"), tuple(attachments))
+
+
+@dataclass(frozen=True, slots=True)
+class NativeToolArgumentsReference:
+    """Project one published call into exact admitted canonical argument bytes."""
+
+    root: NativeMessageRoot
+    part_index: int
+    tool_name: str
+    tool_call_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
+            raise ValueError("native tool arguments requires one message")
+        _count(self.part_index)
+        if any(not isinstance(value, str) or not value for value in
+               (self.tool_name, self.tool_call_id)):
+            raise ValueError("native tool arguments identity is invalid")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"$native_tool_arguments": self.root.to_json(), "part_index": self.part_index,
+                "tool_name": self.tool_name, "tool_call_id": self.tool_call_id}
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeToolArgumentsReference":
+        if not isinstance(value, Mapping) or set(value) != {
+                "$native_tool_arguments", "part_index", "tool_name", "tool_call_id"}:
+            raise ValueError("native tool arguments wire is invalid")
+        return cls(NativeMessageRoot.from_json(value["$native_tool_arguments"]), value["part_index"],
+                   value["tool_name"], value["tool_call_id"])
+
+
+@dataclass(frozen=True, slots=True)
+class NativeUserInputReference:
+    """One immutable prompt part reconstructing a canonical text or text-list input."""
+    root: NativeMessageRoot
+    part_index: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
+            raise ValueError("native input reference requires one message")
+        _count(self.part_index)
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"$native_user_input": self.root.to_json(), "part_index": self.part_index}
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeUserInputReference":
+        if not isinstance(value, Mapping) or set(value) != {"$native_user_input", "part_index"}:
+            raise ValueError("native user input wire is invalid")
+        return cls(NativeMessageRoot.from_json(value["$native_user_input"]), value["part_index"])
+
+
+__all__ = ["NativeToolArgumentsReference", "NativeUserInputReference", "NativeToolResultReference", "NativeTextReference", "NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]

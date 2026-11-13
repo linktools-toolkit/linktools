@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from ..asset import AssetVersionRef
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 
@@ -33,9 +34,19 @@ class RepositoryInstructionDocument:
     source: str
     scope: str
     content: str
+    asset_source_id: str | None = field(default=None, compare=False)
+    asset: AssetVersionRef | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         _validate_document(self)
+        if self.asset_source_id is None and self.asset is None:
+            return
+        if (not isinstance(self.asset_source_id, str) or not self.asset_source_id.strip()
+                or not isinstance(self.asset, AssetVersionRef)
+                or self.asset.key.kind != "rule"
+                or self.asset.key.id != f"{self.source.removeprefix('rule:')}.md"
+                or not self.source.startswith("rule:")):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +72,8 @@ class RepositoryInstructions:
                     "source": document.source,
                     "scope": document.scope,
                     "content": document.content,
+                    **({"asset_source_id": document.asset_source_id, "asset": document.asset.to_payload()}
+                       if document.asset is not None else {}),
                 }
                 for document in self.documents
             ],
@@ -93,7 +106,11 @@ class RepositoryInstructions:
                 or not isinstance(content, str)
             ):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            documents.append(RepositoryInstructionDocument(source, scope, content))
+            try:
+                asset = None if raw.get("asset") is None else AssetVersionRef.from_payload(raw["asset"])
+                documents.append(RepositoryInstructionDocument(source, scope, content, raw.get("asset_source_id"), asset))
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
         wire = tuple(documents)
         if wire != _ordered_documents(wire):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)

@@ -111,7 +111,7 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         statements = []
 
         def record_query(connection, cursor, statement, parameters, context, executemany) -> None:
-            if statement.lstrip().upper().startswith("SELECT"):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
                 statements.append((statement, parameters))
 
         event.listen(engine.sync_engine, "before_cursor_execute", record_query)
@@ -136,9 +136,9 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         sql, parameters = statements[0]
         async with engine.connect() as connection:
             plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)).all()
-        assert any("SEARCH ai_state_records USING INDEX" in row[3] and "sort_key=?" in row[3] for row in plan), plan
+        assert any("SEARCH ai_state_records USING INDEX" in row[3] and "sort_prefix=?" in row[3] for row in plan), plan
         assert not any("SCAN ai_state_records" in row[3] for row in plan), plan
-        assert all("sort_key=?" in row[3] or "key=?" in row[3]
+        assert all("sort_prefix=?" in row[3] or "key_locator=?" in row[3]
                    for row in plan if "SEARCH" in row[3] and "ai_state_records" in row[3]), plan
 
 
@@ -182,7 +182,7 @@ async def test_sql_frontier_batches_stay_within_999_parameters(tmp_path: Path) -
         parameter_counts = []
 
         def check_query(connection, cursor, statement, parameters, context, executemany) -> None:
-            if statement.lstrip().upper().startswith("SELECT"):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
                 parameter_counts.append(len(parameters))
                 assert len(parameters) <= 999
 
@@ -217,10 +217,49 @@ def test_fixed_frontier_compiles_for_supported_server_dialects_with_bounded_para
             assert "WITH RECURSIVE" not in str(compiled).upper()
             sql = str(compiled).upper()
             assert "NOT IN" not in sql
-            identities = statement.get_final_froms()[0].left
-            assert identities.c.identity.type.dialect_impl(dialect).python_type is bytes
+            frontier = statement.selects[0] if hasattr(statement, "selects") else statement
+            if nodes:
+                identities = frontier.get_final_froms()[0].left
+                assert identities.c.identity.type.dialect_impl(dialect).python_type is bytes
             if nodes:
                 if dialect.name == "postgresql":
                     assert "CONVERT_TO(" in sql
                 else:
                     assert " AS BINARY)" in sql if dialect.name == "mysql" else " AS BLOB)" in sql
+
+
+@pytest.mark.asyncio
+async def test_direct_step_content_uses_exact_index_without_sequence_union(tmp_path: Path) -> None:
+    async with _archive_database(tmp_path / "direct-step.db") as (engine, archive, prepared, root):
+        scope, store = await archive.store.storage_group.open_archive(create=True)
+        archive = ContentArchive(store, scope, namespace="namespace", tenant_id="tenant", object_store=None)
+        prepared = PreparedArchive()
+        root = await archive.prepare_append(archive.empty_root(), (("model-message", b"message"),), prepared)
+        await store.mutate(lambda tx: archive.publish(tx, prepared))
+        identities = await archive.prepare_content((("execution-payload", b"payload"),), prepared)
+        await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
+        key = archive._key("archive_content", identities[0])
+        statements = []
+
+        def record_query(connection, cursor, statement, parameters, context, executemany) -> None:
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                statements.append((statement, parameters))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record_query)
+        records = await archive.store.read(lambda tx: tx.read_archive_frontiers(
+            scope_key=decode_archive_scope(archive.content_scope), requests=(), content_keys=(key,),
+        ))
+        assert set(records) == {key}
+        assert len(statements) == 1
+        sql, parameters = statements.pop()
+        assert "ai_state_records" not in sql
+        async with engine.connect() as connection:
+            plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)).all()
+        assert any("SEARCH ai_step_messages" in row[3] and "store_locator=? AND sha256=?" in row[3] for row in plan), plan
+        await archive.store.read(lambda tx: tx.read_archive_frontiers(
+            scope_key=decode_archive_scope(archive.content_scope),
+            requests=(ArchiveNodeRead(archive._key("archive_sequence", root.slices[0].first)),),
+        ))
+        event.remove(engine.sync_engine, "before_cursor_execute", record_query)
+        assert len(statements) == 1
+        assert "ai_step_messages" not in statements[0][0]

@@ -154,7 +154,9 @@ async def test_history_head_requires_open_for_mutations() -> None:
         seal_record = ExecutionHistorySealRecord("execution", (), 0)
 
         async def require_open(transaction: object) -> None:
-            execution, _ = await repository.require_execution_history_write_in_transaction(transaction, "execution")
+            await repository.require_execution_history_write_in_transaction(transaction, "execution")
+            execution = await repository.get_in_transaction(transaction, "execution", tenant_id="tenant")
+            assert execution is not None
             await repository.put_history_seal_in_transaction(transaction, seal_record)
             await repository.compare_and_swap_in_transaction(
                 transaction, "execution", tenant_id="tenant", expected_revision=execution.revision,
@@ -197,7 +199,9 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
         assert open_head.revision == 0
 
         async def seal(transaction: object) -> None:
-            execution, _ = await repository.require_execution_history_write_in_transaction(transaction, "execution")
+            await repository.require_execution_history_write_in_transaction(transaction, "execution")
+            execution = await repository.get_in_transaction(transaction, "execution", tenant_id="tenant")
+            assert execution is not None
             seal_record = await repository.get_history_seal("execution", tenant_id="tenant")
             await repository.put_history_seal_in_transaction(transaction, seal_record)
             await repository.compare_and_swap_in_transaction(

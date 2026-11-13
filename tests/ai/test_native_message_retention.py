@@ -11,7 +11,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.steps import native_store_key
+from linktools.ai.steps import native_store_locator, native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice, SqlStepStore
@@ -31,19 +31,6 @@ from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from .test_step_content_cleanup import _Offline, _snapshot
-
-@pytest.fixture(autouse=True)
-def _exercise_explicit_offline_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    from linktools.ai.persistence import _native_content_index
-
-    async def defer(_context, **kwargs) -> None:
-        pass
-
-    # These tests deliberately accumulate orphans for the explicit offline
-    # collector. Automatic collection has its own owner/concurrency coverage.
-    monkeypatch.setattr(_native_content_index, "maintain_native_content", defer)
-
-
 
 def _row(node: ImmutableSequenceNode, scope: bytes = native_store_key("a", "tenant")) -> dict[str, object]:
     return dict(store_key=scope, sha256=node.identity, message_sha256=node.content_id,
@@ -149,6 +136,10 @@ async def test_cross_owner_message_roots_outlive_native_snapshot_pruning(tmp_pat
             assert protected.retained == ((PersistenceDomain.TRACE, reference),)
             assert await objects.stat(reference.key) is not None
         await state.mutate(lambda tx: tx.delete_record(key))
+        # Owner retirement never reclaims shared bodies online. Only the
+        # complete closure under offline exclusion may remove this orphan.
+        async with engine.connect() as connection:
+            assert len((await connection.execute(select(messages.c.sha256))).scalars().all()) == 2
         result = await native.purge_unreferenced_content(exclusive=_Offline())
         assert result.deleted_messages == 1
         assert result.retained_messages == 1
@@ -191,8 +182,10 @@ async def test_native_database_integrity_and_attachment_group_boundaries_fail_cl
     content = ContentRecord("model-message", digest, len(raw), "raw", body=raw)
     row = dict(store_key=native_store_key("a", "tenant"), sha256=digest, **content.to_native_values())
     assert validate_native_message_content(row) == content
-    with pytest.raises(AIError):
-        validate_native_message_content({**row, "sha256": "f" * 64})
+    # A fixed address is not rehashed from its bytes during restoration.
+    assert validate_native_message_content({**row, "sha256": "f" * 64}) == replace(
+        content, raw_digest="f" * 64,
+    )
     with pytest.raises(AIError):
         validate_native_message_content({**row, "message": b"corrupt"})
 
@@ -268,8 +261,8 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
         async with engine.begin() as connection:
             for value, node in zip((content, orphan), nodes):
                 await connection.execute(metadata.tables["ai_step_messages"].insert().values(
-                    store_key=native.store_key, sha256=value.raw_digest, **value.to_native_values()))
-                await connection.execute(metadata.tables["ai_step_sequences"].insert().values(_row(node, native.store_key)))
+                    store_key=native.store_key, store_locator=native_store_locator(native.store_key), sha256=value.raw_digest, **value.to_native_values()))
+                await connection.execute(metadata.tables["ai_step_sequences"].insert().values(dict(_row(node, native.store_key), store_locator=native_store_locator(native.store_key))))
         root = NativeMessageRoot(group_id, native.store_key, (NativeMessageSlice(nodes[0].identity, 1, 0, 1),))
         key = hashlib.sha256(b"native-only-owner").digest()
         record = StoredRecord(key, None, None, "test_owner", b'owner', None, 1, None, 0, None,

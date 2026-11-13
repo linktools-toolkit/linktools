@@ -24,6 +24,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence._native_event_reference import NativeEventReferences
+from linktools.ai.persistence._run_registration import RunRegistrationReference
 from linktools.ai.persistence._snapshot import SnapshotLimits
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope, decode_fact
@@ -165,7 +166,9 @@ async def _runtime_start(tmp_path: Path, *, outcome: str = "success", backend: s
 
 
 async def _raw_events(archive, run_id: str):
-    return await archive.state_store.read(lambda tx: tx.list_facts(FactQuery(archive._stream(run_id, "event"))))
+    assert archive._trace_events is not None
+    return await archive.state_store.read(lambda tx: archive._trace_events.read(
+        tx, FactQuery(archive._stream(run_id, "event"))))
 
 
 @pytest.mark.asyncio
@@ -182,8 +185,10 @@ async def test_shared_start_preparation_has_one_timestamp_and_identity(native_fi
 
     registration.bind_registration(token)
     if native_first:
-        registration.prepare(conversation_id="conversation", registration_id=seed[0], started_at=seed[1])
+        await registration.prepare_registration(conversation_id="conversation")
     run, source = await registration.prepare_started(conversation_id="conversation", step_index=0)
+    assert run.registration_id == seed[0]
+    assert run.started_at == source.timestamp == seed[1]
     source.metadata["custom"] = "caller mutation"
     repeated_run, repeated = await registration.prepare_started(conversation_id="conversation", step_index=0)
     assert repeated_run == run
@@ -329,7 +334,8 @@ async def test_portable_trace_exports_complete_start_without_rewriting_sidecar(t
         resources = SnapshotResources(namespace="native-start", tenant_id="default",
             durable_domains=frozenset({PersistenceDomain.TRACE}),
             stores={PersistenceDomain.TRACE: archive.state_store},
-            object_stores={domain: objects for domain in PersistenceDomain}, read_only=True)
+            object_stores={domain: objects for domain in PersistenceDomain}, read_only=True,
+            run_registrations=state.run_store.run_registrations)
         target = InMemoryObjectStore()
         traffic = _Traffic()
         engine = native.storage_context.engine
@@ -339,10 +345,12 @@ async def test_portable_trace_exports_complete_start_without_rewriting_sidecar(t
                 object_store=target, limits=SnapshotLimits(max_entries=10000, max_bytes=10000000))
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
-        fact_reads = [sql for sql in traffic.sql if sql.lstrip().upper().startswith("SELECT") and "FROM ai_state_facts" in sql]
+        trace_reads = [sql for sql in traffic.sql if sql.lstrip().upper().startswith("SELECT") and "FROM ai_trace_events" in sql]
         traffic.report(record_property, "portable_export")
-        assert len(fact_reads) == 1
-        assert "JOIN ai_step_events" in fact_reads[0]
+        assert len(trace_reads) == 1
+        assert "JOIN ai_step_events" in trace_reads[0]
+        assert "ai_step_events.metadata" in trace_reads[0]
+        assert "ai_step_runs.metadata" in trace_reads[0]
         manifest = json.loads(await read_object(target, ref.key, expected_digest=ref.digest, expected_size=ref.size))
         facts = [decode_fact(value) for value in manifest["domains"]["trace"]["facts"]]
         exported = next(fact for fact in facts if fact.kind == "step_event" and fact.state == "AGENT_RUN_STARTED")
@@ -362,7 +370,9 @@ async def test_portable_trace_exports_complete_start_without_rewriting_sidecar(t
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native_first", (False, True))
 async def test_native_and_trace_publication_order_does_not_reinsert_source(tmp_path: Path, native_first: bool, record_property) -> None:
-    async with _source(tmp_path, confirmed=False) as (state, native, run, projected_run):
+    from linktools.ai.persistence._official_step_reader import OfficialStepReader
+
+    async with _shared_candidate_source(tmp_path) as (state, native, run, projected_run):
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         source = NativeEvent(run_id=run.run_id, kind="run_started", step_index=0,
             conversation_id=run.conversation_id, parent_run_id=run.parent_run_id,
@@ -384,7 +394,7 @@ async def test_native_and_trace_publication_order_does_not_reinsert_source(tmp_p
         if not native_first:
             assert native.confirmed_run(run.run_id) is None
             raw_run = await archive.state_store.read(lambda tx: tx.get_record(archive._agent_run_key(run.run_id)))
-            assert raw_run.data["value"]["type"] == "native_agent_run_reference"
+            assert RunRegistrationReference.from_data(raw_run.data).project(run) == OfficialStepReader.project_run(run)
             assert native.confirmed_run(run.run_id) is None
         receipts = archive.confirm_native_event_projection((projected,))
         inserts = [sql for sql in traffic.sql if sql.startswith("INSERT INTO ai_step_events ")]
@@ -482,7 +492,7 @@ async def test_concurrent_first_publishers_keep_receipt_proof_after_cache_evicti
     from dataclasses import replace
     from linktools.ai.persistence import _step_store
 
-    async with _source(tmp_path, confirmed=False) as (state, native, original, _):
+    async with _shared_candidate_source(tmp_path) as (state, native, original, _):
         run = replace(original, metadata={"large": "x" * (1024 * 1024 + 1)}) if large else original
         # This forces actual confirmation to evict rather than mocking the proof.
         monkeypatch.setattr(_step_store, "_RUN_CACHE_BYTES", 1)
@@ -664,25 +674,42 @@ async def test_large_metadata_is_not_returned_by_cold_trace_select(tmp_path: Pat
             cold = await state.create_agent_run_store()
             try:
                 archive = cold.read_store(PersistenceDomain.TRACE)
-                references = NativeEventReferences(archive.state_store, namespace="native-start", tenant_id="default")
-                query = references.statement(query=FactQuery(archive._stream(run.run_id, "event"), limit=1))
+                assert archive._trace_events is not None and archive._native_events is not None
+                query = FactQuery(archive._stream(run.run_id, "event"), limit=1)
                 traffic = _Traffic()
                 engine = native.storage_context.engine
                 event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
                 try:
-                    rows = await archive.state_store.read(lambda tx: tx.read_joined_facts(archive.state_store.context, query))
+                    rows = await archive.state_store.read(lambda tx: archive._trace_events.read_rows(
+                        tx, query, native_events=archive._native_events))
                 finally:
                     event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
-                # Values come from the actual returned SQL mapping, not a DTO.
+                # Count returned SQL values, including the driver-decoded JSON
+                # payload in canonical bytes, not a projected event DTO.
                 # Numeric/driver framing/disk bytes are deliberately not included.
-                returned_bytes = sum(_SqlTraffic._bytes(value) for _, row in rows for value in row.values())
+                assert len(rows) == 1
+                assert rows[0]["kind"] == "AGENT_RUN_STARTED"
+                assert rows[0]["native_kind"] == "run_started"
+                source_fields = ("agent_conversation_id", "parent_agent_run_id", "agent_id", "tool_name", "error",
+                                 "idempotency_key", "history_identity")
+                assert all(rows[0][name] is None for name in source_fields)
+                fact = archive._trace_events.row_to_fact(rows[0])
+                for name in source_fields:
+                    poisoned = dict(rows[0], **{name: b"copied source"})
+                    with pytest.raises(AIError) as caught:
+                        archive._native_events.project_trace_facts((fact,), rows=(poisoned,))
+                    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+                returned_bytes = sum(len(canonical_json_bytes(value)) if isinstance(value, dict)
+                                     else _SqlTraffic._bytes(value) for row in rows for value in row.values())
                 returned_sizes.append(returned_bytes)
                 traffic.report(record_property, f"metadata_{size}")
-                record_property(f"metadata_{size}_returned_sql_text_binary_bytes", returned_bytes)
+                record_property(f"metadata_{size}_returned_sql_value_logical_bytes", returned_bytes)
                 assert traffic.statements["SELECT"] == 1
+                assert "FROM ai_trace_events" in traffic.selects[0]
+                assert "JOIN ai_step_events" in traffic.selects[0]
                 assert "ai_step_events.metadata" not in traffic.selects[0]
                 assert "ai_step_runs.metadata" not in traffic.selects[0]
-                assert all("native_metadata" not in row for _, row in rows)
+                assert all("native_metadata" not in row for row in rows)
             finally:
                 await cold.preflight_close()
                 await cold.close()
@@ -700,7 +727,7 @@ async def test_replay_metadata_adopts_original_source_in_both_publication_orders
     from dataclasses import replace
     from linktools.ai.persistence._official_step_reader import OfficialStepReader
 
-    async with _source(tmp_path, confirmed=False) as (state, native, original_run, _):
+    async with _shared_candidate_source(tmp_path) as (state, native, original_run, _):
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         original_start = NativeEvent(run_id=original_run.run_id, kind="run_started", step_index=0,
             timestamp=original_run.started_at, conversation_id=original_run.conversation_id,
@@ -758,7 +785,7 @@ async def test_runtime_recovers_trace_start_commit_ack_loss_with_joined_readback
     marker = "native_start_test_ack_loss"
 
     def mark_start(connection, _cursor, statement, parameters, _context, _many):
-        if (not lost and statement.startswith("INSERT INTO ai_state_facts ")
+        if (not lost and statement.startswith("INSERT INTO ai_trace_events ")
                 and "native_event_reference" in str(parameters)):
             connection.info[marker] = True
 
@@ -788,6 +815,7 @@ async def test_runtime_recovers_trace_start_commit_ack_loss_with_joined_readback
         assert traffic.statements["SELECT"] == 1
         assert "JOIN ai_step_events" in traffic.selects[0]
         assert "ai_step_events.metadata" in traffic.selects[0]
+        assert "ai_step_runs.metadata" in traffic.selects[0]
         checked_ranges.append(result)
         return result
 
@@ -994,8 +1022,7 @@ async def test_terminal_unknown_verification_checks_pending_source_in_original_r
         # Deliberately leave the receipt provisional, as at terminal ACK loss.
         assert native.confirmed_run("run") is None
         raw_run = await archive.state_store.read(lambda tx: tx.get_record(archive._agent_run_key("run")))
-        if not large:
-            assert raw_run.data["value"]["type"] != "native_agent_run_reference"
+        assert RunRegistrationReference.from_data(raw_run.data).project(original) == canonical
         head = await archive.execution_history_head_record("run")
         projection = PreparedExecutionProjection(run=canonical, events=(projected,), checkpoints=(),
             base_event_offset=0, base_checkpoint_offset=0, target_event_offset=head.event_count,
@@ -1011,7 +1038,8 @@ async def test_terminal_unknown_verification_checks_pending_source_in_original_r
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", baseline.capture)
             baseline.report(record_property, "terminal_without_pending_source")
-            assert baseline.statements["SELECT"] == 3
+            # Run header and its counters share the same owner capture.
+            assert baseline.statements["SELECT"] == 2
             if damage != "none":
                 tables = build_step_sql_metadata().tables
                 table = tables["ai_step_runs" if damage == "registration" else "ai_step_events"]
@@ -1073,8 +1101,9 @@ def test_terminal_source_join_keeps_explicit_locator_bind_budget(dialect_name: s
     assert locators <= compiled.params.keys()
     assert compiled.params["source_run_id"] == "run"
     assert compiled.params["source_event_key"] == source.idempotency_key.encode("utf-8")
-    assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 4
-    ordinary = references.statement(keys=tuple(index.to_bytes(32, "big") for index in range(998))).compile(
+    assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 5
+    # Each record binds its indexed locator and exact key beside the partition.
+    ordinary = references.statement(keys=tuple(index.to_bytes(32, "big") for index in range(499))).compile(
         dialect=dialect, compile_kwargs={"render_postcompile": True})
     assert not locators.intersection(ordinary.params)
     assert len(ordinary.params if ordinary.positiontup is None else ordinary.positiontup) == 999

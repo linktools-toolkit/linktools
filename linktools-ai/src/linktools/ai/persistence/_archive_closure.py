@@ -5,6 +5,7 @@
 import hashlib
 import json
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 
 from ..steps import validate_native_store_key
 from ..core import JsonValue, canonical_json_bytes
@@ -13,8 +14,10 @@ from ..storage import ObjectRef, StoredPayload
 from ._archive import (ArchiveRoot, ArchiveSlice, ContentRecord, ImmutableSequenceNode,
                        archive_scope_parts, archive_scope_token, decode_archive_scope,
                        validate_archive_content_identity, validate_archive_group_id)
-from ._message_root import NativeMessageRoot, NativeMessageSlice
+from ._message_root import NativeMessageRoot, NativeMessageSlice, NativeToolResultReference
+from ._native_tool_error import NativeToolErrorReference
 from ._payload import decode_payload_bytes
+from .codec import tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -25,7 +28,8 @@ from .codec import (
 )
 from .state import StoredRecord, record_key
 from .captures import task_binding_content_reference
-from .codec import execution_payload_slots, payload_reference, map_execution_payload_slots
+from .codec import (runtime_policy_reference, execution_payload_slots, payload_reference, map_execution_payload_slots,
+                    native_text_reference, native_user_input_reference)
 
 
 def _context_payload(value: Mapping[str, object]) -> tuple[Mapping[str, object], StoredPayload] | None:
@@ -115,8 +119,15 @@ def iter_archive_content_refs(value: object) -> Iterator[tuple[str, str, str]]:
     if isinstance(value, Mapping):
         if value.get("$dataclass") in {"stored_payload", "stored_user_input"}:
             return
+        policy = runtime_policy_reference(value)
+        if policy is not None:
+            yield policy
         for _path, payload in execution_payload_slots(value):
             reference = payload_reference(payload)
+            if reference is not None:
+                yield reference
+        for _name, payload in tool_payload_slots(value):
+            reference = tool_payload_reference(payload)
             if reference is not None:
                 yield reference
         reference = binding_reference(value) or task_binding_content_reference(value)
@@ -160,6 +171,14 @@ def iter_native_message_roots(value: object) -> Iterator[NativeMessageRoot]:
             root = _context_history(context[1].decode())
             if isinstance(root, NativeMessageRoot):
                 yield root
+        for _path, payload in execution_payload_slots(value):
+            reference = native_user_input_reference(payload) or native_text_reference(payload)
+            if reference is not None:
+                yield reference.root
+        for _name, payload in tool_payload_slots(value):
+            reference = native_tool_arguments_reference(payload) or native_tool_result_reference(payload)
+            if reference is not None:
+                yield reference.root
         if kind in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
             return
         if kind in _NATIVE_ROOT_SLOTS:
@@ -190,6 +209,47 @@ def iter_native_message_roots(value: object) -> Iterator[NativeMessageRoot]:
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from iter_native_message_roots(item)
+
+
+def iter_native_event_references(value: object) -> Iterator[NativeToolErrorReference]:
+    """Read fixed event locators only from declared tool payload slots."""
+    if isinstance(value, Mapping):
+        for _name, payload in tool_payload_slots(value):
+            reference = native_tool_error_reference(payload)
+            if reference is not None:
+                yield reference
+        if value.get("$dataclass") in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
+            return
+        for item in value.values():
+            yield from iter_native_event_references(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from iter_native_event_references(item)
+
+
+def rekey_native_event_references(
+    value: JsonValue, groups: Mapping[str, str],
+    stores: Mapping[tuple[str, bytes], bytes] | None = None,
+) -> JsonValue:
+    """Move typed event locators without interpreting opaque user JSON."""
+    if isinstance(value, dict):
+        if value.get("$dataclass") in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
+            return value
+        if value.get("$dataclass") == "tool_operation":
+            def rewrite(payload: Mapping) -> JsonValue:
+                reference = native_tool_error_reference(payload)
+                if reference is None:
+                    return payload
+                store = reference.store_key if stores is None else stores.get((reference.group_id, reference.store_key))
+                if reference.group_id not in groups or store is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                moved = replace(reference, group_id=groups[reference.group_id], store_key=store)
+                return {**payload, "fields": {**payload["fields"], "content": moved.to_json()}}
+            value = map_tool_payload_slots(value, rewrite)
+        return {key: rekey_native_event_references(item, groups, stores) for key, item in value.items()}
+    if isinstance(value, list):
+        return [rekey_native_event_references(item, groups, stores) for item in value]
+    return value
 
 
 def require_known_retention(value: object, *, state: object = None) -> None:
@@ -397,7 +457,7 @@ class ArchiveClosure(_SequenceClosure):
         """Expose immutable binding metadata for complete offline validation."""
         return {(self.scope_id, scope, identity): ContentRecord.from_record(record)
                 for (scope, kind, identity), record in self._records.items()
-                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "task-graph-binding", "execution-payload"}}
+                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "runtime-policy", "task-graph-binding", "execution-payload", "tool-operation-payload"}}
 
     @property
     def has_roots(self) -> bool:
@@ -610,6 +670,37 @@ def rekey_native_message_roots(
             encoded = _encode_persisted_domain(root) if "schema" in wire else encode_domain(root)
             return {**value, "fields": {**fields, slot: encoded}}
         context = _context_payload(value)
+        if kind == "execution_record":
+            def rekey_payload(payload: Mapping) -> JsonValue:
+                reference = native_user_input_reference(payload) or native_text_reference(payload)
+                if reference is None:
+                    return payload
+                content = payload["fields"]["content"]
+                marker = "$native_user_input" if "$native_user_input" in content else "$native_text"
+                return {**payload, "fields": {"content": {
+                    **content, marker: rewrite(reference.root).to_json(),
+                }}}
+            value = map_execution_payload_slots(value, rekey_payload)
+        if kind == "tool_operation":
+            def rekey_tool_payload(payload: Mapping) -> JsonValue:
+                reference = native_tool_arguments_reference(payload) or native_tool_result_reference(payload)
+                if reference is None:
+                    return payload
+                if isinstance(reference, NativeToolResultReference) and reference.attachments:
+                    def rekey_file(ref: ObjectRef) -> ObjectRef:
+                        if not ref.key.startswith("v1/archive/"):
+                            return ref
+                        parts = ref.key[len("v1/archive/"):].split("/", 1)
+                        if len(parts) != 2 or parts[0] not in groups:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        return ObjectRef(ref.store_id, f"v1/archive/{groups[parts[0]]}/{parts[1]}", ref.digest, ref.size)
+                    reference = reference.map_object_refs(rekey_file)
+                content = reference.to_json()
+                marker = "$native_tool_arguments" if "$native_tool_arguments" in content else "$native_tool_result"
+                return {**payload, "fields": {**payload["fields"], "content": {
+                    **content, marker: rewrite(reference.root).to_json(),
+                }}}
+            value = map_tool_payload_slots(value, rekey_tool_payload)
         result = {key: rekey_native_message_roots(item, groups, stores) for key, item in value.items()}
         if context is not None:
             wire, payload = context
@@ -637,9 +728,26 @@ def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValu
                     return payload
                 if reference[0] not in scopes:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return {**payload, "fields": {"content": {**payload["fields"]["content"],
+                return {**payload, "fields": {**payload["fields"], "content": {**payload["fields"]["content"],
                     "archive_scope": scopes[reference[0]]}}}
             value = map_execution_payload_slots(value, rekey_payload)
+            policy = runtime_policy_reference(value)
+            if policy is not None:
+                if policy[0] not in scopes:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                value = {**value, "fields": {**value["fields"], "runtime_policy": {
+                    **value["fields"]["runtime_policy"], "archive_scope": scopes[policy[0]]}}}
+
+        if value.get("$dataclass") == "tool_operation":
+            def rekey_tool(payload: Mapping) -> JsonValue:
+                reference = tool_payload_reference(payload)
+                if reference is None:
+                    return payload
+                if reference[0] not in scopes:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return {**payload, "fields": {**payload["fields"], "content": {**payload["fields"]["content"],
+                    "archive_scope": scopes[reference[0]]}}}
+            value = map_tool_payload_slots(value, rekey_tool)
         reference = binding_reference(value) or task_binding_content_reference(value)
         if reference is not None:
             if reference[0] not in scopes:
@@ -684,6 +792,7 @@ def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValu
 
 __all__ = [
     "ArchiveClosure", "NativeMessageClosure", "iter_archive_roots", "iter_archive_content_refs",
+    "iter_native_event_references", "rekey_native_event_references",
     "iter_native_message_roots", "rekey_archive_roots", "rekey_native_message_roots",
     "require_known_retention", "validate_native_message_content",
 ]

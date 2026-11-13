@@ -12,11 +12,12 @@ from pydantic_ai.capabilities import Capability
 from pydantic_ai.messages import InstructionPart, ToolCallPart
 
 from ..capability import AgentContext
-from ..capability import ToolCallFailed
-from ..core import canonical_sha256
+from ..capability import ToolCallFailed, ToolCallRetry
+from ..core import PersistenceDomain, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import RepositoryInstructions
 from ._tool_boundary import RepositoryInstructionBoundary
+from ..inputs import RepositoryInstructionPayload
 from ..execution import ExecutionRecord
 
 if TYPE_CHECKING:
@@ -87,9 +88,7 @@ def _validate_repository_instruction_frontier(
         return
     if overlay is None or not barriers:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    overlay_digest = canonical_sha256(overlay.to_payload())
-    if reference.payload.digest != overlay_digest:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    RepositoryInstructionPayload.from_reference(reference, source_domain=PersistenceDomain.CHECKPOINT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,18 +179,27 @@ class _RepositoryInstructionBoundary:
                 # ToolApproved.override_args; its validators may normalize them.
                 self._checked_approvals[tool_call_id] = permit
             previous_signature = _repository_instruction_signature(self._overlay)
-            next_overlay, reconsider = (
-                await self._runtime.check_repository_instructions(
-                    execution=self._execution,
-                    initial=self._initial,
-                    overlay=self._overlay,
-                    tool_name=tool_name,
-                    tool_call_id=tool_call_id,
-                    arguments=arguments,
-                    path_fields=path_fields,
-                    producer_generation=self._producer_generation,
+            try:
+                next_overlay, reconsider = (
+                    await self._runtime.check_repository_instructions(
+                        execution=self._execution,
+                        initial=self._initial,
+                        overlay=self._overlay,
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        arguments=arguments,
+                        path_fields=path_fields,
+                        producer_generation=self._producer_generation,
+                    )
                 )
-            )
+            except AIError as error:
+                if (error.code is ErrorCode.STORAGE_PATH_INVALID
+                        and error.safe_details.get("reason") == "repository_instruction_target_path_too_long"):
+                    raise ToolCallRetry(
+                        "The target path is too long. Use the exact path returned by a file tool "
+                        "or request a valid path before retrying."
+                    ) from error
+                raise
             next_signature = _repository_instruction_signature(next_overlay)
             if next_signature != previous_signature:
                 next_text = self._render_overlay_text(next_overlay)

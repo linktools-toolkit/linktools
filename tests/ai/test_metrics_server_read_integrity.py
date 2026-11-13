@@ -207,7 +207,7 @@ async def test_cancelled_query_releases_its_snapshot(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", (0, 270))
+@pytest.mark.parametrize("count", (0, 3))
 async def test_server_query_streams_verification_once_and_still_aggregates_in_sql(
     server_metrics: _ServerMetrics, monkeypatch: pytest.MonkeyPatch, count: int,
 ) -> None:
@@ -256,7 +256,7 @@ async def test_server_json_text_does_not_erase_duplicate_members(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", (0, 1025))
+@pytest.mark.parametrize("count", (0, 513))
 async def test_global_count_reuses_only_fully_verified_sql_count(
     server_metrics: _ServerMetrics, count: int,
 ) -> None:

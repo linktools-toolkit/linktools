@@ -11,12 +11,12 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from sqlalchemy import event, select, update
+from sqlalchemy import event, literal, select, union_all
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from linktools.ai.steps import native_store_key
+from linktools.ai.steps import native_store_locator, native_store_key
 from linktools.ai.migrate import provision_database
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
@@ -94,7 +94,7 @@ def test_mysql_tiny_ranges_do_not_expand_the_entire_forest_height() -> None:
                                  (NativeMessageSlice("b" * 64, count, count - 1, count),))
         plan = content.range_query((tail,))
         assert plan.depth == 0 and plan.path_units == 1
-        assert plan.bind_parameters <= 4 and plan.sql_bytes < 2048
+        assert plan.bind_parameters <= 5 and plan.sql_bytes < 2048
     first = replace(tail, slices=(NativeMessageSlice("b" * 64, 1_000_000, 0, 1),))
     plan = content.range_query((first,))
     assert plan.path_units >= plan.depth + 1
@@ -116,7 +116,7 @@ def test_repeated_span_work_is_shared_and_singleton_batches_fit_one_read(dialect
     for count in (128, 446):
         distinct = tuple(replace(single, slices=(NativeMessageSlice(f"{index:064x}", 1, 0, 1),)) for index in range(count))
         batch = content.range_query(distinct)
-        assert batch.path_units == count and batch.bind_parameters < count + 4
+        assert batch.path_units == count and batch.bind_parameters <= count + 4
         assert batch.sql_bytes < 32 * 1024
 
 
@@ -129,8 +129,10 @@ async def test_immutable_content_insert_compares_winners_without_body_reads(dial
     ]), prepare_payload=_payload)
     identity, body = prepared.messages[0]
     node_id, node = prepared.nodes[0]
-    rows = ((content._messages, {"store_key": native_store_key("a", "tenant"), "sha256": identity, **body.to_native_values()}),
-            (content._nodes, {"store_key": native_store_key("a", "tenant"), "sha256": node_id,
+    rows = ((content._messages, {"store_key": native_store_key("a", "tenant"),
+                               "store_locator": native_store_locator(native_store_key("a", "tenant")), "sha256": identity, **body.to_native_values()}),
+            (content._nodes, {"store_key": native_store_key("a", "tenant"),
+                               "store_locator": native_store_locator(native_store_key("a", "tenant")), "sha256": node_id,
                 "message_sha256": node.content_id, "tree_count": node.tree_count,
                 "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}))
 
@@ -286,42 +288,24 @@ async def _check_native_cas_and_range_execution(engine: AsyncEngine) -> None:
                                            store_key=native.store_key, max_cached_messages=0, max_cached_nodes=0)
             prepared = await content.prepare_append(frozen, prepare_payload=_payload)
             proof = await _publish(native, content, prepared)
-            # Each fresh publisher resolves bounded surrogate IDs, then fences
-            # those exact dependency sets against concurrent garbage collection.
-            # No message body or sequence frontier is reread during publication.
-            assert len(publication_io) == 4
+            # Publication verifies exact node/message dependencies once. Offline GC
+            # requires no online revision writes or message-body rereads.
+            assert len(publication_io) == 1
             sequence_ids = sorted({value for identity, node in prepared.nodes
                                    for value in (identity, node.left, node.right, node.next_forest)
                                    if value is not None})
             message_ids = sorted({identity for identity, _body in prepared.messages})
-            for actual, table, identities in zip(
-                publication_io[:2], (content._nodes, content._messages),
-                (sequence_ids, message_ids), strict=True,
-            ):
-                expected = select(table.c.sha256, table.c.id).where(
+            expected = union_all(*(
+                select(literal(kind), table.c.sha256, table.c.id).where(
+                    table.c.store_locator == native_store_locator(native.store_key),
                     table.c.store_key == native.store_key, table.c.sha256.in_(identities),
                 )
-                assert str(actual.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})) == str(
-                    expected.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}),
-                )
-            dependency_counts = (
-                len({value for _identity, node in prepared.nodes
-                     for value in (node.left, node.right, node.next_forest) if value is not None}),
-                len(message_ids),
+                for kind, table, identities in (
+                    ("sequence", content._nodes, sequence_ids), ("message", content._messages, message_ids))
+            ))
+            assert str(publication_io[0].compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})) == str(
+                expected.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}),
             )
-            for actual, table, count in zip(
-                publication_io[2:], (content._nodes, content._messages), dependency_counts, strict=True,
-            ):
-                targets = actual.whereclause.right.value
-                assert len(targets) == len(set(targets)) == count
-                assert 0 < count <= len(frozen)
-                assert all(type(value) is int and value > 0 for value in targets)
-                expected = update(table).where(table.c.id.in_(targets)).values(
-                    gc_revision=table.c.gc_revision + 1, updated_at=table.c.updated_at,
-                )
-                assert str(actual.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})) == str(
-                    expected.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}),
-                )
         roots = (proof.root.slice(0, 3), proof.root.slice(14, 18), proof.root.slice(34, 35), proof.root.slice(14, 18))
         statements.clear()
         plan = content.range_query(roots)
@@ -394,22 +378,30 @@ async def test_actual_readback_resumes_frozen_append_without_another_content_rea
         await _publish(native, cold, prepared)
         reads = [sql for sql in statements if sql.startswith(("SELECT", "WITH"))]
         # One hydration read remains sufficient at either history size. The
-        # publication adds only bounded surrogate-ID resolution for GC edges.
-        assert len(reads) == 3
+        # publication adds one bounded joint node/message existence lookup.
+        assert len(reads) == 2
         allowed = {identity for identity, _body in prepared.messages}
         for identity, node in prepared.nodes:
             allowed.update(value for value in (identity, node.left, node.right, node.next_forest)
                            if value is not None)
+        assert len(read_calls[1:]) == 1
         for sql, parameters in read_calls[1:]:
-            normalized = " ".join(sql.split())
-            assert re.fullmatch(
-                r"SELECT (AI_STEP_MESSAGES|AI_STEP_SEQUENCES)\.SHA256, \1\.ID "
-                r"FROM \1 WHERE \1\.STORE_KEY = \? AND \1\.SHA256 IN \([?, ]+\)",
-                normalized,
-            ), normalized
-            assert parameters[0] == native.store_key
-            assert 1 <= len(parameters[1:]) <= 4
-            assert set(parameters[1:]) <= allowed
+            branches = " ".join(sql.split()).split(" UNION ALL ")
+            assert len(branches) == 2
+            offset = 0
+            for branch, kind, table in zip(branches, ("sequence", "message"),
+                    ("AI_STEP_SEQUENCES", "AI_STEP_MESSAGES"), strict=True):
+                assert re.fullmatch(
+                    rf"SELECT \? AS ANON_[0-9]+, {table}\.SHA256, {table}\.ID "
+                    rf"FROM {table} WHERE {table}\.STORE_LOCATOR = \? AND {table}\.STORE_KEY = \? "
+                    rf"AND {table}\.SHA256 IN \([?, ]+\)", branch,
+                ), branch
+                count = branch.count("?")
+                bound = parameters[offset:offset + count]
+                assert bound[:3] == (kind, native_store_locator(native.store_key), native.store_key)
+                assert 1 <= len(bound[3:]) <= 4 and set(bound[3:]) <= allowed
+                offset += count
+            assert offset == len(parameters)
         selected = cold.adopt_read(readbacks[1])
         branch = await cold.prepare_append(frozen[:1], prepare_payload=_payload, base=selected)
         assert len(branch.root.slices) == 2 and len(branch.nodes) == 1

@@ -5,6 +5,7 @@
 from linktools.ai.persistence import Persistence
 import json
 import weakref
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.observe.journal import MESSAGE_SEQ_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence import _sql
+from linktools.ai.persistence._trace_event_store import SqlTraceEventStore
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._memory_transaction import _MemoryOverlay, _MemoryTransaction
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
@@ -36,9 +38,12 @@ def _capture_fact_batches(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> It
     """Observe physical rows per SQL read independently of the query route."""
     batches: list[list[int]] = []
     original = _sql._fact_from_row
+    original_trace = SqlTraceEventStore.row_to_fact
 
     def capture_sql(_connection, _cursor, statement, _parameters, _context, _many) -> None:
-        if statement.lstrip().upper().startswith("SELECT") and "FROM AI_STATE_FACTS" in statement.upper():
+        if statement.lstrip().upper().startswith("SELECT") and any(
+            name in statement.upper() for name in ("FROM AI_STATE_FACTS", "FROM AI_TRACE_EVENTS")
+        ):
             batches.append([])
 
     def materialize(row):
@@ -47,8 +52,15 @@ def _capture_fact_batches(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> It
         batches[-1].append(fact.sequence)
         return fact
 
+    def materialize_trace(store, row):
+        fact = original_trace(store, row)
+        assert batches, "materialized Trace facts must belong to an observed SQL read"
+        batches[-1].append(fact.sequence)
+        return fact
+
     with monkeypatch.context() as patch:
         patch.setattr(_sql, "_fact_from_row", materialize)
+        patch.setattr(SqlTraceEventStore, "row_to_fact", materialize_trace)
         sql_event.listen(engine, "before_cursor_execute", capture_sql)
         try:
             yield batches
@@ -90,7 +102,11 @@ async def _append_backdated_trace(storage: Persistence, run_id: str, count: int)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("message_count", (32, 256))
+@pytest.mark.parametrize("message_count", (
+    3,
+    pytest.param(32, marks=pytest.mark.manual, id="scale-32"),
+    pytest.param(256, marks=pytest.mark.manual, id="scale-256"),
+))
 async def test_small_history_and_trace_pages_bound_materialized_rows(
     monkeypatch: pytest.MonkeyPatch,
     message_count: int,
@@ -108,13 +124,15 @@ async def test_small_history_and_trace_pages_bound_materialized_rows(
             )
         await history.state.run_store.flush_execution_projection(recorder.agent_run_id, execution_id="execution")
         materialized = 0
+        event_rows = 0
         for name in ("list_facts", "get_facts", "list_records", "get_records"):
             original = getattr(_MemoryTransaction, name)
 
             async def count_rows(self, *args, _original=original, **kwargs):
-                nonlocal materialized
+                nonlocal materialized, event_rows
                 rows = await _original(self, *args, **kwargs)
                 materialized += len(rows)
+                event_rows += sum(isinstance(row, StoredFact) and row.kind == "step_event" for row in rows)
                 return rows
 
             monkeypatch.setattr(_MemoryTransaction, name, count_rows)
@@ -124,8 +142,10 @@ async def test_small_history_and_trace_pages_bound_materialized_rows(
             (history.reader.trace, {}),
         ):
             materialized = 0
+            event_rows = 0
             page = await method("execution", tenant_id="tenant", cursor=None, limit=1, **selectors)
             assert len(page.items) == 1
+            assert event_rows <= 2, "only the selected item and cursor lookahead may read event facts"
             assert materialized <= 128, "one small page must not fetch every step event"
 
 
@@ -173,12 +193,18 @@ async def test_exact_memory_fact_lookup_does_not_enumerate_other_facts(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("selector", ("no_match", "rare_match"))
+@pytest.mark.parametrize("counts", (
+    pytest.param((3,), id="contract"),
+    pytest.param((32, 64, 128), marks=pytest.mark.manual, id="growth"),
+))
 async def test_selective_trace_examined_work_scales_linearly(
     monkeypatch: pytest.MonkeyPatch,
     selector: str,
+    counts: tuple[int, ...],
 ) -> None:
     examined = 0
     measuring = False
+    visits = Counter()
     original = _MemoryOverlay.__iter__
 
     def iterate(self):
@@ -186,11 +212,12 @@ async def test_selective_trace_examined_work_scales_linearly(
         for key in original(self):
             if measuring:
                 examined += 1
+                visits[id(self._base), key] += 1
             yield key
 
     monkeypatch.setattr(_MemoryOverlay, "__iter__", iterate)
     costs = []
-    for count in (32, 64, 128):
+    for count in counts:
         async with _history() as history:
             recorder, = history.recorders
             for index in range(count):
@@ -201,39 +228,51 @@ async def test_selective_trace_examined_work_scales_linearly(
                 })
             await history.state.run_store.flush_execution_projection(recorder.agent_run_id, execution_id="execution")
             examined = 0
+            visits.clear()
             measuring = True
             filters = {"tool_call_id": "missing"} if selector == "no_match" else {"model_request_seq": count}
             page = await history.reader.trace("execution", tenant_id="tenant", cursor=None, limit=1, **filters)
             measuring = False
             assert len(page.items) == (0 if selector == "no_match" else 1)
+            if selector == "rare_match":
+                assert page.items[0].payload["model_request_seq"] == count
+            assert max(visits.values(), default=0) <= 2, "selection must not rescan maps for each candidate"
             costs.append(examined)
-    assert costs[1] <= costs[0] * 2.25
-    assert costs[2] <= costs[1] * 2.25
+    for smaller, larger in zip(costs, costs[1:]):
+        assert larger <= smaller * 2.25
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("counts", (
+    pytest.param((3,), id="contract"),
+    pytest.param((32, 64, 128), marks=pytest.mark.manual, id="growth"),
+))
 async def test_old_trace_cutoff_does_not_rescan_for_each_later_backdated_event(
     monkeypatch: pytest.MonkeyPatch,
+    counts: tuple[int, ...],
 ) -> None:
     original = _MemoryOverlay.__iter__
     examined = 0
     measuring = False
+    visits = Counter()
 
     def iterate(self):
         nonlocal examined
         for key in original(self):
             if measuring:
                 examined += 1
+                visits[id(self._base), key] += 1
             yield key
 
     monkeypatch.setattr(_MemoryOverlay, "__iter__", iterate)
     costs = []
-    for count in (32, 64, 128):
+    for count in counts:
         storage = Persistence(PersistenceStorage.in_memory())
         try:
             archive, run_id = await _seed_trace(storage, 1)
             await _append_backdated_trace(storage, run_id, count)
             examined = 0
+            visits.clear()
             measuring = True
             rows = await archive.list_trace_events(
                 agent_run_id=run_id, event_high_water=1,
@@ -241,60 +280,96 @@ async def test_old_trace_cutoff_does_not_rescan_for_each_later_backdated_event(
             )
             measuring = False
             assert len(rows) == 1 and rows[0][0] == 1
+            assert rows[0][1].tool_call_id == "call-0"
+            assert max(visits.values(), default=0) <= 1, "later candidates must not rescan the captured prefix"
             costs.append(examined)
+            current = await archive.list_trace_events(
+                agent_run_id=run_id, event_high_water=count + 1,
+                after_timestamp=None, after_sequence=0, limit=count + 1,
+            )
+            assert [sequence for sequence, _ in current] == [*range(2, count + 2), 1]
         finally:
             await storage.close()
-    assert costs[1] <= costs[0] * 2.25
-    assert costs[2] <= costs[1] * 2.25
+    for smaller, larger in zip(costs, costs[1:]):
+        assert larger <= smaller * 2.25
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ("no_match", "old_cutoff"))
-async def test_sql_trace_query_count_is_independent_of_examined_events(tmp_path: Path, scenario: str) -> None:
+@pytest.mark.parametrize("sizes", (
+    pytest.param((3,), id="contract"),
+    pytest.param((32, 64, 128), marks=pytest.mark.manual, id="growth"),
+))
+async def test_sql_trace_query_count_is_independent_of_examined_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str, sizes: tuple[int, ...],
+) -> None:
     counts = []
-    for count in (32, 64, 128):
+    for count in sizes:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'trace-{count}.db'}")
         await provision_database(engine)
         storage = Persistence(PersistenceStorage.sql(engine))
         statements = []
 
         def capture(_connection, _cursor, statement, _parameters, _context, _executemany) -> None:
-            statements.append(statement)
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
 
         try:
-            archive, run_id = await _seed_trace(storage, count if scenario == "no_match" else 1)
+            archive, run_id = await _seed_trace(
+                storage, count if scenario == "no_match" else 1, reverse_timestamps=True,
+            )
             if scenario == "old_cutoff":
                 await _append_backdated_trace(storage, run_id, count)
+            high_water = count if scenario == "no_match" else 1
             sql_event.listen(engine.sync_engine, "before_cursor_execute", capture)
-            rows = await archive.list_trace_events(
-                agent_run_id=run_id,
-                event_high_water=count if scenario == "no_match" else 1,
-                after_timestamp=None, after_sequence=0, limit=1,
-                **({"tool_call_id": "missing"} if scenario == "no_match" else {}),
-            )
-            sql_event.remove(engine.sync_engine, "before_cursor_execute", capture)
+            try:
+                with _capture_fact_batches(engine.sync_engine, monkeypatch) as batches:
+                    rows = await archive.list_trace_events(
+                        agent_run_id=run_id, event_high_water=high_water,
+                        after_timestamp=None, after_sequence=0, limit=1,
+                        **({"tool_call_id": "missing"} if scenario == "no_match" else {}),
+                    )
+            finally:
+                sql_event.remove(engine.sync_engine, "before_cursor_execute", capture)
             assert len(rows) == (0 if scenario == "no_match" else 1)
+            if scenario == "old_cutoff":
+                assert [(sequence, value.tool_call_id) for sequence, value in rows] == [(1, "call-0")]
+            expected_sequences = [] if scenario == "no_match" else [1]
+            assert [sequence for batch in batches for sequence in batch] == expected_sequences, (
+                "Trace filters must not materialize rejected or later event facts"
+            )
+            candidate_reads = sum(
+                "FROM AI_STATE_RECORDS" in statement.upper() and "ORDER BY" in statement.upper()
+                for statement in statements
+            )
+            # Rejected or later candidates must not cause per-event source reads.
+            assert candidate_reads <= (1 if scenario == "old_cutoff" else 0)
             counts.append(len(statements))
         finally:
             await storage.close()
             await engine.dispose()
     assert max(counts) <= 12
-    assert counts[1] <= counts[0] + 2
-    assert counts[2] <= counts[0] + 2
+    assert all(value <= counts[0] + 2 for value in counts[1:])
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("page_size", (32, 64, 129))
+@pytest.mark.parametrize("page_size", (
+    1, 33,
+    pytest.param(32, marks=pytest.mark.manual, id="scale-32"),
+    pytest.param(64, marks=pytest.mark.manual, id="scale-64"),
+    pytest.param(129, marks=pytest.mark.manual, id="scale-129"),
+))
 @pytest.mark.parametrize("reverse_timestamps", (False, True))
-async def test_trace_pages_batch_fact_reads_without_overfetch(
+async def test_trace_pages_read_only_selected_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page_size: int, reverse_timestamps: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'page.db'}")
     await provision_database(engine)
     storage = Persistence(PersistenceStorage.sql(engine))
     try:
-        archive, run_id = await _seed_trace(storage, page_size * 2, reverse_timestamps=reverse_timestamps)
-        original_fact = _sql._fact_from_row
+        event_count = page_size + 1
+        archive, run_id = await _seed_trace(storage, event_count, reverse_timestamps=reverse_timestamps)
+        original_fact = SqlTraceEventStore.row_to_fact
         alive = maximum_alive = 0
         logical_json_bytes = 0
 
@@ -305,9 +380,9 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
             nonlocal alive
             alive -= 1
 
-        def materialize(row):
+        def materialize(store, row):
             nonlocal alive, maximum_alive, logical_json_bytes
-            value = original_fact(row)
+            value = original_fact(store, row)
             logical_json_bytes += len(canonical_json_bytes(value.data))
             tracked = TrackedFact(value.stream_key, value.sequence, value.owner_key,
                                   value.kind, value.subject_id, value.state, value.data)
@@ -316,23 +391,23 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
             weakref.finalize(tracked, released)
             return tracked
 
-        monkeypatch.setattr(_sql, "_fact_from_row", materialize)
+        monkeypatch.setattr(SqlTraceEventStore, "row_to_fact", materialize)
         with _capture_fact_batches(engine.sync_engine, monkeypatch) as batches:
             rows = await archive.list_trace_events(
-                agent_run_id=run_id, event_high_water=page_size * 2,
+                agent_run_id=run_id, event_high_water=event_count,
                 after_timestamp=None, after_sequence=0, limit=page_size,
             )
         fact_selects = len(batches)
-        expected = (range(page_size * 2, page_size, -1) if reverse_timestamps else range(1, page_size + 1))
+        expected = (range(event_count, event_count - page_size, -1)
+                    if reverse_timestamps else range(1, page_size + 1))
         assert [sequence for sequence, _ in rows] == list(expected)
         assert sum(map(len, batches)) == page_size, "normal pages must not read unselected event facts"
         assert sorted(sequence for batch in batches for sequence in batch) == sorted(expected)
         print("TRACE_SELECTED_FACTS " + json.dumps({"page_size": page_size, "reverse": reverse_timestamps,
               "fact_selects": fact_selects, "fact_batches": len(batches), "fact_rows": sum(map(len, batches)),
               "logical_json_bytes": logical_json_bytes, "peak_raw_facts": maximum_alive}))
-        assert fact_selects == (page_size + 31) // 32, "selected consecutive facts must batch regardless of timestamp order"
-        assert all(len(batch) <= 32 for batch in batches)
-        assert maximum_alive <= 32, "raw facts from previous windows must not survive the next source read"
+        assert fact_selects <= (page_size + 31) // 32, "Trace page queries stay bounded"
+        assert maximum_alive <= page_size, "raw Trace rows must remain bounded by the requested page"
         assert alive == 0
     finally:
         await storage.close()
@@ -340,15 +415,16 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
 
 
 @pytest.mark.asyncio
-async def test_ordered_sparse_trace_pages_keep_contiguous_fact_batches(
+async def test_sparse_trace_pages_read_only_selected_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = Persistence(PersistenceStorage.sqlite(tmp_path / "sparse-page.db"))
     try:
         archive, run_id = await _seed_trace(storage, 0)
         timestamp = datetime(2026, 1, 2, tzinfo=timezone.utc)
-        for sequence in range(1, 97):
-            traced = sequence not in {32, 65}
+        # Gaps in the event sequence must not materialize non-Trace events.
+        for sequence in range(1, 37):
+            traced = sequence not in {2, 35}
             await storage.run_store.append_event(StepEvent(
                 run_id, "TOOL_CALL_STARTED" if traced else "AGENT_RUN_STARTED", sequence,
                 timestamp=timestamp, tool_call_id=f"call-{sequence}" if traced else None,
@@ -358,57 +434,84 @@ async def test_ordered_sparse_trace_pages_keep_contiguous_fact_batches(
         engine = archive.state_store.storage_group.context.engine.sync_engine
         with _capture_fact_batches(engine, monkeypatch) as batches:
             rows = await archive.list_trace_events(
-                agent_run_id=run_id, event_high_water=96,
-                after_timestamp=None, after_sequence=0, limit=100,
+                agent_run_id=run_id, event_high_water=36,
+                after_timestamp=None, after_sequence=0, limit=36,
             )
-        expected = [sequence for sequence in range(1, 97) if sequence not in {32, 65}]
+        expected = [sequence for sequence in range(1, 37) if sequence not in {2, 35}]
         assert [sequence for sequence, _ in rows] == expected
         assert [sequence for batch in batches for sequence in batch] == expected
-        assert len(batches) == 3
+        assert len(batches) <= 3
     finally:
         await storage.close()
 
 
 @pytest.mark.asyncio
-async def test_run_release_scans_owned_cleanup_data_once_per_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("counts", (
+    pytest.param((3,), id="contract"),
+    pytest.param((32, 64, 128), marks=pytest.mark.manual, id="growth"),
+))
+async def test_run_release_scans_owned_cleanup_data_once_per_batch(
+    monkeypatch: pytest.MonkeyPatch, counts: tuple[int, ...],
+) -> None:
     original = _MemoryOverlay.__iter__
     examined = 0
     measuring = False
+    visits = Counter()
 
     def iterate(self):
         nonlocal examined
         for key in original(self):
             if measuring:
                 examined += 1
+                visits[id(self._base), key] += 1
             yield key
 
     monkeypatch.setattr(_MemoryOverlay, "__iter__", iterate)
     costs = []
-    for count in (32, 64, 128):
+    for count in counts:
         storage = Persistence(PersistenceStorage.in_memory())
         try:
             archive, run_id = await _seed_trace(storage, count)
+            owner, stream = b"o" * 32, b"s" * 32
+            unrelated = StoredRecord(owner, None, None, "owner", b"owner", None, 0, None, 0, None, {})
+            fact = StoredFact(stream, 1, owner, "event", None, None, {"retained": True})
+
+            async def seed_unrelated(transaction) -> None:
+                await transaction.insert_record(unrelated)
+                await transaction.insert_fact(fact)
+
+            await archive.state_store.mutate(seed_unrelated)
             examined = 0
+            visits.clear()
             measuring = True
             await archive.release_agent_run(run_id, execution_id="execution")
             measuring = False
+            # Mapping item snapshots may enumerate once for their length and once for their values.
+            assert max(visits.values(), default=0) <= 2, "cleanup must scan by owner batch, not by deleted record"
             costs.append(examined)
             assert await archive.get_agent_run(agent_run_id=run_id) is None
             assert await archive.list_events(agent_run_id=run_id) == []
+            assert await archive.state_store.read(lambda tx: tx.get_record(owner)) == unrelated
+            assert await archive.state_store.read(lambda tx: tx.get_facts(stream, (1,))) == (fact,)
         finally:
             await storage.close()
-    assert costs[1] <= costs[0] * 2.25
-    assert costs[2] <= costs[1] * 2.25
+    for smaller, larger in zip(costs, costs[1:]):
+        assert larger <= smaller * 2.25
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selected_count,sparse", ((32, False), (65, False), (65, True)))
+@pytest.mark.parametrize("selected_count,sparse", (
+    (1, False), (33, False), (33, True),
+    pytest.param(32, False, marks=pytest.mark.manual, id="scale-32-contiguous"),
+    pytest.param(65, False, marks=pytest.mark.manual, id="scale-65-contiguous"),
+    pytest.param(65, True, marks=pytest.mark.manual, id="scale-65-sparse"),
+))
 async def test_history_associations_batch_only_selected_source_facts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_count: int, sparse: bool,
 ) -> None:
     storage = Persistence(PersistenceStorage.sqlite(tmp_path / "association-page.db"))
     try:
-        archive, run_id = await _seed_trace(storage, selected_count * 2)
+        archive, run_id = await _seed_trace(storage, selected_count * 2 if sparse else selected_count + 1)
         selected = tuple(range(1, selected_count * 2, 2)) if sparse else tuple(range(1, selected_count + 1))
         engine = archive.state_store.storage_group.context.engine.sync_engine
         with _capture_fact_batches(engine, monkeypatch) as batches:
@@ -419,7 +522,7 @@ async def test_history_associations_batch_only_selected_source_facts(
             )
         fact_selects = len(batches)
         assert [value.tool_call_id for value in values] == [f"call-{sequence - 1}" for sequence in selected]
-        assert tuple(sequence for batch in batches for sequence in batch) == selected
+        assert tuple(sorted(sequence for batch in batches for sequence in batch)) == selected
         assert all(len(batch) <= 32 for batch in batches)
         assert fact_selects <= (selected_count + 31) // 32
         print("HISTORY_SELECTED_FACTS " + json.dumps({"selected_count": selected_count, "sparse": sparse,

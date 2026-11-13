@@ -403,8 +403,9 @@ def test_event_metadata_values_are_detached_without_json_round_trip() -> None:
 class _InlineStepStore(SqlStepStore):
     """Current JSON inline policy, not the historical TEXT encoding path."""
 
-    async def _write_events(self, session, events, *, source=None, started=None):
-        assert started is None, "the inline comparison does not own managed starts"
+    async def _write_events(self, session, events, *, source=None, started=None, replay_keys=None,
+                            fixed_error_sources: bool = False):
+        assert started is None and not fixed_error_sources, "the inline comparison does not own fixed sources"
         for keyed, group in groupby(events, key=lambda item: item.idempotency_key is not None):
             rows = [self._run_values(item.run_id) | self._event_values(item) for item in group]
             for row in rows:
@@ -416,7 +417,7 @@ class _InlineStepStore(SqlStepStore):
                 else:
                     await self._context.dialect.insert_ignore_conflict_many(
                         session, table=self._table("events"), rows=rows[offset:offset + batch_size],
-                        index_elements=("store_key", "run_id", "idempotency_key"),
+                        index_elements=("store_locator", "run_id", "idempotency_key"),
                     )
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
@@ -537,7 +538,9 @@ async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(
             await adapter.commit_step(run=run, events=expected[:1])
             for boundary in expected[1:]:
                 await adapter.append_event(boundary)
+            assert metrics["statements"]["SELECT"] == 0
             await adapter.commit_step(run=run, events=(replace(expected[0], metadata={"retry": "ignored"}),))
+            assert metrics["statements"]["SELECT"] == (2 if name == "referenced" else 1)
             await adapter.close()
             cold = constructor(context, namespace="steps", tenant_id="one")
             try:
@@ -561,7 +564,9 @@ async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(
         "metadata_matches_native_run": metadata_matches_run, "samples": samples,
     }, sort_keys=True))
     text_baseline, baseline, candidate = samples["text_inline"], samples["json_inline"], samples["referenced"]
-    assert candidate["statements"] == baseline["statements"] == text_baseline["statements"] == {"BEGIN": 33, "INSERT": 35, "SELECT": 3}
+    assert baseline["statements"] == text_baseline["statements"] == {"BEGIN": 33, "INSERT": 35, "SELECT": 3}
+    # The one duplicate replay verifies raw scope after its indexed conflict.
+    assert candidate["statements"] == {"BEGIN": 33, "INSERT": 35, "SELECT": 4}
     assert candidate["commits"] == baseline["commits"] == text_baseline["commits"] == 33
     assert text_baseline["application_metadata_encodes"] == candidate["application_metadata_encodes"] == 35
     assert baseline["application_metadata_encodes"] == 2

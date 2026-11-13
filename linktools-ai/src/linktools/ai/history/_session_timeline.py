@@ -435,6 +435,10 @@ async def capture_session_timeline(
                             executions.execution_record_key(identity) for identity in execution_ids
                             if identity not in admitted_records
                         ))))
+                        if isinstance(executions, ExecutionRepositoryImpl):
+                            await executions.prefetch_timeline_records(
+                                tuple(identity for identity in execution_ids if identity not in admitted_records),
+                                additional_records={session_store: tuple(dict.fromkeys(keys))})
                         await _group.get_records(requests)
                     else:
                         await transaction.get_records(tuple(dict.fromkeys(keys)))

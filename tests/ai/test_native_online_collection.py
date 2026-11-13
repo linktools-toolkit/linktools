@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Native-only online reclamation follows committed owners, not cache proofs."""
+"""Explicit offline reclamation follows committed owners, not cache proofs."""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -11,10 +11,10 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from linktools.ai.steps import native_store_locator
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice, SqlStepStore
-from linktools.ai.persistence import _native_content_index as index
 from linktools.ai.persistence._archive import ContentArchive
 from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
@@ -23,7 +23,7 @@ from linktools.ai.persistence.contracts import ArchivedContextBlock
 from linktools.ai.persistence.state import OperationQuery, StoredFact, StoredOperation, StoredRecord, operation_key
 from linktools.ai.storage import SqlObjectStore
 
-from .test_step_content_cleanup import _snapshot
+from .test_step_content_cleanup import _snapshot, _Offline
 
 
 @asynccontextmanager
@@ -50,7 +50,7 @@ async def _shared(path: Path):
         await engine.dispose()
 
 
-def _record(data, *, key: bytes = b"r" * 32, state: str = "UNKNOWN") -> StoredRecord:
+def _record(data, *, key: bytes = b"r" * 32, state: str = "DONE") -> StoredRecord:
     return StoredRecord(key, None, None, "owner", b'owner', state, 0, None, 0, None, data)
 
 
@@ -61,38 +61,48 @@ async def _count(engine, table: str) -> int:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ("record", "fact", "operation"))
-async def test_online_collection_preserves_all_committed_root_owners_including_unknown(
-    tmp_path: Path, owner: str,
+@pytest.mark.parametrize("status", ("UNKNOWN", "DONE"))
+async def test_offline_collection_preserves_all_committed_root_owners_including_unknown(
+    tmp_path: Path, owner: str, status: str,
 ) -> None:
     async with _shared(tmp_path / "owners.db") as (engine, state, native, root):
         payload = encode_domain(ArchivedContextBlock(root, "c" * 64, 2))
-        record = _record(payload if owner == "record" else {})
+        record = _record(payload if owner == "record" else {}, state=status if owner == "record" else "DONE")
 
         async def publish(tx):
             await tx.insert_record(record)
             if owner == "fact":
-                await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, "UNKNOWN", payload))
+                await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, status, payload))
             elif owner == "operation":
-                await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
+                await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 42 + "xx"), b"s" * 32, 1, status, False, payload))
 
         await state.mutate(publish)
         current = _snapshot("run", 2, "current")
         await native.save_snapshot(current)
         assert await _count(engine, "ai_step_messages") == 2
+        if status == "UNKNOWN":
+            with pytest.raises(AIError) as unknown:
+                await native.purge_unreferenced_content(exclusive=_Offline())
+            assert unknown.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+            assert await _count(engine, "ai_step_messages") == 2
+        else:
+            retained = await native.purge_unreferenced_content(exclusive=_Offline())
+            assert retained.retained_messages == 2
         assert (await native.read_message_roots((root,)))[0]
         if owner == "operation":
             async def transition(tx):
-                previous = await tx.get_operation(operation_key("steps", "one", "execution", "界" * 85 + "x"))
-                assert await tx.replace_operation(replace(previous, state="DONE"), expected_state="UNKNOWN")
+                previous = await tx.get_operation(operation_key("steps", "one", "execution", "界" * 42 + "xx"))
+                assert await tx.replace_operation(replace(previous, state="DONE"), expected_state=status)
             await state.mutate(transition)
             assert (await native.read_message_roots((root,)))[0]
             await state.mutate(lambda tx: tx.delete_operations(OperationQuery(stream_key=b"s" * 32)))
         elif owner == "record":
             assert await state.mutate(lambda tx: tx.replace_record(
-                replace(record, data={}, storage_revision=1), expected_storage_revision=0,
+                replace(record, data={}, state="DONE", storage_revision=1), expected_storage_revision=0,
             ))
         else:
             assert await state.mutate(lambda tx: tx.delete_record(record.key))
+        await native.purge_unreferenced_content(exclusive=_Offline())
         assert await _count(engine, "ai_step_messages") == 1
         assert await _count(engine, "ai_step_sequences") == 1
         assert await native.latest_snapshot(run_id="run") == current
@@ -128,6 +138,7 @@ async def test_native_binding_enables_retention_after_state_only_initialization(
         await state.mutate(publish)
         assert (await native.read_message_roots((root,)))[0]
         assert await state.mutate(lambda tx: tx.delete_record(record.key))
+        await native.purge_unreferenced_content(exclusive=_Offline())
         assert await _count(engine, "ai_step_messages") == 0
     finally:
         await native.close()
@@ -162,7 +173,7 @@ async def test_cold_state_owner_retains_and_releases_native_content(tmp_path: Pa
                 assert await owner.mutate(release_owner)
             else:
                 assert await owner.mutate(lambda tx: tx.delete_record(record.key))
-            await index.maintain_native_content(native.storage_context, store_keys=(native.store_key,))
+            await native.purge_unreferenced_content(exclusive=_Offline())
             assert await _count(engine, "ai_step_messages") == 1
         finally:
             await owner.close()
@@ -186,7 +197,7 @@ async def test_undeclared_native_owner_fails_closed_without_rejecting_business_j
                     if kind == "fact":
                         await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, "UNKNOWN", payload))
                     elif kind == "operation":
-                        await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
+                        await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 42 + "xx"), b"s" * 32, 1, "UNKNOWN", False, payload))
                 except AIError:
                     # Catching the direct failure must not allow a partial commit.
                     pass
@@ -211,6 +222,7 @@ async def test_reclaimed_cross_process_cache_rebuilds_same_root_without_resurrec
         old = _snapshot("run", 1, "old")
         await stores[0].save_snapshot(old)
         await stores[1].save_snapshot(_snapshot("run", 2, "current"))
+        await stores[1].purge_unreferenced_content(exclusive=_Offline())
         assert await _count(engines[0], "ai_step_messages") == 1
         await stores[0].save_snapshot(old)
         assert await _count(engines[0], "ai_step_messages") == 1
@@ -226,7 +238,7 @@ async def test_reclaimed_cross_process_cache_rebuilds_same_root_without_resurrec
 
 
 @pytest.mark.asyncio
-async def test_failed_owner_cas_cannot_release_live_edges(tmp_path: Path) -> None:
+async def test_failed_owner_cas_cannot_release_live_content(tmp_path: Path) -> None:
     async with _shared(tmp_path / "cas.db") as (engine, state, native, root):
         record = _record(encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
         await state.mutate(lambda tx: tx.insert_record(record))
@@ -234,35 +246,38 @@ async def test_failed_owner_cas_cannot_release_live_edges(tmp_path: Path) -> Non
         assert not await state.mutate(lambda tx: tx.replace_record(
             replace(record, data={}, storage_revision=10), expected_storage_revision=9,
         ))
+        await native.purge_unreferenced_content(exclusive=_Offline())
         assert await _count(engine, "ai_step_messages") == 2
         assert (await native.read_message_roots((root,)))[0]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ("ordinary", "cancelled"))
-async def test_collection_failure_does_not_retry_committed_owner(tmp_path: Path, monkeypatch, failure: str) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'maintenance.db'}")
-    store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
-    await store.initialize(local=True)
-    try:
-        await store.save_snapshot(_snapshot("run", 1, "old"))
-        async def fail(*args, **kwargs):
-            if failure == "cancelled":
-                raise asyncio.CancelledError()
-            raise RuntimeError("collector failure")
-        monkeypatch.setattr(index, "collect_native_content", fail)
+async def test_collection_failure_leaves_already_committed_owner_intact(tmp_path: Path, monkeypatch, failure: str) -> None:
+    async with _shared(tmp_path / "failure.db") as (engine, state, native, root):
+        record = _record(encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
+        await state.mutate(lambda tx: tx.insert_record(record))
         current = _snapshot("run", 2, "current")
-        if failure == "cancelled":
-            with pytest.raises(asyncio.CancelledError):
-                await store.save_snapshot(current)
-        else:
-            await store.save_snapshot(current)
-        assert await store.latest_snapshot(run_id="run") == current
-        assert await _count(engine, "ai_step_snapshots") == 2
-        assert await _count(engine, "ai_step_messages") == 2
-    finally:
-        await store.close()
-        await engine.dispose()
+        await native.save_snapshot(current)
+        execute = AsyncSession.execute
+        async def fail_delete(session, statement, *args, **kwargs):
+            if str(statement).startswith("DELETE FROM ai_step_messages"):
+                if failure == "cancelled":
+                    raise asyncio.CancelledError()
+                raise RuntimeError("collector failure")
+            return await execute(session, statement, *args, **kwargs)
+        # Retire only an unrelated body; the committed UNKNOWN owner remains authoritative.
+        await native.save_snapshot(_snapshot("unrelated", 1, "orphan"))
+        await native.save_snapshot(_snapshot("unrelated", 2, "live"))
+        before = await _count(engine, "ai_step_messages")
+        with monkeypatch.context() as patch:
+            patch.setattr(AsyncSession, "execute", fail_delete)
+            with pytest.raises(asyncio.CancelledError if failure == "cancelled" else RuntimeError):
+                await native.purge_unreferenced_content(exclusive=_Offline())
+        assert await state.read(lambda tx: tx.get_record(record.key)) == record
+        assert await _count(engine, "ai_step_messages") == before
+        assert await native.latest_snapshot(run_id="run") == current
+        assert (await native.read_message_roots((root,)))[0]
 
 
 @pytest.mark.asyncio
@@ -295,116 +310,56 @@ async def test_unknown_business_commit_never_cold_retries_or_collects_as_rollbac
 
 
 @pytest.mark.asyncio
-async def test_collection_budget_bounds_deleted_rows_and_preserves_pending_work(tmp_path: Path, monkeypatch) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'budget.db'}")
-    store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
-    await store.initialize(local=True)
-    async def defer(_context, **kwargs):
-        pass
-    monkeypatch.setattr(index, "maintain_native_content", defer)
-    try:
-        await store.save_snapshot(_snapshot("run", 1, *(str(i) for i in range(12))))
-        await store.save_snapshot(_snapshot("run", 2))
-        before = await _count(engine, "ai_step_messages") + await _count(engine, "ai_step_sequences")
-        await store.storage_context.run_mutation(lambda session: index.collect_native_content(
-            store.storage_context, session, store_keys=(store.store_key,), budget=3,
-        ))
-        after = await _count(engine, "ai_step_messages") + await _count(engine, "ai_step_sequences")
-        assert 0 < before - after <= 3
-        assert await _count(engine, "ai_native_content_edges") > 0
-        for _ in range(12):
-            await store.storage_context.run_mutation(lambda session: index.collect_native_content(
-                store.storage_context, session, store_keys=(store.store_key,), budget=3,
-            ))
+async def test_offline_sweep_is_idempotent_and_preserves_replay_tombstones(tmp_path: Path) -> None:
+    async with _shared(tmp_path / "sweep.db") as (engine, state, native, root):
+        await native.save_snapshot(_snapshot("run", 2))
+        result = await native.purge_unreferenced_content(exclusive=_Offline())
+        assert result.deleted_messages == result.deleted_sequences == 1
+        again = await native.purge_unreferenced_content(exclusive=_Offline())
+        assert again.deleted_messages == again.deleted_sequences == 0
         assert await _count(engine, "ai_step_messages") == await _count(engine, "ai_step_sequences") == 0
         assert await _count(engine, "ai_step_snapshots") == 2
-    finally:
-        await store.close()
-        await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_pin_winning_against_collector_keeps_target_and_unknown_owner(tmp_path: Path, monkeypatch) -> None:
-    async with _shared(tmp_path / "pin-race.db") as (engine, state, native, root):
-        async def defer(_context, **kwargs):
-            pass
-        monkeypatch.setattr(index, "maintain_native_content", defer)
+async def test_owner_committed_before_offline_exclusion_is_kept(tmp_path: Path) -> None:
+    async with _shared(tmp_path / "guard.db") as (engine, state, native, root):
         await native.save_snapshot(_snapshot("run", 2, "current"))
-        # WAL permits the independent writer to commit while the collector
-        # still holds its earlier read snapshot; rollback journal mode cannot.
-        async with engine.connect() as connection:
-            await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
-        other_engine = create_async_engine(str(engine.url))
-        other = SqlStateStore(other_engine, native_content_index=True)
-        await other.initialize()
-        await other.storage_group.open_archive()
-        execute = AsyncSession.execute
-        inserted = False
+        lock = asyncio.Lock()
+        entered = asyncio.Event()
+        release = asyncio.Event()
         record = _record(encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
-
-        async def publish_before_delete(session, statement, *args, **kwargs):
-            nonlocal inserted
-            if not inserted and str(statement).startswith("DELETE FROM ai_step_sequences"):
-                inserted = True
-                # An independent writer wins after the collector's old metadata
-                # read. Its target guard must invalidate that deletion attempt.
-                await other.mutate(lambda tx: tx.insert_record(record))
-            return await execute(session, statement, *args, **kwargs)
-
-        try:
-            with monkeypatch.context() as patch:
-                patch.setattr(AsyncSession, "execute", publish_before_delete)
-                await native.storage_context.run_mutation(lambda session: index.collect_native_content(
-                    native.storage_context, session, store_keys=(native.store_key,),
-                ))
-            assert inserted
-            assert await _count(engine, "ai_step_messages") == 2
-            assert (await native.read_message_roots((root,)))[0]
-        finally:
-            await other.close()
-            await other_engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_candidate_reenqueue_cannot_be_consumed_by_an_older_collector(tmp_path: Path, monkeypatch) -> None:
-    async with _shared(tmp_path / "candidate.db") as (_engine, _state, native, root):
-        sequence = build_step_sql_metadata().tables["ai_step_sequences"]
-        edges = build_step_sql_metadata().tables["ai_native_content_edges"]
-        async with native.storage_context.engine.connect() as connection:
-            target = await connection.scalar(select(sequence.c.id).where(sequence.c.sha256 == root.slices[0].first))
-        await native.storage_context.run_mutation(lambda session: index.enqueue(native.storage_context, session, "sequence", target))
-        execute = AsyncSession.execute
-        reenqueued = False
-
-        async def renew_before_ack(session, statement, *args, **kwargs):
-            nonlocal reenqueued
-            if not reenqueued and str(statement).startswith("DELETE FROM ai_native_content_edges"):
-                reenqueued = True
-                await index.enqueue(native.storage_context, session, "sequence", target)
-            return await execute(session, statement, *args, **kwargs)
-
-        with monkeypatch.context() as patch:
-            patch.setattr(AsyncSession, "execute", renew_before_ack)
-            await native.storage_context.run_mutation(lambda session: index.collect_native_content(
-                native.storage_context, session, store_keys=(native.store_key,), budget=1,
-            ))
-        assert reenqueued
-        async with native.storage_context.engine.connect() as connection:
-            assert await connection.scalar(select(edges.c.id).where(
-                edges.c.edge_kind == "candidate_sequence", edges.c.target_id == target,
-            )) is not None
+        class Guard:
+            @asynccontextmanager
+            async def offline_exclusivity(self):
+                async with lock:
+                    yield
+        async def writer():
+            async with lock:
+                entered.set()
+                await release.wait()
+                await state.mutate(lambda tx: tx.insert_record(record))
+        writing = asyncio.create_task(writer())
+        await entered.wait()
+        collection = asyncio.create_task(native.purge_unreferenced_content(exclusive=Guard()))
+        await asyncio.sleep(0)
+        assert not collection.done(), "offline collection must wait for admitted writers"
+        release.set()
+        await writing
+        await collection
         assert (await native.read_message_roots((root,)))[0]
+        assert await _count(engine, "ai_step_messages") == 2
 
 
 @pytest.mark.asyncio
-async def test_owner_and_native_edge_publication_roll_back_together(tmp_path: Path) -> None:
+async def test_owner_and_native_content_publication_roll_back_together(tmp_path: Path) -> None:
     from linktools.ai.persistence._archive import PreparedArchive
 
     async with _shared(tmp_path / "rollback.db") as (engine, state, native, _root):
         prepared = PreparedArchive()
         root = await native.prepare_archived_messages(_snapshot("new", 1, "new").messages, prepared)
         record = _record(encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
-        before = await _count(engine, "ai_native_content_edges")
+        before = await _count(engine, "ai_step_sequences")
 
         async def publish(tx):
             await tx.insert_record(record)
@@ -414,37 +369,25 @@ async def test_owner_and_native_edge_publication_roll_back_together(tmp_path: Pa
         with pytest.raises(AIError):
             await state.mutate(publish)
         assert await state.read(lambda tx: tx.get_record(record.key)) is None
-        assert await _count(engine, "ai_native_content_edges") == before
+        assert await _count(engine, "ai_step_sequences") == before
         assert await _count(engine, "ai_step_messages") == 1
 
 
 @pytest.mark.asyncio
-async def test_scoped_collection_leaves_other_namespace_content_and_clears_dead_candidates(tmp_path: Path, monkeypatch) -> None:
+async def test_scoped_offline_collection_leaves_other_namespace_content(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scope.db'}")
     stores = [SqlStepStore(engine, namespace="steps", tenant_id=tenant, max_snapshots_per_run=1)
               for tenant in ("one", "two")]
     await stores[0].initialize(local=True)
-    async def defer(_context, **kwargs):
-        pass
-    monkeypatch.setattr(index, "maintain_native_content", defer)
     try:
         for store in stores:
             await store.save_snapshot(_snapshot("run", 1, "old"))
             await store.save_snapshot(_snapshot("run", 2, "current"))
-        await stores[0].storage_context.run_mutation(lambda session: index.enqueue(
-            stores[0].storage_context, session, "sequence", 999999,
-        ))
-        await stores[0].storage_context.run_mutation(lambda session: index.collect_native_content(
-            stores[0].storage_context, session, store_keys=(stores[0].store_key,),
-        ))
+        await stores[0].purge_unreferenced_content(exclusive=_Offline())
         table = build_step_sql_metadata().tables["ai_step_messages"]
-        edges = build_step_sql_metadata().tables["ai_native_content_edges"]
         async with engine.connect() as connection:
             for store, expected in zip(stores, (1, 2)):
-                assert len((await connection.execute(select(table.c.id).where(
-                    table.c.store_key == store.store_key,
-                ))).all()) == expected
-            assert await connection.scalar(select(edges.c.id).where(edges.c.target_id == 999999)) is None
+                assert len((await connection.execute(select(table.c.id).where(table.c.store_key == store.store_key))).all()) == expected
     finally:
         for store in stores:
             await store.close()
@@ -452,7 +395,7 @@ async def test_scoped_collection_leaves_other_namespace_content_and_clears_dead_
 
 
 @pytest.mark.asyncio
-async def test_multiple_stale_candidates_each_rebuild_once_before_atomic_publication(tmp_path: Path) -> None:
+async def test_offline_invalidation_requires_fresh_candidates_before_atomic_publication(tmp_path: Path) -> None:
     from linktools.ai.persistence._archive import PreparedArchive
     from linktools.ai.persistence.contracts import ContextProjection
 
@@ -464,6 +407,7 @@ async def test_multiple_stale_candidates_each_rebuild_once_before_atomic_publica
         roots = tuple([await native.prepare_archived_messages(snapshot.messages, prepared) for snapshot in originals])
         for name in ("a", "b"):
             await native.save_snapshot(_snapshot(name, 2, "new-" + name))
+        await native.purge_unreferenced_content(exclusive=_Offline())
         before = await _count(engine, "ai_step_messages")
         record = _record(encode_domain(ContextProjection(tuple(ArchivedContextBlock(root, "c" * 64, 2) for root in roots))))
         attempts = 0
@@ -474,8 +418,17 @@ async def test_multiple_stale_candidates_each_rebuild_once_before_atomic_publica
             await tx.insert_record(record)
             await native.publish_archived_messages(tx, prepared)
 
+        with pytest.raises(AIError) as stale:
+            await state.mutate(publish)
+        assert stale.value.code is ErrorCode.INTERNAL_ERROR
+        assert await state.read(lambda tx: tx.get_record(record.key)) is None
+        # Offline exclusion expires this adapter's prepared proofs. Re-prepare
+        # from the original bytes; never republish an invalidated proof.
+        prepared = PreparedArchive()
+        refreshed = tuple([await native.prepare_archived_messages(snapshot.messages, prepared) for snapshot in originals])
+        assert refreshed == roots
         await state.mutate(publish)
-        assert attempts == 3, "each newly encountered stale candidate permits only one cold retry"
+        assert attempts == 2, "one rejected stale publication and one fresh atomic publication"
         assert await state.read(lambda tx: tx.get_record(record.key)) == record
         assert await _count(engine, "ai_step_messages") == before + 2
         assert all(await native.read_message_roots(roots))
@@ -540,15 +493,20 @@ async def test_state_owner_consumes_only_live_matching_publication_handoff(
                 assert await state.read(lambda transaction: transaction.get_record(record.key)) is None
             await state.mutate(write)
             assert await state.read(lambda transaction: transaction.get_record(record.key)) == record
-            assert len(queries) == (1 if boundary == "same" else 3 if boundary == "savepoint_rollback" else 2)
-            assert all(parameters[0] == native.store_key and len(parameters) == 2 for _, parameters in queries)
+            # Node indexing supplies publication roots; only an expired receipt
+            # or a different retained root needs this standalone owner lookup.
+            assert len(queries) == (1 if boundary in {"savepoint_commit", "savepoint_rollback", "other_root"} else 0)
+            assert all(parameters[:2] == (native_store_locator(native.store_key), native.store_key) and len(parameters) == 3 for _, parameters in queries)
             assert (await native.read_message_roots((retained,)))[0]
             if boundary == "other_root":
+                await native.purge_unreferenced_content(exclusive=_Offline())
                 assert await _count(engine, "ai_step_messages") == 1
             await native.save_snapshot(_snapshot("run", 2, "current"))
+            await native.purge_unreferenced_content(exclusive=_Offline())
             assert (await native.read_message_roots((retained,)))[0]
             assert await _count(engine, "ai_step_messages") == 2
             assert await state.mutate(lambda transaction: transaction.delete_record(record.key))
+            await native.purge_unreferenced_content(exclusive=_Offline())
             assert await _count(engine, "ai_step_messages") == 1
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)

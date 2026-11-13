@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
 
-from ..execution import (TaskExecutionService, ExecutionReleaseCallback as _ExecutionReleaseCallback,
+from ..execution import (ExecutionResultRecord, TaskExecutionService, ExecutionReleaseCallback as _ExecutionReleaseCallback,
     LocalExecutionWaiter as _LocalExecutionWaiter, overlay_execution_correlation as _overlay_execution_correlation,
     consumed_terminal_query, observed_query as _observed_query)
 from ..persistence.commands import StoredExecutionManagementAdapter
@@ -68,6 +68,7 @@ from ..core import (
     WorkspaceFileInput,
     canonical_json_bytes,
     canonical_sha256,
+    deterministic_id,
     normalize_json_value,
     overlay_correlation,
     principal_identity_payload,
@@ -77,6 +78,7 @@ from ..core import (
 from ..asset import AssetVersionRef
 from ..session import SessionAdmission
 from ..spec import RepositoryInstructions
+from ..inputs import RepositoryInstructionPayload
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
@@ -295,6 +297,13 @@ class _LiveExecutionStreamBroker(Protocol):
     def abandon_prepared_local_producer(self, execution_id: str) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _SessionStartRead:
+    """One admission attempt's read hints, never a reservation or reusable cache."""
+    session: "SessionRecord | None"
+    identity: IdempotencyRecord | None
+
+
 class _ExecutionRuntimeBridge:
     def __init__(self) -> None:
         self._port: _ExecutionRuntimePort | None = None
@@ -335,6 +344,18 @@ class _ExecutionManagementAdapter(StoredExecutionManagementAdapter):
         self._service = service
         super().__init__(service._state, service._object_store,
             object_key_factory=service._object_key_factory, object_reader=service._object_reader)
+
+    async def read_result_record(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | ExecutionResultRecord | None:
+        service = self._service
+        pending = await service._runtime_bridge.pending_turns.read_execution(execution_id, tenant_id=tenant_id)
+        if pending is not None:
+            return pending
+        record = await super().read_result_record(execution_id, tenant_id=tenant_id)
+        if record is not None:
+            return record
+        pending = await service._runtime_bridge.pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
+        record = await super().read_result_record(execution_id, tenant_id=tenant_id)
+        return record if record is not None else pending
 
     async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self._service.load_execution(execution_id, tenant_id=tenant_id)
@@ -498,11 +519,15 @@ class DefaultExecutionService(TaskExecutionService):
     def abandon_prepared_stream(self, execution_id: str) -> None:
         self._live_broker.abandon_prepared_local_producer(execution_id)
 
-    def _capture_repository_instructions(
+    async def _capture_repository_instructions(
         self, instructions: RepositoryInstructions,
     ) -> RuntimePayloadRef:
-        return RuntimePayloadRef(
-            StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.EXECUTION,
+        if self._context_archive is not None:
+            return await self._context_archive.prepare_repository_instruction_payload(
+                instructions, source_domain=PersistenceDomain.EXECUTION,
+            )
+        return RepositoryInstructionPayload.capture(instructions, instructions.to_payload()).to_reference(
+            PersistenceDomain.EXECUTION,
         )
 
     def _validate_tool_response_mode(
@@ -568,8 +593,10 @@ class DefaultExecutionService(TaskExecutionService):
     async def _request_identity(
         self, scope: str, idempotency_key: str, *, tenant_id: str,
         include_remote: bool = False,
+        captured: _SessionStartRead | None = None,
     ) -> tuple[int, IdempotencyRecord | None]:
-        identity = await self._state.idempotency.get(scope, idempotency_key, tenant_id=tenant_id)
+        identity = (captured.identity if captured is not None else
+                    await self._state.idempotency.get(scope, idempotency_key, tenant_id=tenant_id))
         if identity is not None:
             return identity.request_identity_version, identity
         pending = self._runtime_bridge.pending_turns
@@ -890,6 +917,13 @@ class DefaultExecutionService(TaskExecutionService):
             return ExecutionHandle(execution.execution_id)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    async def _read_session_start(self, session_id: str, idempotency_key: str, *, tenant_id: str) -> _SessionStartRead:
+        from ..persistence.commands import StateCommands
+        session, identity = await StateCommands.read_session_start(
+            self._sessions, self._state.idempotency, session_id, idempotency_key, tenant_id=tenant_id,
+        )
+        return _SessionStartRead(session, identity)
+
     async def start_for_session(
         self,
         agent_id: str,
@@ -903,6 +937,7 @@ class DefaultExecutionService(TaskExecutionService):
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
+        _start_read: _SessionStartRead | None = None,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -913,6 +948,7 @@ class DefaultExecutionService(TaskExecutionService):
             session_agent_id=agent_id,
             session=session,
             scope="session.resume",
+            start_read=_start_read,
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
@@ -1088,6 +1124,7 @@ class DefaultExecutionService(TaskExecutionService):
         resolved_binding: AgentBinding | None = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
+        start_read: _SessionStartRead | None = None,
     ) -> ExecutionHandle:
         metric_delivery: _TerminalMetricDelivery | None = None
 
@@ -1122,6 +1159,7 @@ class DefaultExecutionService(TaskExecutionService):
                     binding_contract=binding_contract,
                     resolved_binding=resolved_binding,
                     capture_metric=capture_metric,
+                    start_read=start_read,
                 )
             async with self._session_guard(request.principal.tenant_id, session_id):
                 return await self._start_unlocked(
@@ -1146,6 +1184,7 @@ class DefaultExecutionService(TaskExecutionService):
                     binding_contract=binding_contract,
                     resolved_binding=resolved_binding,
                     capture_metric=capture_metric,
+                    start_read=start_read,
                 )
         finally:
             admission_done.set_result(None)
@@ -1178,6 +1217,7 @@ class DefaultExecutionService(TaskExecutionService):
         budget_scope_id: str | None = None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
         prepared_input: _ExecutionStartContext | None = None,
+        start_read: _SessionStartRead | None = None,
     ) -> ExecutionHandle:
         if budget_scope_id is not None and (
             not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
@@ -1228,6 +1268,7 @@ class DefaultExecutionService(TaskExecutionService):
                 session_id, tenant_id=request.principal.tenant_id,
             )
             if session is None or settled:
+                start_read = None
                 current_session = await self._load_session(
                     session_id, tenant_id=request.principal.tenant_id
                 )
@@ -1280,6 +1321,7 @@ class DefaultExecutionService(TaskExecutionService):
         idempotency_key = request.idempotency_key
         identity_version, existing = await self._request_identity(
             scope, idempotency_key, tenant_id=request.principal.tenant_id, include_remote=prepared_input is not None,
+            captured=start_read,
         )
         request_digest = _request_digest(
             request,
@@ -1296,7 +1338,11 @@ class DefaultExecutionService(TaskExecutionService):
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
         )
-        pending_turn = await self._runtime_bridge.pending_turns.lookup(
+        pending_turns = self._runtime_bridge.pending_turns
+        pending_before_lookup = pending_turns.peek_request(
+            tenant_id=request.principal.tenant_id, scope=scope, idempotency_key=idempotency_key,
+        )
+        pending_turn = await pending_turns.lookup(
             tenant_id=request.principal.tenant_id, scope=scope,
             idempotency_key=idempotency_key, request_digest=request_digest,
         )
@@ -1307,7 +1353,8 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
             )
             return ExecutionHandle(pending_turn.execution.execution_id)
-        if existing is None:
+        if existing is None and pending_before_lookup is not None:
+            # Settling a local pending turn can publish its durable identity.
             existing = await self._state.idempotency.get(
                 scope,
                 idempotency_key,
@@ -1465,7 +1512,7 @@ class DefaultExecutionService(TaskExecutionService):
                         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                     inherited = await port.load_input_repository_instructions(parent.input_context)
                     repository_instructions = (
-                        None if inherited is None else self._capture_repository_instructions(inherited)
+                        None if inherited is None else await self._capture_repository_instructions(inherited)
                     )
                 if repository_instructions is None or input_instruction_paths:
                     documents = {}
@@ -1487,7 +1534,7 @@ class DefaultExecutionService(TaskExecutionService):
                     resolved_instructions = RepositoryInstructions(tuple(documents.values()))
                     self._instruction_resolver.validate(resolved_instructions)
                     if resolved_instructions.documents:
-                        repository_instructions = self._capture_repository_instructions(
+                        repository_instructions = await self._capture_repository_instructions(
                             resolved_instructions,
                         )
             else:
@@ -1516,7 +1563,7 @@ class DefaultExecutionService(TaskExecutionService):
                 resolved_instructions = RepositoryInstructions(tuple(documents.values()))
                 self._instruction_resolver.validate(resolved_instructions)
                 if resolved_instructions.documents:
-                    repository_instructions = self._capture_repository_instructions(
+                    repository_instructions = await self._capture_repository_instructions(
                         resolved_instructions,
                     )
 
@@ -1541,7 +1588,8 @@ class DefaultExecutionService(TaskExecutionService):
             fork_base_execution_id=fork_base_execution_id,
             lineage_kind=lineage_kind,
             agent_run_seq=0,
-            memory_scope=("capture:" + execution_id) if request.input_context is not None else request.memory_scope,
+            memory_scope=("capture:" + deterministic_id(execution_id, "capture-memory"))
+            if request.input_context is not None else request.memory_scope,
             conversation_agent_run_id=conversation_agent_run_id,
             mode=request.mode,
             planning=request.planning,
@@ -2381,18 +2429,18 @@ class DefaultExecutionService(TaskExecutionService):
         if timeout_seconds is not None and timeout_seconds < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        async def load_confirmed_terminal() -> ExecutionRecord:
+        async def load_confirmed_terminal() -> ExecutionRecord | ExecutionResultRecord:
             publication = (None if self._retained_publication is None else
                 self._retained_publication(execution_id, tenant_id=principal.tenant_id))
             if publication is None:
-                return await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+                return await self.manager.load_result_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
             await self.authorize_loaded_execution(
                 publication.execution, principal, AuthorizationAction.EXECUTION_READ, owner_principal_id=None,
             )
             return publication.execution
 
         async def wait_once() -> ExecutionResult:
-            execution = await self.load_authorized(
+            execution = await self.manager.load_result_authorized(
                 execution_id,
                 principal,
                 AuthorizationAction.EXECUTION_READ,
@@ -2765,11 +2813,9 @@ class DefaultExecutionService(TaskExecutionService):
         principal: Principal,
         idempotency_key: str | None = None,
     ) -> ExecutionHandle:
-        execution = await self.load_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RECOVER,
-        )
+        read = (self.manager.load_view_authorized if type(self._state.executions) is ExecutionRepositoryImpl
+                else self.load_authorized)
+        execution = await read(execution_id, principal, AuthorizationAction.EXECUTION_RECOVER)
         if idempotency_key is None:
             if execution.status not in {
                 ExecutionStatus.RECOVERY_REQUIRED,
@@ -2942,6 +2988,17 @@ class DefaultExecutionService(TaskExecutionService):
         # Remote publication can outlive the source commit observed during this await.
         record = await self.load_source_execution(execution_id, tenant_id=tenant_id)
         return record if record is not None else pending
+
+
+    async def budget_usage(self, execution_id: str, *, principal: Principal) -> BudgetUsage | None:
+        if type(self._state.executions) is not ExecutionRepositoryImpl:
+            return await super().budget_usage(execution_id, principal=principal)
+        execution = await self.manager.load_view_authorized(
+            execution_id, principal, AuthorizationAction.EXECUTION_READ, observed=True,
+        )
+        if execution.budget_scope_id is None:
+            return None
+        return await self._state.budgets.read(execution.budget_scope_id)
 
 
     async def load_observed_authorized(

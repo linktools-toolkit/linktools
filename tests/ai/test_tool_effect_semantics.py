@@ -6,7 +6,6 @@ import asyncio
 from typing import Any
 
 import pytest
-from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ToolCallFailed, ToolCallRetry
 from linktools.ai.runtime._tool import ToolOperationDecision
@@ -14,7 +13,6 @@ from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     BoundaryToolset,
 )
-from linktools.ai.persistence.contracts import ToolOperationRecord
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
@@ -359,8 +357,3 @@ def test_tool_descriptor_rejects_tool_operation_without_effect() -> None:
             effect_policy="none",
             tool_class="business",
         )
-
-
-def test_error_payload_contract_uses_durable_tool_record() -> None:
-    assert ToolOperationStatus.CLAIMED.value == "CLAIMED"
-    assert ToolOperationRecord.__name__ == "ToolOperationRecord"

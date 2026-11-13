@@ -156,7 +156,10 @@ async def test_custom_native_capability_preserves_hooks_without_provisional_effe
             events = await native.list_events(run_id=runs[0].run_id)
             tool_events = [event for event in events if event.kind.startswith("tool_call")]
             assert [event.kind for event in tool_events] == ["tool_call_started", "tool_call_completed"]
-            assert all(event.metadata == runs[0].metadata and event.agent_name == runs[0].agent_name
+            expected_metadata = dict(runs[0].metadata)
+            if override_hooks is None:
+                expected_metadata["linktools.operation_id"] = operations[0].tool_operation_id
+            assert all(event.metadata == expected_metadata and event.agent_name == runs[0].agent_name
                        and event.parent_run_id == runs[0].parent_run_id for event in tool_events)
         assert effects == ["effect"]
         assert hooks == (["before", "after"] if override_hooks else [])
@@ -180,12 +183,14 @@ async def test_unknown_tool_fact_and_native_failure_event_share_storage(
     class NativeStore(SqlStepStore):
         interrupted = False
 
-        async def _write_events(self, session, events, *, source=None, started=None):
+        async def _write_events(self, session, events, *, source=None, started=None, replay_keys=None,
+                                fixed_error_sources: bool = False) -> None:
             if (fail_native_once and not self.interrupted
                     and any(event.error == ErrorCode.TOOL_EFFECT_UNKNOWN.value for event in events)):
                 self.interrupted = True
                 raise OSError("native event storage failed")
-            await super()._write_events(session, events, source=source, started=started)
+            await super()._write_events(session, events, source=source, started=started, replay_keys=replay_keys,
+                                        fixed_error_sources=fixed_error_sources)
 
         async def append_event(self, event):
             raise AssertionError("same-group unknown publication must join the effect transaction")

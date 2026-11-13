@@ -10,8 +10,8 @@ from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 
 from ..errors import AIError, ErrorCode
-from ..steps import encode_native_replay_key
-from ._native_run_reference import NativeRunReferences, is_native_run_reference
+from ..steps import encode_native_replay_key, decode_native_replay_key
+from ._run_registration import RunRegistrationReference
 from ._native_event_reference import NativeEventReferences
 from ._step_backup import NativeStepBackup
 from ._step_store import SqlStepStore
@@ -36,7 +36,7 @@ class NativeBackupProjections:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         self._runs = {row["run_id"]: row for row in backup.runs}
         self._events = {(row["run_id"], row["idempotency_key"]): row for row in backup.events
-                        if row["idempotency_key"] is not None}
+                        if decode_native_replay_key(row["idempotency_key"]) is not None}
 
     def validate(self, projected: StoredRecord | StoredFact,
                  physical_data: Mapping[str, object]) -> StoredRecord | StoredFact:
@@ -44,13 +44,12 @@ class NativeBackupProjections:
         try:
             physical = replace(projected, data=physical_data)
             if isinstance(projected, StoredRecord):
-                if projected.kind != "agent_run" or not is_native_run_reference(physical_data):
+                if projected.kind != "agent_run" or physical_data.get("value", {}).get("type") != "run_reference":
                     raise ValueError("portable native run projection has an invalid kind")
-                reference = NativeRunReferences.decode_reference(physical_data)
-                row = self._runs[reference["run"]]
+                reference = RunRegistrationReference.from_data(physical_data)
+                row = self._runs[reference.run_id]
                 source = _RUN_ADAPTER.validate_python(dict(row, metadata=json.loads(row["metadata"])))
-                run = NativeRunReferences.project_source(physical_data, source,
-                    store_key=row["store_key"], expected_store_key=self._store_key)
+                run = reference.project(source)
                 if projected.key != record_key(
                         self._namespace, self._tenant_id, "trace", "agent_run", (source.run_id,)):
                     raise ValueError("portable run projection belongs to another Trace record")

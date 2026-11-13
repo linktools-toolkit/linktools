@@ -627,13 +627,13 @@ async def test_state_turn_sort_reuses_identity_across_pages_and_snapshot(tmp_pat
         assert restored == records
         validate_snapshot_domain(
             namespace="turn-authority", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-            records=restored, aliases=(), facts=(), operations=(), sequences={},
+            records=restored, facts=(), operations=(), sequences={},
         )
         invalid = (replace(restored[0], sort_key=b"not-its-identity"), *restored[1:])
         with pytest.raises(AIError) as caught:
             validate_snapshot_domain(
                 namespace="turn-authority", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                records=invalid, aliases=(), facts=(), operations=(), sequences={},
+                records=invalid, facts=(), operations=(), sequences={},
             )
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
@@ -666,8 +666,8 @@ async def test_state_turn_rejects_foreign_scope_without_mutation(tmp_path, backe
 async def test_pending_turn_uses_local_scope_with_maximum_namespace_and_compound_keys(tmp_path, backend):
     from linktools.ai.persistence.coordination import PendingTurnCoordination
 
-    namespace, tenant = '"' * 256, '"' * 128
-    request_key = "s" * 128 + ":" + "k" * 256
+    namespace, tenant = '"' * 128, '"' * 128
+    request_key = "s" * 128 + ":" + "k" * 128
     session_key = "request:" + request_key
     async with _open_store(backend, tmp_path / backend) as store:
         authority = StateTurnCoordination(store, namespace=namespace, tenant_id=tenant)
@@ -690,9 +690,9 @@ async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(
 
     async with _open_store(backend, tmp_path / backend) as store:
         authority = _backend(store)
-        scope = replace(_SCOPE, scope="é" * 128)
+        scope = replace(_SCOPE, scope="é" * 64)
         owner = await authority.claim_turn(scope, session_key="session:" + "s" * 128,
-                                          request_key="r" * 385, request_digest="digest",
+                                          request_key="r" * 257, request_digest="digest",
                                           execution_id="e", owner_id="o", lease_seconds=60)
         assert await authority.read_turn(scope, "e") == replace(owner, lease=None)
         records = await store.read(lambda tx: tx.scan_records())

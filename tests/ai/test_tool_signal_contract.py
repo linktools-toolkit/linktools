@@ -22,16 +22,12 @@ from ._runtime_test_helpers import _UsageFunctionModel, is_tool_retry
 
 
 @pytest.mark.parametrize("signal_type", (ToolCallRetry, ToolCallFailed))
-def test_tool_signal_has_only_a_valid_message(signal_type: type[Exception]) -> None:
+def test_tool_signal_carries_a_valid_message(signal_type: type[Exception]) -> None:
     signal = signal_type("valid message")
 
     assert isinstance(signal, Exception)
     assert not isinstance(signal, AIError)
     assert signal.message == "valid message"
-    assert vars(signal) == {"message": "valid message"}
-    assert not hasattr(signal, "code")
-    assert not hasattr(signal, "retryable")
-    assert not hasattr(signal, "safe_details")
 
 
 @pytest.mark.parametrize("message", ("", "   ", "x" * 2049, 1, None))

@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 from sqlalchemy import delete, event, inspect, update
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -21,6 +22,7 @@ from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.persistence import Persistence, PersistenceDomain, SqlStepStore
 from linktools.ai.persistence._native_run_reference import is_native_run_reference
 from linktools.ai.persistence._official_step_reader import OfficialStepReader
+from linktools.ai.persistence._run_registration import RunRegistrationReference
 from linktools.ai.persistence._snapshot import SnapshotLimits
 from linktools.ai.persistence._step_contracts import StepEvent
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
@@ -33,20 +35,23 @@ from .test_step_projection import _execution
 
 
 @asynccontextmanager
-async def _source(tmp_path: Path, *, confirmed: bool = True, restart: bool = True, large: bool = True, default_metadata: bool = False) -> AsyncIterator[tuple]:
+async def _source(
+    tmp_path: Path, *, confirmed: bool = True, restart: bool = True, large: bool = True,
+    default_metadata: bool = False, extra_metadata: dict[str, str] | None = None,
+) -> AsyncIterator[tuple]:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="native-run-facts", tenant_id="tenant")
     native = await state.create_step_store()
     store = state.run_store
     source = RunRecord(
         run_id="run", conversation_id="conversation", parent_run_id="parent", agent_name="agent",
-        # A long registration token makes the reference larger than the small inline run.
+        # A long registration token also exercises references with small metadata.
         registration_id="registration" if large else "registration" * 128,
         metadata=({"capability_scope": "parent", "history_id": "6ae1ec90-9238-43ec-a423-30db52344212",
                    "agent_run_seq": "1", "linktools.transcript_start": "0", "linktools.transcript_run_id": "run"}
                   if default_metadata else
                   {"shared": "shared-native-payload" * (200 if large else 1), "different": "native",
-                   "native-only": "retained", "linktools.transcript_start": "0"}),
+                   "native-only": "retained", "linktools.transcript_start": "0"}) | (extra_metadata or {}),
     )
     run = replace(OfficialStepReader.project_run(source),
         started_at=source.started_at + timedelta(microseconds=1),
@@ -59,8 +64,8 @@ async def _source(tmp_path: Path, *, confirmed: bool = True, restart: bool = Tru
         store.bind_step_store(native)
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1,
                                      restart_checkpoints=restart)
+        await native.register_run(source)
         if confirmed:
-            await native.register_run(source)
             store.confirm_step_run(source)
         await store.register_agent_run(run, execution_id="execution")
         yield state, native, source, run
@@ -102,30 +107,30 @@ async def test_confirmed_native_run_owns_lineage_and_common_metadata(tmp_path: P
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("confirmed,restart", ((False, True), (True, False)))
-async def test_unconfirmed_or_independent_trace_run_keeps_its_own_fact(
+async def test_unconfirmed_or_independent_trace_resolves_canonical_registration(
     tmp_path: Path, confirmed: bool, restart: bool,
 ) -> None:
-    async with _source(tmp_path, confirmed=confirmed, restart=restart) as (state, _, _, run):
+    async with _source(tmp_path, confirmed=confirmed, restart=restart) as (state, native, source, run):
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         raw = await _raw_run(archive)
-        assert not is_native_run_reference(raw.data)
-        assert _decode_step_envelope(raw.data) == run
+        assert is_native_run_reference(raw.data)
+        assert await archive.get_agent_run(agent_run_id="run") == run
+        assert await native.get_run(run_id="run") == source
 
 
 @pytest.mark.asyncio
-async def test_later_confirmation_removes_inline_duplicate_without_reordering_events(tmp_path: Path) -> None:
-    async with _source(tmp_path, confirmed=False) as (state, native, source, run):
+async def test_later_confirmation_preserves_run_reference_and_event_order(tmp_path: Path) -> None:
+    async with _source(tmp_path, confirmed=False) as (state, _, source, run):
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         before = await _raw_run(archive)
-        assert not is_native_run_reference(before.data)
-        await native.register_run(source)
+        assert is_native_run_reference(before.data)
         state.run_store.confirm_step_run(source)
         await _flush(state, step=1)
         after = await _raw_run(archive)
         assert is_native_run_reference(after.data)
-        assert after.key == before.key
+        assert after.key == before.key and after.data == before.data
         assert await archive.get_agent_run(agent_run_id="run") == run
         assert [item.step_index for item in await archive.list_events(agent_run_id="run")] == [0, 1]
         assert (await archive.capture_history(("run",)))["run"].event_count == 2
@@ -149,8 +154,12 @@ async def test_cold_history_reads_share_one_native_join_and_keep_raw_cache(tmp_p
             assert await archive.get_agent_run(agent_run_id="run") == run
             assert len(statements) == 1
             statements.clear()
-            assert (await archive.capture_history(("run",)))["run"].run == run
-            assert len(statements) == 2
+            captured = (await archive.capture_history(("run",)))["run"]
+            assert captured.run == run
+            assert captured.event_count == 1 and captured.model_interaction_count == 0
+            assert len(statements) == 1
+            assert "ai_step_run_admissions" in statements[0]
+            assert "event_high_water" in statements[0] and "interaction_high_water" in statements[0]
             statements.clear()
             assert await archive.read_model_interactions_with_run(agent_run_id="run") == (run, [])
             assert len(statements) == 2
@@ -172,23 +181,28 @@ async def test_cold_history_reads_share_one_native_join_and_keep_raw_cache(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing", (False, True))
-async def test_native_run_reference_fails_closed_when_source_is_missing_or_changed(tmp_path: Path, missing: bool) -> None:
-    async with _source(tmp_path) as (state, native, _, _):
+async def test_native_run_reference_requires_owner_but_reads_valid_source_changes(tmp_path: Path, missing: bool) -> None:
+    async with _source(tmp_path) as (state, native, _, run):
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         table = build_step_sql_metadata().tables["ai_step_runs"]
         async with native.storage_context.engine.begin() as connection:
             statement = delete(table) if missing else update(table).values(metadata='{"changed":"source"}')
             await connection.execute(statement.where(table.c.store_key == native.store_key))
-        with pytest.raises(AIError) as caught:
-            await archive.get_agent_run(agent_run_id="run")
-        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        if missing:
+            with pytest.raises(AIError) as caught:
+                await archive.get_agent_run(agent_run_id="run")
+            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        else:
+            # Fixed identity owns current valid source fields; only actual
+            # runtime overrides are retained, not an old projection checksum.
+            assert await archive.get_agent_run(agent_run_id="run") == replace(run, metadata={
+                "changed": "source", "different": "runtime", "runtime-only": "retained"})
 
 
 @pytest.mark.asyncio
 async def test_source_confirmation_uses_original_registration_after_changed_replay(tmp_path: Path) -> None:
     async with _source(tmp_path, confirmed=False) as (state, native, source, run):
-        await native.register_run(source)
         changed = replace(source, metadata={**source.metadata, "shared": "different"})
         await native.commit_step(run=changed)
         state.run_store.confirm_step_run(changed)
@@ -201,7 +215,7 @@ async def test_source_confirmation_uses_original_registration_after_changed_repl
 
 @pytest.mark.asyncio
 async def test_portable_trace_subset_projects_native_source_without_changing_live_record(tmp_path: Path) -> None:
-    async with _source(tmp_path) as (state, _, _, run):
+    async with _source(tmp_path) as (state, _, source, run):
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         objects = InMemoryObjectStore()
@@ -209,6 +223,7 @@ async def test_portable_trace_subset_projects_native_source_without_changing_liv
             namespace="native-run-facts", tenant_id="tenant", durable_domains=frozenset({PersistenceDomain.TRACE}),
             stores={PersistenceDomain.TRACE: archive.state_store},
             object_stores={domain: objects for domain in PersistenceDomain}, read_only=True,
+            run_registrations=state.run_store.run_registrations,
         )
         target = InMemoryObjectStore()
         ref = await RuntimeSnapshotOperations(resources, require_ready=lambda: None).export_snapshot(
@@ -216,8 +231,11 @@ async def test_portable_trace_subset_projects_native_source_without_changing_liv
         manifest = json.loads(await read_object(target, ref.key, expected_digest=ref.digest, expected_size=ref.size))
         records = [decode_record(value) for value in manifest["domains"]["trace"]["records"]]
         exported = next(record for record in records if record.kind == "agent_run")
-        assert _decode_step_envelope(exported.data) == run
-        assert is_native_run_reference((await _raw_run(archive)).data)
+        exported_source, = manifest["run_registrations"]
+        exported_source = TypeAdapter(RunRecord).validate_python(exported_source)
+        assert exported_source == source
+        assert RunRegistrationReference.from_data(exported.data).project(exported_source) == run
+        assert exported.data == (await _raw_run(archive)).data
 
 
 @pytest.mark.asyncio
@@ -249,35 +267,39 @@ async def test_selected_trace_schema_provisions_its_native_run_read_dependency(t
 
 
 @pytest.mark.asyncio
-async def test_small_run_keeps_smaller_inline_representation(tmp_path: Path) -> None:
-    async with _source(tmp_path, large=False) as (state, _, _, run):
+async def test_small_run_keeps_canonical_registration_reference(tmp_path: Path) -> None:
+    async with _source(tmp_path, large=False) as (state, native, source, run):
         await _flush(state)
-        raw = await _raw_run(state.run_store.read_store(PersistenceDomain.TRACE))
-        assert not is_native_run_reference(raw.data)
-        assert _decode_step_envelope(raw.data) == run
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
+        raw = await _raw_run(archive)
+        assert is_native_run_reference(raw.data)
+        assert await archive.get_agent_run(agent_run_id="run") == run
+        assert await native.get_run(run_id="run") == source
 
 
 @pytest.mark.asyncio
-async def test_uncertain_native_source_invalidates_reference_admission(tmp_path: Path) -> None:
-    async with _source(tmp_path) as (state, _, _, run):
+async def test_uncertain_native_confirmation_preserves_canonical_registration(tmp_path: Path) -> None:
+    async with _source(tmp_path) as (state, native, source, run):
         state.run_store.invalidate_step_run("run")
         await _flush(state)
-        raw = await _raw_run(state.run_store.read_store(PersistenceDomain.TRACE))
-        assert not is_native_run_reference(raw.data)
-        assert _decode_step_envelope(raw.data) == run
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
+        raw = await _raw_run(archive)
+        assert is_native_run_reference(raw.data)
+        assert await archive.get_agent_run(agent_run_id="run") == run
+        assert await native.get_run(run_id="run") == source
 
 
 @pytest.mark.asyncio
-async def test_reference_promotion_rolls_back_with_original_projection_transaction(tmp_path: Path) -> None:
+async def test_trace_projection_rolls_back_without_changing_run_reference(tmp_path: Path) -> None:
     async with _source(tmp_path, confirmed=False) as (state, native, source, run):
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         before = await _raw_run(archive)
-        await native.register_run(source)
+        assert is_native_run_reference(before.data)
         state.run_store.confirm_step_run(source)
 
         def fail(_connection, _cursor, statement, _parameters, _context, _many):
-            if statement.startswith("INSERT INTO ai_state_facts "):
+            if statement.startswith("INSERT INTO ai_trace_events "):
                 raise RuntimeError("publication failed")
 
         engine = native.storage_context.engine
@@ -315,7 +337,7 @@ async def test_native_reference_cannot_redirect_trace_to_another_tenant(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key", ("shared", "different", "native-only"))
-async def test_native_projection_checks_reused_fields_but_retains_runtime_overrides(tmp_path: Path, key: str) -> None:
+async def test_native_projection_reads_source_fields_and_retains_runtime_overrides(tmp_path: Path, key: str) -> None:
     async with _source(tmp_path) as (state, native, source, run):
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
@@ -324,12 +346,8 @@ async def test_native_projection_checks_reused_fields_but_retains_runtime_overri
         async with native.storage_context.engine.begin() as connection:
             await connection.execute(update(table).where(table.c.store_key == native.store_key)
                                      .values(metadata=json.dumps(metadata)))
-        if key == "shared":
-            with pytest.raises(AIError) as caught:
-                await archive.get_agent_run(agent_run_id="run")
-            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        else:
-            assert await archive.get_agent_run(agent_run_id="run") == run
+        expected = replace(run, metadata={**run.metadata, "shared": "changed"}) if key == "shared" else run
+        assert await archive.get_agent_run(agent_run_id="run") == expected
 
 
 @pytest.mark.asyncio
@@ -405,18 +423,17 @@ async def test_terminal_history_prefetch_reuses_present_and_missing_run_reads(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ("inline", "insert", "promote", "existing"))
+@pytest.mark.parametrize("mode", ("unconfirmed", "confirmed", "later-confirmed", "invalidated"))
 async def test_checkpoint_projection_reuses_its_run_read_for_terminal_head(tmp_path: Path, mode: str) -> None:
     from pydantic_ai.messages import ModelRequest, UserPromptPart
     from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
 
-    async with _source(tmp_path, confirmed=mode in {"insert", "existing"}) as (state, native, source, run):
-        if mode in {"promote", "existing"}:
+    async with _source(tmp_path, confirmed=mode in {"confirmed", "invalidated"}) as (state, _, source, run):
+        if mode in {"later-confirmed", "invalidated"}:
             await _flush(state)
-        if mode == "promote":
-            await native.register_run(source)
+        if mode == "later-confirmed":
             state.run_store.confirm_step_run(source)
-        if mode == "existing":
+        if mode == "invalidated":
             state.run_store.invalidate_step_run("run")
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         prepared = await archive.prepare_checkpoints(run, (AgentRunCheckpoint(
@@ -439,9 +456,9 @@ async def test_checkpoint_projection_reuses_its_run_read_for_terminal_head(tmp_p
             assert head.checkpoint_count == 1
             assert head.transcript_message_count == 1
             assert await archive.get_agent_run(agent_run_id="run") == run
-            # The untouched interaction sequence is the only remaining read;
-            # run/head/projection records must all reuse the write transaction.
-            assert len(statements) == 1 and "ai_state_sequences" in statements[0]
+            # Admission prefetch includes its untouched interaction counter;
+            # all head inputs reuse this write transaction's current values.
+            assert not statements
 
         engine = archive.state_store.context.engine
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
@@ -492,14 +509,33 @@ async def test_joined_record_reader_rejects_writing_or_locking_select_plans(tmp_
 
 
 @pytest.mark.parametrize("dialect_name", ("sqlite", "postgresql", "mysql"))
-def test_native_join_preserves_full_record_key_bind_budget(dialect_name: str) -> None:
+@pytest.mark.asyncio
+async def test_native_join_batches_full_record_keys_within_bind_budget(dialect_name: str) -> None:
     from sqlalchemy.dialects import mysql, postgresql, sqlite
     from linktools.ai.persistence._native_run_reference import NativeRunReferences
 
     dialect = {"sqlite": sqlite, "postgresql": postgresql, "mysql": mysql}[dialect_name].dialect()
-    state = SimpleNamespace(context=SimpleNamespace(dialect=dialect), store_key=b"state-partition")
+    state = SimpleNamespace(context=SimpleNamespace(dialect=dialect, engine=SimpleNamespace(dialect=dialect)),
+                            store_key=b"state-partition")
     reader = NativeRunReferences(state, namespace="native-run-facts", tenant_id="tenant")
     keys = tuple(index.to_bytes(32, "big") for index in range(998))
-    compiled = reader.statement(keys=keys).compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
-    parameters = compiled.params if compiled.positiontup is None else compiled.positiontup
-    assert len(parameters) == 999
+    batches = []
+
+    class Transaction:
+        def cached_records(self, requested):
+            return {}
+
+        async def read_joined_records(self, context, statement, *, keys=(), sequence_keys=()):
+            assert sequence_keys == ()
+            compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
+            parameters = compiled.params if compiled.positiontup is None else compiled.positiontup
+            assert len(parameters) <= 999
+            sql = str(compiled)
+            raw_key = dialect.identifier_preparer.quote("key")
+            assert "ai_state_records.key_locator IN" in sql and f"ai_state_records.{raw_key} IN" in sql
+            batches.append(tuple(keys))
+            return ()
+
+    assert await reader.read(Transaction(), keys=keys) == ()
+    assert tuple(key for batch in batches for key in batch) == keys
+    assert len(batches) == 2
