@@ -2154,7 +2154,6 @@ class _SqlTransaction:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await self._execute(delete(facts).where(
                     facts.c.store_key == self._store_key,
-                    facts.c.owner_locator.in_([_key_locator(key) for key in current]),
                     _keys_match(facts.c.owner_key, tuple(current)),
                 ))
                 deleted = await self._execute(delete(table).where(or_(
