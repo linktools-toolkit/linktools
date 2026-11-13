@@ -110,20 +110,19 @@ class NativeMessageReceipt:
     prepared: PreparedNativeMessages | None
     _transaction: "AsyncSessionTransaction | None" = None
     _store_key: bytes | None = field(default=None, repr=False)
-    _root_targets: tuple[tuple[str, int], ...] = ()
+    _roots: tuple[str, ...] = ()
 
-    def publication_targets(
+    def confirm_publication(
         self, session: "AsyncSession", *, store_key: bytes, roots: Sequence[str],
-    ) -> tuple[int, ...]:
-        """Reuse physical IDs only inside this exact live publication transaction."""
-        from ._native_content_index import PublicationTargetsUnavailable
+    ) -> None:
+        """Confirm roots only inside their original live publication transaction."""
+        from ._native_content_index import PublicationUnavailable
 
         if (self.prepared is None or self._transaction is None
                 or (session.get_nested_transaction() or session.get_transaction()) is not self._transaction or not self._transaction.is_active
                 or store_key != self._store_key
-                or tuple(sorted(set(roots))) != tuple(root for root, _ in self._root_targets)):
-            raise PublicationTargetsUnavailable("native publication targets require their active transaction, store, and roots")
-        return tuple(target for _, target in self._root_targets)
+                or tuple(sorted(set(roots))) != self._roots):
+            raise PublicationUnavailable("native publication targets require their active transaction, store, and roots")
 
     @property
     def root(self) -> NativeMessageSequence | None:
@@ -414,7 +413,7 @@ class NativeMessageContent:
         owner_written: bool, confirmed_content: CommittedNativeMessages | None,
     ) -> NativeMessageReceipt:
         from sqlalchemy.ext.asyncio import AsyncConnection
-        from ._native_content_index import index_nodes, note_publication, register_publication_targets, register_recovery
+        from ._native_content_index import register_publication, register_recovery
 
         recovery = self._recoveries.get(prepared)
         if recovery is not None:
@@ -446,21 +445,18 @@ class NativeMessageContent:
                      "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
                     for identity, node in prepared.nodes if prepared.cold or identity not in self._known_nodes
                 ])
-            resolved = await index_nodes(self._context, session, self._store_key, [
-                {"sha256": identity, "message_sha256": node.content_id,
-                 "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
-                for identity, node in prepared.nodes
-            ])
-            targets = await note_publication(
-                session, self._store_key, tuple(span.first for span in prepared.root.slices), resolved=resolved,
-            )
+            # Preparation extends this owner's committed closure; the INSERTs
+            # above establish every new immutable dependency in this transaction.
+            # Offline reclamation invalidates that knowledge while writers are
+            # drained, so publication does not need to rediscover physical IDs.
+            roots = tuple(sorted({span.first for span in prepared.root.slices}))
             receipt = NativeMessageReceipt(
                 prepared, session.get_nested_transaction() or session.get_transaction(),
-                self._store_key, tuple(sorted(targets.items())),
+                self._store_key, roots,
             )
-            register_publication_targets(
+            register_publication(
                 session, self._store_key, tuple(span.first for span in prepared.root.slices),
-                receipt.publication_targets,
+                receipt.confirm_publication,
             )
         self._receipts.add(receipt)
         return receipt

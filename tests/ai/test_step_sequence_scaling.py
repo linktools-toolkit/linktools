@@ -368,7 +368,7 @@ async def test_invalid_snapshot_descriptor_does_not_hide_other_valid_history(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rollback", (False, True))
-async def test_publication_ids_are_reused_only_within_their_live_owner_transaction(
+async def test_publication_receipts_are_reused_only_within_their_live_owner_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rollback: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'publication-ids.db'}")
@@ -385,13 +385,12 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
         roots = tuple(span.first for span in prepared.root.slices)
         for previous in receipts:
             with pytest.raises(ValueError, match="active transaction"):
-                previous.publication_targets(session, store_key=store.store_key, roots=roots)
+                previous.confirm_publication(session, store_key=store.store_key, roots=roots)
         receipt = await publish(content, session, prepared, **kwargs)
-        targets = receipt.publication_targets(session, store_key=store.store_key, roots=roots)
-        assert len(targets) == 1 and targets[0] > 0
+        receipt.confirm_publication(session, store_key=store.store_key, roots=roots)
         for scope, selected in ((native_store_key("0", "tenant"), roots), (store.store_key, ("0" * 64,))):
             with pytest.raises(ValueError, match="store, and roots"):
-                receipt.publication_targets(session, store_key=scope, roots=selected)
+                receipt.confirm_publication(session, store_key=scope, roots=selected)
         receipts.append(receipt)
         sessions.append(session)
         if fail_once:
@@ -411,14 +410,13 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
                 await store.save_snapshot(snapshot)
             projections.clear()
         await store.save_snapshot(snapshot)
-        # One bounded UNION verifies both node/message publication owners.
-        # Offline GC adds no online scan or dependency revision update.
-        assert len(projections) == 1
+        # Successful immutable writes already establish the publication closure.
+        assert not projections
         assert not any("ai_step_messages.message" in sql or "ai_step_messages.payload_json" in sql
                        for sql in projections)
         for receipt, session in zip(receipts, sessions):
             with pytest.raises(ValueError, match="active transaction"):
-                receipt.publication_targets(
+                receipt.confirm_publication(
                     session, store_key=store.store_key,
                     roots=tuple(span.first for span in receipt.root.slices),
                 )
@@ -431,7 +429,7 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rollback", (False, True))
-async def test_publication_ids_reject_a_completed_savepoint(
+async def test_publication_receipts_reject_a_completed_savepoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rollback: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'savepoint-ids.db'}")
@@ -446,14 +444,14 @@ async def test_publication_ids_reject_a_completed_savepoint(
         try:
             async with session.begin_nested():
                 receipt = await publish(content, session, prepared, **kwargs)
-                assert receipt.publication_targets(session, store_key=store.store_key, roots=roots)
+                receipt.confirm_publication(session, store_key=store.store_key, roots=roots)
                 if rollback:
                     raise RuntimeError("rollback savepoint")
         except RuntimeError as error:
             assert rollback and str(error) == "rollback savepoint"
         assert session.in_transaction()
         with pytest.raises(ValueError, match="active transaction"):
-            receipt.publication_targets(session, store_key=store.store_key, roots=roots)
+            receipt.confirm_publication(session, store_key=store.store_key, roots=roots)
         return receipt
 
     monkeypatch.setattr(NativeMessageContent, "publish_in_session", nested_publication)

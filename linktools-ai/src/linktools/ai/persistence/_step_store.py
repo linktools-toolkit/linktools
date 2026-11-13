@@ -1679,7 +1679,7 @@ class SqlStepStore:
         if snapshot_id is None:
             raise RuntimeError("snapshot insertion did not return its physical identity")
         content = await self._message_content.publish_in_session(session, prepared, owner_inserted=True)
-        targets = content.publication_targets(
+        content.confirm_publication(
             session, store_key=self._store_key, roots=tuple(span.first for span in prepared.root.slices),
         )
         await self._prune_snapshots(session, values["run_id"])
