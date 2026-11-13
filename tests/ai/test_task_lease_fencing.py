@@ -3,7 +3,10 @@
 """Regression coverage for vendor-neutral Task lease and fencing semantics."""
 
 from linktools.ai.persistence import Persistence
-import asyncio
+from datetime import timedelta
+from types import SimpleNamespace
+
+from linktools.ai.persistence import _memory
 
 import pytest
 
@@ -53,7 +56,7 @@ async def test_active_foreign_task_lease_cannot_be_stolen() -> None:
 
 
 @pytest.mark.asyncio
-async def test_expired_task_lease_reclaim_fences_stale_terminal_write() -> None:
+async def test_expired_task_lease_reclaim_fences_stale_terminal_write(monkeypatch: pytest.MonkeyPatch) -> None:
     state = PersistenceStorage.in_memory()
     state = Persistence(state)
     await state.initialize(namespace="task-reclaim-test", tenant_id="tenant")
@@ -70,7 +73,9 @@ async def test_expired_task_lease_reclaim_fences_stale_terminal_write() -> None:
             owner="owner-a",
             lease_seconds=1,
         )
-        await asyncio.sleep(1.05)
+        # Advance only the store clock; real claim/CAS/fencing behavior stays intact.
+        expired_at = stale.lease_expires_at + timedelta(seconds=1)
+        monkeypatch.setattr(_memory, "datetime", SimpleNamespace(now=lambda tz: expired_at))
 
         current = await repository.claim(
             "graph",
