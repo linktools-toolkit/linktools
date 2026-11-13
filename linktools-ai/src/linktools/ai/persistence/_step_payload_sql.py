@@ -100,6 +100,16 @@ class StepPayloadSql:
         for offset in range(0, len(records), 64):
             values = [payload_record_values(record) for record in records[offset:offset + 64]]
             if immutable:
+                returned = await self.context.run_statement(
+                    self.context.dialect.insert_ignore_conflict_many_returning(
+                        self.session, table=self.table, rows=values,
+                        index_elements=("store_locator", "sha256"), returning=("store_key", "sha256"),
+                    )) if len(values) > 1 else None
+                if returned is not None:
+                    addresses = {(bytes(row["store_key"]), row["sha256"]) for row in returned}
+                    inserted.update(record.key for record in records[offset:offset + 64]
+                                    if payload_address(record.key) in addresses)
+                    continue
                 count = await self.context.run_statement(self.context.dialect.insert_ignore_conflict_many(
                     self.session, table=self.table, rows=values,
                     index_elements=("store_locator", "sha256"),

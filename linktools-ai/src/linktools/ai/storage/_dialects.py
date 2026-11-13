@@ -131,6 +131,14 @@ class SqlAlchemyDialect(Protocol):
         """Return the inserted count, or None when conflicts cannot be distinguished."""
         ...
 
+    async def insert_ignore_conflict_many_returning(
+        self, session: "AsyncSession", *, table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]", index_elements: "Sequence[str]",
+        returning: "Sequence[str]",
+    ) -> "Sequence[Mapping[str, SqlValue]] | None":
+        """Return inserted identities; None means unsupported and no statement ran."""
+        ...
+
     async def insert_immutable_many(
         self, session: "AsyncSession", *, table: "Table",
         rows: "Sequence[Mapping[str, SqlValue]]", index_elements: "Sequence[str]",
@@ -307,6 +315,18 @@ class SQLiteDialect:
         )
         result = await session.execute(statement)
         return result.rowcount if result.rowcount >= 0 else None
+
+    async def insert_ignore_conflict_many_returning(
+        self, session: "AsyncSession", *, table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]", index_elements: "Sequence[str]",
+        returning: "Sequence[str]",
+    ) -> "Sequence[Mapping[str, SqlValue]] | None":
+        if not rows:
+            return ()
+        statement = (self._insert(table).values([dict(row) for row in rows])
+                     .on_conflict_do_nothing(index_elements=list(index_elements))
+                     .returning(*(table.c[name] for name in returning)))
+        return (await session.execute(statement)).mappings().all()
 
     def _immutable_match(
         self, table: "Table", incoming: "ColumnCollection", columns: "Sequence[str]",
@@ -618,6 +638,13 @@ class MySQLDialect(SQLiteDialect):
             parameters,
         )
         # FOUND_ROWS makes an ignored duplicate indistinguishable from an insert.
+        return None
+
+    async def insert_ignore_conflict_many_returning(
+        self, session: "AsyncSession", *, table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]", index_elements: "Sequence[str]",
+        returning: "Sequence[str]",
+    ) -> "Sequence[Mapping[str, SqlValue]] | None":
         return None
 
     async def insert_immutable_many(
