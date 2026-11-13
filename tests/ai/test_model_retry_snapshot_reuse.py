@@ -250,3 +250,108 @@ async def test_model_retry_without_bound_runtime_writer(tmp_path):
     finally:
         await native.close()
         await engine.dispose()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["cancel", "ack_loss"])
+async def test_empty_retry_boundary_keeps_database_fence_and_resolves_lost_ack(tmp_path, monkeypatch, fault):
+    from dataclasses import replace
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import AsyncSessionTransaction
+    from linktools.ai.errors import AIError, ErrorCode
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fenced-retry.db'}")
+    await provision_database(engine)
+    native = SqlStepStore(engine, namespace="fenced-retry", tenant_id="default")
+    first_call = asyncio.Event()
+    resume = asyncio.Event()
+    calls = []
+    snapshots = []
+    fence_rowcounts = []
+    lost = []
+    marker = "retry_boundary_ack_loss"
+    original_exit = AsyncSessionTransaction.__aexit__
+
+    def record_sql(connection, cursor, statement, parameters, context, many):
+        if statement.startswith("INSERT INTO ai_step_snapshots"):
+            snapshots.append(parameters)
+        if len(calls) == 1 and resume.is_set() and statement.startswith("UPDATE ai_state_records"):
+            fence_rowcounts.append(cursor.rowcount)
+            if fault == "ack_loss" and not lost:
+                connection.info[marker] = True
+
+    async def lose_ack(transaction, error_type, error, traceback):
+        selected = False
+        if error_type is None and not transaction.nested and not lost:
+            connection = await transaction.session.connection()
+            selected = connection.info.pop(marker, False)
+        result = await original_exit(transaction, error_type, error, traceback)
+        if selected:
+            assert len(snapshots) == 1
+            lost.append(True)
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN, "retry fence committed; acknowledgement lost")
+        return result
+
+    event.listen(engine.sync_engine, "after_cursor_execute", record_sql)
+    monkeypatch.setattr(AsyncSessionTransaction, "__aexit__", lose_ack)
+
+    class RetryModel(WrapperModel):
+        async def request(self, messages, model_settings, model_request_parameters):
+            try:
+                return await self.wrapped.request(messages, model_settings, model_request_parameters)
+            except RuntimeError:
+                return await self.wrapped.request(messages, model_settings, model_request_parameters)
+
+        @asynccontextmanager
+        async def request_stream(self, messages, model_settings, model_request_parameters, run_context=None):
+            try:
+                async with self.wrapped.request_stream(messages, model_settings, model_request_parameters, run_context) as response:
+                    yield response
+            except RuntimeError:
+                async with self.wrapped.request_stream(messages, model_settings, model_request_parameters, run_context) as response:
+                    yield response
+
+    class RetryHooks(AbstractCapability):
+        id = "retry-model"
+        def get_wrapper_model(self, model):
+            return RetryModel(model)
+
+    async def provider(messages, info):
+        calls.append(True)
+        if len(calls) == 1:
+            first_call.set()
+            await resume.wait()
+            raise RuntimeError("transport failed")
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = RuntimeFeatures("fenced-retry")
+    features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+    features.capability(RetryHooks(), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    try:
+        async with Persistence.open("fenced-retry", storage=PersistenceStorage.sql(engine)) as state:
+            async with Runtime.attach(persistence=state,
+                features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
+                execution = await runtime.agents.get().start("work", idempotency_key="work")
+                await asyncio.wait_for(first_call.wait(), timeout=5)
+                assert len(snapshots) == 1
+                if fault == "cancel":
+                    repository = state.execution.executions
+                    current = await repository.get(execution.execution_id, tenant_id="default")
+                    await repository.compare_and_swap(execution.execution_id, tenant_id="default",
+                        expected_revision=current.revision,
+                        next_record=replace(current, revision=current.revision + 1, status=ExecutionStatus.CANCELLING))
+                resume.set()
+                result = await execution.wait(timeout_seconds=5)
+                if fault == "cancel":
+                    assert result.result.status is ExecutionStatus.CANCELLED
+                    assert len(calls) == 1
+                    assert 0 in fence_rowcounts
+                else:
+                    assert result.result.status is ExecutionStatus.SUCCEEDED
+                    assert len(calls) == 2 and lost == [True]
+                    assert len(snapshots) == 3
+                    assert fence_rowcounts[0] == 1
+    finally:
+        resume.set()
+        await native.close()
+        await engine.dispose()
