@@ -2218,7 +2218,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def get_result(
         self, execution_id: str, *, tenant_id: str
     ) -> ResultRecord | None:
-        execution = await self.get(execution_id, tenant_id=tenant_id)
+        # Result consumers depend on retained result bytes, not executable inputs.
+        # Custom repositories retain their existing full-read override contract.
+        execution = (await self.get_result_record(execution_id, tenant_id=tenant_id)
+                     if type(self) is ExecutionRepositoryImpl
+                     else await self.get(execution_id, tenant_id=tenant_id))
         return None if execution is None else execution.result
 
     async def acquire_dependency_hold(
