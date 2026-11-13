@@ -187,3 +187,29 @@ async def test_stream_fault_allows_serial_cursor_resume_without_restarting_tasks
     assert replayed["events"] and not delivered_facts.intersection(map(tuple, replayed["events"]))
     assert replayed["digest"] == reference.result_digest
     assert sorted(calls) == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_graph_activity_completion_does_not_swallow_waiter_cancellation() -> None:
+    from types import SimpleNamespace
+
+    from linktools.ai.task import DefaultTaskGraphService
+
+    class LocalWaiter:
+        def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
+            return True
+
+        async def wait_graph_activity(
+            self, graph_id: str, *, tenant_id: str, after_generation: int | None,
+        ) -> None:
+            # Deliver cancellation in the same turn as a completed activity wait.
+            waiting.cancel()
+
+    service = DefaultTaskGraphService(
+        SimpleNamespace(), SimpleNamespace(), local_waiter=LocalWaiter(),
+    )
+    waiting = asyncio.create_task(service._wait_graph_activity_opportunity(
+        "graph", tenant_id="tenant", after_generation=0, fallback_backoff=1.0,
+    ))
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
