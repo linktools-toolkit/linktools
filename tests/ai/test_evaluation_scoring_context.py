@@ -15,7 +15,7 @@ import pytest
 from linktools.ai.core import JsonValue, canonical_json_bytes, deterministic_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
-    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
+    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy, EvaluationSpec,
     LabelProvenance, RescoreRequest, ScoreBundle, ScorerContract, ScoringInput,
     StartEvaluationRequest, TargetTrialRef,
 )
@@ -52,7 +52,7 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
                                expected="same answer", label_provenance=label)
                   for index, label in enumerate(labels))
     async with (
-        Persistence.open('scoring-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_51,
+        Persistence.open('scoring-context', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_51,
         TaskEngine.open(target, scorer, persistence=persistence_51, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -60,7 +60,8 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
             principal=PRINCIPAL, idempotency_key="dataset")
         spec = replace(rule_scorer(scorer), config={"policy": "constant"})
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("candidate", task=target.ref),), (spec,)), PRINCIPAL, "start"))
+            (CandidateSpec("candidate", task=target.ref),), (spec,),
+            policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start"))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert len(received) == len(cases)
         revised = tuple(replace(case, ref=replace(case.ref, revision=2),

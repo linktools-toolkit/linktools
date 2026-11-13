@@ -181,7 +181,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
 
     scorer = Task("semantics.projected-score", score, effect_policy="none")
     async with (
-        Persistence.open('projected-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_168,
+        Persistence.open('projected-input', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_168,
         Runtime.attach(persistence=persistence_168, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         target = Task.from_agent("semantics.projected-target", runtime.agents.get(), build_input=project)
@@ -195,7 +195,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
             )), principal=PRINCIPAL, idempotency_key="dataset")
             run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
-                policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"))
+                policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "start"))
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             assert received == [{"kind": "agent_input", "prompt": {"kind": "text", "text": models.prompts[0]}}]
             assert models.prompts == ["Prepared question: accepted input"]
@@ -221,7 +221,7 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
     template = TaskGraphTemplate((TaskNode("prepare", task=first, input={"fixed": "template data"}),
         TaskNode("finish", ("prepare",), task=second, input_refs={"prepared": TaskNodeResultRef("prepare")})))
     async with (
-        Persistence.open('graph-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_203,
+        Persistence.open('graph-input', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_203,
         TaskEngine.open(first, second, scorer, persistence=persistence_203, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -230,7 +230,7 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
         )), principal=PRINCIPAL, idempotency_key="dataset")
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", graph_template=GraphTargetSpec(template=template, outputs={"answer": "finish"})),),
-            (rule_scorer(scorer),)), PRINCIPAL, "start"))
+            (rule_scorer(scorer),), policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start"))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert len(received) == 1
         assert received[0]["inputs"]["prepare"]["input"] == {"fixed": "template data", "question": "original"}
