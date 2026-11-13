@@ -295,3 +295,42 @@ async def test_rule_reference_rejects_the_wrong_asset_owner_or_layer(corruption:
         with pytest.raises(AIError) as failure:
             await service.decode_repository_instructions(stored)
         assert failure.value.code is expected
+
+
+async def test_rule_decode_batches_each_owner_and_preserves_document_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.inputs._instruction_codec import RepositoryInstructionCodec
+    from linktools.ai.spec import RuleInstructionAdapter
+
+    async with _assets() as first, _assets() as second:
+        documents = []
+        adapter = RuleInstructionAdapter()
+        for source, owner, name in (("first", first, "a"), ("second", second, "b"), ("first", first, "c")):
+            key = AssetKey("rule", f"{name}.md")
+            body = f"original-{name}".encode()
+            await owner.put(key, body)
+            version, = await owner.resolve_versions((key,))
+            documents.append(adapter.decode_markdown(body, asset_source_id=source, asset=version))
+        documents.append(RepositoryInstructionDocument("agents:AGENTS.md", ".", "inline instruction"))
+        expected = RepositoryInstructions(tuple(documents)).to_payload()
+        codec = RepositoryInstructionCodec({"first": first, "second": second})
+        stored = await codec.encode(expected)
+        reads = []
+        original_read = AssetStore.require_retained_versions
+
+        async def counted_read(self, refs):
+            reads.append((self, tuple(refs)))
+            return await original_read(self, refs)
+
+        monkeypatch.setattr(AssetStore, "require_retained_versions", counted_read)
+        for owner, name in ((first, "a"), (second, "b"), (first, "c")):
+            await owner.put(AssetKey("rule", f"{name}.md"), b"changed head")
+        assert await codec.decode(stored) == expected
+        assert [(owner, len(refs)) for owner, refs in reads] == [(first, 2), (second, 1)]
+        assert [ref.key.id for ref in reads[0][1]] == ["a.md", "c.md"]
+        reads.clear()
+        assert await codec.decode({"version": 1, "documents": []}) == {"version": 1, "documents": []}
+        assert reads == []
+        duplicate = {**stored, "documents": [stored["documents"][0], stored["documents"][0]]}
+        with pytest.raises(AIError) as failure:
+            await codec.decode(duplicate)
+        assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

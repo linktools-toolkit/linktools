@@ -68,9 +68,7 @@ def expand_policy_records(records: Sequence[StoredRecord], contents: Mapping[tup
         fields = dict(payload["fields"])
         overrides = fields.pop("runtime_overrides", {})
         if (not isinstance(overrides, Mapping) or set(overrides) - set(EXECUTION_POLICY_FIELDS)
-                or set(fields).intersection(EXECUTION_POLICY_FIELDS)
-                or any(canonical_json_bytes(item) == canonical_json_bytes(values[name])
-                       for name, item in overrides.items())):
+                or set(fields).intersection(EXECUTION_POLICY_FIELDS)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         fields.pop("runtime_policy")
         fields.update(values)

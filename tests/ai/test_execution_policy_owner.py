@@ -104,3 +104,37 @@ def test_scope_remap_preserves_typed_component_children_and_runtime_policy() -> 
     assert len(refs) == 9 and {item[0] for item in refs} == {"target"}
     assert {item[2] for item in refs} == {"runtime-policy:" + "f" * 64,
                                        *("execution-payload:" + f"{index:064x}" for index in range(1, 9))}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown_field", (False, True))
+async def test_policy_overrides_allow_default_values_but_reject_unknown_fields(tmp_path: Path, unknown_field: bool) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.persistence._execution_policy_content import (
+        encode_policy, expand_policy_records, policy_reference, policy_values,
+    )
+    from linktools.ai.persistence.codec import encode_envelope
+
+    value = _record(ExecutionStatus.STARTED, 0)
+    async with Persistence.open("policy-overrides", storage=PersistenceStorage.sqlite(tmp_path / "overrides.db"), tenant_id="tenant") as state:
+        repository = state.execution.executions
+        await repository.create_execution(value)
+        raw = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
+        envelope = decode_envelope(raw.data)
+        payload = envelope.value["payload"]
+        values = policy_values(value)
+        fields = dict(payload["fields"])
+        fields["runtime_overrides"] = {"unknown_policy": True} if unknown_field else dict(values)
+        changed = replace(raw, data=encode_envelope({**envelope.value,
+            "payload": {**payload, "fields": fields}}))
+        _, policy = encode_policy(values)
+        contents = {policy_reference(raw): policy}
+        if unknown_field:
+            with pytest.raises(AIError) as caught:
+                expand_policy_records((changed,), contents)
+            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        else:
+            expanded = expand_policy_records((changed,), contents)[0]
+            restored = decode_envelope(expanded.data).value["payload"]["fields"]
+            assert {name: restored[name] for name in EXECUTION_POLICY_FIELDS} == values
+            assert "runtime_overrides" not in restored

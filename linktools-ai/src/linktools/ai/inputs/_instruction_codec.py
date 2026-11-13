@@ -51,6 +51,7 @@ class RepositoryInstructionCodec:
             if not isinstance(value, Mapping) or not isinstance(value.get("documents"), list):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             documents = []
+            sources: dict[str, list[tuple[int, AssetVersionRef]]] = {}
             for raw in value["documents"]:
                 if not isinstance(raw, Mapping):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -67,7 +68,13 @@ class RepositoryInstructionCodec:
                         raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, safe_details={
                             "reason": "repository_instruction_history_unavailable", "asset_source_id": source_id,
                         })
-                    data, = await reader.require_retained_versions((asset,))
+                    sources.setdefault(source_id, []).append((len(documents), asset))
+                documents.append(document)
+            for source_id, entries in sources.items():
+                reader = self._asset_sources[source_id]
+                bodies = await reader.require_retained_versions(tuple(asset for _, asset in entries))
+                for (index, asset), data in zip(entries, bodies, strict=True):
+                    document = documents[index]
                     parsed = self._adapter.decode_markdown(data, asset_source_id=source_id, asset=asset)
                     if parsed.source != document["source"] or parsed.scope != document["scope"]:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -75,7 +82,6 @@ class RepositoryInstructionCodec:
                     # remains an admission-comparison key, not a second read check.
                     document.pop("content_digest")
                     document["content"] = parsed.content
-                documents.append(document)
             result = {**value, "documents": documents}
             RepositoryInstructions.from_payload(result)
             return result
