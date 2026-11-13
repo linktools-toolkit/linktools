@@ -530,12 +530,12 @@ class SqlStepStore:
                 rows.append(row)
             # Private occurrence keys retain insertion occurrences; managed sources
             # must fail on conflict until their exact body is proven.
-            batch_size = _BATCH_SIZE if keyed and not managed else 1
+            batch_size = 1 if managed else _BATCH_SIZE
             for offset in range(0, len(rows), batch_size):
-                if not keyed or managed:
-                    await session.execute(self._table("events").insert().values(rows[offset]))
-                    continue
                 batch = rows[offset:offset + batch_size]
+                if not keyed or managed:
+                    await session.execute(self._table("events").insert().values(batch))
+                    continue
                 inserted = await self._context.dialect.insert_ignore_conflict_many(
                     session, table=self._table("events"), rows=batch,
                     index_elements=("store_locator", "run_id", "idempotency_key"),
