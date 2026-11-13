@@ -1234,7 +1234,7 @@ class StepExecutionHistoryReader:
         if record.binding_kind == "task":
             return UsageSummary()
 
-        boundary = await self.capture_model_interaction_cutoffs(execution_id, tenant_id=tenant_id)
+        boundary = await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
         current_cutoffs = {value.agent_run_seq: value.model_request_seq for value in boundary.cutoffs}
         explicit_cutoffs = _normalize_usage_cutoffs(cutoffs)
         if explicit_cutoffs is None:
