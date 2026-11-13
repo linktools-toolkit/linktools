@@ -14,7 +14,8 @@ python linktools-ai/examples/capability_composition.py
 The application code is also the retained call shape for internal ownership
 changes: no extra manager, producer, adapter, parameter or context is proposed
 for these ordinary paths. This is not a claim that all internal ownership work
-is complete. In particular, the Task integration decisions below remain open.
+is complete. The Task-to-Agent operation boundary is described below; broader
+Capability and Runtime ownership work remains separate.
 
 ## Declaration to execution
 
