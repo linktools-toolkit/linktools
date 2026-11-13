@@ -364,13 +364,13 @@ async def test_update_source_hints_never_replace_post_authorization_owners(
                     ))
 
         monkeypatch.setattr(repository._execution_content, "expand_bindings", tracked_bindings)
-        if change != "binding":
+        if change in {"missing", "denied"}:
             monkeypatch.setattr(state.run_store.read_store(PersistenceDomain.TRACE), "capture_history", forbidden_history)
         service = _service(state, authorization=Authorization())
-        if change == "binding":
+        if change in {"binding", "content"}:
             boundary, rows = await service.read_model_interaction_updates("execution", principal=_PRINCIPAL)
             assert boundary.cutoffs and rows
-            assert observed and all(value.agent_id == "replacement-agent" for value in observed)
+            assert not observed
         else:
             with pytest.raises(AIError) as raised:
                 await service.read_model_interaction_updates("execution", principal=_PRINCIPAL)

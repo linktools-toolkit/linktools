@@ -1825,7 +1825,6 @@ def decode_tool_operation_metadata(value: Mapping[str, JsonValue]) -> ToolOperat
 def decode_execution_observation(value: Mapping[str, JsonValue]) -> ExecutionObservationRecord:
     """Decode only the current owner fields used by model observations."""
     source, codec = _execution_projection_fields(value)
-    _execution_binding_summary(_execution_projection_field(source, "binding", codec))
     names = ("execution_id", "agent_run_seq", "durable_trace", "status")
     values = {name: _execution_projection_field(source, name, codec) for name in names}
     try:

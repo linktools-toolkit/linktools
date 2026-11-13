@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Model coverage validates its binding without restoring result payloads."""
+"""Model coverage reads its owner without unrelated binding or result bodies."""
 
 from pathlib import Path
 
@@ -23,8 +23,9 @@ async def test_observation_does_not_expand_result(tmp_path: Path, monkeypatch: p
         await _seed(state)
         repository = state.execution.executions
         async def forbidden(*args, **kwargs):
-            raise AssertionError("model coverage must not restore result payloads")
+            raise AssertionError("model coverage must not restore unrelated payloads")
         monkeypatch.setattr(repository._execution_content, "expand_projection_components", forbidden)
+        monkeypatch.setattr(repository._execution_content, "expand_bindings", forbidden)
         observation = await repository.get_observation("execution", tenant_id="tenant")
         assert isinstance(observation, ExecutionObservationRecord)
         assert observation.execution_id == "execution" and observation.agent_run_seq == 1

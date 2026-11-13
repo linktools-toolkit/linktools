@@ -421,17 +421,17 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return header
 
     async def get_observation(self, execution_id: str, *, tenant_id: str) -> ExecutionObservationRecord | None:
-        """Read model coverage without restoring result payloads."""
+        """Read model coverage from its execution owner only."""
         if tenant_id != self._tenant_id:
             return None
         key = self._key("execution", (execution_id,))
         async def read(_group: object) -> ExecutionObservationRecord | None:
-            await self._execution_content.prefetch_projection_owners((key,), bindings=True)
+            await self._execution_content.prefetch_projection_owners((key,))
             record = await self._store.read_record(key)
             if record is None:
                 return None
             self._decode_header(record, execution_id)
-            record, = await self._execution_content.expand_bindings((record,))
+            record, = await self._execution_content.expand_policies((record,))
             return decode_execution_observation(record.data)
         return await self.read_content(read)
 
