@@ -526,21 +526,23 @@ async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ("dataset", "owner"))
-async def test_current_reads_preserve_dataset_authorization(tmp_path: Path, boundary: str) -> None:
+async def test_current_reads_preserve_dataset_authorization(tmp_path: Path) -> None:
     async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
-        policy.reject = lambda action, resource: action is AuthorizationAction.EVALUATION_DATASET_READ and (
-            boundary == "dataset" and resource.owner_principal_id is None
-            or boundary == "owner" and resource.owner_principal_id == PRINCIPAL.principal_id)
-        for read in (lambda: run.current_trials(limit=1),
-                     lambda: run.read_trial(record.manifest.trials[0].trial_id),
-                     lambda: run.read_trial("unknown-trial")):
-            with pytest.raises(AIError) as caught:
-                await read()
-            assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
-        assert await report_count(storage) == 0
+        for boundary in ("dataset", "owner"):
+            policy.reject = lambda action, resource, boundary=boundary: action is AuthorizationAction.EVALUATION_DATASET_READ and (
+                boundary == "dataset" and resource.owner_principal_id is None
+                or boundary == "owner" and resource.owner_principal_id == PRINCIPAL.principal_id)
+            for read in (lambda: run.current_trials(limit=1),
+                         lambda: run.read_trial(record.manifest.trials[0].trial_id),
+                         lambda: run.read_trial("unknown-trial")):
+                policy.calls.clear()
+                with pytest.raises(AIError) as caught:
+                    await read()
+                assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
+                assert any(policy.reject(action, resource) for action, resource in policy.calls)
+            assert await report_count(storage) == 0
 
 
 @pytest.mark.asyncio
