@@ -79,3 +79,29 @@ new focused payload cases passed separately. They cover raw/zlib winner reuse,
 nonzero GC revision, a guard before duplicate publication, concurrent duplicates,
 no existence pre-read, mixed old/new insertion with cached absence, and unknown
 insertion counts. Existing tool tests cover owner rollback and portable cold recovery.
+
+## Follow-up: reuse transaction-local publication evidence
+
+Repeated typed-payload publication retains an already observed row only when the
+same transaction inserted or guarded that exact revision. Unknown winners still
+require readback. This removes a terminal execution-content reread without treating
+candidate bytes as stored evidence.
+
+Native owner validation now unions overlapping root requirements per store. Live
+publication receipts are validated against their original transaction, savepoint,
+store and complete root set before they cover subset owners. Uncovered roots are
+resolved together; evidence is local to this flush, not a cross-transaction cache.
+
+The same two-turn fixture records 62 SELECT (29 + 33), 131 INSERT, 46 UPDATE,
+49 transactions/commits and 38 write commits. Bound text/blob bytes are 223,020;
+decoded State-record JSON bytes are 43,008. Relative to the prior 63-SELECT result,
+the measured saving is one terminal JOIN; the Native batching change has no
+additional SELECT saving in this particular fixture. It covers overlapping-owner
+workloads without claiming they occur in every turn.
+
+Validation: 36 typed-payload/immutable/source-join regressions passed; 37 Native
+collection, owner-batching and payload cases passed after correcting stale
+standalone-query expectations. Those five expectations also failed unchanged at
+the preceding HEAD: node indexing already supplies publication roots. Actual
+savepoint rollback, owner readback and offline collection assertions remain intact.
+The official fixture passed with both changes. No CI rerun was requested.

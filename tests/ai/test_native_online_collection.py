@@ -493,7 +493,9 @@ async def test_state_owner_consumes_only_live_matching_publication_handoff(
                 assert await state.read(lambda transaction: transaction.get_record(record.key)) is None
             await state.mutate(write)
             assert await state.read(lambda transaction: transaction.get_record(record.key)) == record
-            assert len(queries) == (1 if boundary == "same" else 3 if boundary == "savepoint_rollback" else 2)
+            # Node indexing supplies publication roots; only an expired receipt
+            # or a different retained root needs this standalone owner lookup.
+            assert len(queries) == (1 if boundary in {"savepoint_commit", "savepoint_rollback", "other_root"} else 0)
             assert all(parameters[:2] == (native_store_locator(native.store_key), native.store_key) and len(parameters) == 3 for _, parameters in queries)
             assert (await native.read_message_roots((retained,)))[0]
             if boundary == "other_root":

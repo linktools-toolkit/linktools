@@ -1722,9 +1722,13 @@ class _SqlTransaction:
                     self._record_cache[record.key] = record
                     self._guarded_record_revisions[record.key] = record.storage_revision
                 else:
-                    # A previous representation/revision won. Do not treat our
-                    # candidate as an observation of that physical row.
-                    self._record_cache.pop(record.key, None)
+                    # An ignored candidate is not an observation of the winner.
+                    # Retain an actual row only when this transaction already
+                    # inserted/guarded its revision; publication cannot change it.
+                    cached = self._record_cache.get(record.key)
+                    if (cached is None or self._guarded_record_revisions.get(record.key)
+                            != cached.storage_revision):
+                        self._record_cache.pop(record.key, None)
             return
         try:
             if len({record.key for record in values}) != len(values):

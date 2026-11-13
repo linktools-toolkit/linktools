@@ -44,20 +44,6 @@ def register_publication_targets(
     current[1][store, tuple(sorted(set(roots)))] = resolve
 
 
-async def _owner_targets(session: "AsyncSession", store: bytes, roots: Sequence[str]) -> tuple[int, ...]:
-    current = session.info.get(_PUBLICATION_HANDOFF)
-    if current is not None:
-        resolve = current[1].pop((store, tuple(sorted(set(roots)))), None)
-        if resolve is not None:
-            try:
-                return resolve(session, store_key=store, roots=roots)
-            except PublicationTargetsUnavailable:
-                # A completed savepoint or prior transaction is not evidence
-                # for the owner's current write. Resolve its actual rows again.
-                pass
-    return tuple((await resolve_targets(session, "sequence", store, roots)).values())
-
-
 class NativeContentUnavailable(Exception):
     """A dependency disappeared before its new owner could commit."""
 
@@ -198,16 +184,36 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
         ))
         if wire is not None:
             group_id = json.loads(wire)["archive_scope_id"]
-    targets = set()
+    targets: dict[bytes, set[str]] = {}
     for roots in pending.values():
         for root in roots:
             if group_id is None or root.group_id != group_id:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            targets.add((root.store_key, tuple(sorted({span.first for span in root.slices}))))
-    # All owner writes have finished. This validation phase performs no source
-    # writes, so identical dependencies need one check, not one per owner.
-    for store, roots in targets:
-        await _owner_targets(session, store, roots)
+            targets.setdefault(root.store_key, set()).update(span.first for span in root.slices)
+    # All owner writes have finished. Reuse live publication evidence, then
+    # check overlapping dependencies once per store in this write-free phase.
+    confirmed: dict[bytes, set[str]] = {}
+    current = session.info.get(_PUBLICATION_HANDOFF)
+    if current is not None:
+        transaction = session.get_nested_transaction() or session.get_transaction()
+        for (store, roots), resolve in tuple(current[1].items()):
+            required = targets.get(store)
+            if required is None or not required.intersection(roots):
+                continue
+            del current[1][store, roots]
+            if current[0] is not transaction:
+                continue
+            try:
+                # Verify the receipt's original scope, including its savepoint;
+                # a subset owner's roots do not change that scope.
+                resolve(session, store_key=store, roots=roots)
+            except PublicationTargetsUnavailable:
+                continue
+            confirmed.setdefault(store, set()).update(roots)
+    for store, roots in targets.items():
+        missing = roots - confirmed.get(store, set())
+        if missing:
+            await resolve_targets(session, "sequence", store, tuple(sorted(missing)))
 
 
 __all__ = ["NativeContentUnavailable", "PublicationTargetsUnavailable", "stage_owner", "register_recovery",

@@ -47,11 +47,24 @@ async def test_payload_duplicate_keeps_winner_bytes_and_gc_revision(tmp_path: Pa
         assert await store.read_record(winner.key) == winner
 
         async def guard_then_reuse(transaction):
+            await transaction.get_record(winner.key)
             guarded = await transaction.guard_record_revision(winner.key, expected_storage_revision=7)
             assert guarded == 8
-            await archive.publish(transaction, prepared)
-            assert await transaction.guard_record_revision(winner.key, expected_storage_revision=7) == guarded
-            assert (await transaction.get_record(winner.key)).storage_revision == guarded
+            reads = []
+            def observe(connection, cursor, statement, parameters, context, executemany):
+                if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                    reads.append(statement)
+            engine = store.storage_group.context.engine.sync_engine if backend == "sqlite" else None
+            if engine is not None:
+                event.listen(engine, "before_cursor_execute", observe)
+            try:
+                await archive.publish(transaction, prepared)
+                assert await transaction.guard_record_revision(winner.key, expected_storage_revision=7) == guarded
+                assert (await transaction.get_record(winner.key)).storage_revision == guarded
+            finally:
+                if engine is not None:
+                    event.remove(engine, "before_cursor_execute", observe)
+            assert reads == []
 
         await store.mutate(guard_then_reuse)
         assert (await store.read_record(winner.key)).storage_revision == 8
