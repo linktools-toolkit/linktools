@@ -55,7 +55,7 @@ from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     EventKind,
     RunRecord,
-    SnapshotSaved,
+    SnapshotSavedEvent,
     SnapshotState,
     StepEvent,
     is_provider_valid,
@@ -471,7 +471,7 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
                                                else deepcopy(snapshot.messages))
         self._atomic_last_snapshot_step = snapshot.step_index
         await ctx.emit(
-            SnapshotSaved(
+            SnapshotSavedEvent(
                 persistence_run_id=snapshot.run_id,
                 conversation_id=snapshot.conversation_id,
                 step_index=snapshot.step_index,
