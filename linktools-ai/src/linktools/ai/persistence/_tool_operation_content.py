@@ -181,6 +181,10 @@ class ToolOperationContent:
             fields = payload.get("fields", {})
             if name == "arguments_payload" and arguments_source is not None:
                 root, raw, part_index = arguments_source
+                opened = self.store.storage_group.opened_archive
+                if (opened is None or root.group_id != opened[0]
+                        or root.store_key != native_store_key(self.namespace, self.tenant_id)):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 reference = prepare_native_tool_arguments(root, raw, part_index, decode_domain(payload, StoredPayload))
                 owner = value["fields"]
                 if (reference is not None and reference.tool_name == owner["tool_name"]

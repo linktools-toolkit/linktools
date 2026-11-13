@@ -15,6 +15,7 @@ from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
 from ..steps import NativeStepSource
+from ..persistence import MessageSnapshot
 from pydantic import ValidationError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -5639,14 +5640,16 @@ class LocalExecutionBackend:
                 if written is None:
                     raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                 native.confirm_prepared_step(written)
-                if snapshot is not None:
+                if snapshot is not None or any(event.kind == "model_request_started" for event in events):
                     argument_sources.clear()
+                if snapshot is not None:
                     content = written.native_messages
                     if (content is not None and content.root is not None and snapshot.messages
+                            and isinstance(snapshot.messages, MessageSnapshot)
                             and isinstance(snapshot.messages[-1], ModelResponse)):
                         message = snapshot.messages[-1]
                         root = native.message_root(content.root).slice(len(snapshot.messages) - 1, len(snapshot.messages))
-                        raw = encode_model_messages((message,))
+                        raw = next(snapshot.messages[-1:].encoded_payloads())
                         seen = set()
                         for index, part in enumerate(message.parts):
                             if isinstance(part, ToolCallPart):
