@@ -898,7 +898,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         tenant_id: str,
     ) -> ExecutionRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await transaction.get_record(self._key("execution", (execution_id,)))
+        key = self._key("execution", (execution_id,))
+        await self._execution_content.prefetch_projection_owners(
+            (key,), bindings=True, input_body=True, result=True,
+            result_body=True, recovery=True, terminal_details=True,
+        )
+        record = await transaction.get_record(key)
         return None if record is None else await self._decode(record, ExecutionRecord)
 
     async def guard_recovery_in_transaction(

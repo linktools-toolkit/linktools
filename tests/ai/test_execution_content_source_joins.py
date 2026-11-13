@@ -163,3 +163,33 @@ async def test_content_join_batch_bound_covers_all_dialect_path_expansions(tmp_p
                 compiled = query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
                 count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
                 assert count <= 999
+
+
+async def test_transaction_execution_read_batches_fixed_content(tmp_path: Path) -> None:
+    """Terminal callers need one coherent owner/content read, not slot-by-slot loads."""
+    async with Persistence.open(_NAMESPACE, storage=_storage("sqlite", tmp_path), tenant_id="tenant") as state:
+        await _seed(state)
+        repository = state.execution.executions
+        expected = await repository.get("execution", tenant_id="tenant")
+        statements: list[str] = []
+
+        def observe(connection, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                statements.append(statement)
+
+        async def read(transaction):
+            actual = await repository.get_in_transaction(transaction, "execution", tenant_id="tenant")
+            assert actual == expected
+            first_reads = len(statements)
+            assert await repository.get_in_transaction(transaction, "execution", tenant_id="tenant") == actual
+            assert len(statements) == first_reads
+
+        engine = repository.state_store.storage_group.context.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", observe)
+        try:
+            await repository.state_store.mutate(read)
+        finally:
+            event.remove(engine, "before_cursor_execute", observe)
+        assert len(statements) == 1
+        assert "ai_state_records" in statements[0]
+        assert "ai_step_messages" in statements[0]
