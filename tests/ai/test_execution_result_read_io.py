@@ -94,7 +94,7 @@ async def test_terminal_result_queries_use_one_authorized_result_record(
         # The default policy never suspends, so Runtime reuses its authorized source record.
         limit = 2 if history else 1
         assert reads <= limit
-        assert sum(item.lstrip().upper().startswith("SELECT") for item in statements) <= limit
+        assert sum(item.lstrip().upper().startswith(("SELECT", "WITH")) for item in statements) <= limit
     finally:
         await state.close()
 
@@ -293,7 +293,7 @@ async def test_denied_result_read_does_not_resolve_payload(history: bool, method
     (ExecutionStatus.STARTED, False),
 ))
 async def test_history_result_uses_fresh_terminal_state_after_authorization(
-    monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus, missing_result: bool,
+    status: ExecutionStatus, missing_result: bool,
 ) -> None:
     state = PersistenceStorage.in_memory()
     state = Persistence(state)
@@ -303,7 +303,6 @@ async def test_history_result_uses_fresh_terminal_state_after_authorization(
         code = (ErrorCode.EXECUTION_CANCELLED if status is ExecutionStatus.CANCELLED
                 else ErrorCode.INTERNAL_ERROR)
         current = record
-        get = state.execution.executions.get
 
         class Authorization:
             async def authorize(self, principal, action, resource):
@@ -314,12 +313,10 @@ async def test_history_result_uses_fresh_terminal_state_after_authorization(
                     result=None if missing_result else replace(record.result, output=None),
                     error_code=code.value if status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} else None,
                 )
-
-        async def fresh_get(execution_id, *, tenant_id):
-            await get(execution_id, tenant_id=tenant_id)
-            return current
-
-        monkeypatch.setattr(state.execution.executions, "get", fresh_get)
+                await state.execution.executions.compare_and_swap(
+                    "execution", tenant_id="tenant", expected_revision=record.revision,
+                    next_record=replace(current, revision=record.revision + 1),
+                )
         service = _service(state, authorization=Authorization(), history=True)
         if status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             result = await service.result("execution", principal=_PRINCIPAL)
@@ -360,3 +357,62 @@ async def test_result_reauthorizes_owner_changed_during_custom_authorization(met
         assert owners == ["principal", "other"]
     finally:
         await state.close()
+
+
+async def test_result_projection_skips_archived_input_and_preserves_full_execution(tmp_path: Path) -> None:
+    from linktools.ai.model import StoredUserInput
+
+    async with Persistence.open("result-projection", storage=_storage("sqlite", tmp_path), tenant_id="tenant") as state:
+        original = _execution()
+        original = replace(original, status=ExecutionStatus.SUCCEEDED,
+            stored_user_input=StoredUserInput("text", StoredPayload.inline_text("input" * 20000)),
+            result=_result(original.execution_id, "inline", original.created_at))
+        await state.execution.executions.create_execution(original)
+        engine = state.execution.executions.state_store.storage_group.context.engine.sync_engine
+        statements = []
+
+        def capture(_connection, _cursor, statement, *_args):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            result = await _service(state).result(original.execution_id, principal=_PRINCIPAL)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        assert result.output == {"text": "result"}
+        assert len(statements) == 1
+        loaded = await state.execution.executions.get(original.execution_id, tenant_id="tenant")
+        assert loaded.binding == original.binding
+        assert loaded.stored_user_input == original.stored_user_input
+
+
+@pytest.mark.parametrize("corruption", ("principal", "diagnostics", "completion"))
+async def test_result_projection_rejects_invalid_owner_fields(corruption: str) -> None:
+    from copy import deepcopy
+    from linktools.ai.errors import ErrorDiagnostics
+    from linktools.ai.persistence.codec import encode_domain
+
+    async with Persistence.open("result-integrity", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
+        original = await _seed(state)
+        repository = state.execution.executions
+
+        async def corrupt(transaction):
+            key = repository.execution_record_key(original.execution_id)
+            record = await transaction.get_record(key)
+            data = deepcopy(dict(record.data))
+            fields = data["value"]["payload"]["fields"]
+            if corruption == "principal":
+                fields["principal_id"] = ""
+            elif corruption == "diagnostics":
+                fields["error_diagnostics"] = encode_domain(ErrorDiagnostics("Error", "failed", "a" * 64))
+            else:
+                fields["completed_at"] = encode_domain(original.updated_at)
+                fields["status"] = encode_domain(ExecutionStatus.STARTED)
+            await transaction.delete_record(key)
+            await transaction.insert_record(replace(record, data=data))
+
+        await repository.state_store.mutate(corrupt)
+        with pytest.raises(AIError) as invalid:
+            await _service(state).result_payload_size(original.execution_id, principal=_PRINCIPAL)
+        assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

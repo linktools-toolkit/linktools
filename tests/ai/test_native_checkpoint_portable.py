@@ -71,8 +71,19 @@ async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstone
     assert len({row["idempotency_key"] for row in backup["events"]}) == 2
     if content != "empty":
         assert [row["pruned"] for row in backup["snapshots"]] == [True, False]
+    assert backup["run_refs"] == [{"run_id": "run", "managed_start_key": None}]
+    assert [row["run_id"] for row in original["run_registrations"]] == ["run"]
     entry_count, _ = _storage_snapshot_usage(original)
-    assert entry_count >= len(backup["runs"]) + len(backup["events"]) + len(backup["snapshots"])
+    expected_entries = len(original["objects"]) + len(original["run_registrations"])
+    expected_entries += sum(len(rows) for domain in original["domains"].values() for rows in domain.values())
+    for group_name, fields in (
+        ("archives", ("records",)),
+        ("native_messages", ("sequences", "messages")),
+        ("native_checkpoints", ("run_refs", "events", "snapshots")),
+        ("native_projections", ("records", "facts")),
+    ):
+        expected_entries += sum(len(group[field]) for group in original.get(group_name, []) for field in fields)
+    assert entry_count == expected_entries
     if content != "empty":
         corrupted = deepcopy(original)
         row = corrupted["native_checkpoints"][0]["snapshots"][-1]

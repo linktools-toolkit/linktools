@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -32,7 +32,9 @@ _OUTPUT = "large immutable answer body " * 4000
 _ROW_LIMIT = 16 * 1024
 _INPUT_SLOT = ("stored_user_input",)
 _OUTPUT_SLOT = ("result", "fields", "output")
-_HANDOFF_SLOT = ("recovery", "fields", "terminal_handoff", "fields", "outcome", "fields", "output")
+_RESULT_SLOT = ("result",)
+_HANDOFF_TEMPLATE_SLOT = ("recovery", "fields", "terminal_handoff")
+_HANDOFF_SLOT = ("recovery", "fields", "terminal_handoff", "fields", "output")
 
 
 def _payload_refs(record: StoredRecord) -> dict[tuple[str, ...], tuple[str, str, str]]:
@@ -88,9 +90,15 @@ async def _inspect_without_payload_reads(
 ) -> None:
     read_contents = ContentArchive.read_contents
 
-    async def metadata_only(self, identities: Sequence[str], *, codec: str, **kwargs):
-        assert codec != "execution-payload", "metadata inspection hydrated an execution body"
-        return await read_contents(self, identities, codec=codec, **kwargs)
+    async def metadata_only(self: ContentArchive, identities: Sequence[str], *, codec: str,
+                            reserve: Callable[[str, int], None] | None = None) -> tuple[bytes, ...]:
+        contents = await read_contents(self, identities, codec=codec, reserve=reserve)
+        if codec == "execution-payload":
+            for raw in contents:
+                template = json.loads(raw)
+                assert template.get("$dataclass") == "result_record", "inspection hydrated an input or output body"
+                assert template["fields"]["output"] is None, "result metadata duplicated its output body"
+        return contents
 
     with monkeypatch.context() as guarded:
         guarded.setattr(ContentArchive, "read_contents", metadata_only)
@@ -138,7 +146,7 @@ async def test_execution_payload_runtime_keeps_control_writes_compact_across_tur
                     ids.append(execution.execution_id)
                     row = await _compact_row(state, execution.execution_id)
                     refs = _payload_refs(row)
-                    assert set(refs) == ({_OUTPUT_SLOT} if index == 0 else {_INPUT_SLOT, _OUTPUT_SLOT})
+                    assert set(refs) == {_INPUT_SLOT, _RESULT_SLOT, _OUTPUT_SLOT}
                     record = await state.execution.executions.get_fresh(execution.execution_id, tenant_id=runtime.tenant_id)
                     assert record is not None
                     assert record.conversation is conversation
@@ -151,7 +159,7 @@ async def test_execution_payload_runtime_keeps_control_writes_compact_across_tur
                 for index, execution_id in enumerate(ids):
                     writes = [row for row in bindings if row["fields"]["execution_id"] == execution_id]
                     assert len(writes) > 1, "the real producer must exercise control updates"
-                    for slot in ((_OUTPUT_SLOT,) if index == 0 else (_INPUT_SLOT, _OUTPUT_SLOT)):
+                    for slot in (_INPUT_SLOT, _OUTPUT_SLOT):
                         references = [payload_reference(value) for write in writes
                                       for path, value in execution_payload_slots(write) if path == slot]
                         assert references and None not in references
@@ -209,7 +217,7 @@ async def test_execution_payload_runtime_pending_terminal_publishes_compact_bodi
                 assert result.status is ExecutionStatus.SUCCEEDED
                 assert result.output == {"text": _OUTPUT}
                 row = await _compact_row(state, execution.execution_id)
-                assert set(_payload_refs(row)) == {_INPUT_SLOT, _OUTPUT_SLOT}
+                assert set(_payload_refs(row)) == {_INPUT_SLOT, _RESULT_SLOT, _OUTPUT_SLOT}
                 assert bindings and calls == 1
                 await _inspect_without_payload_reads(runtime, execution.execution_id, monkeypatch)
 
@@ -263,7 +271,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                     await asyncio.wait_for(prepared.wait(), 10)
                     row = await _compact_row(state, execution.execution_id)
                     refs = _payload_refs(row)
-                    assert set(refs) == {_INPUT_SLOT, _HANDOFF_SLOT}
+                    assert set(refs) == {_INPUT_SLOT, _HANDOFF_TEMPLATE_SLOT, _HANDOFF_SLOT}
                     stored = await state.execution.executions.get_fresh(execution.execution_id, tenant_id=owner.tenant_id)
                     assert stored.recovery.handoff_phase is RecoveryHandoffPhase.PREPARED
                     assert stored.recovery.terminal_handoff.outcome.output.decode() == {"text": _OUTPUT}
@@ -345,7 +353,7 @@ async def test_execution_payload_runtime_task_producer_keeps_large_json_bodies_c
                 execution = await run.execution("produce")
                 assert (await execution.wait(timeout_seconds=5)).result.output == output_value
                 row = await _compact_row(state, execution.execution_id)
-                assert set(_payload_refs(row)) == {_INPUT_SLOT, _OUTPUT_SLOT}
+                assert set(_payload_refs(row)) == {_INPUT_SLOT, _RESULT_SLOT, _OUTPUT_SLOT}
                 fresh = await state.execution.executions.get_fresh(execution.execution_id, tenant_id=state.tenant_id)
                 assert fresh.binding_kind == "task" and fresh.status is ExecutionStatus.SUCCEEDED
                 assert fresh.stored_user_input.payload.decode() == input_value

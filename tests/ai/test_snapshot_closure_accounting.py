@@ -66,7 +66,7 @@ def _manifest(group: str) -> dict:
     return {
         "kind": "runtime-storage-snapshot", "format_version": 1, "namespace": "test", "tenant_id": "default",
         "domains": {"trace": {"records": [encode_domain(ArchivedContextBlock(root, content.raw_digest, content.raw_size))],
-                               "aliases": [], "facts": [], "operations": [], "sequences": []}},
+                               "facts": [], "operations": [], "sequences": []}},
         "archives": [],
         "native_messages": [{"group_id": group, "domain": "trace", "messages": [encode_native_message_row(_row(content))],
             "sequences": [{"store_key": encode_native_store_key(native_store_key("a", "tenant")), "sha256": node.identity, "message_sha256": content.raw_digest,

@@ -45,12 +45,16 @@ async def state(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator
 
 
 def _bridge(state: Persistence, *, run_id: str = "run", source_run_id: str | None = None,
-            binding_digest: str = "b" * 64) -> RuntimeToolOperationBridge:
+            binding_digest: str = "b" * 64, operation_ids: dict[str, str] | None = None) -> RuntimeToolOperationBridge:
+    if operation_ids is None and source_run_id is not None:
+        from linktools.ai.execution._tool_identity import tool_operation_id
+        operation_ids = {"call": tool_operation_id(tenant_id="tenant", execution_id="execution",
+                                                  agent_run_id=source_run_id, tool_call_id="call")}
     return RuntimeToolOperationBridge(
         state.checkpoint.tools, InMemoryObjectStore(), namespace="native-effects",
         tenant_id="tenant", execution_id="execution", agent_run_id=run_id,
         binding_digest=binding_digest, owner="worker", background_tasks=set(),
-         recovery_agent_run_id=source_run_id,
+         recovery_agent_run_id=source_run_id, operation_ids=operation_ids,
     )
 
 
@@ -65,8 +69,8 @@ async def test_native_observation_is_not_business_admission(state: Persistence) 
     assert await store.list_unresolved_tool_effects(run_id="run") == []
     repository = state.checkpoint.tools
     assert not await repository.has_by_agent_run("run", tenant_id="tenant")
-    assert await repository.get_by_call("run", "call", tenant_id="tenant") is None
-    assert await repository.get_by_call_ids("run", ["call"], tenant_id="tenant") == ()
+    assert await repository.get_operation(bridge._operation_id("run", "call"), tenant_id="tenant") is None
+    assert await repository.get_operations((bridge._operation_id("run", "call"),), tenant_id="tenant") == ()
     assert await repository.list_by_execution("execution", tenant_id="tenant") == ()
     assert await bridge.list_operations() == ()
     await store.record_tool_effect(replace(effect, status="completed", ended_at=effect.started_at))
@@ -83,7 +87,7 @@ async def test_official_hooks_preserve_annotations_and_replay_one_result(state: 
     descriptor = ManagedToolDescriptor("tool_operation", "non_replay_safe", "business")
 
     for run_id, source_run_id in (("run", None), ("resumed", "run"), ("resumed-again", "resumed")):
-        bridge = _bridge(state, run_id=run_id, source_run_id=source_run_id)
+        bridge = _bridge(state, run_id=run_id, source_run_id="run" if source_run_id else None)
         underlying = InMemoryStepStore()
         store = RuntimeStepStore(underlying, bridge)
 
@@ -119,7 +123,7 @@ async def test_official_hooks_preserve_annotations_and_replay_one_result(state: 
     operations = await state.checkpoint.tools.list_by_execution("execution", tenant_id="tenant")
     assert len(operations) == 1
     assert operations[0].agent_run_id == "run" and operations[0].status is ToolOperationStatus.COMPLETED
-    assert (await state.checkpoint.tools.get_by_call_ids("resumed", ["call"], tenant_id="tenant"))[0] == operations[0]
+    assert (await state.checkpoint.tools.get_operations((operations[0].tool_operation_id,), tenant_id="tenant"))[0] == operations[0]
 
 
 @pytest.mark.asyncio
@@ -184,7 +188,7 @@ async def test_native_observation_keeps_admission_argument_and_binding_checks(st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown", [False, True])
-async def test_cold_recovery_alias_chain_keeps_original_effect_owner(tmp_path: Path, unknown: bool) -> None:
+async def test_cold_recovery_operation_reference_keeps_original_effect_owner(tmp_path: Path, unknown: bool) -> None:
     database = tmp_path / "cold-effects.db"
     call = ToolCallPart("create", {"count": 3}, tool_call_id="call")
     original_operation = None
@@ -192,7 +196,8 @@ async def test_cold_recovery_alias_chain_keeps_original_effect_owner(tmp_path: P
         state = Persistence(PersistenceStorage.sqlite(database))
         await state.initialize(namespace="native-effects", tenant_id="tenant")
         try:
-            bridge = _bridge(state, run_id=run_id, source_run_id=source_run_id)
+            bridge = _bridge(state, run_id=run_id, source_run_id=source_run_id,
+                             operation_ids=None if original_operation is None else {"call": original_operation})
             if source_run_id is not None:
                 effect = await bridge.get_tool_effect(run_id=run_id, tool_call_id="call")
                 assert effect is not None and effect.run_id == run_id
@@ -246,7 +251,7 @@ async def test_official_terminal_hook_uses_committed_receipt(state: Persistence,
     async def unexpected_storage(*args, **kwargs):
         raise AssertionError("a confirmed same-owner receipt must not be reread or rewritten")
 
-    monkeypatch.setattr(state.checkpoint.tools, "get_tool_effect", unexpected_storage)
+    monkeypatch.setattr(state.checkpoint.tools, "get_operation", unexpected_storage)
     monkeypatch.setattr(state.checkpoint.tools, "record_tool_effect", unexpected_storage)
     result = await capability.after_tool_execute(context, call=call, tool_def=definition,
                                                  args={"count": 3}, result={"item": 42})
@@ -290,7 +295,9 @@ async def test_recovered_effect_queries_keep_canonical_owner_and_exclude_sibling
         agent_id="default", metadata={"agent_run_seq": "2", "agent_id": "default"},
     ))
     recorder.append_transcript_message(ModelResponse(parts=[call]))
-    await recorder.record_tool_start(call, 1)
+    await recorder.record_event("TOOL_CALL_STARTED", 1, tool_call_id=call.tool_call_id,
+                                tool_name=call.tool_name,
+                                metadata={"linktools.operation_id": decision.operation_id})
     await recorder.commit_history_boundary()
     await state.run_store.flush_execution_projection(resumed_id, execution_id="execution")
     async with History.open(persistence=state) as history:
@@ -334,17 +341,21 @@ async def test_new_recovery_call_belongs_only_to_its_first_observing_attempt(
         ))
     decision = await first.begin(tool_run_context(), call, definition, {}, False)
     assert decision is not None
+    assert await first.get_tool_effect(run_id="run", tool_call_id="new-call") is None
+    assert await first.list_unresolved_tool_effects(run_id="run") == []
+    assert len(await first.list_unresolved_tool_effects(run_id="resumed")) == 1
     await first.complete(decision, {"created": True})
     if native_observation:
         prior = await first.get_tool_effect(run_id="resumed", tool_call_id="new-call")
         assert prior is not None
         await first.record_tool_effect(replace(prior, effect_summary="Created in resumed attempt"))
     assert await first.get_tool_effect(run_id="run", tool_call_id="new-call") is None
-    assert await state.checkpoint.tools.get_by_call("run", "new-call", tenant_id="tenant") is None
-    assert await state.checkpoint.tools.get_tool_effect(run_id="run", tool_call_id="new-call") is None
+    assert await state.checkpoint.tools.get_operation(first._operation_id("run", "new-call"), tenant_id="tenant") is None
+    assert await _bridge(state).get_tool_effect(run_id="run", tool_call_id="new-call") is None
     assert await _bridge(state).list_unresolved_tool_effects(run_id="run") == []
     for run_id, source_run_id in (("resumed-again", "resumed"), ("last", "resumed-again")):
-        resumed = _bridge(state, run_id=run_id, source_run_id=source_run_id)
+        resumed = _bridge(state, run_id=run_id, source_run_id=source_run_id,
+                          operation_ids={"new-call": decision.operation_id})
         if native_observation:
             await RuntimeStepStore(InMemoryStepStore(), resumed).record_tool_effect(ToolEffectRecord(
                 run_id=run_id, tool_call_id="new-call", tool_name="create", status="started",
@@ -403,7 +414,7 @@ async def test_bound_leaf_callbacks_keep_native_event_identity_and_permitted_pay
     assert all(event.run_id == "run" and event.step_index == 7 and event.conversation_id == "conversation"
                and event.tool_name == "inspect" and event.tool_call_id == "call" for event in events)
     assert all(event.parent_run_id == "parent" and event.agent_name == "worker"
-               and event.metadata == {"native": "metadata"} for event in events)
+               and event.metadata == {"native": "metadata", "linktools.operation_id": decision.operation_id} for event in events)
     assert len({event.idempotency_key for event in events}) == 2
     assert (await bridge.get_tool_effect(run_id="run", tool_call_id="call")).effect_summary == "Authorized provider call"
     assert len(await repository.list_by_execution("execution", tenant_id="tenant")) == 1

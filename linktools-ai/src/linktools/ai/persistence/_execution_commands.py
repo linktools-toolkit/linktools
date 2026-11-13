@@ -26,7 +26,7 @@ from ._step_archive import (
     PreparedAgentRunCheckpointBatch,
     StateStepArchive,
 )
-from .state import StateStore, StateTransaction
+from .state import StateGroupTransaction, StateStore, StateTransaction
 from ._execution_repositories import ExecutionRepositoryImpl
 
 
@@ -60,6 +60,8 @@ class ExecutionStateCommands:
         if isinstance(self._executions, ExecutionRepositoryImpl):
             await self._executions.prepare_content(replace(commit.execution, result=commit.result))
         prepared_checkpoints = ()
+        if self._steps is not None and agent_run is not None:
+            await self._steps.prepare_run_registration(agent_run)
         if self._steps is not None and agent_run is not None and checkpoints:
             prepared_checkpoints = await self._steps.prepare_checkpoints(
                 agent_run,
@@ -80,6 +82,7 @@ class ExecutionStateCommands:
 
         async def mutate(
             transaction: StateTransaction,
+            step_transaction: StateTransaction | None,
         ) -> ExecutionTerminalCommitResult:
             if commit.producer_generation is not None:
                 execution_guard = await self._executions.require_execution_producer_in_transaction(
@@ -108,8 +111,10 @@ class ExecutionStateCommands:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if self._steps is not None and agent_run is not None:
+                if step_transaction is None:
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
                 await self._steps.sync_projection_in_transaction(
-                    transaction,
+                    step_transaction,
                     agent_run,
                     events=step_events,
                     checkpoints=(
@@ -177,8 +182,19 @@ class ExecutionStateCommands:
                 )
             return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
+        stores = [self._state_store]
+        if self._steps is not None and agent_run is not None:
+            stores.extend(self._steps.transaction_stores)
+
+        async def commit_group(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
+            return await mutate(
+                group.transaction(self._state_store),
+                group.transaction(self._steps.state_store)
+                if self._steps is not None and agent_run is not None else None,
+            )
+
         outcome = await run_durable_commit(
-            lambda: self._state_store.mutate(mutate),
+            lambda: self._state_store.storage_group.mutate(tuple(dict.fromkeys(stores)), commit_group),
             readback,
             background_tasks=self._background_tasks,
         )

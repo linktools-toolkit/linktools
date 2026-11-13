@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 
-ALIAS_KEY_MAX_BYTES = 768
 OPERATION_KEY_MAX_BYTES = 768
 STREAM_KEY_MAX_BYTES = 768
 STORE_KEY_MAX_BYTES = 128
@@ -339,6 +338,13 @@ class StoredRecord:
     payload_bytes: bytes | None = None
 
     def __post_init__(self) -> None:
+        from ._record_owner import record_owner_table, record_owner_values
+
+        record_owner_values(record_owner_table(self.key), {
+            "kind": self.kind, "subject_id": self.subject_id, "parent_key": self.parent_key, "state": self.state,
+            "lease_owner": self.lease_owner, "lease_fence": self.lease_fence,
+            "lease_expires_at": self.lease_expires_at, "payload_bytes": self.payload_bytes,
+        })
         if self.payload_bytes is not None and type(self.payload_bytes) is not bytes:
             raise TypeError("record binary payload must be frozen bytes")
         validate_record_key(self.key)
@@ -361,16 +367,6 @@ class StoredRecord:
         if not isinstance(self.data, ImmutableJsonMapping):
             _require_data_mapping(self.data, "record data")
             object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
-
-
-@dataclass(frozen=True, slots=True)
-class StoredAlias:
-    alias_key: bytes = field(repr=False)
-    record_key: bytes = field(repr=False)
-
-    def __post_init__(self) -> None:
-        validate_alias_key(self.alias_key)
-        validate_record_key(self.record_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,8 +627,10 @@ class StateTransaction(Protocol):
     async def insert_record(self, record: StoredRecord) -> None: ...
     async def insert_records(self, records: Sequence[StoredRecord]) -> None: ...
     async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
-        """Insert or confirm byte-exact immutable records without a preceding read.
+        """Insert immutable records without a preceding read.
 
+        Typed content-addressed payloads retain the first representation; other
+        immutable records require byte-exact equality.
         Any failure poisons the enclosing mutation, even if the callback catches it.
         """
         ...
@@ -698,17 +696,6 @@ class StateTransaction(Protocol):
         after: RecordScanCursor | None,
         limit: int,
     ) -> tuple[StoredRecord, ...]: ...
-    async def resolve_alias(self, alias: bytes) -> bytes | None: ...
-    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
-    async def scan_aliases(self) -> tuple[StoredAlias, ...]: ...
-    async def scan_aliases_page(
-        self,
-        *,
-        after: bytes | None,
-        limit: int,
-    ) -> tuple[StoredAlias, ...]: ...
-    async def insert_alias(self, alias: StoredAlias) -> None: ...
-    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None: ...
     async def get_sequence(self, key: bytes) -> int: ...
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]: ...
     async def scan_sequences(self) -> Mapping[bytes, int]: ...
@@ -798,12 +785,15 @@ class SqlStateRecordReader(Protocol):
 
     Results retain the physical record separately from joined columns. Raw
     scans and transaction caches continue to expose the persisted record.
+    Optional Step run sequence keys project counters from their admission rows
+    into the existing transaction counter view, including absent owners as zero.
     """
 
     def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]: ...
 
     async def read_joined_records(
         self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
+        sequence_keys: Sequence[bytes] = (),
     ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]: ...
 
 
@@ -873,10 +863,11 @@ class _ReadOnlyStateTransaction(StateTransaction):
 
     async def read_joined_records(
         self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
+        sequence_keys: Sequence[bytes] = (),
     ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]:
         if not isinstance(self._transaction, SqlStateRecordReader):
             raise StateTransactionNestingError("joined record reads require SQL storage")
-        return await self._transaction.read_joined_records(context, statement, keys=keys)
+        return await self._transaction.read_joined_records(context, statement, keys=keys, sequence_keys=sequence_keys)
 
     async def read_joined_facts(
         self, context: "SqlStorageContext", statement: "Select",
@@ -932,22 +923,6 @@ class _ReadOnlyStateTransaction(StateTransaction):
     ) -> tuple[StoredRecord, ...]:
         return await self._transaction.scan_records_page(after=after, limit=limit)
 
-    async def resolve_alias(self, alias: bytes) -> bytes | None:
-        return await self._transaction.resolve_alias(alias)
-
-    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
-        return await self._transaction.resolve_aliases(aliases)
-
-    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
-        return await self._transaction.scan_aliases()
-
-    async def scan_aliases_page(
-        self,
-        *,
-        after: bytes | None,
-        limit: int,
-    ) -> tuple[StoredAlias, ...]:
-        return await self._transaction.scan_aliases_page(after=after, limit=limit)
 
     async def get_sequence(self, key: bytes) -> int:
         return await self._transaction.get_sequence(key)
@@ -1059,13 +1034,6 @@ class _ReadOnlyStateTransaction(StateTransaction):
         del keys
         self._reject("delete_records")
 
-    async def insert_alias(self, alias: StoredAlias) -> None:
-        del alias
-        self._reject("insert_alias")
-
-    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
-        del aliases
-        self._reject("insert_aliases")
 
     async def next_sequence(self, key: bytes) -> int:
         del key
@@ -1219,6 +1187,32 @@ class StateStorageGroup(Protocol):
     ) -> ValueT: ...
 
 
+@runtime_checkable
+class StateContentDependencies(Protocol):
+    """Explicit immutable-owner participants bound before transaction entry."""
+
+    @property
+    def content_dependencies(self) -> tuple["StateStore", ...]: ...
+
+    def bind_content_dependency(self, source: "StateStore") -> None: ...
+
+
+def state_content_members(stores: Sequence["StateStore"]) -> tuple["StateStore", ...]:
+    """Expand only declared dependencies; never discover arbitrary group members."""
+    members = list(dict.fromkeys(stores))
+    index = 0
+    while index < len(members):
+        store = members[index]
+        if isinstance(store, StateContentDependencies):
+            for source in store.content_dependencies:
+                if source.storage_group is not store.storage_group:
+                    raise StateTransactionNestingError("content owners must share their StateStorageGroup")
+                if source not in members:
+                    members.append(source)
+        index += 1
+    return tuple(members)
+
+
 class StateStore(Protocol):
     """Physical StateStore contract with retry-safe, transaction-local callbacks.
 
@@ -1355,32 +1349,6 @@ def validate_relation_key(value: bytes) -> bytes:
     return value
 
 
-def alias_key(
-    namespace: str,
-    tenant_id: str,
-    runtime_domain: str,
-    relation: str,
-    identity: Sequence[str],
-) -> bytes:
-    """Encode an exact scoped relation tuple, including for shared StateStores."""
-    if not isinstance(relation, str) or not relation:
-        raise ValueError("alias relation must be a non-empty string")
-    if not isinstance(identity, Sequence) or isinstance(identity, (str, bytes)):
-        raise TypeError("alias identity must be a sequence of strings")
-    return _encode_key_components(
-        (validate_persistence_namespace(namespace), validate_tenant_id(tenant_id),
-         runtime_domain, relation, *identity),
-        ALIAS_KEY_MAX_BYTES,
-    )
-
-
-def validate_alias_key(value: bytes) -> bytes:
-    """Validate the bounded physical alias address, including custom keys."""
-    if type(value) is not bytes or not 0 < len(value) <= ALIAS_KEY_MAX_BYTES:
-        raise ValueError(f"alias key must contain 1 to {ALIAS_KEY_MAX_BYTES} bytes")
-    return value
-
-
 def stream_key(
     namespace: str,
     tenant_id: str,
@@ -1508,4 +1476,4 @@ STATE_GROUP_METADATA_KEY = _encode_key_components(("state-group-metadata",), STO
 STATE_GROUP_ARCHIVE_KEY = _encode_key_components(("state-group-archive",), STORE_KEY_MAX_BYTES)
 
 
-__all__ = ['STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ["StateContentDependencies", "state_content_members", 'STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

@@ -24,6 +24,7 @@ from ..execution import (
 
     StoredUserInput,
     ExecutionRecord,
+    ExecutionControlRecord,
     ExecutionStartClaim,
     ExecutionStartUnknownCommit,
     ExecutionCancelRequestCommit,
@@ -40,7 +41,7 @@ from ..execution import (
 import binascii
 import json
 from ..session import SessionRepository as SessionRepositoryContract
-from ..execution import ExecutionTimelineRecord, ExecutionView
+from ..execution import ExecutionMetadataRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
 from ..session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -122,7 +123,7 @@ from ._plan import PersistenceDomain
 
 if TYPE_CHECKING:
     from ._archive import ContentArchive, PreparedArchive
-    from .state import Observed, StateStore, StateTransaction, StoredRecord
+    from .state import Observed, StateGroupTransaction, StateStore, StateTransaction, StoredRecord
 
 
 def _validate_transcript_index(value: int, *, positive: bool = False) -> None:
@@ -909,6 +910,30 @@ class ExecutionCandidatePage:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionMetadataCandidate:
+    record: ExecutionMetadataRecord
+    cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionMetadataCandidatePage:
+    items: tuple[ExecutionMetadataCandidate, ...]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionViewCandidate:
+    view: ExecutionView
+    cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionViewCandidatePage:
+    items: tuple[ExecutionViewCandidate, ...]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionRunSealHead:
     agent_run_id: str
     event_count: int
@@ -1003,6 +1028,42 @@ class MemoryRecord:
         if transient_execution_id is None:
             return ("persistent", memory_scope)
         return ("transient", memory_scope, transient_execution_id)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionMembershipRecord:
+    """Current session membership without input, result or recovery bodies."""
+
+    execution_id: str
+    session_id: str | None
+    parent_execution_id: str | None
+    principal_id: str
+    principal_kind: str
+    status: ExecutionStatus
+    created_at: datetime
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOperationSource:
+    """Immutable admission projection, independent of the later effect outcome."""
+
+    tool_operation_id: str
+    execution_id: str
+    tool_call_id: str
+    tool_name: str
+    arguments_payload: StoredPayload
+    capability_ref: CapabilityRef | None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOperationMetadata:
+    """Canonical effect identity and status for history, without payload bodies."""
+
+    tool_operation_id: str
+    execution_id: str
+    tool_call_id: str
+    status: ToolOperationStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -1249,10 +1310,16 @@ class ExecutionStartReceipt(ExecutionStartReservationResult):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ExecutionTerminalPublication(ExecutionTerminalCommitResult):
-    """Full publication confirmed by its owner, including any Session release."""
+class ExecutionTerminalWriteReceipt(ExecutionTerminalCommitResult):
+    """Execution owner state confirmed by a successful terminal CAS."""
 
     observed: Observed[ExecutionRecord]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExecutionTerminalPublication(ExecutionTerminalWriteReceipt):
+    """Full publication confirmed by its owner, including any Session release."""
+
     session_released: bool = False
 
 
@@ -1389,7 +1456,17 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
     ) -> tuple[ConversationHistoryIndexNodeRecord, ...]: ...
 
 
+_ContentValueT = TypeVar("_ContentValueT")
+
+
 class ExecutionRepository(RuntimeRepository, Protocol):
+    async def read_content(
+        self, capture: Callable[[StateGroupTransaction], Awaitable[_ContentValueT]],
+        *, stores: Sequence[StateStore] = (),
+    ) -> _ContentValueT:
+        """Read owners and content together, retrying cold dependencies read-only."""
+        ...
+
     async def get_view(
         self, execution_id: str, *, tenant_id: str,
     ) -> tuple[ResourceRef, ExecutionView] | None: ...
@@ -1654,13 +1731,17 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         against current dependency holds; an unknown outcome is not confirmation.
         """
         ...
+    async def get_result_record(self, execution_id: str, *, tenant_id: str,
+                                fresh: bool = False) -> ExecutionResultRecord | None: ...
+    async def get_retention_in_transaction(self, transaction: StateTransaction, execution_id: str,
+                                          *, tenant_id: str) -> ExecutionRetentionRecord | None: ...
     async def close_retention_in_transaction(
         self,
         transaction: StateTransaction,
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> tuple[bool, ExecutionRecord | None]:
+    ) -> tuple[bool, ExecutionRetentionRecord | None]:
         """Close retention and return the same transaction's execution receipt.
 
         The publication requirements of close_retention also apply here. The
@@ -1670,10 +1751,10 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def require_execution_producer_in_transaction(
         self, transaction: StateTransaction, execution_id: str, *,
         expected_producer_generation: int, allow_cancelling: bool = True,
-    ) -> tuple[ExecutionRecord, StoredRecord]: ...
+    ) -> tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord]: ...
     async def require_execution_history_write_in_transaction(
         self, transaction: StateTransaction, execution_id: str,
-    ) -> tuple[ExecutionRecord, StoredRecord]: ...
+    ) -> tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord]: ...
     async def put_history_seal_in_transaction(
         self,
         transaction: StateTransaction,
@@ -2252,7 +2333,7 @@ class CheckpointRepositories:
 
 from ._evaluation_records import EvaluationHumanDecision
 
-__all__ = ['ExecutionStartReceipt', 'ExecutionTerminalPublication', 'ToolBoundaryReceipt', 'ExecutionInsertionReceipt', 'AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'ExecutionRecoveryDetail', 'ExecutionRecoveryState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'CheckpointRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
+__all__ = ["ToolOperationMetadata", 'ExecutionMembershipRecord', 'ExecutionStartReceipt', 'ExecutionTerminalPublication', 'ToolBoundaryReceipt', 'ExecutionInsertionReceipt', 'AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'ExecutionRecoveryDetail', 'ExecutionRecoveryState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'CheckpointRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
 
 
 class ToolStateRepository(Protocol):
@@ -2267,14 +2348,6 @@ class ToolStateRepository(Protocol):
         self, tool_operation_id: str, *, tenant_id: str,
     ) -> "Observed[ToolOperationRecord] | None": ...
 
-    async def get_tool_effect(
-        self, *, run_id: str, tool_call_id: str, source_run_id: str | None = None,
-    ) -> ToolEffectRecord | None: ...
-
-    async def list_unresolved_tool_effects(
-        self, *, execution_id: str, run_id: str, source_run_id: str | None = None,
-    ) -> list[ToolEffectRecord]: ...
-
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord: ...
     async def get_operation(
@@ -2283,8 +2356,8 @@ class ToolStateRepository(Protocol):
     async def list_by_execution(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ToolOperationRecord, ...]: ...
-    async def get_by_call_ids(
-        self, agent_run_id: str, tool_call_ids: Sequence[str], *, tenant_id: str,
+    async def get_operations(
+        self, operation_ids: Sequence[str], *, tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]: ...
     async def list_by_agent_run(
         self, agent_run_id: str, *, tenant_id: str,

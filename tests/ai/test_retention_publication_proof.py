@@ -51,14 +51,15 @@ async def test_stale_unadmitted_cache_cannot_prove_publication(tmp_path, monkeyp
             source_reads.append(1)
             return await original_get(*args, **kwargs)
 
-        original_source = repository.get_in_transaction
+        original_source = repository.get_retention_in_transaction
 
         async def source_get(*args, **kwargs):
+            assert active_state_scope() is not None
             source_reads.append(1)
             return await original_source(*args, **kwargs)
 
         monkeypatch.setattr(repository, "get", cached_get)
-        monkeypatch.setattr(repository, "get_in_transaction", source_get)
+        monkeypatch.setattr(repository, "get_retention_in_transaction", source_get)
         calls = []
         controller = _controller(repository, calls)
 

@@ -15,9 +15,10 @@ from ._referenced_content import ReferencedContent, ReferencedInputOrigin
 from ._referenced_input import ReferencedInputModel
 from ._response import project_model_attempts, project_model_response_attempts
 
-from ._user_input import (StoredUserInput, CanonicalUserInput, MaterializedUserContent, append_user_input_text, UserPromptInput, validate_user_content, validate_user_input, normalize_input_files)
+from ._user_input import (capture_plain_text_input, plain_text_input_content, StoredUserInput, CanonicalUserInput, MaterializedUserContent, append_user_input_text, UserPromptInput, validate_user_content, validate_user_input, normalize_input_files)
 
 __all__ = [
+    "capture_plain_text_input", "plain_text_input_content",
     "model_input_content",
     "project_model_attempts", "project_model_response_attempts",
     "ReferencedContent", "ReferencedInputOrigin", "ReferencedInputModel", "ModelInputValidator", "model_request_error",

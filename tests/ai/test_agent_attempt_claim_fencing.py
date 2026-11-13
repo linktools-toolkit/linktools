@@ -37,7 +37,7 @@ async def test_admission_readback_requires_own_receipt(
     try:
         now = datetime.now(timezone.utc)
         pending = PendingToolContinuation(
-            "prior-run", calls=(PendingDeferredCall("call", "tool", StoredPayload.inline_json({})),),
+            "prior-run", calls=(PendingDeferredCall("call", "tool", StoredPayload.inline_json({}), operation_id="test-operation"),),
         ) if kind == "deferred" else None
         execution = replace(
             _execution(now), revision=1, agent_run_seq=0 if kind == "initial" else 1,

@@ -179,7 +179,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
 
     async def publish(self, transaction, prepared, *, native=True):
         run_publications.append((id(self.store.storage_group), self.scope_id))
-        if terminal.get():
+        if terminal.get() and not native:
             publications[-1].append(("archive", self.scope_id))
         return await original_publish(self, transaction, prepared, native=native)
 
@@ -319,7 +319,8 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
     publish_native = ContentArchive.publish_native
 
     async def capture(self, transaction, prepared, *, native=True):
-        published_scopes.append(("archive", self.content_scope))
+        if not native:
+            published_scopes.append(("archive", self.content_scope))
         return await publish(self, transaction, prepared, native=native)
 
     async def capture_native(self, transaction, prepared):

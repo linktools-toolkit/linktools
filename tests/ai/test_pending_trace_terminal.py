@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic_ai_harness.step_persistence import RunRecord
 
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
@@ -168,6 +169,14 @@ async def test_pending_trace_does_not_adopt_existing_source_heads(tmp_path: Path
                                         state=turn.reservation.execution.status.value)
         else:
             store = archive.state_store
+            if existing == "run":
+                source = RunRecord(
+                    run_id=turn.run.agent_run_id, conversation_id=turn.run.agent_conversation_id,
+                    parent_run_id=turn.run.parent_agent_run_id, agent_name=turn.run.agent_id,
+                    metadata=dict(turn.run.metadata), started_at=turn.run.started_at,
+                )
+                await state.storage.run_store.run_registrations.publish(source)
+                archive.remember_run_registration(source)
             record = (archive._stored_agent_run(turn.run) if existing == "run" else
                       archive.transcript_repository.empty_head_record(turn.run.agent_run_id))
         await store.mutate(lambda transaction: transaction.insert_records((record,)))

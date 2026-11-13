@@ -201,7 +201,7 @@ def test_runtime_storage_plan_rejects_an_invalid_domain() -> None:
 
 def _pending_tools() -> PendingToolContinuation:
     payload = StoredPayload.inline_json({"path": "file.txt"})
-    call = PendingDeferredCall("call", "read_file", payload)
+    call = PendingDeferredCall("call", "read_file", payload, operation_id="test-operation")
     return PendingToolContinuation(
         "step-1",
         approvals=(call,),

@@ -40,6 +40,7 @@ from ..execution import (
 )
 from ..execution import ExecutionRecord
 from ..persistence.contracts import ExecutionRepository
+from ..persistence.repositories import ExecutionRepositoryImpl
 
 _CURSOR_RESOURCE_KIND = "EXECUTION"
 
@@ -90,8 +91,11 @@ class DefaultExecutionHistoryService:
         )
         views: list[ExecutionView] = []
         scanned = 0
+        builtin_views = type(self._executions) is ExecutionRepositoryImpl
+        list_candidates = (self._executions.list_view_candidates if builtin_views
+                           else self._executions.list_candidates)
         while scanned < 1000:
-            page = await self._executions.list_candidates(
+            page = await list_candidates(
                 tenant_id=request.principal.tenant_id,
                 session_id=request.session_id,
                 parent_execution_id=request.parent_execution_id,
@@ -102,7 +106,7 @@ class DefaultExecutionHistoryService:
                 break
             for index, candidate in enumerate(page.items):
                 scanned += 1
-                record = candidate.record
+                record = candidate.view if builtin_views else candidate.record
                 if request.session_id is not None and (
                     record.session_id != request.session_id
                 ):
@@ -128,7 +132,7 @@ class DefaultExecutionHistoryService:
                     if error.code is not ErrorCode.AUTHORIZATION_DENIED:
                         raise
                     continue
-                views.append(project_execution_view(record))
+                views.append(record if builtin_views else project_execution_view(record))
                 if len(views) == request.limit:
                     has_more = page.has_more or index + 1 < len(page.items)
                     return Page(
@@ -271,7 +275,17 @@ class DefaultExecutionHistoryService:
         message_seq: int | None = None,
         part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
-        await self._authorize_metadata(execution_id, principal)
+        authorized_executions: dict[str, ExecutionRepository] = {}
+        if (type(self) is DefaultExecutionHistoryService
+                and type(self._reader) is StepExecutionHistoryReader
+                and type(self._executions) is ExecutionRepositoryImpl):
+            await self._authorize_header(execution_id, principal)
+            pending = (None if self._pending_execution is None else
+                       await self._pending_execution(execution_id, tenant_id=principal.tenant_id))
+            if pending is None:
+                authorized_executions["authorized_executions"] = self._executions
+        else:
+            await self._authorize_metadata(execution_id, principal)
         filters = {
             "agent_run_seq": agent_run_seq,
             "model_request_seq": model_request_seq,
@@ -302,6 +316,7 @@ class DefaultExecutionHistoryService:
             tool_call_id=tool_call_id,
             message_seq=message_seq,
             part_index=part_index,
+            **authorized_executions,
         )
         items = (
             page.items
@@ -344,10 +359,10 @@ class DefaultExecutionHistoryService:
     ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
         """Authorize one bounded capture-and-suffix operation before opening its read scope."""
         if type(self) is DefaultExecutionHistoryService and type(self._reader) is StepExecutionHistoryReader:
-            await self._authorize_header(execution_id, principal)
+            source_hint = await self._authorize_header(execution_id, principal, capture_configuration=True)
             return await self._reader.read_authorized_model_interaction_updates(
                 execution_id, tenant_id=principal.tenant_id, executions=self._executions,
-                after_cutoffs=after_cutoffs, limit=limit,
+                after_cutoffs=after_cutoffs, limit=limit, source_hint=source_hint,
             )
         return await _read_model_interaction_updates(
             self, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
@@ -548,15 +563,18 @@ class DefaultExecutionHistoryService:
         self,
         execution_id: str,
         principal: Principal,
-    ) -> None:
+        *, capture_configuration: bool = False,
+    ) -> Callable[[], Awaitable[None]] | None:
         tenant_id = principal.tenant_id
         pending = (None if self._pending_execution is None else
                    await self._pending_execution(execution_id, tenant_id=tenant_id))
-        header = (ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, pending.principal_id)
-                  if pending is not None else await self._executions.get_header(
-            execution_id,
-            tenant_id=tenant_id,
-        ))
+        source_hint = None
+        if pending is not None:
+            header = ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, pending.principal_id)
+        elif capture_configuration and type(self._executions) is ExecutionRepositoryImpl:
+            header, source_hint = await self._executions.capture_header(execution_id, tenant_id=tenant_id)
+        else:
+            header = await self._executions.get_header(execution_id, tenant_id=tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(
@@ -564,6 +582,7 @@ class DefaultExecutionHistoryService:
             AuthorizationAction.EXECUTION_READ,
             header,
         )
+        return source_hint
 
     async def _authorize_metadata(
         self,

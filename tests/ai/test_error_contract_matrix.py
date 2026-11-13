@@ -201,7 +201,7 @@ async def test_execution_result_before_terminal_is_not_ready() -> None:
         del execution_id, principal, action
         return SimpleNamespace(status=ExecutionStatus.STARTED)
 
-    service.load_authorized = load_authorized  # type: ignore[method-assign]
+    service._manager.load_result_authorized = load_authorized  # type: ignore[method-assign]
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
         await DefaultExecutionService.result.__wrapped__(
@@ -230,7 +230,7 @@ async def test_execution_wait_timeout_has_stable_code() -> None:
             execution_id=execution_id, status=ExecutionStatus.STARTED
         )
 
-    service.load_authorized = load_authorized  # type: ignore[method-assign]
+    service._manager = SimpleNamespace(load_result_authorized=load_authorized)
     service._runtime_bridge = _ExecutionRuntimeBridge()
     service._live_broker = SimpleNamespace(
         abandon_prepared_local_producer=lambda _execution_id: None

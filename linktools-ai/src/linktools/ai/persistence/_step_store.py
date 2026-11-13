@@ -111,6 +111,7 @@ class PreparedStep:
     messages: PreparedNativeMessages | None
     event_keys: tuple[bytes, ...]
     managed_start: bool = False
+    fixed_error_sources: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +287,11 @@ class SqlStepStore:
         self, session: "AsyncSession", record: RunRecord, *, replay: bool = False,
         started: StepEvent | None = None,
     ) -> _RunFields:
+        from sqlalchemy import update
+
+        start_key = None if started is None else encode_native_replay_key(started.idempotency_key)
         values = self._run_values(record.run_id) | self._record_values(record)
+        values["managed_start_key"] = start_key
         result = await self._context.dialect.insert_ignore_conflict(
             session, table=self._table("runs"), values=values,
             index_elements=("store_locator", "run_id"),
@@ -299,6 +304,27 @@ class SqlStepStore:
                 if row is not None and row["registration_id"] == record.registration_id:
                     source = _RunFields.from_row(row, engine=self._context.engine)
                     if started is not None:
+                        if row["managed_start_key"] is None:
+                            # Only an explicitly metadata-only header admits its
+                            # first start. Missing committed sources fail closed.
+                            actual = self.run_from_receipt(StepWriteReceipt((), (), source))
+                            if (actual != record or row["start_idempotency_key"] is not None
+                                    or row["terminal_idempotency_key"] is not None
+                                    or row["has_other_start"]):
+                                raise ValueError("first run_started differs from its admitted registration")
+                            table = self._table("runs")
+                            changed = await session.execute(update(table).where(
+                                *self._run_predicates(table, record.run_id),
+                                table.c.managed_start_key.is_(None),
+                            ).values(managed_start_key=start_key))
+                            if changed.rowcount == 1:
+                                return source
+                            # RR cannot see the winner in this snapshot. The
+                            # existing SQL boundary retries only after rollback.
+                            from ..storage import SqlSnapshotConflict
+                            raise SqlSnapshotConflict()
+                        if row["managed_start_key"] != start_key or row["start_idempotency_key"] is None:
+                            raise ValueError("managed start source is missing or has another identity")
                         event = self.decode_started_source(
                             {name: row["start_" + name] for name in source_names}, run=row,
                         )
@@ -322,9 +348,19 @@ class SqlStepStore:
 
         table, events = self._table("runs"), self._table("events")
         query = select(table.c.store_key, table.c.run_id, table.c.registration_id, table.c.started_at,
+                       table.c.managed_start_key,
                        *(table.c[name] for name in _EVENT_RUN_FIELDS))
         if started is not None:
-            query = query.add_columns(*(events.c[name].label("start_" + name) for name in _EVENT_SOURCE_COLUMNS))
+            other_start = events.alias("other_start")
+            query = query.add_columns(
+                *(events.c[name].label("start_" + name) for name in _EVENT_SOURCE_COLUMNS),
+                select(other_start.c.id).where(
+                    other_start.c.store_locator == table.c.store_locator,
+                    other_start.c.store_key == table.c.store_key,
+                    other_start.c.run_id == table.c.run_id,
+                    other_start.c.kind == "run_started",
+                ).exists().label("has_other_start"),
+            )
             joined = table.outerjoin(events, and_(
                 events.c.idempotency_key == encode_native_replay_key(started.idempotency_key),
                 events.c.store_locator == table.c.store_locator, events.c.store_key == table.c.store_key,
@@ -337,6 +373,51 @@ class SqlStepStore:
             query = query.add_columns(*(terminal.c[name].label("terminal_" + name) for name in _EVENT_SOURCE_COLUMNS))
             query = query.select_from(joined)
         return query.where(*self._run_predicates(table, record.run_id))
+
+    async def _import_run(self, session: "AsyncSession", record: RunRecord) -> _RunFields:
+        from sqlalchemy import select
+
+        values = self._run_values(record.run_id) | self._record_values(record)
+        table = self._table("runs")
+        result = await self._context.dialect.insert_ignore_conflict(
+            session, table=table, values=values, index_elements=("store_locator", "run_id"),
+        )
+        if result.inserted:
+            return _RunFields.from_row(values, engine=self._context.engine)
+        row = (await session.execute(select(table).where(*self._run_predicates(table, record.run_id)))).mappings().one()
+        if _RUN_ADAPTER.validate_python(self._record_data(row)) != record:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return _RunFields.from_row(row, engine=self._context.engine)
+
+    async def import_run(self, record: RunRecord) -> None:
+        """Import metadata independently of native lifecycle-event publication."""
+        await self.initialize()
+        source = await self._context.run_mutation(
+            lambda session: self._import_run(session, record), domain="steps.run_metadata",
+        )
+        self._confirm_run(source)
+
+    async def import_run_in_transaction(self, transaction: StateTransaction, record: RunRecord) -> None:
+        """Admit metadata in the consumer's actual publication, not a new commit."""
+        if not isinstance(transaction, SqlStateTransaction):
+            raise TypeError("native SQL metadata requires a SQL state transaction")
+        await transaction.run_sql(self._context, lambda session: self._import_run(session, record))
+        # Provisional metadata is not a committed native receipt or cache entry.
+
+    async def get_run_in_transaction(self, transaction: StateTransaction, *, run_id: str) -> RunRecord | None:
+        """Read canonical metadata without opening a second connection or confirming it."""
+        from sqlalchemy import select
+
+        if not isinstance(transaction, SqlStateTransaction):
+            raise TypeError("native SQL metadata requires a SQL state transaction")
+        validate_resource_id(run_id)
+        table = self._table("runs")
+
+        async def read(session: "AsyncSession") -> RunRecord | None:
+            row = (await session.execute(select(table).where(*self._run_predicates(table, run_id)))).mappings().first()
+            return None if row is None else _RUN_ADAPTER.validate_python(self._record_data(row))
+
+        return await transaction.run_sql(self._context, read)
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         from sqlalchemy import select
@@ -352,6 +433,29 @@ class SqlStepStore:
         record = _RUN_ADAPTER.validate_python(self._record_data(row))
         self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
         return record
+
+    async def get_runs(self, run_ids: Sequence[str]) -> Mapping[str, RunRecord]:
+        """Resolve a bounded set of run registrations without scanning other runs."""
+        from sqlalchemy import select
+
+        identifiers = tuple(dict.fromkeys(run_ids))
+        for identity in identifiers:
+            validate_resource_id(identity)
+        if not identifiers:
+            return {}
+        await self.initialize()
+        table = self._table("runs")
+        result = {}
+        async with self._context.sessions() as session:
+            for offset in range(0, len(identifiers), 128):
+                rows = (await self._context.run_statement(session.execute(select(table).where(
+                    table.c.store_locator == self._store_locator, table.c.store_key == self._store_key,
+                    table.c.run_id.in_(identifiers[offset:offset + 128]),
+                )))).mappings().all()
+                for row in rows:
+                    result[row["run_id"]] = _RUN_ADAPTER.validate_python(self._record_data(row))
+                    self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
+        return result
 
     async def list_runs(
         self, *, parent_run_id: str | None = None, conversation_id: str | None = None,
@@ -374,14 +478,17 @@ class SqlStepStore:
             self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
         return sorted(records, key=lambda r: r.started_at)
 
-    async def append_event(self, event: StepEvent) -> None:
+    async def append_event(self, event: StepEvent, *, fixed_error_source: bool = False) -> None:
+        if type(fixed_error_source) is not bool or fixed_error_source and (
+                event.kind != "tool_call_failed" or event.idempotency_key is None):
+            raise ValueError("fixed error sources require keyed tool failure events")
         await self.initialize()
         replay_keys = {id(event): encode_native_replay_key(event.idempotency_key)}
 
         async def write(session: "AsyncSession") -> _RunFields | None:
             if isinstance(event, NativeLifecycleEvent):
                 return await self._write_lifecycle_event(session, event, source=self._confirmed_runs.get(event.run_id))
-            await self._write_events(session, (event,), replay_keys=replay_keys)
+            await self._write_events(session, (event,), replay_keys=replay_keys, fixed_error_sources=fixed_error_source)
             return None
 
         source = await self._context.run_mutation(write, domain="steps.event")
@@ -391,17 +498,25 @@ class SqlStepStore:
     async def _write_events(
         self, session: "AsyncSession", events: Sequence[StepEvent], *, source: _RunFields | None = None,
         started: StepEvent | None = None, replay_keys: Mapping[int, bytes] | None = None,
+        fixed_error_sources: bool = False,
     ) -> None:
         for (keyed, managed), group in groupby(
             events, key=lambda event: (event.idempotency_key is not None, event is started),
         ):
             rows = []
             for event in group:
-                row = self._run_values(event.run_id) | self._event_values(event)
+                values = self._event_values(event)
+                row = self._run_values(event.run_id) | values
                 known = source if source is not None and source.run_id == event.run_id else self._confirmed_runs.get(event.run_id)
                 if event is started:
                     row["body_sha256"] = _digest(self._started_body(event))
                     row["fields_sha256"] = _digest(self._started_fields_body(event))
+                elif fixed_error_sources:
+                    if event.kind != "tool_call_failed" or event.idempotency_key is None:
+                        raise ValueError("fixed error sources require keyed tool failure events")
+                    row["body_sha256"] = _digest(json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                    row["fields_sha256"] = _digest(json.dumps({key: value for key, value in values.items() if key != "metadata"},
+                                                             ensure_ascii=False, sort_keys=True, separators=(",", ":")))
                 row["run_fields"] = 0
                 if known is not None:
                     for bit, (name, value) in enumerate(zip(_EVENT_RUN_FIELDS, known.values)):
@@ -454,6 +569,44 @@ class SqlStepStore:
         # without body proof fails closed rather than adding a speculative read.
         await self._write_events(session, (event,), source=source, started=event)
         return self._with_terminal(source, event)
+
+    async def read_fixed_events(
+        self, keys: Sequence[tuple[str, str]], *, transaction: SqlStateRowReader,
+    ) -> dict[tuple[str, str], StepEvent]:
+        """Read keyed sources and inherited run fields in the owner's actual scope."""
+        from sqlalchemy import and_, or_, select
+
+        if not isinstance(transaction, SqlStateRowReader):
+            raise TypeError("native event reads require a SQL state scope")
+        keys = tuple(dict.fromkeys(keys))
+        for run_id, replay_key in keys:
+            validate_resource_id(run_id)
+            if validate_native_replay_key(replay_key) is None:
+                raise ValueError("fixed events require keyed identities")
+        table, runs = self._table("events"), self._table("runs")
+        result = {}
+        for offset in range(0, len(keys), _BATCH_SIZE):
+            batch = keys[offset:offset + _BATCH_SIZE]
+            query = select(*table.c, *(column.label("source_run_" + column.name) for column in runs.c)).select_from(
+                table.outerjoin(runs, and_(runs.c.store_locator == table.c.store_locator,
+                    runs.c.store_key == table.c.store_key, runs.c.run_id == table.c.run_id)),
+            ).where(table.c.store_locator == self._store_locator, table.c.store_key == self._store_key,
+                or_(*(and_(table.c.run_id == run_id,
+                            table.c.idempotency_key == encode_native_replay_key(replay_key))
+                       for run_id, replay_key in batch)))
+            for row in await transaction.read_sql_rows(self._context, query):
+                run = {column.name: row["source_run_" + column.name] for column in runs.c}
+                try:
+                    event = self.decode_started_row(row, expected_store_key=self._store_key, run=run)
+                except (ValueError, TypeError, KeyError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                key = event.run_id, event.idempotency_key
+                if key not in batch or key in result:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result[key] = event
+        if len(result) != len(keys):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result
 
     async def list_events(
         self, *, run_id: str, started_receipt: StepWriteReceipt | None = None,
@@ -548,8 +701,8 @@ class SqlStepStore:
 
     @classmethod
     def _started_body(cls, event: StepEvent) -> str:
-        if (event.kind != "run_started" and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
-            raise ValueError("managed source requires a keyed lifecycle event")
+        if (event.kind not in {"run_started", "tool_call_failed"} and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
+            raise ValueError("fixed source requires a keyed lifecycle or tool failure event")
         values = cls._event_values(event)
         if isinstance(event, NativeLifecycleEvent):
             cls.decode_event(values)
@@ -557,8 +710,8 @@ class SqlStepStore:
 
     @classmethod
     def _started_fields_body(cls, event: StepEvent) -> str:
-        if (event.kind != "run_started" and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
-            raise ValueError("managed source requires a keyed lifecycle event")
+        if (event.kind not in {"run_started", "tool_call_failed"} and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
+            raise ValueError("fixed source requires a keyed lifecycle or tool failure event")
         validate_native_replay_key(event.idempotency_key)
         if event.tool_call_id is not None:
             validate_resource_id(event.tool_call_id)
@@ -740,6 +893,7 @@ class SqlStepStore:
         """Validate raw row identities and descriptors without opening SQL."""
         metadata = build_step_sql_metadata()
         runs = {}
+        managed_starts = {}
         for name in ("runs", "events", "snapshots"):
             table = metadata.tables[f"ai_step_{name}"]
             columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at"}
@@ -757,6 +911,9 @@ class SqlStepStore:
                     seen.add(key)
                 if name == "runs":
                     _RUN_ADAPTER.validate_python(cls._record_data(row))
+                    marker = row["managed_start_key"]
+                    if marker is not None and decode_native_replay_key(marker) is None:
+                        raise ValueError("managed start identity must be a public replay key")
                     runs[run_id] = row
                     continue
                 if name == "snapshots":
@@ -786,6 +943,13 @@ class SqlStepStore:
                 if (isinstance(event, NativeLifecycleEvent) or row["body_sha256"] is not None
                         or row["fields_sha256"] is not None):
                     cls.decode_started_row(row, expected_store_key=backup.store_key, run=run)
+                    if event.kind == "run_started":
+                        if run_id in managed_starts or run is None or run["managed_start_key"] != replay:
+                            raise ValueError("managed start differs from its registration identity")
+                        managed_starts[run_id] = replay
+        for run_id, row in runs.items():
+            if row["managed_start_key"] != managed_starts.get(run_id):
+                raise ValueError("native backup is missing its committed managed start")
 
     async def capture_backup(
         self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
@@ -821,8 +985,9 @@ class SqlStepStore:
                     value = {column.name: row[column.name] for column in columns}
                     if accept is not None:
                         encoded = dict(value, store_key=encode_native_store_key(value["store_key"]))
-                        if "idempotency_key" in encoded:
-                            encoded["idempotency_key"] = base64.b64encode(encoded["idempotency_key"]).decode("ascii")
+                        for key in ("idempotency_key", "managed_start_key"):
+                            if key in encoded and encoded[key] is not None:
+                                encoded[key] = base64.b64encode(encoded[key]).decode("ascii")
                         accept(encoded)
                     rows.append(value)
                 if len(page) < _BATCH_SIZE:
@@ -935,30 +1100,56 @@ class SqlStepStore:
             raise ValueError("native backup message closure is incomplete")
 
     async def restore_backup(self, session: "AsyncSession", backup: NativeStepBackup) -> None:
-        """Restore into an empty owner after message closure import, without replaying writers."""
+        """Restore native history, reusing equal canonical run registrations."""
         from sqlalchemy import select
 
         async def read(statement: "Select") -> Sequence[Mapping[str, object]]:
             return (await session.execute(statement)).mappings().all()
         await self._validate_backup_messages(read, backup)
-        for name in ("runs", "events", "snapshots"):
+        for name in ("events", "snapshots"):
             table = self._table(name)
             if (await session.execute(select(table.c.id).where(
                     table.c.store_locator == self._store_locator, table.c.store_key == self._store_key).limit(1))).first() is not None:
                 raise ValueError("native backup restore requires an empty owner")
+        run_table = self._table("runs")
+        existing_runs = {}
+        identifiers = tuple(row["run_id"] for row in backup.runs)
+        for offset in range(0, len(identifiers), _BATCH_SIZE):
+            rows = (await session.execute(select(run_table).where(
+                run_table.c.store_locator == self._store_locator,
+                run_table.c.store_key == self._store_key,
+                run_table.c.run_id.in_(identifiers[offset:offset + _BATCH_SIZE]),
+            ))).mappings().all()
+            existing_runs.update((row["run_id"], row) for row in rows)
+        for row in backup.runs:
+            existing = existing_runs.get(row["run_id"])
+            if existing is not None and (_RUN_ADAPTER.validate_python(self._record_data(existing))
+                                         != _RUN_ADAPTER.validate_python(self._record_data(row))):
+                raise ValueError("native backup registration differs from its canonical owner")
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
             # Individual inserts preserve ordering even on dialects that do not
             # guarantee the generated ID order of executemany operations.
             for row in getattr(backup, name):
+                if name == "runs" and row["run_id"] in existing_runs:
+                    existing = existing_runs[row["run_id"]]
+                    if existing["managed_start_key"] is not None:
+                        raise ValueError("native restore requires metadata-only registrations")
+                    if row["managed_start_key"] is not None:
+                        from sqlalchemy import update
+                        changed = await session.execute(update(table).where(
+                            *self._run_predicates(table, row["run_id"]),
+                            table.c.managed_start_key.is_(None),
+                        ).values(managed_start_key=row["managed_start_key"]))
+                        if changed.rowcount != 1:
+                            raise ValueError("native restore registration changed concurrently")
+                    continue
                 inserted = await session.execute(table.insert().values(**dict(row)))
                 if name == "snapshots" and not row["pruned"]:
-                    from ._native_content_index import replace_edges, resolve_targets
+                    from ._native_content_index import resolve_targets
                     root = self.snapshot_message_sequence(row)
                     targets = await resolve_targets(session, "sequence", self._store_key,
                                                     tuple(span.first for span in root.slices))
-                    await replace_edges(self._context, session, "snapshot",
-                                        inserted.inserted_primary_key[0], tuple(targets.values()))
         self.invalidate_context(self._context)
 
     @classmethod
@@ -1183,6 +1374,7 @@ class SqlStepStore:
 
     async def capture_message_roots(
         self, roots: Sequence[NativeMessageRoot], *, transaction: SqlStateRowReader | None = None,
+        reserve: Callable[[int], None] | None = None,
     ) -> Callable[[], Awaitable[tuple[tuple[bytes, ...], ...]]]:
         """Capture SQL rows with their owners; decode objects after the read scope."""
         from .state import active_state_transaction
@@ -1195,8 +1387,16 @@ class SqlStepStore:
                 if not isinstance(active, SqlStateRowReader):
                     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
                 transaction = active
-        rows = ()
-        if query is not None:
+        rows = None
+        if transaction is not None:
+            from .state import active_state_scope
+            from ._archive_read import ContentReferenceReader
+
+            active = active_state_scope()
+            if (active is not None and not active.writable
+                    and isinstance(active.record_reader, ContentReferenceReader)):
+                rows = active.record_reader.captured_native_message_rows(self._context, roots)
+        if rows is None and query is not None:
             if transaction is not None:
                 rows = await transaction.read_sql_rows(self._context, query.statement)
             else:
@@ -1205,6 +1405,21 @@ class SqlStepStore:
                     rows = tuple(dict(row) for row in (await self._context.run_statement(
                         session.execute(query.statement),
                     )).mappings())
+
+        if rows is None:
+            rows = ()
+        if reserve is not None:
+            # Structural ancestors carry NULL bodies. Only physical message
+            # bodies consume decompression memory, once per distinct identity.
+            sizes = {}
+            for row in rows:
+                if row.get("message") is None and row.get("payload_json") is None:
+                    continue
+                size = row.get("raw_size")
+                if type(size) is not int or size < 0:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                sizes[row["message_sha256"]] = size
+            reserve(sum(sizes.values()))
 
         async def hydrate() -> tuple[tuple[bytes, ...], ...]:
             try:
@@ -1224,10 +1439,14 @@ class SqlStepStore:
     async def prepare_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
         snapshot: ContinuableSnapshot | None = None, managed_start: bool = False,
+        fixed_error_sources: bool = False,
     ) -> PreparedStep:
-        """Capture native records; only an explicitly owned start mints source proof."""
+        """Capture native records; fixed source proofs require explicit ownership."""
         if type(managed_start) is not bool:
             raise ValueError("managed_start must be a bool")
+        if type(fixed_error_sources) is not bool or fixed_error_sources and (
+                not events or any(event.kind != "tool_call_failed" or event.idempotency_key is None for event in events)):
+            raise ValueError("fixed error sources require keyed tool failure events")
         if managed_start:
             starts = [event for event in events if event.kind == "run_started"]
             if (run is None or len(starts) != 1 or starts[0].idempotency_key is None
@@ -1242,7 +1461,7 @@ class SqlStepStore:
             snapshot = replace(snapshot, messages=self._frozen_messages.snapshot(snapshot.messages))
         values, messages = (None, None) if snapshot is None else await self._prepare_snapshot(snapshot)
         return PreparedStep(run, events, snapshot, values, messages,
-                            tuple(encode_native_replay_key(event.idempotency_key) for event in events), managed_start)
+                            tuple(encode_native_replay_key(event.idempotency_key) for event in events), managed_start, fixed_error_sources)
 
     async def write_prepared_step(
         self, transaction: StateTransaction, prepared: PreparedStep, *,
@@ -1314,7 +1533,8 @@ class SqlStepStore:
                 for event in batch:
                     source = await self._write_lifecycle_event(session, event, source=source)
             else:
-                await self._write_events(session, batch, source=source, started=fresh, replay_keys=replay_keys)
+                await self._write_events(session, batch, source=source, started=fresh, replay_keys=replay_keys,
+                                         fixed_error_sources=prepared.fixed_error_sources)
                 if fresh is not None and any(event is fresh for event in batch) and source is not None:
                     source = self._with_started(source, fresh)
                     fresh = None
@@ -1371,14 +1591,12 @@ class SqlStepStore:
         if run is None and not events and snapshot is None:
             return
         prepared = await self.prepare_step(run=run, events=events, snapshot=snapshot)
-        from ._native_content_index import maintain_native_content, run_native_mutation
-        receipt, maintenance = await run_native_mutation(self._context,
+        from ._native_content_index import run_native_mutation
+        receipt = await run_native_mutation(self._context,
             lambda session: self._write_prepared_step(session, prepared), domain="steps.boundary",
         )
         self.confirm_prepared_step(receipt)
         self._publish_receipt(receipt)
-        if maintenance:
-            await maintain_native_content(self._context, store_keys=(self._store_key,))
 
     async def commit_step_receipt(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
@@ -1398,11 +1616,9 @@ class SqlStepStore:
         async def write(session: "AsyncSession") -> StepWriteReceipt:
             return await self._write_snapshot(session, *prepared)
 
-        from ._native_content_index import maintain_native_content, run_native_mutation
-        receipt, maintenance = await run_native_mutation(self._context, write, domain="steps.snapshot")
+        from ._native_content_index import run_native_mutation
+        receipt = await run_native_mutation(self._context, write, domain="steps.snapshot")
         self.confirm_prepared_step(receipt)
-        if maintenance:
-            await maintain_native_content(self._context, store_keys=(self._store_key,))
 
     async def _prepare_snapshot(
         self, snapshot: ContinuableSnapshot,
@@ -1463,11 +1679,9 @@ class SqlStepStore:
         if snapshot_id is None:
             raise RuntimeError("snapshot insertion did not return its physical identity")
         content = await self._message_content.publish_in_session(session, prepared, owner_inserted=True)
-        from ._native_content_index import replace_edges
         targets = content.publication_targets(
             session, store_key=self._store_key, roots=tuple(span.first for span in prepared.root.slices),
         )
-        await replace_edges(self._context, session, "snapshot", snapshot_id, targets)
         await self._prune_snapshots(session, values["run_id"])
         return StepWriteReceipt((), (), native_messages=content)
 
@@ -1542,7 +1756,6 @@ class SqlStepStore:
         if last_complete is not None:
             complete_safe = or_(complete_safe, table.c.id < last_complete)
         conditions += (complete_safe,)
-        from ._native_content_index import replace_edges
         after = 0
         while True:
             retired = (await session.execute(select(table.c.id).where(
@@ -1554,9 +1767,6 @@ class SqlStepStore:
             await session.execute(table.update().where(
                 *self._run_predicates(table, run_id), table.c.id.in_(ids),
             ).values(pruned=True, messages="{}", sequence_root=None))
-            for row in retired:
-                await replace_edges(self._context, session, "snapshot",
-                                    row.id, ())
             after = retired[-1].id
             if len(retired) < 128:
                 break

@@ -4,7 +4,7 @@
 
 from linktools.ai.persistence import Persistence
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,9 +17,12 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.execution import ExecutionRecord
 from linktools.ai.inputs import CaptureInputRequest
 from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence.state import active_state_scope
 from linktools.ai.inputs import InputCaptures
+from linktools.ai.storage import InMemoryCacheBackend, _write_cache
 
 from .test_history_projection_conformance import _record
 
@@ -44,49 +47,51 @@ def _captures(state, *, prepare=None, authorization=None):
     )
 
 
-def _stale_source_miss(monkeypatch, state):
+def _stale_source_miss(monkeypatch: pytest.MonkeyPatch, state: Persistence) -> list[str]:
     repository = state.execution.executions
-    read, get = repository.state_store.read, repository.get
-    source_scope = ContextVar("capture_source_scope", default=False)
+    store = repository.state_store
+    get = repository.get
+    source_reads: list[str] = []
 
-    async def strong_read(callback):
-        token = source_scope.set(True)
-        try:
-            return await read(callback)
-        finally:
-            source_scope.reset(token)
+    async def observed_get(execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
+        scope = active_state_scope()
+        if scope is None:
+            return None
+        assert scope.group is store.storage_group
+        assert not scope.writable and store in scope.transactions
+        source_reads.append(execution_id)
+        return await get(execution_id, tenant_id=tenant_id)
 
-    async def observed_get(execution_id, *, tenant_id):
-        if source_scope.get():
-            return await get(execution_id, tenant_id=tenant_id)
-        return None
-
-    monkeypatch.setattr(repository.state_store, "read", strong_read)
     monkeypatch.setattr(repository, "get", observed_get)
+    return source_reads
 
 
 @pytest.mark.asyncio
-async def test_pending_capture_authorizes_promotion_and_refreshes_source_misses(monkeypatch) -> None:
+async def test_pending_capture_authorizes_promotion_and_refreshes_source_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async with _storage() as state:
         record = _record(ExecutionStatus.STARTED, 1)
         policy = TenantAuthorizationPolicy("tenant")
         promotions = []
 
-        async def prepare(execution_id, principal):
+        async def prepare(execution_id: str, principal: Principal) -> None:
             header = ResourceRef(ResourceKind.EXECUTION, execution_id, "tenant", record.principal_id)
             await policy.authorize(principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT, header)
             await policy.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
             await state.execution.executions.create_execution(record)
             promotions.append(execution_id)
+            assert await state.execution.executions.get(execution_id, tenant_id=principal.tenant_id) is None
 
         captures = _captures(state, prepare=prepare)
-        _stale_source_miss(monkeypatch, state)
+        source_reads = _stale_source_miss(monkeypatch, state)
         reference = await captures.capture_input("execution", CaptureInputRequest(_PRINCIPAL, "capture"))
         captured = await captures.read_agent(reference, principal=_PRINCIPAL)
         assert captured.prompt == "prompt"
         assert captured.source_execution_id == "execution"
         assert captured.source_principal["principal_id"] == "principal"
         assert promotions == ["execution"]
+        assert source_reads == ["execution"]
 
 
 @pytest.mark.asyncio
@@ -175,3 +180,43 @@ async def test_source_capture_does_not_request_pending_promotion() -> None:
         captures = _captures(state, prepare=prepare)
         reference = await captures.capture_input("execution", CaptureInputRequest(_PRINCIPAL, "source"))
         assert (await captures.read_agent(reference, principal=_PRINCIPAL)).prompt == "prompt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_policy", ("captured", "clean"))
+async def test_pending_capture_reads_remote_promotion_despite_cached_sqlite_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context_policy: str,
+) -> None:
+    monkeypatch.setattr(_write_cache, "time", lambda: 1000.0)
+    path = tmp_path / "pending.db"
+    cached = PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=1_000_000))
+    async with Persistence.open("pending-capture", storage=cached, tenant_id="tenant") as reader:
+        async with Persistence.open(
+            "pending-capture", storage=PersistenceStorage.sqlite(path), tenant_id="tenant",
+        ) as writer:
+            repository = reader.execution.executions
+            assert await repository.get("execution", tenant_id="tenant") is None
+            assert await repository.get_header("execution", tenant_id="tenant") is None
+            record = _record(ExecutionStatus.STARTED, 1)
+            policy = TenantAuthorizationPolicy("tenant")
+            promotions: list[str] = []
+
+            async def prepare(execution_id: str, principal: Principal) -> None:
+                header = ResourceRef(ResourceKind.EXECUTION, execution_id, "tenant", record.principal_id)
+                await policy.authorize(principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT, header)
+                await policy.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
+                await writer.execution.executions.create_execution(record)
+                promotions.append(execution_id)
+                assert await writer.execution.executions.get(execution_id, tenant_id="tenant") == record
+                assert await repository.get(execution_id, tenant_id="tenant") is None
+                assert await repository.get_header(execution_id, tenant_id="tenant") is None
+
+            captures = _captures(reader, prepare=prepare)
+            reference = await captures.capture_input("execution", CaptureInputRequest(
+                _PRINCIPAL, "remote-promotion", context_policy=context_policy,
+            ))
+            captured = await captures.read_agent(reference, principal=_PRINCIPAL)
+            assert captured.prompt == "prompt"
+            assert captured.source_execution_id == "execution"
+            assert captured.source_principal["principal_id"] == "principal"
+            assert promotions == ["execution"]

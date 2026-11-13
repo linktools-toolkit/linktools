@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from ._record_key import validate_record_key
 
 if TYPE_CHECKING:
-    from .state import StoredRecord
+    from .state import RecordQuery, StateStore, StoredRecord
+    from ._message_root import NativeMessageRoot
+    from ..storage._database import SqlStorageContext
 
 
 class ArchiveNodeSlot(IntFlag):
@@ -47,4 +49,23 @@ class ArchiveFrontierReader(Protocol):
         ...
 
 
-__all__ = ["ArchiveNodeSlot", "ArchiveNodeRead", "ArchiveFrontierReader"]
+@runtime_checkable
+class ContentReferenceReader(Protocol):
+    async def read_content_references(
+        self, *, owner_store: "StateStore", owner_keys: Sequence[bytes], content_store: "StateStore",
+        content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
+        additional_records: Mapping["StateStore", Sequence[bytes]] | None = None,
+        owner_query: "RecordQuery | None" = None,
+        native_root_paths: Sequence[tuple[str, ...]] = (),
+    ) -> "Mapping[StateStore, Mapping[bytes, StoredRecord]] | None":
+        """Capture current owners and declared references in their enlisted snapshot."""
+        ...
+
+    def captured_native_message_rows(
+        self, context: "SqlStorageContext", roots: Sequence["NativeMessageRoot"],
+    ) -> "tuple[Mapping[str, object], ...] | None":
+        """Return only fixed source rows captured with owners in this read snapshot."""
+        ...
+
+
+__all__ = ["ArchiveNodeSlot", "ArchiveNodeRead", "ArchiveFrontierReader", "ContentReferenceReader"]

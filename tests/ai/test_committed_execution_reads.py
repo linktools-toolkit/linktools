@@ -103,19 +103,21 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
         )
         await execution.wait()
         service = runtime._execution_service
-        load = service.load_execution
+        repository = runtime._state.execution.executions
+        load = repository.get_result_record
         confirmed = False
 
-        async def load_once(execution_id, *, tenant_id):
+        async def load_once(execution_id, *, tenant_id, fresh=False):
             nonlocal confirmed
+            assert fresh
             if confirmed:
                 raise AssertionError("terminal consumption already owns its confirmed status")
-            value = await load(execution_id, tenant_id=tenant_id)
+            value = await load(execution_id, tenant_id=tenant_id, fresh=fresh)
             assert value.status is ExecutionStatus.SUCCEEDED
             confirmed = True
             return value
 
-        monkeypatch.setattr(service, "load_execution", load_once)
+        monkeypatch.setattr(repository, "get_result_record", load_once)
         result = await getattr(service, query)(
             execution.execution_id, principal=runtime.default_principal,
         )

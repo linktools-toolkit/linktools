@@ -29,6 +29,9 @@ async def _append_calls(history, request: int, count: int) -> None:
     results = []
     for index in range(count):
         result = ToolReturnPart("echo", index, tool_call_id=f"call-{request}-{index}")
+        await recorder.record_event("TOOL_CALL_STARTED", request + 1,
+                                    tool_call_id=result.tool_call_id, tool_name="echo",
+                                    metadata={"linktools.operation_id": f"operation-{request}-{index}"})
         await recorder.record_tool_result_boundary(result, request + 1)
         results.append(result)
     recorder.append_transcript_message(ModelRequest(parts=results))
@@ -105,21 +108,26 @@ async def test_history_request_filters_bound_tool_operation_reads(monkeypatch: p
         await history.archive()
         repository = history.state.checkpoint.tools
         history.reader._tool_operations = repository
-        original = repository.get_by_call_ids
+        original = repository.get_operation_metadata
         calls = set()
 
-        async def capture(agent_run_id, tool_call_ids, *, tenant_id):
-            calls.update(tool_call_ids)
-            return await original(agent_run_id, tool_call_ids, tenant_id=tenant_id)
+        async def capture(operation_ids, *, tenant_id):
+            calls.update(operation_ids)
+            return await original(operation_ids, tenant_id=tenant_id)
 
-        monkeypatch.setattr(repository, "get_by_call_ids", capture)
+        monkeypatch.setattr(repository, "get_operation_metadata", capture)
+
+        async def reject_full_receipts(*args, **kwargs):
+            raise AssertionError("history association must not hydrate unrelated tool payloads")
+
+        monkeypatch.setattr(repository, "get_operations", reject_full_receipts)
         for selector in ({"model_request_seq": 2}, {"step_index": 2}):
             calls.clear()
             selected = await history.reader.history(
                 "execution", tenant_id="tenant", cursor=None, limit=100, **selector,
             )
             assert len(selected.items) == 18
-            assert calls == {f"call-2-{index}" for index in range(9)}
+            assert calls == {f"operation-2-{index}" for index in range(9)}
 
 
 @pytest.mark.asyncio

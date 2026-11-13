@@ -30,12 +30,13 @@ def _reference(revision: int = 1) -> CapabilityRef:
     return CapabilityRef("mcp", "server", revision)
 
 
-def _bridge(state: Persistence, *, recovery: bool = False) -> RuntimeToolOperationBridge:
+def _bridge(state: Persistence, *, recovery: bool = False, operation_id: str | None = None) -> RuntimeToolOperationBridge:
     return RuntimeToolOperationBridge(
         state.checkpoint.tools, InMemoryObjectStore(), namespace="admitted-capability",
         tenant_id="tenant", execution_id="execution", agent_run_id="resumed" if recovery else "run",
         binding_digest="b" * 64, owner="owner", background_tasks=set(),
          recovery_agent_run_id="run" if recovery else None,
+        operation_ids=None if operation_id is None else {"call": operation_id},
     )
 
 
@@ -111,7 +112,7 @@ async def test_unresolved_call_rejects_changed_revision_and_keeps_original_facts
     with pytest.raises(AIError) as changed:
         await repository.admit(replace(request, capability_ref=_reference(2)))
     assert changed.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-    assert await repository.get_by_call("resumed", "call", tenant_id="tenant") is None
+    assert await repository.get_operation("operation", tenant_id="tenant") == record
     if status == "unknown":
         with pytest.raises(AIError) as unknown:
             await repository.admit(replace(request, capability_ref=_reference()))
@@ -140,7 +141,7 @@ async def test_warm_and_cold_bridge_keep_original_terminal_result_and_reject_cha
             await bridge.fail(decision, ToolCallFailed("original failure"))
         else:
             await bridge.complete(decision, "original result")
-        for candidate in (bridge, _bridge(state), _bridge(state, recovery=True)):
+        for candidate in (bridge, _bridge(state), _bridge(state, recovery=True, operation_id=decision.operation_id)):
             replayed = await _begin(candidate, _reference(2), replay_safe=True)
             assert replayed.capability_ref == original
             assert replayed.replay_safe is False
@@ -232,7 +233,7 @@ async def test_boundary_keeps_prior_effect_when_current_tool_is_read_only(status
             await original.defer(decision)
         else:
             await original.complete(decision, "original result")
-        bridge = _bridge(state, recovery=True) if recovery else original
+        bridge = _bridge(state, recovery=True, operation_id=decision.operation_id) if recovery else original
         boundary = BoundaryToolset((FunctionToolset([work]),), {
             "work": ManagedToolDescriptor("none", "none", "business",
                                           capability_ref=CapabilityRef("tool", "work", 2)),

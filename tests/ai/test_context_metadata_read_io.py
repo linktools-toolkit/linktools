@@ -46,6 +46,8 @@ async def test_empty_context_batches_projection_and_head(
         def capture_cold(_connection, _cursor, statement, parameters, _context, _many):
             cold_queries.append((statement, parameters))
 
+        # Session creation already established and retained the archive identity.
+        assert archive.state_store.storage_group.opened_archive is not None
         event.listen(engine, "before_cursor_execute", capture_cold)
         try:
             cold = (await repository.load_session_model_context(owner, tenant_id="tenant")
@@ -56,8 +58,8 @@ async def test_empty_context_batches_projection_and_head(
         cold_selects = [(sql, parameters) for sql, parameters in cold_queries if sql.startswith("SELECT")]
         scope_key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
         scope_locator = sha256(scope_key).hexdigest()
-        assert sum(scope_key in parameters or scope_locator in parameters for _, parameters in cold_selects) == 1
-        assert len(cold_selects) == 2
+        assert sum(scope_key in parameters or scope_locator in parameters for _, parameters in cold_selects) == 0
+        assert len(cold_selects) == 1
         assert not any(name in sql for sql, _ in cold_selects
                        for name in ("ai_step_messages", "ai_step_sequences", "ai_objects"))
         assert not any(sql.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"} for sql, _ in cold_queries)

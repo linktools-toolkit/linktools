@@ -42,7 +42,7 @@ from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.core import ExecutionContext
 from linktools.ai.persistence.captures import capture_record, task_graph_binding_capture_key
 from linktools.ai.persistence._memory import InMemoryStateStore
-from linktools.ai.persistence.state import StateCallback
+from linktools.ai.persistence.state import StateCallback, active_state_scope
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.inputs import TaskGraphBindingCaptureStore
@@ -295,8 +295,10 @@ class _ConcurrentCaptureStateStore(InMemoryStateStore):
         self._both_read = asyncio.Event()
 
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
+        outer_read = active_state_scope() is None
         value = await super().read(fn)
-        if value is None and self._initial_reads < 2:
+        # Synchronize completed snapshots, never nested reads holding the group lock.
+        if outer_read and value is None and self._initial_reads < 2:
             self._initial_reads += 1
             if self._initial_reads == 2:
                 self._both_read.set()

@@ -60,6 +60,7 @@ async def test_interaction_fact_cannot_replace_missing_authoritative_record(
         assert await store.read(lambda tx: tx.get_record(archive._interaction_key(run.agent_run_id, 2))) is None
 
         records = await store.read(lambda tx: tx.scan_records())
+        records = await archive._project_run_records(records)
         facts = await store.read(lambda tx: tx.scan_facts())
         with pytest.raises(AIError) as indexes:
             canonical_snapshot_indexes(
@@ -70,7 +71,7 @@ async def test_interaction_fact_cannot_replace_missing_authoritative_record(
         with pytest.raises(AIError) as snapshot:
             validate_snapshot_domain(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=records, facts=facts, operations=(), aliases=(),
+                records=records, facts=facts, operations=(), 
                 sequences={archive._stream(run.agent_run_id, "interaction"): 1},
             )
         assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

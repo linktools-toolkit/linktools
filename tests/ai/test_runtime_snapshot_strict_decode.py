@@ -47,11 +47,9 @@ from linktools.ai.persistence._snapshot_validation import (
     validate_snapshot_domain,
 )
 from linktools.ai.persistence.state import (
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
-    alias_key,
     operation_key,
     scope_key,
     stream_key,
@@ -261,7 +259,7 @@ def test_snapshot_task_capture_state_rejects_invalid_manifests(
     with pytest.raises(AIError) as raised:
         validate_snapshot_domain(
             namespace="runtime", tenant_id="tenant", domain=PersistenceDomain.TASK,
-            records=(record,), aliases=(), facts=(), operations=(), sequences={},
+            records=(record,), facts=(), operations=(), sequences={},
         )
 
     assert raised.value.code is expected_code
@@ -451,7 +449,6 @@ async def test_runtime_storage_restore_rejects_mismatched_logical_record_key_bef
         "domains": {
             "conversation": {
                 "records": [encode_record(record)],
-                "aliases": [],
                 "facts": [],
                 "operations": [],
                 "sequences": [],
@@ -480,7 +477,7 @@ async def test_runtime_storage_restore_rejects_mismatched_logical_record_key_bef
 
 
 
-def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
+def test_snapshot_tool_operation_identity_is_validated_without_alias_inventory() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     operation = ToolOperationRecord(
         tool_operation_id=canonical_sha256({"tool_operation": 1}),
@@ -508,7 +505,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         state=operation.status.value,
     )
 
-    aliases, sequences = canonical_snapshot_indexes(
+    sequences = canonical_snapshot_indexes(
         namespace="runtime",
         tenant_id="tenant",
         domain=PersistenceDomain.CHECKPOINT,
@@ -517,11 +514,6 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         operations=(),
     )
 
-    expected_alias = alias_key(
-        "runtime", "tenant", "checkpoint", "tool_call",
-        [operation.agent_run_id, operation.tool_call_id],
-    )
-    assert aliases == (StoredAlias(expected_alias, record.key),)
     assert sequences == {}
 
     for field in ("agent_run_id", "tool_call_id"):
@@ -545,7 +537,6 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         tenant_id="tenant",
         domain=PersistenceDomain.CHECKPOINT,
         records=(record,),
-        aliases=aliases,
         facts=(),
         operations=(),
         sequences=sequences,
@@ -555,8 +546,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
             namespace="runtime",
             tenant_id="tenant",
             domain=PersistenceDomain.CHECKPOINT,
-            records=(record,),
-            aliases=(StoredAlias(b"x" * 32, record.key),),
+            records=(replace(record, key=b"x" * 32),),
             facts=(),
             operations=(),
             sequences=sequences,
@@ -597,7 +587,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
         domain_data(operation),
     )
 
-    aliases, sequences = canonical_snapshot_indexes(
+    sequences = canonical_snapshot_indexes(
         namespace="runtime",
         tenant_id="tenant",
         domain=PersistenceDomain.CONVERSATION,
@@ -606,7 +596,6 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
         operations=(stored,),
     )
 
-    assert aliases == ()
     assert sequences == {
         stream_key(
             "runtime",
@@ -719,23 +708,23 @@ def test_snapshot_object_refs_reject_malformed_known_fields(codec, change) -> No
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("raw", ({"alias_key": "AA", "record_key": "77" * 32},
-                                {"alias_key": "aa" * 1025, "record_key": "77" * 32},
-                                {"alias_key": "aa", "record_key": "77" * 1153},
-                                {"alias_key": "aa", "record_key": ""},
-                                {"alias_key": "aa"}))
-def test_snapshot_aliases_reject_malformed_binary_transport(raw: object) -> None:
+@pytest.mark.parametrize("raw", ({"stream_key": "AA", "value": 1},
+                                {"stream_key": "aa" * 769, "value": 1},
+                                {"stream_key": "aa", "value": True},
+                                {"stream_key": "", "value": 1},
+                                {"stream_key": "aa"}))
+def test_snapshot_sequences_reject_malformed_binary_transport(raw: object) -> None:
     with pytest.raises(AIError) as rejected:
-        runtime_storage_snapshot_module._decode_snapshot_aliases([raw])
+        runtime_storage_snapshot_module._decode_snapshot_sequences([raw])
     assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_snapshot_alias_binary_transport_roundtrips() -> None:
-    key = alias_key("runtime", "tenant", "checkpoint", "tool_call", ("é", "e\u0301"))
-    raw = {"alias_key": key.hex(), "record_key": "77" * 32}
-    assert runtime_storage_snapshot_module._decode_snapshot_aliases([raw]) == (StoredAlias(key, b"w" * 32),)
+def test_snapshot_sequence_binary_transport_roundtrips() -> None:
+    key = stream_key("runtime", "tenant", "checkpoint", "tool_call", ("é", "e\u0301"))
+    raw = {"stream_key": key.hex(), "value": 1}
+    assert runtime_storage_snapshot_module._decode_snapshot_sequences([raw]) == {key: 1}
     with pytest.raises(AIError) as rejected:
-        runtime_storage_snapshot_module._decode_snapshot_aliases([raw, raw])
+        runtime_storage_snapshot_module._decode_snapshot_sequences([raw, raw])
     assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -761,5 +750,5 @@ def test_snapshot_oversized_relation_owners_report_integrity_errors(family: str)
     record = replace(record, data=domain_data(value))
     with pytest.raises(AIError) as error:
         validate_snapshot_domain(namespace="namespace", tenant_id="tenant", domain=domain,
-                                 records=(record,), aliases=(), facts=(), operations=(), sequences={})
+                                 records=(record,), facts=(), operations=(), sequences={})
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

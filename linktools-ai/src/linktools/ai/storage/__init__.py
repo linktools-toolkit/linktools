@@ -48,6 +48,7 @@ from ._contracts import (
     normalize_storage_metadata,
 )
 from ._database import (
+    SqlSnapshotConflict,
     SqlStorageContext,
     create_sql_storage_context,
     create_sqlite_storage_context,
@@ -189,6 +190,7 @@ __all__ = [
     "SqlErrorKind",
     "SqlObjectStore",
     "SqlStorageContext",
+    "SqlSnapshotConflict",
     "SqlTransactionDisposition",
     "SqlTransactionPhase",
     "SqlValue",

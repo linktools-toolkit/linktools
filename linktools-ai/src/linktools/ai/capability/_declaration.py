@@ -24,6 +24,7 @@ from ..spec import (
     MCPServerSpecCodec,
     SkillSpecAdapter,
     RepositoryInstructionDocument,
+    RuleInstructionAdapter,
 )
 from ._contribution import CapabilityContribution, _freeze_contribution
 from ._resource_path import (
@@ -120,7 +121,7 @@ class BuiltinDeclarationLoader:
     async def load(
         self,
         context: CapabilityLoadContext,
-    ) -> "Sequence[AgentSpec | SkillDefinition | MCPServerSpec]":
+    ) -> "Sequence[AgentSpec | SkillDefinition | MCPServerSpec | RepositoryInstructionDocument]":
         if self.source_kind == "agent":
             return await _load_agents(
                 context,
@@ -345,41 +346,12 @@ async def _load_rules(
         if not DEFAULT_DISCOVERY_POLICY.ignores(entry.key.id)
     )
     values = await context.read_many(tuple(entry.key for entry in entries))
-    result: list[RepositoryInstructionDocument] = []
-    for entry, value in zip(entries, values, strict=True):
-        source_id = entry.key.id[:-3]
-        try:
-            content = value.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise AIError(
-                ErrorCode.OUTPUT_CONTRACT_INVALID,
-                safe_details={
-                    "asset_source_id": context.group_id,
-                    "asset_id": entry.key.id,
-                },
-            ) from error
-        scope = "."
-        if content.startswith("---\n"):
-            metadata, separator, content = content[4:].partition("\n---\n")
-            if not separator:
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            declared_scope: str | None = None
-            for field in metadata.splitlines():
-                if not field.startswith("scope:"):
-                    continue
-                if declared_scope is not None or not field.startswith("scope: "):
-                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-                declared_scope = field[len("scope: ") :]
-            if declared_scope is not None:
-                scope = declared_scope
-        result.append(
-            RepositoryInstructionDocument(
-                f"rule:{source_id}",
-                scope,
-                content,
-            )
-        )
-    return result
+    versions = context.bind_versions(tuple(entry.key for entry in entries))
+    adapter = RuleInstructionAdapter()
+    return tuple(
+        adapter.decode_markdown(value, asset_source_id=context.group_id, asset=version)
+        for value, version in zip(values, versions, strict=True)
+    )
 
 
 def _validate_resource_arguments(

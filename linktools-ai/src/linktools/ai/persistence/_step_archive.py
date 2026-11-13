@@ -13,7 +13,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from datetime import datetime, timezone
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
@@ -40,6 +40,7 @@ from .codec import (
     encode_record,
     decode_record,
 )
+from ..execution import ExecutionControlRecord
 from .contracts import (
     ArchivedContextBlock,
     ContextProjection,
@@ -71,6 +72,8 @@ from ._history import (
 )
 from ._model_client import capture_client_requests, prepare_client_requests, resolve_client_requests
 from ._native_event_reference import NativeEventReferences
+from ._trace_event_store import SqlTraceEventStore, history_identities
+from ._run_registration import RunRegistrationStore, RunRegistrationReference
 from ._native_run_reference import NativeRunReferences, is_native_run_reference
 from ._sql import SqlStateStore
 from ._step_store import SqlStepStore, StepWriteReceipt
@@ -78,7 +81,6 @@ from ._message_root import NativeMessageRoot
 from ._plan import PersistenceDomain
 from ._object_router import runtime_object_source_reads
 from ._step_contracts import (
-    TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunCheckpoint,
     AgentRunHistoryCapture,
     AgentRunRecord,
@@ -133,6 +135,10 @@ class _StepArchiveBatch(Protocol):
         *,
         execution_id: str | None = None,
     ) -> None: ...
+
+
+if TYPE_CHECKING:
+    from ._checkpoint_repositories import ToolRepositoryImpl
 
 
 @dataclass(slots=True)
@@ -1147,12 +1153,16 @@ class StateStepArchive(AgentRunStore):
         namespace: str,
         tenant_id: str,
         runtime_domain: PersistenceDomain,
+        run_registrations: "RunRegistrationStore | None" = None,
         context_sources: Mapping[PersistenceDomain, TranscriptRepository] | None = None,
         history_repository: "ConversationHistoryRepository | None" = None,
         execution_repository: "ExecutionRepository | None" = None,
         object_reader: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bytes]] | None" = None,
         cache: CacheBackend | None = None,
     ) -> None:
+        self._run_registrations = run_registrations or RunRegistrationStore(
+            store, namespace=namespace, tenant_id=tenant_id)
+        self._registration_sources: dict[str, RunRecord] = {}
         self._store = store
         self._namespace = namespace
         self._tenant_id = tenant_id
@@ -1170,6 +1180,7 @@ class StateStepArchive(AgentRunStore):
             object_reader=object_reader,
         )
         self._execution_repository = execution_repository
+        self._tool_repository: "ToolRepositoryImpl | None" = None
         self._context_baselines: dict[str, LoadedModelContext] = {}
         self._context_cache = cache if isinstance(cache, CacheBackend) else None
         self._context_cache_keys: OrderedDict[str, str] = OrderedDict()
@@ -1177,13 +1188,51 @@ class StateStepArchive(AgentRunStore):
         self._closed = False
         self._native_runs: NativeRunReferences | None = None
         self._native_events: NativeEventReferences | None = None
+        native_owner = self._run_registrations.native
+        if (isinstance(store, SqlStateStore) and native_owner is not None
+                and native_owner.storage_context.engine is store.context.engine):
+            # Canonical metadata is read in the domain's existing snapshot and
+            # connection. This does not enable native lifecycle publication.
+            self._native_runs = NativeRunReferences(store, namespace=namespace, tenant_id=tenant_id)
+        self._trace_events = (SqlTraceEventStore(store, namespace=namespace, tenant_id=tenant_id)
+                              if runtime_domain is PersistenceDomain.TRACE and isinstance(store, SqlStateStore) else None)
 
     def enable_native_run_reads(self) -> None:
         """Use the co-located provisioned native schema for Trace source joins."""
-        if self._runtime_domain is PersistenceDomain.TRACE and isinstance(self._store, SqlStateStore):
+        if (self._runtime_domain is PersistenceDomain.TRACE and isinstance(self._store, SqlStateStore)
+                and (self._run_registrations is None or self._run_registrations.native is not None
+                     and self._run_registrations.native.storage_context.engine is self._store.context.engine)):
             if self._native_runs is None:
                 self._native_runs = NativeRunReferences(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
+            if self._native_events is None:
                 self._native_events = NativeEventReferences(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
+
+    def bind_tool_repository(self, repository: "ToolRepositoryImpl") -> None:
+        """Join receipt ownership only when its state shares this publication group."""
+        if repository.state_store.storage_group is self._store.storage_group:
+            self._tool_repository = repository
+
+    async def share_published_content(
+        self, run: AgentRunRecord, *, execution_id: str | None,
+        checkpoints: Sequence[PreparedAgentRunCheckpoint],
+        observation: PreparedTranscriptObservation | None, archive: PreparedArchive,
+    ) -> None:
+        repository = self._tool_repository
+        if execution_id is None:
+            return
+        chunks = tuple(chunk for checkpoint in checkpoints for chunk in checkpoint.chunks)
+        if observation is not None:
+            chunks += observation.chunks
+        roots = tuple(dict.fromkeys(chunk.content for chunk in chunks if isinstance(chunk.content, NativeMessageRoot)))
+        combined = PreparedArchive.combine((archive, *(checkpoint.archive for checkpoint in checkpoints),
+                                            *((observation.archive,) if observation is not None else ())))
+        if repository is not None:
+            await repository.share_published_results(agent_run_id=run.agent_run_id, execution_id=execution_id,
+                                                    roots=roots, archive=combined)
+        if type(self._execution_repository) is ExecutionRepositoryImpl:
+            await self._execution_repository.share_published_user_input(
+                execution_id=execution_id, roots=roots, archive=combined,
+                source_archive=await self._history.content_archive())
 
     def bind_native_run_store(self, native: SqlStepStore) -> None:
         if (type(native) is SqlStepStore and isinstance(self._store, SqlStateStore)
@@ -1192,8 +1241,11 @@ class StateStepArchive(AgentRunStore):
                     namespace=self._namespace, tenant_id=self._tenant_id,
                 )):
             self._history.bind_native_message_store(native)
-        if self._native_runs is not None:
-            self._native_runs.bind(native)
+        if self._native_events is not None:
+            # Only lifecycle projections consume the bound writer's receipts.
+            # Run-only readers resolve their source directly in the SQL JOIN.
+            if self._native_runs is not None:
+                self._native_runs.bind(native)
             self._native_events.bind(native)
 
     def can_share_native_start(self, native: object) -> bool:
@@ -1232,27 +1284,92 @@ class StateStepArchive(AgentRunStore):
     async def read_event_facts(self, transaction: StateTransaction, query: FactQuery,
                                *, sequences: Sequence[int] | None = None,
                                full_source: bool = False) -> tuple[StoredFact, ...]:
+        if self._trace_events is not None:
+            rows = await self._trace_events.read_rows(transaction, query, sequences=sequences,
+                native_events=self._native_events, full_source=full_source)
+            facts = tuple(self._trace_events.row_to_fact(row) for row in rows)
+            return (self._native_events.project_trace_facts(facts, rows=rows, full_source=full_source)
+                    if self._native_events is not None else facts)
         if self._native_events is not None:
             return await self._native_events.read(transaction, query=query, sequences=sequences, full_source=full_source)
         if sequences is not None and isinstance(transaction, FactReader):
             return await transaction.get_facts(query.stream_key, sequences)
         return await transaction.list_facts(query)
 
-    def confirm_native_run(self, record: RunRecord) -> None:
-        if self._native_runs is not None:
-            self._native_runs.confirm(record)
+    def remember_run_registration(self, source: RunRecord) -> None:
+        """Carry the prepared canonical source to its domain publication."""
+        previous = self._registration_sources.get(source.run_id)
+        if previous is not None and previous != source:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._registration_sources[source.run_id] = source
 
-    def invalidate_native_run(self, run_id: str) -> None:
-        if self._native_runs is not None:
-            self._native_runs.invalidate(run_id)
+    async def prepare_run_registration(self, run: AgentRunRecord) -> None:
+        """Prepare admission; same-owner metadata joins the domain publication."""
+        owner = self._run_registrations
+        if owner is None or owner.joins(self._store):
+            # Same-owner admissions are resolved atomically at the central
+            # domain insertion point, not during payload preparation.
+            return
+        source = self._registration_sources.get(run.agent_run_id)
+        if source is None:
+            source = await owner.get(run.agent_run_id)
+            if source is None:
+                source = RunRecord(run_id=run.agent_run_id, conversation_id=run.agent_conversation_id,
+                                   parent_run_id=run.parent_agent_run_id, agent_name=run.agent_id,
+                                   metadata=dict(run.metadata), started_at=run.started_at)
+            self.remember_run_registration(source)
+        if not owner.joins(self._store):
+            # An independent owner must be durable before this domain can refer
+            # to it. Existing immutable admissions need no extra commit.
+            if await owner.get(run.agent_run_id) != source:
+                await owner.publish(source)
+
+    async def read_run_registrations(self, run_ids: Sequence[str]) -> Mapping[str, RunRecord] | None:
+        """Capture immutable registrations before opening a domain scope."""
+        owner = self._run_registrations
+        if self._native_runs is not None or owner is None or owner.native is not None:
+            return None
+        return await owner.get_many(run_ids)
+
+    async def _project_run_records(
+        self, records: Sequence[StoredRecord], *, registrations: Mapping[str, RunRecord] | None = None,
+    ) -> tuple[StoredRecord, ...]:
+        references = {record.key: RunRegistrationReference.from_data(record.data)
+                      for record in records if record.kind == "agent_run" and is_native_run_reference(record.data)}
+        if not references:
+            return tuple(records)
+        if self._run_registrations is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        identities = tuple(dict.fromkeys(reference.run_id for reference in references.values()))
+        if registrations is None:
+            sources = {identity: self._registration_sources[identity] for identity in identities
+                       if identity in self._registration_sources}
+            missing = tuple(identity for identity in identities if identity not in sources)
+            if missing:
+                sources.update(await self._run_registrations.get_many(missing))
+        else:
+            sources = registrations
+        result = []
+        for record in records:
+            reference = references.get(record.key)
+            if reference is not None:
+                source = sources.get(reference.run_id)
+                if source is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                record = replace(record, data=_encode_step(reference.project(source)))
+            result.append(record)
+        return tuple(result)
 
     async def read_run_records(
-        self, transaction: StateTransaction, keys: Sequence[bytes],
+        self, transaction: StateTransaction, keys: Sequence[bytes], *,
+        registrations: Mapping[str, RunRecord] | None = None,
+        sequence_keys: Sequence[bytes] = (),
     ) -> Mapping[bytes, StoredRecord]:
         """Read DTO projections without replacing the transaction's raw records."""
         if self._native_runs is None:
-            return await transaction.get_records(keys)
-        return {record.key: record for record in await self._native_runs.read(transaction, keys=keys)}
+            records = await transaction.get_records(keys)
+            return {record.key: record for record in await self._project_run_records(tuple(records.values()), registrations=registrations)}
+        return {record.key: record for record in await self._native_runs.read(transaction, keys=keys, sequence_keys=sequence_keys)}
 
     @property
     def runtime_domain(self) -> PersistenceDomain:
@@ -1266,9 +1383,14 @@ class StateStepArchive(AgentRunStore):
     def transaction_stores(self) -> tuple[StateStore, ...]:
         """Enlist evidence and its authoritative producer head atomically."""
         repository = self._execution_repository
+        stores = [self._store]
+        if self._tool_repository is not None:
+            stores.append(self._tool_repository.state_store)
         if repository is not None:
-            return tuple(dict.fromkeys((self._store, repository.state_store)))
-        return (self._store,)
+            stores.append(repository.state_store)
+        if self._run_registrations is not None:
+            stores.extend(self._run_registrations.transaction_stores(self._store))
+        return tuple(dict.fromkeys(stores))
 
     async def _mutate(
         self, callback: Callable[[StateTransaction], Awaitable[_ValueT]],
@@ -1339,6 +1461,7 @@ class StateStepArchive(AgentRunStore):
         unique_agent_run_ids = tuple(dict.fromkeys(agent_run_ids))
         if not unique_agent_run_ids:
             return {}
+        registrations = await self.read_run_registrations(unique_agent_run_ids)
         sequence_keys = tuple(
             key
             for agent_run_id in unique_agent_run_ids
@@ -1357,7 +1480,8 @@ class StateStepArchive(AgentRunStore):
             transaction: StateTransaction,
         ) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, int]]:
             records = await self.read_run_records(
-                transaction, (*run_keys, *projection_keys, *head_keys)
+                transaction, (*run_keys, *projection_keys, *head_keys), registrations=registrations,
+                sequence_keys=sequence_keys,
             )
             sequences = await transaction.get_sequences(sequence_keys)
             return records, sequences
@@ -1952,6 +2076,8 @@ class StateStepArchive(AgentRunStore):
         else:
             records = await self._store.read(lambda transaction: transaction.get_records((run_key, head_key)))
         record = records.get(run_key)
+        if record is not None:
+            record = (await self._project_run_records((record,)))[0]
         existing_run = None if record is None else _decode_step(record.data)
         relocated = await self._relocate_conversation_checkpoint(run, checkpoint, existing_run)
         # Existing runs validate checkpoint bodies and then recapture metadata.
@@ -2044,6 +2170,7 @@ class StateStepArchive(AgentRunStore):
             self._native_runs.clear()
         if self._native_events is not None:
             self._native_events.clear()
+        self._registration_sources.clear()
         self._context_baselines.clear()
         self._context_cache_keys.clear()
 
@@ -2053,6 +2180,7 @@ class StateStepArchive(AgentRunStore):
             self._native_runs.clear()
         if self._native_events is not None:
             self._native_events.clear()
+        self._registration_sources.clear()
         self._context_baselines.clear()
         self._context_cache_keys.clear()
 
@@ -2070,6 +2198,7 @@ class StateStepArchive(AgentRunStore):
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.register_agent_run")
+        await self.prepare_run_registration(record)
 
         async def mutate(transaction: StateTransaction) -> None:
             execution_guard = await self._execution_history_guard_in_transaction(
@@ -2086,6 +2215,13 @@ class StateStepArchive(AgentRunStore):
 
     def _stored_agent_run(self, record: AgentRunRecord, *, source_receipt: StepWriteReceipt | None = None) -> StoredRecord:
         key = self._agent_run_key(record.agent_run_id)
+        source = self._registration_sources.get(record.agent_run_id)
+        data = (self._native_runs.encode(record, source_receipt=source_receipt)
+                if source_receipt is not None and self._native_runs is not None else
+                RunRegistrationReference.capture(source, record).to_data() if source is not None else
+                None if self._native_runs is None else self._native_runs.encode(record))
+        if data is None and self._run_registrations is not None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         return StoredRecord(
             key,
             None
@@ -2115,13 +2251,15 @@ class StateStepArchive(AgentRunStore):
             None,
             0,
             None,
-            (None if self._native_runs is None else self._native_runs.encode(record, source_receipt=source_receipt)) or _encode_step(record),
+            data if data is not None else _encode_step(record),
         )
 
     async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
         require_no_run_history_lock("StateStepArchive.get_agent_run")
         key = self._agent_run_key(agent_run_id)
-        records = await self._store.read(lambda transaction: self.read_run_records(transaction, (key,)))
+        registrations = await self.read_run_registrations((agent_run_id,))
+        records = await self._store.read(lambda transaction: self.read_run_records(
+            transaction, (key,), registrations=registrations))
         stored = records.get(key)
         return None if stored is None else _decode_step(stored.data)
 
@@ -2161,6 +2299,8 @@ class StateStepArchive(AgentRunStore):
             lambda transaction: transaction.list_records(query) if self._native_runs is None
             else self._native_runs.read(transaction, query=query)
         )
+        if self._native_runs is None:
+            records = await self._project_run_records(records)
         values = [_decode_step(record.data) for record in records]
         return [value for value in values if isinstance(value, AgentRunRecord)]
 
@@ -2368,12 +2508,12 @@ class StateStepArchive(AgentRunStore):
         self,
         transaction: StateTransaction,
         execution_id: str | None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None,
         producer_generation: int | None = None,
         *,
         allow_cancelling: bool = True,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
-    ) -> tuple[ExecutionRecord, StoredRecord] | None:
+    ) -> tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None:
         if self._execution_repository is None:
             if self._runtime_domain is PersistenceDomain.TRACE:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2459,6 +2599,7 @@ class StateStepArchive(AgentRunStore):
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.sync_projection")
+        await self.prepare_run_registration(run)
         prepared = await self._prepare_checkpoints(
             run,
             checkpoints,
@@ -2472,6 +2613,8 @@ class StateStepArchive(AgentRunStore):
             )
             if archive is not None:
                 await self._history.publish_native_archive(transaction, archive, owner_written=True)
+            await self.share_published_content(run, execution_id=execution_id, checkpoints=prepared.checkpoints,
+                                                   observation=None, archive=archive or PreparedArchive())
         await self._mutate(commit)
 
     def combine_projection_archives(
@@ -2505,6 +2648,13 @@ class StateStepArchive(AgentRunStore):
         require_no_run_history_lock(
             "StateStepArchive.sync_prepared_projection"
         )
+        # Direct callers may admit a fresh run. A surrounding publication must
+        # already have prepared its independent owner before opening its scope.
+        if active_state_scope() is None:
+            await self.prepare_run_registration(run)
+        elif (run.agent_run_id not in self._registration_sources
+              and not self._run_registrations.joins(self._store)):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         values = tuple(checkpoints)
         if any(not isinstance(value, PreparedAgentRunCheckpoint) for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2523,6 +2673,8 @@ class StateStepArchive(AgentRunStore):
             )
             if archive is not None:
                 await self._history.publish_native_archive(transaction, archive, owner_written=True)
+            await self.share_published_content(run, execution_id=execution_id, checkpoints=values,
+                                                   observation=observation, archive=archive or PreparedArchive())
         await self._mutate(commit)
 
     async def _sync_projection_in_transaction(
@@ -2536,7 +2688,7 @@ class StateStepArchive(AgentRunStore):
         observation: PreparedTranscriptObservation | None = None,
         producer_generation: int | None = None,
         execution_id: str | None = None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
         prefetch_keys: Sequence[bytes] = (),
     ) -> bool:
@@ -2608,10 +2760,6 @@ class StateStepArchive(AgentRunStore):
             stream = streams[family]
             final = high_waters[stream]
             sequences = tuple(range(final - len(values) + 1, final + 1))
-            if family == "event":
-                await self.index_history_events_in_transaction(
-                    transaction, run, tuple(zip(sequences, events)),
-                )
             fact_kind = {
                 "event": "step_event",
                 "checkpoint": "step_checkpoint",
@@ -2655,7 +2803,14 @@ class StateStepArchive(AgentRunStore):
             expected_storage_revision=owner_record.storage_revision,
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await _insert_facts(transaction, tuple(stored_facts))
+        event_facts = tuple(fact for fact in stored_facts if fact.kind == "step_event")
+        if self._trace_events is not None:
+            await self._trace_events.insert(transaction, event_facts, events)
+            await _insert_facts(transaction, tuple(fact for fact in stored_facts if fact.kind != "step_event"))
+        else:
+            await self.index_history_events_in_transaction(transaction, run, tuple(
+                (fact.sequence, event) for fact, event in zip(event_facts, events, strict=True)))
+            await _insert_facts(transaction, tuple(stored_facts))
         for checkpoint in checkpoints:
             await self._history.publish_native_archive(transaction, checkpoint.archive, owner_written=True)
         return created
@@ -2670,6 +2825,7 @@ class StateStepArchive(AgentRunStore):
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.materialize_checkpoint")
+        await self.prepare_run_registration(run)
         prepared = await self._prepare_checkpoints(
             run,
             (checkpoint,),
@@ -2700,7 +2856,7 @@ class StateStepArchive(AgentRunStore):
         checkpoint: PreparedAgentRunCheckpoint,
         *,
         execution_id: str | None = None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
     ) -> int:
         if not isinstance(checkpoint, PreparedAgentRunCheckpoint):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2766,7 +2922,7 @@ class StateStepArchive(AgentRunStore):
         checkpoint: PreparedAgentRunCheckpoint,
         *,
         execution_id: str | None = None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
     ) -> int | None:
         """Materialize and return its exact position; legacy overrides may return None."""
         require_no_run_history_lock(
@@ -2791,7 +2947,7 @@ class StateStepArchive(AgentRunStore):
         observation: PreparedTranscriptObservation | None = None,
         producer_generation: int | None = None,
         execution_id: str | None = None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
         archive: PreparedArchive | None = None,
     ) -> None:
@@ -2814,6 +2970,8 @@ class StateStepArchive(AgentRunStore):
         )
         if archive is not None:
             await self._history.publish_native_archive(transaction, archive, owner_written=True)
+        await self.share_published_content(run, execution_id=execution_id, checkpoints=checkpoints,
+                                               observation=observation, archive=archive or PreparedArchive())
 
     async def _ensure_run_with_head_in_transaction(
         self,
@@ -2839,9 +2997,21 @@ class StateStepArchive(AgentRunStore):
         owner_record = records.get(owner)
         head_record = records.get(head_key)
         if owner_record is None:
+            registrations = self._run_registrations
+            if registrations is not None and registrations.joins(self._store) and source_receipt is None:
+                source = self._registration_sources.get(run.agent_run_id)
+                if source is None:
+                    source = await registrations.get_in_transaction(transaction, run.agent_run_id)
+                    if source is None:
+                        source = RunRecord(run_id=run.agent_run_id, conversation_id=run.agent_conversation_id,
+                                           parent_run_id=run.parent_agent_run_id, agent_name=run.agent_id,
+                                           metadata=dict(run.metadata), started_at=run.started_at)
+                    self.remember_run_registration(source)
+                await registrations.publish_in_transaction(transaction, source)
             stored_run = self._stored_agent_run(run, source_receipt=source_receipt)
             if self._native_runs is not None:
-                self._native_runs.remember_prepared(transaction, stored_run, run, source_receipt=source_receipt)
+                self._native_runs.remember_prepared(transaction, stored_run, run, source_receipt=source_receipt,
+                                                   registration=self._registration_sources.get(run.agent_run_id))
             if head_record is None:
                 await transaction.insert_records(
                     (
@@ -2861,17 +3031,23 @@ class StateStepArchive(AgentRunStore):
                     run.agent_run_id,
                 )
             return stored_run, True
-        elif (self._native_runs is None or not self._native_runs.matches(owner_record.data, run)
-              if is_native_run_reference(owner_record.data) else _decode_step(owner_record.data) != run):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        elif head_record is None:
+        else:
+            if self._native_runs is not None and is_native_run_reference(owner_record.data):
+                matches = self._native_runs.matches(owner_record.data, run, transaction=transaction)
+            else:
+                projected = (await self._project_run_records((owner_record,)))[0]
+                matches = _decode_step(projected.data) == run
+            if not matches:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if head_record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._history.decode_head(head_record)
         if self._native_runs is not None and not is_native_run_reference(owner_record.data):
             reference = self._native_runs.encode(run, source_receipt=source_receipt)
             if reference is not None:
                 updated = replace(owner_record, data=reference, storage_revision=owner_record.storage_revision + 1)
-                self._native_runs.remember_prepared(transaction, updated, run, source_receipt=source_receipt)
+                self._native_runs.remember_prepared(transaction, updated, run, source_receipt=source_receipt,
+                                                   registration=self._registration_sources.get(run.agent_run_id))
                 if not await transaction.replace_record(updated, expected_storage_revision=owner_record.storage_revision):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 owner_record = updated
@@ -3147,7 +3323,7 @@ class StateStepArchive(AgentRunStore):
                 namespace=self._namespace, tenant_id=self._tenant_id)) if isinstance(root, NativeMessageRoot)
                 else root.scope_id == archive.scope_id and root.content_scope == archive.content_scope)
             if (not valid_scope
-                    or root.count != len(messages) or hashlib.sha256(raw).hexdigest() != block.raw_digest
+                    or root.count != len(messages)
                     or projection != ContextProjection((block,))):
                 return None
             frontier = tuple(decode_record(record) for record in value["frontier"])
@@ -3220,6 +3396,9 @@ class StateStepArchive(AgentRunStore):
         require_no_run_history_lock(
             "StateStepArchive.verify_checkpoint_projection"
         )
+        registrations = await self.read_run_registrations((agent_run_id,))
+        run_key = self._agent_run_key(agent_run_id)
+
         async def capture():
             values = await self._facts(agent_run_id, "checkpoint", latest=True)
             if not values:
@@ -3227,7 +3406,10 @@ class StateStepArchive(AgentRunStore):
             stored = _decode_step(values[0].data)
             if not isinstance(stored, StoredAgentRunCheckpoint):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            run = await self.get_agent_run(agent_run_id=agent_run_id)
+            records = await self._store.read(lambda transaction: self.read_run_records(
+                transaction, (run_key,), registrations=registrations))
+            record = records.get(run_key)
+            run = None if record is None else _decode_step(record.data)
             if run is None:
                 return None
             owner_id = (
@@ -3280,6 +3462,9 @@ class StateStepArchive(AgentRunStore):
 
     async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
         require_no_run_history_lock("StateStepArchive.latest_checkpoint")
+        registrations = await self.read_run_registrations((agent_run_id,))
+        run_key = self._agent_run_key(agent_run_id)
+
         async def capture():
             values = await self._facts(agent_run_id, "checkpoint", latest=True)
             if not values:
@@ -3287,7 +3472,10 @@ class StateStepArchive(AgentRunStore):
             latest = _decode_step(values[0].data)
             if not isinstance(latest, StoredAgentRunCheckpoint):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            run = await self.get_agent_run(agent_run_id=agent_run_id)
+            records = await self._store.read(lambda transaction: self.read_run_records(
+                transaction, (run_key,), registrations=registrations))
+            record = records.get(run_key)
+            run = None if record is None else _decode_step(record.data)
             if run is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             owner_id = (
@@ -3352,6 +3540,8 @@ class StateStepArchive(AgentRunStore):
             interactions = await transaction.list_records(RecordQuery(
                 parent_key=self._agent_run_key(agent_run_id),
             ))
+            if self._trace_events is not None:
+                await self._trace_events.delete(transaction, (agent_run_id,))
             await transaction.delete_records((
                 *(interaction.key for interaction in interactions),
                 self._agent_run_key(agent_run_id),
@@ -3364,11 +3554,12 @@ class StateStepArchive(AgentRunStore):
             )
 
         await self._mutate(mutate)
+        self._registration_sources.pop(agent_run_id, None)
         self._context_baselines.pop(agent_run_id, None)
 
     def release_runtime_cache(self, agent_run_id: str) -> None:
+        self._registration_sources.pop(agent_run_id, None)
         self._context_baselines.pop(agent_run_id, None)
-        self.invalidate_native_run(agent_run_id)
         if self._native_events is not None:
             self._native_events.clear(agent_run_id)
 
@@ -3389,9 +3580,10 @@ class StateStepArchive(AgentRunStore):
             "checkpoint": "step_checkpoint",
         }[family]
         data = _encode_step(value)
+        registrations = await self.read_run_registrations((agent_run_id,))
 
         async def mutate(transaction: StateTransaction) -> None:
-            owner_record = (await self.read_run_records(transaction, (owner,))).get(owner)
+            owner_record = (await self.read_run_records(transaction, (owner,), registrations=registrations)).get(owner)
             if owner_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             execution_guard = await self._execution_history_guard_in_transaction(
@@ -3405,12 +3597,16 @@ class StateStepArchive(AgentRunStore):
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             sequence = await transaction.next_sequence(stream)
-            await transaction.insert_fact(StoredFact(stream, sequence, owner, fact_kind, None, kind, data))
-            if isinstance(value, StepEvent):
-                run = _decode_step(owner_record.data)
-                if not isinstance(run, AgentRunRecord):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self.index_history_events_in_transaction(transaction, run, ((sequence, value),))
+            fact = StoredFact(stream, sequence, owner, fact_kind, None, kind, data)
+            if isinstance(value, StepEvent) and self._trace_events is not None:
+                await self._trace_events.insert(transaction, (fact,), (value,))
+            else:
+                if isinstance(value, StepEvent):
+                    run = _decode_step(owner_record.data)
+                    if not isinstance(run, AgentRunRecord):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    await self.index_history_events_in_transaction(transaction, run, ((sequence, value),))
+                await transaction.insert_fact(fact)
 
         await self._mutate(mutate)
 
@@ -3450,17 +3646,10 @@ class StateStepArchive(AgentRunStore):
                 [("trace", str(sequence))]
                 if event.event_type.startswith(("MODEL_REQUEST_", "TOOL_CALL_")) else []
             )
-            request = event.metadata.get("linktools.ai.model_request_seq")
-            message = event.metadata.get("linktools.ai.message_seq")
-            if event.event_type.startswith("MODEL_REQUEST_") and request is not None:
-                locators.append((f"request:{event.event_type}", request))
-            if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message is not None:
-                locators.append(("response", message))
-            if (event.event_type in {"TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"}
-                    and event.tool_call_id is not None
-                    and not (event.event_type == "TOOL_CALL_FAILED"
-                             and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value)):
-                locators.append((event.event_type, event.tool_call_id))
+            locators.extend(
+                (f"request:{family}" if family.startswith("MODEL_REQUEST_") else family, identity)
+                for family, identity in history_identities(event)
+            )
             for family, identity in locators:
                 key = self._history_association_key(agent_run_id, family, identity)
                 record = StoredRecord(
@@ -3545,6 +3734,9 @@ class StateStepArchive(AgentRunStore):
     ) -> list[StepEvent]:
         """Resolve bounded immutable event references at a captured event cutoff."""
         require_no_run_history_lock("StateStepArchive.read_history_associations")
+        if self._trace_events is not None:
+            return await self._read_sql_history_associations(agent_run_id=agent_run_id,
+                message_seqs=message_seqs, tool_call_ids=tool_call_ids, event_high_water=event_high_water)
         keys = tuple(dict.fromkeys((
             *(self._history_association_key(agent_run_id, "response", str(value)) for value in message_seqs),
             *(self._history_association_key(agent_run_id, kind, value)
@@ -3607,6 +3799,25 @@ class StateStepArchive(AgentRunStore):
 
         return await self._store.read(read)
 
+    async def _read_sql_history_associations(
+        self, *, agent_run_id: str, message_seqs: Sequence[int],
+        tool_call_ids: Sequence[str], event_high_water: int,
+    ) -> list[StepEvent]:
+        """Resolve response/tool events, then their raw request identities at one cutoff."""
+        require_no_run_history_lock("StateStepArchive.read_history_associations")
+        if not message_seqs and not tool_call_ids:
+            return []
+
+        if self._trace_events is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        async def read(transaction: StateTransaction) -> list[StepEvent]:
+            facts = await self._trace_events.history_associations(
+                transaction, agent_run_id, event_stream=self._stream(agent_run_id, "event"),
+                high_water=event_high_water, message_identities=tuple(map(str, message_seqs)),
+                tool_call_ids=tool_call_ids)
+            return [_decode_step(fact.data) for fact in facts]
+        return await self._store.read(read)
+
     async def _read_selected_history_facts(
         self, transaction: StateTransaction, agent_run_id: str, ordered: Sequence[int],
     ) -> dict[int, StoredFact]:
@@ -3640,6 +3851,10 @@ class StateStepArchive(AgentRunStore):
     ) -> list[tuple[int, StepEvent]]:
         """Read immutable events in timestamp order using their derived locators."""
         require_no_run_history_lock("StateStepArchive.list_trace_events")
+        if self._trace_events is not None:
+            return await self._list_sql_trace_events(agent_run_id=agent_run_id, event_high_water=event_high_water,
+                after_timestamp=after_timestamp, after_sequence=after_sequence, limit=limit,
+                model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id)
         if event_high_water < 0 or after_sequence < 0 or limit < 1:
             raise AIError(ErrorCode.CURSOR_INVALID)
         after_sort_key = (
@@ -3732,6 +3947,29 @@ class StateStepArchive(AgentRunStore):
 
         return await self._store.read(read)
 
+    async def _list_sql_trace_events(
+        self, *, agent_run_id: str, event_high_water: int,
+        after_timestamp: datetime | None, after_sequence: int, limit: int,
+        model_request_seq: int | None = None, step_index: int | None = None,
+        tool_call_id: str | None = None,
+    ) -> list[tuple[int, StepEvent]]:
+        """Filter before limiting, with stable timestamp/sequence pagination."""
+        require_no_run_history_lock("StateStepArchive.list_trace_events")
+        if event_high_water < 0 or after_sequence < 0 or limit < 1:
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        if event_high_water == 0:
+            return []
+        if self._trace_events is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        async def read(transaction: StateTransaction) -> list[tuple[int, StepEvent]]:
+            if await transaction.get_sequence(self._stream(agent_run_id, "event")) < event_high_water:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            facts = await self._trace_events.select(transaction, agent_run_id, high_water=event_high_water,
+                after_timestamp=after_timestamp, after_sequence=after_sequence, limit=limit,
+                model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id)
+            return [(fact.sequence, _decode_step(fact.data)) for fact in facts]
+        return await self._store.read(read)
+
     async def capture_history(
         self, agent_run_ids: Sequence[str], *, include_pending: bool = False,
     ) -> Mapping[str, AgentRunHistoryCapture]:
@@ -3743,6 +3981,7 @@ class StateStepArchive(AgentRunStore):
         run_ids = tuple(dict.fromkeys(agent_run_ids))
         if not run_ids:
             return {}
+        registrations = await self.read_run_registrations(run_ids)
         keys = tuple(key for run_id in run_ids for key in (
             self._agent_run_key(run_id), self._history.head_key(run_id),
         ))
@@ -3753,7 +3992,12 @@ class StateStepArchive(AgentRunStore):
         pending_loaders = {}
 
         async def read(transaction: StateTransaction) -> Mapping[str, AgentRunHistoryCapture]:
-            records = await self.read_run_records(transaction, keys)
+            records: dict[bytes, StoredRecord] = {}
+            for offset in range(0, len(run_ids), 64):
+                records.update(await self.read_run_records(
+                    transaction, keys[offset * 2:(offset + 64) * 2], registrations=registrations,
+                    sequence_keys=sequence_keys[offset * 2:(offset + 64) * 2],
+                ))
             sequences = await transaction.get_sequences(sequence_keys)
             captured: dict[str, AgentRunHistoryCapture] = {}
             for run_id in run_ids:

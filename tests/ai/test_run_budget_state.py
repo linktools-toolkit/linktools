@@ -316,13 +316,13 @@ async def test_budget_snapshot_validates_reservation_projection(budget_storage):
     rows = await budgets.state_store.read(lambda transaction: transaction.scan_records())
     args = dict(namespace="budget-tests", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
                 records=rows, facts=(), operations=())
-    aliases, sequences = canonical_snapshot_indexes(**args)
-    validate_snapshot_domain(**args, aliases=aliases, sequences=sequences)
+    sequences = canonical_snapshot_indexes(**args)
+    validate_snapshot_domain(**args, sequences=sequences)
     usage = await budgets.read("scope")
     corrupt = budgets._stored("budget_scope", ("scope",), replace(usage, total_tokens=6))
     args["records"] = tuple(corrupt if row.kind == "budget_scope" else row for row in rows)
     with pytest.raises(AIError) as integrity:
-        validate_snapshot_domain(**args, aliases=aliases, sequences=sequences)
+        validate_snapshot_domain(**args, sequences=sequences)
     assert integrity.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

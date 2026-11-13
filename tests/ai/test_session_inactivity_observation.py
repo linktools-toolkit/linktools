@@ -54,7 +54,7 @@ async def _admit(state, execution_id="execution", status=ExecutionStatus.STARTED
         if status is ExecutionStatus.WAITING_DEFERRED else status), prompt="question")
     record = replace(record, status=status, recovery=(
         ExecutionRecoveryDetail(agent_run_id="run", pending_tools=PendingToolContinuation("run", calls=(
-            PendingDeferredCall("call", "tool", StoredPayload.inline_json({})),
+            PendingDeferredCall("call", "tool", StoredPayload.inline_json({}), operation_id="test-operation"),
         ))) if status is ExecutionStatus.WAITING_DEFERRED else None
     ))
     await state.execution.executions.create_execution(record)

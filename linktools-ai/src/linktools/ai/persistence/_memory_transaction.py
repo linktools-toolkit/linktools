@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """In-memory StateTransaction implementation."""
 
-from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Generic, TypeVar
 
 from ..core import canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
+from ._run_counters import RUN_COUNTER_COLUMNS, run_counter_address, run_counter_streams
 from .state import (
     RecordLeaseTransition, FactQuery,
     FactScanCursor,
@@ -18,15 +19,14 @@ from .state import (
     RecordReplacement,
     RecordScanCursor,
     StateTransaction,
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
-    validate_alias_key,
     validate_stream_key,
     validate_relation_key,
     validate_operation_replacement,
     validate_record_identity,
+    validate_record_key,
     validate_record_replacement,
 )
 
@@ -35,8 +35,9 @@ MapValueT = TypeVar("MapValueT")
 
 
 class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):  # noqa: PYI059
-    def __init__(self, base: Mapping[KeyT, MapValueT]) -> None:
+    def __init__(self, base: Mapping[KeyT, MapValueT], *, validate: Callable[[MapValueT], None] | None = None) -> None:
         self._base = base
+        self._validate = validate
         self._changes: dict[KeyT, MapValueT] = {}
         self._deleted: set[KeyT] = set()
 
@@ -48,6 +49,8 @@ class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):
         return self._base[key]
 
     def __setitem__(self, key: KeyT, value: MapValueT) -> None:
+        if self._validate is not None:
+            self._validate(value)
         self._deleted.discard(key)
         self._changes[key] = value
 
@@ -80,17 +83,23 @@ class _MemoryTransaction:
     def __init__(
         self,
         records: Mapping[bytes, StoredRecord],
-        aliases: Mapping[bytes, bytes],
         sequences: Mapping[bytes, int],
         facts: Mapping[tuple[bytes, int], StoredFact],
         operations: Mapping[bytes, StoredOperation],
         operation_streams: Mapping[bytes, Mapping[int, bytes]],
         *,
         now: datetime | None = None,
+        validate_record: Callable[[StoredRecord], None] = validate_record_identity,
+        record_values: Callable[[], Iterator[StoredRecord]] | None = None,
+        run_counters: Mapping[bytes, tuple[int | None, ...]] | None = None,
+        store_key: bytes = b"",
     ) -> None:
-        self.records = _MemoryOverlay(records)
-        self.aliases = _MemoryOverlay(aliases)
+        self._store_key = store_key
+        self._validate_record = validate_record
+        self._record_values = record_values
+        self.records = _MemoryOverlay(records, validate=validate_record)
         self.sequences = _MemoryOverlay(sequences)
+        self.run_counters = None if run_counters is None else _MemoryOverlay(run_counters)
         self.facts = _MemoryOverlay(facts)
         self.operations = _MemoryOverlay(operations)
         self._operation_streams = operation_streams
@@ -108,9 +117,10 @@ class _MemoryTransaction:
         await _validate_transaction_integrity(self)
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
-        return self.records.get(key)
+        return self.records.get(validate_record_key(key))
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        keys = tuple(validate_record_key(key) for key in keys)
         return {key: self.records[key] for key in keys if key in self.records}
 
     async def insert_record(self, record: StoredRecord) -> None:
@@ -124,6 +134,7 @@ class _MemoryTransaction:
         ordered = tuple(sorted(values, key=lambda value: value.key))
         for record in ordered:
             validate_record_identity(record)
+            self._validate_record(record)
             if record.key in self.records:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         for record in ordered:
@@ -131,21 +142,26 @@ class _MemoryTransaction:
             self.guarded_record_keys.add(record.key)
 
     async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        from ._record_owner import record_owner_table
         values = tuple(records)
+        payload_keys = {record.key for record in values
+                        if record_owner_table(record.key, store_key=self._store_key) == "ai_step_messages"}
         try:
             if len({record.key for record in values}) != len(values):
                 raise ValueError("insert_immutable_records contains duplicate keys")
             for record in values:
                 validate_record_identity(record)
+                self._validate_record(record)
                 current = self.records.get(record.key)
-                if current is not None and (
+                if current is not None and record.key not in payload_keys and (
                     replace(current, data={}) != replace(record, data={})
                     or canonical_json_bytes(dict(current.data)) != canonical_json_bytes(dict(record.data))
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for record in values:
-                self.records[record.key] = record
-                self.guarded_record_keys.add(record.key)
+                if record.key not in payload_keys or record.key not in self.records:
+                    self.records[record.key] = record
+                    self.guarded_record_keys.add(record.key)
         except BaseException as error:
             if self.mutation_error is None:
                 self.mutation_error = error
@@ -201,6 +217,7 @@ class _MemoryTransaction:
         ordered = sorted(values, key=lambda value: value.record.key)
         for replacement in ordered:
             validate_record_identity(replacement.record)
+            self._validate_record(replacement.record)
             if replacement.record.storage_revision != replacement.expected_storage_revision + 1:
                 raise ValueError("replacement must increment storage_revision exactly once")
         try:
@@ -316,15 +333,25 @@ class _MemoryTransaction:
     def _delete_record_owners(self, keys: frozenset[bytes]) -> None:
         if not keys:
             return
-        for alias, record_key in tuple(self.aliases.items()):
-            if record_key in keys:
-                del self.aliases[alias]
         for fact_key, fact in tuple(self.facts.items()):
             if fact.owner_key in keys:
                 del self.facts[fact_key]
         for key in keys:
             del self.records[key]
+            if self.run_counters is not None and run_counter_streams(key, store_key=self._store_key):
+                self.run_counters[key] = (None, None, None)
             self.guarded_record_keys.discard(key)
+
+    def _iter_records(self) -> Iterator[StoredRecord]:
+        if self._record_values is None:
+            yield from self.records.values()
+            return
+        changes = self.records.changes()
+        deleted = self.records.deleted()
+        for record in self._record_values():
+            if record.key not in changes and record.key not in deleted:
+                yield record
+        yield from changes.values()
 
     async def read_record_subjects(
         self, *, scope_key: bytes, kind: str, subject_ids: Sequence[str],
@@ -334,7 +361,7 @@ class _MemoryTransaction:
         if not subjects:
             return ()
         return tuple(sorted(
-            (record for record in self.records.values()
+            (record for record in self._iter_records()
              if record.scope_key == scope_key and record.kind == kind
              and record.subject_id in subjects),
             key=lambda record: (record.sort_key, record.key),
@@ -342,7 +369,7 @@ class _MemoryTransaction:
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
         values = [
-            record for record in self.records.values() if _matches_record(record, query)
+            record for record in self._iter_records() if _matches_record(record, query)
         ]
         values.sort(key=lambda record: (record.sort_key, record.key))
         if query.after_sort_key is not None and query.after_key is not None:
@@ -359,7 +386,7 @@ class _MemoryTransaction:
         return tuple(values)
 
     async def scan_records(self) -> tuple[StoredRecord, ...]:
-        return tuple(self.records.values())
+        return tuple(self._iter_records())
 
     async def scan_records_page(
         self,
@@ -369,7 +396,7 @@ class _MemoryTransaction:
     ) -> tuple[StoredRecord, ...]:
         _require_scan_limit(limit)
         values = sorted(
-            self.records.values(),
+            self._iter_records(),
             key=lambda value: (value.kind, value.key),
         )
         if after is not None:
@@ -381,63 +408,45 @@ class _MemoryTransaction:
             ]
         return tuple(values[:limit])
 
-    async def resolve_alias(self, alias: bytes) -> bytes | None:
-        return (await self.resolve_aliases((alias,))).get(alias)
 
-    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
-        values = {
-            alias: self.aliases[alias]
-            for alias in dict.fromkeys(validate_alias_key(alias) for alias in aliases)
-            if alias in self.aliases
-        }
-        for value in values.values():
-            if value not in self.records:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return values
+    def _run_counter(self, key: bytes) -> tuple[bytes, int] | None:
+        address = None if self.run_counters is None else run_counter_address(key, store_key=self._store_key)
+        return None if address is None else (address[0], RUN_COUNTER_COLUMNS.index(address[1]))
 
-    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
-        return tuple(
-            StoredAlias(alias, record_key)
-            for alias, record_key in sorted(self.aliases.items())
-        )
+    def _run_counter_value(self, owner: bytes, index: int) -> int | None:
+        if owner not in self.records:
+            return None
+        assert self.run_counters is not None
+        value = self.run_counters.get(owner, (None, None, None))[index]
+        if value is not None and (type(value) is not int or value < 0):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
 
-    async def scan_aliases_page(
-        self,
-        *,
-        after: bytes | None,
-        limit: int,
-    ) -> tuple[StoredAlias, ...]:
-        _require_scan_limit(limit)
-        if after is not None:
-            validate_alias_key(after)
-        values = [
-            StoredAlias(alias, record_key)
-            for alias, record_key in sorted(self.aliases.items())
-            if after is None or alias > after
-        ]
-        return tuple(values[:limit])
-
-    async def insert_alias(self, alias: StoredAlias) -> None:
-        await self.insert_aliases((alias,))
-
-    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
-        for alias in sorted(aliases, key=lambda value: value.alias_key):
-            current = self.aliases.get(alias.alias_key)
-            if current is not None and current != alias.record_key:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if alias.record_key not in self.guarded_record_keys:
-                raise RuntimeError("alias owner must be guarded in the current transaction")
-            self.aliases[alias.alias_key] = alias.record_key
+    def _set_run_counter(self, owner: bytes, index: int, value: int | None) -> None:
+        assert self.run_counters is not None
+        values = list(self.run_counters.get(owner, (None, None, None)))
+        values[index] = value
+        self.run_counters[owner] = tuple(values)
 
     async def get_sequence(self, key: bytes) -> int:
         validate_stream_key(key)
+        address = self._run_counter(key)
+        if address is not None:
+            return self._run_counter_value(*address) or 0
         return self.sequences.get(key, 0)
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
-        return {validate_stream_key(key): self.sequences.get(key, 0) for key in keys}
+        return {key: await self.get_sequence(key) for key in keys}
 
     async def scan_sequences(self) -> Mapping[bytes, int]:
-        return dict(sorted(self.sequences.items()))
+        values = dict(self.sequences)
+        if self.run_counters is not None:
+            for owner in self.run_counters:
+                for index, stream in enumerate(run_counter_streams(owner, store_key=self._store_key)):
+                    value = self._run_counter_value(owner, index)
+                    if value is not None:
+                        values[stream] = value
+        return dict(sorted(values.items()))
 
     async def scan_sequences_page(
         self,
@@ -448,42 +457,50 @@ class _MemoryTransaction:
         _require_scan_limit(limit)
         if after is not None:
             validate_stream_key(after)
-        values = [
-            (key, value)
-            for key, value in sorted(self.sequences.items())
+        return dict([
+            (key, value) for key, value in (await self.scan_sequences()).items()
             if after is None or key > after
-        ][:limit]
-        return dict(values)
+        ][:limit])
 
     async def next_sequence(self, key: bytes) -> int:
-        validate_stream_key(key)
-        value = self.sequences.get(key, 0) + 1
-        self.sequences[key] = value
-        return value
+        return await self.reserve_sequence(key, 1)
 
     async def reserve_sequence(self, key: bytes, count: int) -> int:
         return (await self.reserve_sequences({key: count}))[key]
 
     async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
-        if any(
-            isinstance(count, bool) or not isinstance(count, int) or count < 1
-            for count in requests.values()
-        ):
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 1
+               for count in requests.values()):
             raise ValueError("sequence reservation count must be a positive integer")
+        addresses = {}
+        values = {}
         for key in requests:
             validate_stream_key(key)
-        values = {
-            key: self.sequences.get(key, 0) + requests[key]
-            for key in sorted(requests)
-        }
-        self.sequences.update(values)
+        try:
+            for key in sorted(requests):
+                address = self._run_counter(key)
+                if address is not None and address[0] not in self.records:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                addresses[key] = address
+                values[key] = await self.get_sequence(key) + requests[key]
+        except BaseException as error:
+            if self.mutation_error is None:
+                self.mutation_error = error
+            raise
+        for key, value in values.items():
+            address = addresses[key]
+            if address is None:
+                self.sequences[key] = value
+            else:
+                self._set_run_counter(*address, value)
         return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
         validate_stream_key(key)
         if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
             raise ValueError("expected sequence must be a non-negative integer")
-        current = self.sequences.get(key, 0)
+        address = self._run_counter(key)
+        current = self.sequences.get(key, 0) if address is None else self._run_counter_value(*address)
         if current != expected:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return await self.next_sequence(key)
@@ -493,7 +510,11 @@ class _MemoryTransaction:
 
     async def delete_sequences(self, keys: Sequence[bytes]) -> None:
         for key in sorted(set(validate_stream_key(key) for key in keys)):
-            self.sequences.pop(key, None)
+            address = self._run_counter(key)
+            if address is None:
+                self.sequences.pop(key, None)
+            elif address[0] in self.records:
+                self._set_run_counter(*address, None)
 
     async def insert_fact(self, fact: StoredFact) -> None:
         key = (fact.stream_key, fact.sequence)
@@ -698,11 +719,6 @@ async def _validate_transaction_integrity(
         record.key
         for record in await transaction.scan_records()
     }
-    if any(
-        alias.record_key not in records
-        for alias in await transaction.scan_aliases()
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     facts = await transaction.scan_facts()
     for fact in facts:
         if fact.owner_key not in records:

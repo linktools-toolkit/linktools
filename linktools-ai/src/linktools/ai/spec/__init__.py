@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable Agent, Skill, and MCP declaration contracts."""
 
-from ._adapter import AgentSpecAdapter, MCPServerSpecAdapter, SkillSpecAdapter
+from ._adapter import AgentSpecAdapter, MCPServerSpecAdapter, RuleInstructionAdapter, SkillSpecAdapter
 from ._codec import AgentSpecCodec, MCPServerSpecCodec, SkillSpecCodec, SpecCodec
 from ._contract import (
     DEFAULT_AGENT_RETRIES,
@@ -44,6 +44,7 @@ __all__ = [
     "AgentSpecCodec",
     "AgentSpecAdapter",
     "AgentUsageLimits",
+    "RuleInstructionAdapter",
     "RuleInstructionResolver",
     "DEFAULT_REPOSITORY_INSTRUCTION_BYTES",
     "DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS",

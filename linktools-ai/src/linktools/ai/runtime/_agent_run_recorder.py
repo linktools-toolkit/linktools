@@ -28,6 +28,7 @@ from pydantic_ai.settings import ModelSettings
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
+from ..execution import TOOL_OPERATION_ID_METADATA_KEY
 from ..model import ModelClientRequest, ModelStreamAttempt
 from ..persistence import MessageArchive, MessageSnapshot
 from ..persistence.runs import StagedTranscript
@@ -99,6 +100,7 @@ class AgentRunRecorder:
         self._run: AgentRunRecord | None = None
         self._next_event_index = 0
         self._tool_events: dict[str, set[str]] = {}
+        self._tool_operation_ids: dict[str, str] = {}
         self._tool_execution_metadata: dict[str, tuple[dict[str, str], str | None]] = {}
         self._tool_results: dict[str, ToolReturnPart] = {}
         self._restored_tool_results: set[str] = set()
@@ -144,6 +146,13 @@ class AgentRunRecorder:
     @property
     def agent_run_id(self) -> str:
         return self._agent_run_id
+
+    def stage_run_source(self, record: NativeRunRecord) -> None:
+        """Pass admitted native metadata without treating it as a commit receipt."""
+        if record.run_id != self._agent_run_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if isinstance(self._store, RuntimeAgentRunStore):
+            self._store.stage_run_source(record)
 
     async def register_agent_run(self, record: AgentRunRecord) -> None:
         if record.agent_run_id != self._agent_run_id:
@@ -278,6 +287,9 @@ class AgentRunRecorder:
             and metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value
         ):
             self._tool_events.setdefault(tool_call_id, set()).add(event_type)
+        if tool_call_id in self._tool_operation_ids:
+            metadata = {**({} if metadata is None else metadata),
+                        TOOL_OPERATION_ID_METADATA_KEY: self._tool_operation_ids[tool_call_id]}
         event_index = self._next_event_index
         self._next_event_index += 1
         await self.append_event(
@@ -447,6 +459,13 @@ class AgentRunRecorder:
     async def commit_history_boundary(self) -> None:
         if self._history_boundary is not None:
             await self._history_boundary()
+
+    def remember_tool_operation(self, tool_call_id: str, operation_id: str) -> None:
+        """Retain the admitted identity for later immutable tool event facts."""
+        prior = self._tool_operation_ids.get(tool_call_id)
+        if prior is not None and prior != operation_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._tool_operation_ids[tool_call_id] = operation_id
 
     def remember_tool_execution(
         self,

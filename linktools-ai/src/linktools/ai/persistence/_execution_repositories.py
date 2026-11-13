@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import TypeVar
+from ._message_root import NativeTextReference, NativeMessageRoot
 from linktools.core import environ
 from ..core import (
     ExecutionEventType,
@@ -21,14 +22,18 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
-from ..execution import ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
+from .codec import decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
 from .contracts import (
     ExecutionCandidate,
     ExecutionCandidatePage,
+    ExecutionMetadataCandidate,
+    ExecutionMetadataCandidatePage,
+    ExecutionViewCandidate,
+    ExecutionViewCandidatePage,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionEventRecord,
@@ -43,11 +48,12 @@ from .contracts import (
     ExecutionStartUnknownCommit,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
+    ExecutionTerminalWriteReceipt,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     ResultRecord,
 )
-from .contracts import RuntimePayloadRef
+from .contracts import RuntimePayloadRef, ExecutionMembershipRecord
 from ._plan import PersistenceDomain
 from .state import (
     FactQuery,
@@ -57,6 +63,7 @@ from .state import (
     StateStore,
     StateGroupCallback,
     active_state_scope,
+    active_state_group_transaction,
     StateTransaction,
     StoredFact,
     StoredRecord,
@@ -211,6 +218,21 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             domain=PersistenceDomain.EXECUTION,
         )
 
+    async def share_published_user_input(
+        self, *, execution_id: str, roots: Sequence[NativeMessageRoot], archive: PreparedArchive,
+        source_archive: ContentArchive,
+    ) -> None:
+        if not roots or not self._execution_content.has_native_input_candidate(archive):
+            return
+        async def update(transaction: StateTransaction) -> None:
+            stored = await transaction.get_record(self.execution_record_key(execution_id))
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            candidate = await self._execution_content.project_user_input(stored, roots, source_archive=source_archive)
+            if candidate is not None:
+                await _replace_checked(transaction, candidate, stored.storage_revision)
+        await self._store.mutate(update)
+
     async def read_content(
         self, capture: StateGroupCallback[_ContentValueT], *, stores: Sequence[StateStore] = (),
     ) -> _ContentValueT:
@@ -222,6 +244,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         """
         group = self._store.storage_group
         members = tuple(dict.fromkeys((self._store, *stores)))
+        if active_state_scope() is not None:
+            # Reuse only the stores enlisted by the caller. Another task may
+            # have discovered the archive since this snapshot began; its body
+            # boundary must request an outer retry, not enlarge this snapshot.
+            return await capture(active_state_group_transaction(group, members, writable=False))
         try:
             return await group.read_many(members, capture)
         except _ContentReadRequired as required:
@@ -230,17 +257,154 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         await self._execution_content.initialize(create=False, share_content=False)
         return await group.read_many(members, capture)
 
+    async def get(self, identity: str, *, tenant_id: str) -> ExecutionRecord | None:
+        return await self._get_content_observation(identity, tenant_id=tenant_id, fresh=False)
+
+    async def get_fresh(self, identity: str, *, tenant_id: str) -> ExecutionRecord | None:
+        return await self._get_content_observation(identity, tenant_id=tenant_id, fresh=True)
+
+    async def _get_content_observation(
+        self, identity: str, *, tenant_id: str, fresh: bool,
+    ) -> ExecutionRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key("execution", (identity,))
+        from ._sql import SqlStateStore
+        if (isinstance(self._store, SqlStateStore) and not self._store.record_cache_enabled
+                and (active_state_scope() is None or not active_state_scope().writable)):
+            # Without an observation cache there is no earlier value to preserve.
+            # Capture the actual owner and fixed contents together, rather than
+            # reading an owner merely to choose a second source snapshot.
+            async def read(_group: object) -> ExecutionRecord | None:
+                await self._execution_content.prefetch_projection_owners(
+                    (key,), bindings=True, input_body=True, result=True,
+                    result_body=True, recovery=True, terminal_details=True,
+                )
+                return await super(ExecutionRepositoryImpl, self).get(identity, tenant_id=tenant_id)
+            return await self.read_content(read)
+        # Keep ordinary inspection's cache capture time and write-through ordering.
+        # A forced read still refreshes that observation through the store API.
+        record = ((await self._refresh_records((key,))).get(key) if fresh
+                  else await self._store.read_record(key))
+        if record is None:
+            return None
+        payload = decode_envelope(record.data).value.get("payload")
+        if ((fresh and (runtime_policy_reference(payload) is not None
+                        or (isinstance(payload, Mapping)
+                            and binding_reference(payload.get("fields", {}).get("binding")) is not None)))
+                or any(native_text_reference(item) is not None or native_user_input_reference(item) is not None or pending_operation_reference(item) is not None
+                       for _, item in execution_payload_slots(payload))):
+            # The observation only selects this path. Never hydrate its old owner
+            # in a later snapshot: reread owner and Native source together, so GC
+            # or a concurrent owner change cannot leave a dangling source read.
+            async def read_current(_group: object) -> ExecutionRecord | None:
+                await self._execution_content.prefetch_projection_owners(
+                    (key,), bindings=True, input_body=True, result=True,
+                    result_body=True, recovery=True, terminal_details=True,
+                )
+                return await super(ExecutionRepositoryImpl, self).get(identity, tenant_id=tenant_id)
+            return await self.read_content(read_current)
+        return await self._decode(record, ExecutionRecord)
+
     async def _decode_many(self, records: Sequence[StoredRecord]) -> tuple[ExecutionRecord, ...]:
         values = await self._execution_content.decode_many(records)
         for record, value in zip(records, values, strict=True):
             self._validate_record_identity(record, value)
         return values
 
+    async def get_metadata_record(self, execution_id: str, *, tenant_id: str,
+                                  fresh: bool = False) -> ExecutionMetadataRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key("execution", (execution_id,))
+        async def read():
+            await self._execution_content.prefetch_projection_owners(
+                (key,), bindings=True, result=True, result_body=fresh, terminal_details=True,
+            )
+            record = ((await self._refresh_records((key,))).get(key) if fresh else
+                      await self._store.read_record(key))
+            if record is not None and active_state_scope() is None and any(
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
+                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
+            ):
+                return await self.read_content(lambda _group: read())
+            if record is None:
+                return None
+            self._decode_header(record, execution_id)
+            record, = await self._execution_content.expand_bindings((record,))
+            record, = await self._execution_content.expand_projection_components(
+                (record,), result=True, terminal_details=True)
+            metadata = decode_execution_metadata(record.data, tenant_id=tenant_id)
+            if fresh and metadata.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                payloads = await self._execution_content.read_payloads((record,), result_only=True)
+                metadata = replace(metadata, result_record=decode_execution_content(record.data, payloads, result=True))
+            return metadata
+        from ._memory import InMemoryStateStore
+        from ._sql import SqlStateStore
+        source_scope = fresh or isinstance(self._store, (InMemoryStateStore, SqlStateStore)) and not self._store.record_cache_enabled
+        return await self.read_content(lambda _group: read()) if source_scope else await read()
+
+    async def get_result_record(self, execution_id: str, *, tenant_id: str,
+                                fresh: bool = False) -> ExecutionResultRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key("execution", (execution_id,))
+        async def read(_transactions):
+            await self._execution_content.prefetch_projection_owners(
+                (key,), result=True, result_body=True, terminal_details=True,
+            )
+            record = ((await self._refresh_records((key,))).get(key) if fresh else
+                      await self._store.read_record(key))
+            if record is None:
+                return None
+            self._decode_header(record, execution_id)
+            record, = await self._execution_content.expand_policies((record,))
+            record, = await self._execution_content.expand_terminal_details((record,))
+            payloads = await self._execution_content.read_payloads((record,), result_only=True)
+            return decode_execution_content(record.data, payloads, result=True)
+        return await self.read_content(read)
+
+    async def get_retention_in_transaction(self, transaction: StateTransaction, execution_id: str,
+                                          *, tenant_id: str) -> ExecutionRetentionRecord | None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        key = self._key("execution", (execution_id,))
+        await self._execution_content.prefetch_projection_owners((key,), recovery=True)
+        record = await transaction.get_record(key)
+        if record is None:
+            return None
+        self._decode_header(record, execution_id)
+        record, = await self._execution_content.expand_policies((record,))
+        record, = await self._execution_content.expand_projection_components((record,), recovery=True)
+        return decode_execution_retention(record.data)
+
     async def get_header(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
         if tenant_id != self._tenant_id:
             return None
         record = await self._store.read_record(self._key("execution", (identity,)))
         return None if record is None else self._decode_header(record, identity)
+
+    async def capture_header(
+        self, identity: str, *, tenant_id: str,
+    ) -> tuple[ResourceRef | None, Callable[[], Awaitable[None]] | None]:
+        """Capture authorization identity and a one-operation source-read hint."""
+        if tenant_id != self._tenant_id:
+            return None, None
+
+        async def capture(transaction: StateTransaction) -> tuple[ResourceRef | None, Callable[[], Awaitable[None]] | None]:
+            header = await self.get_header(identity, tenant_id=tenant_id)
+            if header is None:
+                return None, None
+            hint = await transaction.get_record(self._key("execution", (identity,)))
+            if hint is None:
+                return None, None
+            self._decode_header(hint, identity)
+
+            async def load() -> None:
+                await self._execution_content.prefetch_configuration_owner(hint)
+
+            return header, load
+
+        return await self._store.read(capture)
 
     async def get_header_fresh(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
         if tenant_id != self._tenant_id:
@@ -257,29 +421,43 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return header
 
     async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
-        if tenant_id != self._tenant_id:
-            return None
-        record = await self._store.read_record(self._key("execution", (execution_id,)))
-        return None if record is None else await self._decode_view(record, execution_id)
+        return await self._get_view(execution_id, tenant_id=tenant_id, fresh=False)
 
     async def get_view_fresh(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
+        return await self._get_view(execution_id, tenant_id=tenant_id, fresh=True)
+
+    async def _get_view(self, execution_id: str, *, tenant_id: str, fresh: bool) -> tuple[ResourceRef, ExecutionView] | None:
         if tenant_id != self._tenant_id:
             return None
         key = self._key("execution", (execution_id,))
-        record = (await self._refresh_records((key,))).get(key)
-        return None if record is None else await self._decode_view(record, execution_id)
+        async def read(_group: object) -> tuple[ResourceRef, ExecutionView] | None:
+            await self._execution_content.prefetch_projection_owners((key,), bindings=True, result=True)
+            record = ((await self._refresh_records((key,))).get(key) if fresh else await self._store.read_record(key))
+            return None if record is None else await self._decode_view(record, execution_id)
+        from ._memory import InMemoryStateStore
+        from ._sql import SqlStateStore
+        source_scope = fresh or isinstance(self._store, (InMemoryStateStore, SqlStateStore)) and not self._store.record_cache_enabled
+        return await self.read_content(read) if source_scope else await read(None)
 
     async def _decode_view(self, record: StoredRecord, execution_id: str) -> tuple[ResourceRef, ExecutionView]:
         self._decode_header(record, execution_id)
-        expanded, = await self._execution_content.expand_bindings((record,))
-        return decode_execution_view(expanded.data, tenant_id=self._tenant_id)
+        record, = await self._execution_content.expand_bindings((record,))
+        record, = await self._execution_content.expand_projection_components((record,), result=True)
+        return decode_execution_view(record.data, tenant_id=self._tenant_id)
 
     async def list_child_views(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionView, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        records = await self._records("execution", parent=self._parent("execution", "execution", (execution_id,)))
+        async def read(_group: object) -> tuple[ExecutionView, ...]:
+            records = await self._records("execution", parent=self._parent("execution", "execution", (execution_id,)))
+            return await self._child_views(records, execution_id, tenant_id=tenant_id)
+        return await self.read_content(read)
+
+    async def _child_views(self, records: Sequence[StoredRecord], execution_id: str, *, tenant_id: str) -> tuple[ExecutionView, ...]:
         values = []
-        for record in await self._execution_content.expand_bindings(records):
+        records = await self._execution_content.expand_bindings(records)
+        records = await self._execution_content.expand_projection_components(records, result=True)
+        for record in records:
             header = decode_execution_header(record.data, tenant_id=tenant_id)
             self._decode_header(record, header.id)
             _owner, view = decode_execution_view(record.data, tenant_id=tenant_id)
@@ -291,63 +469,98 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def get_view_with_children(
         self, execution_id: str, *, tenant_id: str,
     ) -> tuple[tuple[ResourceRef, ExecutionView] | None, tuple[ExecutionView, ...]]:
-        """Capture parent and child rows together before reading immutable bindings."""
+        """Capture parent, children and admitted bindings in the same read scope."""
         if tenant_id != self._tenant_id:
             return None, ()
-
-        async def capture(transaction: StateTransaction) -> tuple[StoredRecord | None, tuple[StoredRecord, ...]]:
-            parent = await transaction.get_record(self._key("execution", (execution_id,)))
+        async def read(_group: object) -> tuple[tuple[ResourceRef, ExecutionView] | None, tuple[ExecutionView, ...]]:
+            await self._execution_content.prefetch_projection_owners(
+                (self._key("execution", (execution_id,)),), bindings=True, result=True)
+            parent = await self._store.read_record(self._key("execution", (execution_id,)))
             if parent is None:
                 return None, ()
-            children = await self._records(
-                "execution", parent=self._parent("execution", "execution", (execution_id,)),
-            )
-            return parent, tuple(children)
+            children = await self._records("execution", parent=self._parent("execution", "execution", (execution_id,)))
+            return (await self._decode_view(parent, execution_id),
+                    await self._child_views(children, execution_id, tenant_id=tenant_id))
+        return await self.read_content(read)
 
-        parent, children = await self._store.read(capture)
-        if parent is None:
-            return None, ()
-        expanded = await self._execution_content.expand_bindings((parent, *children))
-        owner = await self._decode_view(expanded[0], execution_id)
-        views = []
-        for record in expanded[1:]:
-            header = decode_execution_header(record.data, tenant_id=tenant_id)
-            _principal, view = await self._decode_view(record, header.id)
-            if view.parent_execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            views.append(view)
-        return owner, tuple(views)
-
-    async def _projected_content(self, current: StoredRecord, value: object) -> StoredRecord:
-        candidate = await super()._projected_content(current, value)
+    async def _projected_content(self, current: StoredRecord, value: object, *,
+                                 result_source: NativeTextReference | None = None,
+                                 verified_native_previous: ExecutionRecord | None = None) -> StoredRecord:
+        candidate = await super()._projected_content(current, value, result_source=result_source,
+            verified_native_previous=verified_native_previous)
         if current.state in {ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value,
                              ExecutionStatus.CANCELLED.value, "execution_handoff"}:
-            if not isinstance(value, ExecutionRecord) or not self._execution_content.terminal_matches(current, candidate, value):
+            if not isinstance(value, ExecutionRecord) or not await self._execution_content.terminal_matches(current, candidate, value):
                 raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         return candidate
+
+    async def get_membership_many(self, execution_ids: Sequence[str], *,
+                                  tenant_id: str) -> Mapping[str, ExecutionMembershipRecord]:
+        """Read current session membership without hydrating presentation bodies."""
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if isinstance(execution_ids, (str, bytes)):
+            raise TypeError("execution_ids must be a sequence")
+        keys = {identity: self.execution_record_key(identity) for identity in dict.fromkeys(execution_ids)}
+        async def read(_group: object) -> Mapping[str, ExecutionMembershipRecord]:
+            await self._execution_content.prefetch_projection_owners(tuple(keys.values()))
+            rows = await self._store.read_records(tuple(keys.values())) if keys else {}
+            expanded = await self._execution_content.expand_policies(tuple(rows.values()))
+            values = {}
+            for row in expanded:
+                value = decode_execution_membership(row.data)
+                if row.kind != "execution" or keys.get(value.execution_id) != row.key:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[value.execution_id] = value
+            return values
+        from ._sql import SqlStateStore
+        if isinstance(self._store, SqlStateStore) and self._store.record_cache_enabled:
+            # Preserve ordinary bounded observations, including capture age and
+            # write-through invalidation. Cache absence remains authoritative
+            # only in the separate fresh pending-membership check.
+            return await read(None)
+        return await self.read_content(read)
+
+    async def prefetch_timeline_records(self, execution_ids: Sequence[str], *,
+                                        additional_records: Mapping[StateStore, Sequence[bytes]]) -> None:
+        """Capture timeline owners, immutable content and sibling membership together."""
+        await self._execution_content.prefetch_projection_owners(
+            tuple(self.execution_record_key(identity) for identity in execution_ids),
+            result=True, result_body=True, terminal_details=True, input_body=True,
+            additional_records=additional_records)
 
     async def get_timeline_many(
         self, execution_ids: Sequence[str], *, tenant_id: str,
     ) -> Mapping[str, ExecutionTimelineRecord]:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        if isinstance(execution_ids, (str, bytes)):
-            raise TypeError("execution_ids must be a sequence of strings")
-        ordered = tuple(dict.fromkeys(execution_ids))
-        if any(not isinstance(value, str) or not value for value in ordered):
-            raise ValueError("execution_ids must contain non-empty strings")
-        keys = {value: self._key("execution", (value,)) for value in ordered}
-        records = await self._store.read_records(tuple(keys.values())) if keys else {}
-        payloads = await self._execution_content.read_payloads(tuple(records.values()))
-        values: dict[str, ExecutionTimelineRecord] = {}
-        for execution_id, key in keys.items():
-            record = records.get(key)
-            if record is None:
-                continue
-            value = decode_execution_content(record.data, payloads, timeline=True)
-            if record.kind != "execution" or record.key != key or value.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values[execution_id] = value
-        return values
+        async def read(_group):
+            _require_repository_tenant(tenant_id, self._tenant_id)
+            if isinstance(execution_ids, (str, bytes)):
+                raise TypeError("execution_ids must be a sequence of strings")
+            ordered = tuple(dict.fromkeys(execution_ids))
+            if any(not isinstance(value, str) or not value for value in ordered):
+                raise ValueError("execution_ids must contain non-empty strings")
+            keys = {value: self._key("execution", (value,)) for value in ordered}
+            await self.prefetch_timeline_records(ordered, additional_records={})
+            records = await self._store.read_records(tuple(keys.values())) if keys else {}
+            if active_state_scope() is None and any(
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
+                for record in records.values()
+                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
+            ):
+                return await self.read_content(read)
+            payloads = await self._execution_content.read_payloads(tuple(records.values()))
+            expanded = await self._execution_content.expand_policies(tuple(records.values()))
+            records = {record.key: record for record in expanded}
+            values: dict[str, ExecutionTimelineRecord] = {}
+            for execution_id, key in keys.items():
+                record = records.get(key)
+                if record is None:
+                    continue
+                value = decode_execution_content(record.data, payloads, timeline=True)
+                if record.kind != "execution" or record.key != key or value.execution_id != execution_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[execution_id] = value
+            return values
+        return await read(None)
 
     async def get_recovery(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         execution = await self.get(execution_id, tenant_id=tenant_id)
@@ -360,42 +573,56 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return execution if execution is not None and execution.recovery is not None else None
 
     async def get_observed(self, execution_id: str, *, tenant_id: str) -> Observed[ExecutionRecord] | None:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await self._record(self._key("execution", (execution_id,)))
-        return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
+        async def read(_group):
+            _require_repository_tenant(tenant_id, self._tenant_id)
+            key = self._key("execution", (execution_id,))
+            await self._execution_content.prefetch_projection_owners(
+                (key,), bindings=True, input_body=True, result=True,
+                result_body=True, recovery=True, terminal_details=True,
+            )
+            record = await self._record(key)
+            return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
+        return await self.read_content(read)
 
     async def get_observed_in_transaction(
         self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
     ) -> Observed[ExecutionRecord] | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await transaction.get_record(self._key("execution", (execution_id,)))
+        key = self._key("execution", (execution_id,))
+        await self._execution_content.prefetch_projection_owners(
+            (key,), bindings=True, input_body=True, result=True,
+            result_body=True, recovery=True, terminal_details=True,
+        )
+        record = await transaction.get_record(key)
         return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
 
     async def list_recoverable_page(
         self, *, tenant_id: str, cursor: str | None, limit: int,
     ) -> Page[ExecutionRecord]:
-        if tenant_id != self._tenant_id:
-            return Page(())
-        _validate_page_limit(limit)
-        states = frozenset(status.value for status in (
-            ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED,
-            ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING, ExecutionStatus.WAITING_DEFERRED,
-        )) | {"execution_handoff"}
-        selected: list[tuple[StoredRecord, ExecutionRecord]] = []
-        next_cursor = cursor
-        while len(selected) <= limit:
-            records = await self._records("execution", states=states, cursor=next_cursor, limit=limit + 1)
-            if not records:
-                break
-            for record, value in zip(records, await self._decode_many(records), strict=True):
-                next_cursor = _record_cursor(record)
-                if value.recovery is not None and value.recovery_state is not ExecutionRecoveryState.COMPLETED:
-                    selected.append((record, value))
-                    if len(selected) > limit:
-                        return Page(tuple(item[1] for item in selected[:limit]), _record_cursor(selected[limit - 1][0]))
-            if len(records) < limit + 1:
-                break
-        return Page(tuple(item[1] for item in selected))
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return Page(())
+            _validate_page_limit(limit)
+            states = frozenset(status.value for status in (
+                ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED,
+                ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING, ExecutionStatus.WAITING_DEFERRED,
+            )) | {"execution_handoff"}
+            selected: list[tuple[StoredRecord, ExecutionRecord]] = []
+            next_cursor = cursor
+            while len(selected) <= limit:
+                records = await self._records("execution", states=states, cursor=next_cursor, limit=limit + 1)
+                if not records:
+                    break
+                for record, value in zip(records, await self._decode_many(records), strict=True):
+                    next_cursor = _record_cursor(record)
+                    if value.recovery is not None and value.recovery_state is not ExecutionRecoveryState.COMPLETED:
+                        selected.append((record, value))
+                        if len(selected) > limit:
+                            return Page(tuple(item[1] for item in selected[:limit]), _record_cursor(selected[limit - 1][0]))
+                if len(records) < limit + 1:
+                    break
+            return Page(tuple(item[1] for item in selected))
+        return await self.read_content(read)
 
     async def compare_and_swap(
         self, execution_id: str, *, tenant_id: str,
@@ -470,34 +697,50 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def _get_many(
         self, execution_ids: Sequence[str], *, tenant_id: str, refresh: bool,
     ) -> Mapping[str, ExecutionRecord]:
-        if tenant_id != self._tenant_id:
-            return {}
-        if isinstance(execution_ids, (str, bytes)):
-            raise TypeError("execution_ids must be a sequence of strings")
-        ordered = tuple(dict.fromkeys(execution_ids))
-        if any(not isinstance(execution_id, str) or not execution_id for execution_id in ordered):
-            raise ValueError("execution_ids must contain non-empty strings")
-        if not ordered:
-            return {}
-        keys = {
-            execution_id: self._key("execution", (execution_id,))
-            for execution_id in ordered
-        }
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return {}
+            if isinstance(execution_ids, (str, bytes)):
+                raise TypeError("execution_ids must be a sequence of strings")
+            ordered = tuple(dict.fromkeys(execution_ids))
+            if any(not isinstance(execution_id, str) or not execution_id for execution_id in ordered):
+                raise ValueError("execution_ids must contain non-empty strings")
+            if not ordered:
+                return {}
+            keys = {
+                execution_id: self._key("execution", (execution_id,))
+                for execution_id in ordered
+            }
 
-        records = (await self._refresh_records(tuple(keys.values())) if refresh else
-                   await self._store.read_records(tuple(keys.values())))
-        decoded = {record.key: value for record, value in zip(records.values(),
-            await self._decode_many(tuple(records.values())), strict=True)}
-        values: dict[str, ExecutionRecord] = {}
-        for execution_id, key in keys.items():
-            record = records.get(key)
-            if record is None:
-                continue
-            value = decoded[key]
-            if value.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values[execution_id] = value
-        return values
+            await self._execution_content.prefetch_projection_owners(
+                tuple(keys.values()), bindings=True, input_body=True, result=True,
+                result_body=True, recovery=True, terminal_details=True,
+            )
+            records = (await self._refresh_records(tuple(keys.values())) if refresh else
+                       await self._store.read_records(tuple(keys.values())))
+            if not records:
+                # This source read already proves the complete requested batch
+                # absent; there is no content owner to reopen or hydrate.
+                return {}
+            if active_state_scope() is None and (refresh or any(
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
+                for record in records.values()
+                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
+            )):
+                return await self.read_content(read)
+            decoded = {record.key: value for record, value in zip(records.values(),
+                await self._decode_many(tuple(records.values())), strict=True)}
+            values: dict[str, ExecutionRecord] = {}
+            for execution_id, key in keys.items():
+                record = records.get(key)
+                if record is None:
+                    continue
+                value = decoded[key]
+                if value.execution_id != execution_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[execution_id] = value
+            return values
+        return await read(None)
 
     def execution_record_key(self, execution_id: str) -> bytes:
         """Identify the canonical record for a transaction-local read receipt."""
@@ -556,84 +799,99 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         tenant_id: str,
         statuses: frozenset[ExecutionStatus] | None = None,
     ) -> tuple[ExecutionRecord, ...]:
-        if tenant_id != self._tenant_id:
-            return ()
-        records = await self._records(
-            "execution",
-            scope=self._scope("execution", "session", (session_id,)),
-            states=None
-            if statuses is None
-            else frozenset(status.value for status in statuses) | {"execution_handoff"},
-        )
-        values = await self._decode_many(records)
-        return tuple(value for value in values if statuses is None or value.status in statuses)
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return ()
+            records = await self._records(
+                "execution",
+                scope=self._scope("execution", "session", (session_id,)),
+                states=None
+                if statuses is None
+                else frozenset(status.value for status in statuses) | {"execution_handoff"},
+            )
+            values = await self._decode_many(records)
+            return tuple(value for value in values if statuses is None or value.status in statuses)
+        return await self.read_content(read)
 
     async def list_children(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ExecutionRecord, ...]:
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return ()
+            records = await self._records(
+                "execution",
+                parent=self._parent("execution", "execution", (execution_id,)),
+            )
+            return await self._decode_many(records)
+        return await self.read_content(read)
+
+    async def _candidate_records(
+        self, *, tenant_id: str, session_id: str | None, parent_execution_id: str | None,
+        cursor: str | None, limit: int,
+    ) -> tuple[Sequence[StoredRecord], bool]:
         if tenant_id != self._tenant_id:
-            return ()
-        records = await self._records(
-            "execution",
-            parent=self._parent("execution", "execution", (execution_id,)),
-        )
-        return await self._decode_many(records)
+            return (), False
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        scope = (None if session_id is None or parent_execution_id is not None
+                 else self._scope("execution", "session", (session_id,)))
+        parent = (None if parent_execution_id is None
+                  else self._parent("execution", "execution", (parent_execution_id,)))
+        records = await self._records("execution", scope=scope, parent=parent, cursor=cursor, limit=limit)
+        has_more = (len(records) == limit and await self._has_records(
+            "execution", scope=scope, parent=parent, cursor=_record_cursor(records[-1])))
+        return records[:limit], has_more
 
     async def list_candidates(
-        self,
-        *,
-        tenant_id: str,
-        session_id: str | None,
-        parent_execution_id: str | None,
-        cursor: str | None,
-        limit: int,
+        self, *, tenant_id: str, session_id: str | None, parent_execution_id: str | None,
+        cursor: str | None, limit: int,
     ) -> ExecutionCandidatePage:
-        if tenant_id != self._tenant_id:
-            return ExecutionCandidatePage((), False)
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or not 1 <= limit <= 1000
-        ):
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-        scope = (
-            None
-            if session_id is None or parent_execution_id is not None
-            else self._scope("execution", "session", (session_id,))
-        )
-        parent = (
-            None
-            if parent_execution_id is None
-            else self._parent("execution", "execution", (parent_execution_id,))
-        )
-        records = await self._records(
-            "execution",
-            scope=scope,
-            parent=parent,
-            cursor=cursor,
-            limit=limit,
-        )
-        selected = records[:limit]
-        candidates: list[ExecutionCandidate] = []
-        for record, value in zip(selected, await self._decode_many(selected), strict=True):
-            candidates.append(
-                ExecutionCandidate(
-                    value,
-                    _record_cursor(record),
-                )
-            )
-        has_more = False
-        if len(records) == limit:
-            has_more = await self._has_records(
-                "execution",
-                scope=scope,
-                parent=parent,
-                cursor=_record_cursor(records[-1]),
-            )
-        return ExecutionCandidatePage(
-            tuple(candidates),
-            has_more,
-        )
+        async def read(_group):
+            selected, has_more = await self._candidate_records(tenant_id=tenant_id, session_id=session_id,
+                parent_execution_id=parent_execution_id, cursor=cursor, limit=limit)
+            values = await self._decode_many(selected)
+            return ExecutionCandidatePage(tuple(ExecutionCandidate(value, _record_cursor(record))
+                for record, value in zip(selected, values, strict=True)), has_more)
+        return await self.read_content(read)
+
+    async def list_view_candidates(
+        self, *, tenant_id: str, session_id: str | None, parent_execution_id: str | None,
+        cursor: str | None, limit: int,
+    ) -> ExecutionViewCandidatePage:
+        """List control views without restoring accepted input or output bodies."""
+        async def read(_group):
+            selected, has_more = await self._candidate_records(tenant_id=tenant_id, session_id=session_id,
+                parent_execution_id=parent_execution_id, cursor=cursor, limit=limit)
+            expanded = await self._execution_content.expand_bindings(selected)
+            expanded = await self._execution_content.expand_projection_components(expanded, result=True)
+            candidates = []
+            for stored, record in zip(selected, expanded, strict=True):
+                header = decode_execution_header(record.data, tenant_id=tenant_id)
+                self._decode_header(stored, header.id)
+                _owner, view = decode_execution_view(record.data, tenant_id=tenant_id)
+                candidates.append(ExecutionViewCandidate(view, _record_cursor(stored)))
+            return ExecutionViewCandidatePage(tuple(candidates), has_more)
+        return await self.read_content(read)
+
+    async def list_metadata_candidates(
+        self, *, tenant_id: str, session_id: str | None, parent_execution_id: str | None,
+        cursor: str | None, limit: int,
+    ) -> ExecutionMetadataCandidatePage:
+        """Read diagnostics without hydrating accepted input or terminal output."""
+        async def read(_group):
+            selected, has_more = await self._candidate_records(tenant_id=tenant_id, session_id=session_id,
+                parent_execution_id=parent_execution_id, cursor=cursor, limit=limit)
+            expanded = await self._execution_content.expand_bindings(selected)
+            expanded = await self._execution_content.expand_projection_components(
+                expanded, result=True, terminal_details=True)
+            candidates = []
+            for stored, record in zip(selected, expanded, strict=True):
+                value = decode_execution_metadata(record.data, tenant_id=tenant_id)
+                self._decode_header(stored, value.execution_id)
+                candidates.append(ExecutionMetadataCandidate(value, _record_cursor(stored)))
+            return ExecutionMetadataCandidatePage(tuple(candidates), has_more)
+        return await self.read_content(read)
 
     async def get_in_transaction(
         self,
@@ -643,7 +901,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         tenant_id: str,
     ) -> ExecutionRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await transaction.get_record(self._key("execution", (execution_id,)))
+        key = self._key("execution", (execution_id,))
+        await self._execution_content.prefetch_projection_owners(
+            (key,), bindings=True, input_body=True, result=True,
+            result_body=True, recovery=True, terminal_details=True,
+        )
+        record = await transaction.get_record(key)
         return None if record is None else await self._decode(record, ExecutionRecord)
 
     async def guard_recovery_in_transaction(
@@ -1511,6 +1774,30 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return await mutate(transaction)
         return await self._store.mutate(mutate)
 
+    async def prefetch_terminal_records(
+        self, execution_id: str, *, additional_records: Mapping[StateStore, Sequence[bytes]] | None = None,
+    ) -> None:
+        """Read terminal control and immutable bodies in their transaction snapshot."""
+        await self._execution_content.prefetch_projection_owners(
+            (self._key("execution", (execution_id,)),), bindings=True,
+            input_body=True, result=True, result_body=True, recovery=True,
+            terminal_details=True, additional_records=additional_records,
+        )
+
+    async def confirm_terminal_write_in_transaction(
+        self, transaction: StateTransaction, receipt: ExecutionTerminalWriteReceipt,
+    ) -> Observed[ExecutionRecord] | None:
+        """Reuse the CAS receipt unless a later participant changed its owner."""
+        execution_id = receipt.execution.execution_id
+        stored = await transaction.get_record(self._key("execution", (execution_id,)))
+        if stored is None:
+            return None
+        if stored.storage_revision == receipt.observed.storage_revision:
+            return receipt.observed
+        return await self.get_observed_in_transaction(
+            transaction, execution_id, tenant_id=self._tenant_id,
+        )
+
     def start_idempotency_record_key(self, identity: IdempotencyRecord) -> bytes:
         """Physical key of the request identity confirmed by admission."""
         return self._idempotency._key("idempotency", self._idempotency._identity_key(
@@ -1555,6 +1842,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             commit.execution.error_code,
         )
 
+    async def prepare_terminal_content(
+        self, commit: ExecutionTerminalCommit, archive: PreparedArchive, *, result_source: NativeTextReference | None = None,
+    ) -> None:
+        """Prepare terminal payloads in the existing shared archive, without publishing."""
+        await self._execution_content.prepare_terminal_content(
+            commit.execution.finalize_terminal(commit.result), archive, result_source=result_source,
+        )
+
     async def commit_terminal(
         self,
         commit: ExecutionTerminalCommit,
@@ -1570,6 +1865,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
         transaction: StateTransaction | None = None,
+        result_source: NativeTextReference | None = None,
     ) -> ExecutionTerminalCommitResult:
         key = self._key("execution", (commit.execution.execution_id,))
         stream = stream_key(
@@ -1597,6 +1893,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 )
                 id_key = self._idempotency._key("idempotency", identity)
                 record_keys.append(id_key)
+            await self.prefetch_terminal_records(
+                commit.execution.execution_id, additional_records={self._store: tuple(record_keys)},
+            )
             stored_records = await transaction.get_records(record_keys)
             stored = stored_records.get(key)
             if stored is None:
@@ -1654,9 +1953,15 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 event_seq=stored_value.event_seq + len(pending_events) + 1,
                 result=commit.result,
             ).finalize_terminal(commit.result)
+            if result_source is not None:
+                await self._execution_content.verify_result_source(result_source, commit.result.output)
             replacements = [
                 RecordReplacement(
-                    await self._projected_content(stored, next_execution),
+                    # stored_value was decoded from stored above in this same
+                    # transaction. Only reads occur before this encode; no
+                    # Native source publication/deletion may enter this window.
+                    await self._projected_content(stored, next_execution, result_source=result_source,
+                                                  verified_native_previous=stored_value),
                     stored.storage_revision,
                 )
             ]
@@ -1737,7 +2042,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 commit.idempotency is not None,
                 commit.operation is not None,
             )
-            return ExecutionTerminalCommitResult(next_execution, commit.result)
+            return ExecutionTerminalWriteReceipt(
+                next_execution, commit.result,
+                observed=Observed(next_execution, replacements[0].record.storage_revision),
+            )
 
         if transaction is not None:
             return await mutate(transaction)
@@ -1749,11 +2057,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         commit: ExecutionTerminalCommit,
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
+        result_source: NativeTextReference | None = None,
     ) -> ExecutionTerminalCommitResult:
         return await self._commit_terminal(
             commit,
             pending_events=pending_events,
-            transaction=transaction,
+            transaction=transaction, result_source=result_source,
         )
 
     async def commit_closed_terminal_in_transaction(
@@ -1762,10 +2071,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         commit: ExecutionTerminalCommit,
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
+        result_source: NativeTextReference | None = None,
     ) -> ExecutionTerminalCommitResult:
         if commit.execution.durable_trace:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await self._commit_terminal(commit, pending_events=pending_events, transaction=transaction)
+        return await self._commit_terminal(commit, pending_events=pending_events, transaction=transaction, result_source=result_source)
 
     async def pending_turn_result_in_transaction(
         self, transaction: StateTransaction, reservation: ExecutionStartReservation,
@@ -1954,6 +2264,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
     ) -> bool:
+        await self._execution_content.initialize(create=False, share_content=False)
         released, _execution = await self._store.mutate(
             lambda transaction: self.close_retention_in_transaction(
                 transaction, execution_id, tenant_id=tenant_id,
@@ -1968,25 +2279,47 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         observed: Observed[ExecutionRecord] | None = None,
-    ) -> tuple[bool, ExecutionRecord | None]:
+    ) -> tuple[bool, ExecutionRetentionRecord | None]:
         _require_repository_tenant(tenant_id, self._tenant_id)
         key = self._key("execution", (execution_id,))
         if observed is None:
+            await self._execution_content.prefetch_projection_owners((key,), recovery=True)
             stored = await transaction.get_record(key)
             if stored is None:
                 return True, None
-            current = await self._decode(stored, ExecutionRecord)
+            self._decode_header(stored, execution_id)
+            expanded, = await self._execution_content.expand_policies((stored,))
+            expanded, = await self._execution_content.expand_projection_components((expanded,), recovery=True)
+            current = decode_execution_retention(expanded.data)
         else:
             current = observed.value
             if current.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            stored = replace(await self._stored_content("execution", (execution_id,), current, state=current.status.value, previous_value=current),
-                             storage_revision=observed.storage_revision)
+            stored = self._execution_content.projection(current)
+            if (stored is None or stored.key != key or stored.kind != "execution"
+                    or stored.storage_revision != observed.storage_revision):
+                stored = replace(await self._stored_content("execution", (execution_id,), current,
+                    state=current.status.value, previous_value=current), storage_revision=observed.storage_revision)
+                expanded, = await self._execution_content.expand_policies((stored,))
+                expanded, = await self._execution_content.expand_projection_components((expanded,), recovery=True)
+                current = decode_execution_retention(expanded.data)
+            else:
+                # This exact decoded owner already carries closure metadata.
+                # Reuse it without restoring unrelated immutable bodies; the
+                # physical CAS below rejects any intervening owner update.
+                current = ExecutionRetentionRecord(
+                    execution_id=current.execution_id, session_id=current.session_id,
+                    status=current.status, conversation=current.conversation,
+                    started_at=current.started_at, retention_closed=current.retention_closed,
+                    dependency_hold_ids=current.dependency_hold_ids,
+                    recovery_handoff=current.recovery_state is ExecutionRecoveryState.HANDOFF,
+                    revision=current.revision, updated_at=current.updated_at,
+                )
         if current.status not in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
-        } or current.dependency_hold_ids or current.recovery_state is ExecutionRecoveryState.HANDOFF:
+        } or current.dependency_hold_ids or current.recovery_handoff:
             return False, current
         if current.retention_closed:
             return True, current
@@ -1996,11 +2329,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             revision=current.revision + 1,
             updated_at=await transaction.now(),
         )
-        await _replace_checked(
-            transaction,
-            await self._projected_content(stored, next_value),
-            stored.storage_revision,
-        )
+        envelope = decode_envelope(stored.data)
+        payload = envelope.value["payload"]
+        data = encode_envelope({**envelope.value, "payload": {**payload, "fields": {
+            **payload["fields"], "retention_closed": True, "revision": next_value.revision,
+            "updated_at": encode_domain(next_value.updated_at),
+        }}})
+        await _replace_checked(transaction, replace(stored, data=data,
+            storage_revision=stored.storage_revision + 1), stored.storage_revision)
         return True, next_value
 
     async def require_active_producer(
@@ -2008,21 +2344,24 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         allow_cancelling: bool = True, fresh: bool = False,
     ) -> None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        key = self._key("execution", (execution_id,))
-        record = ((await self._refresh_records((key,))).get(key) if fresh else
-                  await self._store.read_record(key))
-        if record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._decode_header(record, execution_id)
-        generation, status, _durable_trace, _seal = decode_execution_producer_control(record.data)
-        if generation != expected_producer_generation:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if status is ExecutionStatus.CANCELLING and not allow_cancelling:
-            raise AIError(ErrorCode.EXECUTION_CANCELLED)
-        allowed = ({ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
-                   if allow_cancelling else {ExecutionStatus.STARTED})
-        if status not in allowed:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        async def read(_group: object) -> None:
+            key = self._key("execution", (execution_id,))
+            record = ((await self._refresh_records((key,))).get(key) if fresh else
+                      await self._store.read_record(key))
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._decode_header(record, execution_id)
+            generation, status, _seal = decode_execution_producer_authority(record.data)
+            if generation != expected_producer_generation:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if status is ExecutionStatus.CANCELLING and not allow_cancelling:
+                raise AIError(ErrorCode.EXECUTION_CANCELLED)
+            allowed = ({ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
+                       if allow_cancelling else {ExecutionStatus.STARTED})
+            if status not in allowed:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        await self.read_content(read)
 
     async def require_revoked_producer(
         self, execution_id: str, *, tenant_id: str, producer_generation: int,
@@ -2033,7 +2372,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if record is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._decode_header(record, execution_id)
-            generation, status, durable_trace, seal_digest = decode_execution_producer_control(record.data)
+            generation, status, seal_digest = decode_execution_producer_authority(record.data)
             if generation > producer_generation:
                 return
             if generation == producer_generation and status is ExecutionStatus.RECOVERY_REQUIRED:
@@ -2041,12 +2380,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if (generation < producer_generation or status not in {
                     ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            expanded, = await self._execution_content.expand_policies((record,))
+            _generation, _status, durable_trace, seal_digest = decode_execution_producer_control(expanded.data)
             if not durable_trace:
                 return
             seal = await self._get_history_seal_in_transaction(transaction, execution_id)
             if seal is None or seal.seal_digest != seal_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._store.read(read)
+        await self.read_content(lambda _group: self._store.read(read))
 
     async def get_history_seal(
         self,
@@ -2085,7 +2426,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def require_execution_producer_in_transaction(
         self, transaction: StateTransaction, execution_id: str, *,
         expected_producer_generation: int, allow_cancelling: bool = True,
-    ) -> tuple[ExecutionRecord, StoredRecord]:
+    ) -> tuple[ExecutionControlRecord, StoredRecord]:
         """Fence publication against the sole execution control owner."""
         if (isinstance(expected_producer_generation, bool)
                 or not isinstance(expected_producer_generation, int)
@@ -2095,7 +2436,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         record = await transaction.get_record(key)
         if record is None or record.kind != "execution":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution = await self._decode(record, ExecutionRecord)
+        execution = decode_execution_control(record.data)
         if execution.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.producer_generation != expected_producer_generation:
@@ -2115,12 +2456,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
     async def require_execution_history_write_in_transaction(
         self, transaction: StateTransaction, execution_id: str,
-    ) -> tuple[ExecutionRecord, StoredRecord]:
+    ) -> tuple[ExecutionControlRecord, StoredRecord]:
         key = self._key("execution", (execution_id,))
         record = await transaction.get_record(key)
         if record is None or record.kind != "execution":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution = await self._decode(record, ExecutionRecord)
+        execution = decode_execution_control(record.data)
         if execution.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.history_seal_digest is not None or execution.status in {
@@ -2225,26 +2566,24 @@ class EventRepositoryImpl(_RepositoryBase):
         current = await transaction.get_record(key)
         if current is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        execution = await self._decode(current, ExecutionRecord)
-        if (
-            expected_event_seq is not None
-            and execution.event_seq != expected_event_seq
-        ):
+        identity, event_seq, revision = decode_execution_event_control(current.data)
+        if current.kind != "execution" or identity != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if expected_event_seq is not None and event_seq != expected_event_seq:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         now = await transaction.now()
-        first_sequence = execution.event_seq + 1
-        last_sequence = execution.event_seq + len(events)
-        next_execution = replace(
-            execution,
-            event_seq=last_sequence,
-            revision=execution.revision + len(events),
-            updated_at=now,
-        )
-        await _replace_checked(
-            transaction,
-            await self._projected_content(current, next_execution),
-            current.storage_revision,
-        )
+        first_sequence = event_seq + 1
+        last_sequence = event_seq + len(events)
+        # Audit publication changes no execution facts or content owners. Keep
+        # their original wire representation, including all terminal fields.
+        envelope = decode_envelope(current.data)
+        payload = envelope.value["payload"]
+        data = encode_envelope({**envelope.value, "payload": {**payload, "fields": {
+            **payload["fields"], "event_seq": last_sequence,
+            "revision": revision + len(events), "updated_at": encode_domain(now),
+        }}})
+        await _replace_checked(transaction, replace(current, data=data,
+            storage_revision=current.storage_revision + 1), current.storage_revision)
         facts = tuple(
             StoredFact(
                 stream,

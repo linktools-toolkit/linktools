@@ -74,20 +74,21 @@ async def test_session_admission_reuses_verified_history_root(tmp_path: Path, mo
     from linktools.ai.inputs import ExecutionContextArchive
     from linktools.ai.persistence._archive import ContentArchive
     prepared = []
-    active = []
+    from contextvars import ContextVar
+    active = ContextVar("input_prepare_active", default=False)
     body_reads = []
     original = ExecutionContextArchive.prepare
     original_read = ContentArchive._read_content
     async def observe(self, context, **kwargs):
-        active.append(True)
+        token = active.set(True)
         try:
             result = await original(self, context, **kwargs)
         finally:
-            active.pop()
+            active.reset(token)
         prepared.append((len(context.model_messages()), kwargs.get('history_root'), len(result.records.records)))
         return result
     async def read(self, content):
-        if active:
+        if active.get():
             body_reads.append(content.codec)
         return await original_read(self, content)
     monkeypatch.setattr(ExecutionContextArchive, 'prepare', observe)
@@ -130,7 +131,7 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
     features.capability(ExecutionCapability(retain_history=True))
     features.agent("default", model="default", allow_tools=())
     rule = AssetKey("rule", "current.md")
-    expected = RepositoryInstructions((RepositoryInstructionDocument("rule:current", ".", "Rule added after startup"),))
+    expected = None
     try:
         async with Persistence.open("current-instructions", storage=PersistenceStorage.sqlite(tmp_path / "rules.db")) as persistence, Runtime.attach(
             persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
@@ -140,6 +141,11 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
             for index in range(3):
                 if index == 1:
                     await assets.put(rule, b"Rule added after startup")
+                    accepted_version, = await assets.resolve_versions((rule,))
+                    expected = RepositoryInstructions((RepositoryInstructionDocument(
+                        "rule:current", ".", "Rule added after startup",
+                        asset_source_id="current-instructions", asset=accepted_version,
+                    ),))
                 elif index == 2:
                     await assets.delete(rule)
                 result = (await session.run(f"question {index}", timeout_seconds=5)).result
@@ -154,6 +160,7 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
             contexts = [await reader.load_input_context(record.input_context) for record in records]
             assert all(context is not None for context in contexts)
             assert contexts[0].repository_instructions is None
+            assert expected is not None
             assert contexts[1].repository_instructions == expected.to_payload()
             assert contexts[2].repository_instructions is None
             assert "Rule added after startup" not in observed[0]
@@ -176,10 +183,16 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     from linktools.ai.persistence._history import TranscriptRepository
     phase = ContextVar('review_phase', default='other')
     observed = []
+    owner_reads = []
     details = []
     original_read = ContentArchive._read_content
     async def read(self, content):
-        observed.append((phase.get(), content.identity, content.raw_size, content.payload.kind))
+        if content.codec == "model-message":
+            observed.append((phase.get(), content.identity, content.raw_size, "body" if content.payload is None else content.payload.kind))
+        else:
+            from linktools.ai.persistence.state import active_state_transaction
+            assert content.codec in {"execution-binding", "runtime-policy", "execution-payload"}
+            owner_reads.append((active_state_transaction(self.store), content.identity, content.raw_size))
         return await original_read(self, content)
     def wrap(method, label):
         async def invoke(self, *args, **kwargs):
@@ -218,6 +231,16 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     Path(f'/tmp/review-boundary-counts-{rounds}.json').write_text(json.dumps({'summary':summary,'projection_calls':details}, sort_keys=True))
     assert summary['projection']['calls'] <= 6 * rounds + 5
     assert summary['other']['calls'] <= 3 * rounds + 2
+    # Whole-kind owners are a separate cost from model-history hydration.
+    # Both measured workloads (2 and 4 rounds) have 17 distinct scope/owner
+    # decodes, 4 immutable identities and 5503 decoded bytes. More tool rounds
+    # must not add repeated configuration/input/template decodes.
+    from collections import Counter
+    assert len(owner_reads) <= 17
+    assert sum(item[2] for item in owner_reads) <= 5503
+    assert len({item[1] for item in owner_reads}) <= 4
+    assert all(transaction is not None for transaction, _, _ in owner_reads)
+    assert max(Counter((transaction, identity) for transaction, identity, _ in owner_reads).values(), default=0) <= 1
 
 
 @pytest.mark.asyncio

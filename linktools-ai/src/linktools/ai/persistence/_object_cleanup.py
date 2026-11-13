@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from ..core import JsonValue, validate_page_limit
-from ..steps import native_store_locator
+from ..steps import native_store_locator, native_store_key
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload
 from ..storage import (
@@ -24,12 +24,22 @@ from ._archive_closure import (
     iter_native_message_roots, require_known_retention, validate_native_message_content,
 )
 from ._payload import decode_payload_bytes
-from ._execution_content import expand_retained_execution_content
+from ._tool_operation_content import expand_tool_content, expand_native_tool_content
+from ._native_tool_result import restore_native_tool_result_payload
+from ._native_tool_arguments import restore_native_tool_arguments_payload
+from ._native_tool_error import restore_native_tool_error_payload
+from ._archive import archive_content_scope
+from ._record_key import decode_key_components, RECORD_KEY_MAX_BYTES
+from ._pending_operation_reference import pending_operation_values
+from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
+                                 restore_native_text_payload, restore_native_user_input)
 from ._sql import SqlStateStorageGroup
 from ._step_schema import build_step_sql_metadata
-from ._step_maintenance import inspect_native_message_tables
+from ._step_maintenance import inspect_native_message_tables, native_message_partitions
 from ._capability_marker import has_capability_partition_marker
-from .codec import iter_runtime_object_dependencies, iter_runtime_object_refs
+from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
+                    execution_payload_slots, tool_payload_slots, native_user_input_reference,
+                    native_text_reference, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference)
 from .captures import (
     CAPTURE_RECORD_KINDS, capture_retention_value, capture_state_closure,
     capture_record_key, capture_record_scope, capture_record_value, expand_snapshot_capture, input_capture_expiry_key,
@@ -254,7 +264,15 @@ async def _purge_unreferenced_objects(
             await group.context.dialect.begin_consistent_read(session)
             rows = {}
             for name in names:
-                result = await group.context.run_statement(session.execute(select(metadata.tables[name])))
+                table = metadata.tables[name]
+                statement = select(table)
+                if name == "ai_step_messages":
+                    # Typed Step payload bytes share this physical relation but
+                    # are owned and swept by ArchiveClosure, never Native GC.
+                    native_partitions = await native_message_partitions(group.context, session, table)
+                    statement = statement.where(table.c.store_key.in_(native_partitions),
+                        table.c.store_locator.in_(tuple(native_store_locator(key) for key in native_partitions)))
+                result = await group.context.run_statement(session.execute(statement))
                 rows[name] = result.mappings().all()
         snapshots = rows.get("ai_step_snapshots", ())
         sequences, messages = rows["ai_step_sequences"], rows["ai_step_messages"]
@@ -281,6 +299,94 @@ async def _purge_unreferenced_objects(
             metadata[location] = await source.stat(key)
         return metadata[location]
 
+    async def read_native_object(reference: ObjectRef) -> bytes:
+        sources = {id(source): source for source in archive_objects.values()}
+        source = None
+        for candidate_source in sources.values():
+            stat = await read_metadata(candidate_source, reference.key)
+            if stat is not None:
+                if stat.digest != reference.digest or stat.size != reference.size:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                source = candidate_source
+        if source is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        encoded = await read_object(source, reference.key,
+                                    expected_digest=reference.digest, expected_size=reference.size)
+        protected.add(reference.key)
+        return encoded
+
+    async def expand_native_templates(record: StoredRecord, owner_store: StateStore) -> StoredRecord:
+        """Resolve fixed leaves before decoding their complete offline templates."""
+        owner_group = owner_store.storage_group
+        value = decode_envelope(record.data).value["payload"]
+        is_execution = record.kind == "execution"
+        slots = execution_payload_slots(value) if is_execution else tool_payload_slots(value)
+        restored = {}
+        for path, payload in slots:
+            event_reference = None if is_execution else native_tool_error_reference(payload)
+            if event_reference is not None:
+                from ._step_store import SqlStepStore
+                opened = await owner_group.open_archive()
+                if opened is None or opened[0] != event_reference.group_id:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                try:
+                    parts = decode_key_components(record.key, RECORD_KEY_MAX_BYTES)
+                    if len(parts) < 6 or parts[0] != "record" or parts[4] != record.kind:
+                        raise ValueError("invalid typed owner address")
+                    if native_store_key(parts[1], parts[2]) != event_reference.store_key:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    native = SqlStepStore.for_state_store(owner_store, namespace=parts[1], tenant_id=parts[2])
+                    if native is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    key = event_reference.run_id, event_reference.replay_key
+                    events = await owner_store.read(lambda tx: native.read_fixed_events((key,), transaction=tx))
+                    fields = value["fields"]
+                    restored[event_reference] = restore_native_tool_error_payload(event_reference, events[key],
+                        operation_id=fields["tool_operation_id"], tool_name=fields["tool_name"],
+                        tool_call_id=fields["tool_call_id"], fence=record.lease_fence, error_code=fields["error_code"])
+                except (ValueError, TypeError, KeyError, IndexError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                continue
+            reference = ((native_user_input_reference(payload) or native_text_reference(payload))
+                         if is_execution else (native_tool_arguments_reference(payload) or native_tool_result_reference(payload)))
+            if reference is None or reference in restored:
+                continue
+            root = reference.root
+            owner = native_groups.get(owner_group)
+            if owner is None or owner[3] != root.group_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            try:
+                parts = decode_key_components(record.key, RECORD_KEY_MAX_BYTES)
+                if len(parts) < 6 or parts[0] != "record" or parts[4] != record.kind:
+                    raise ValueError("invalid typed owner address")
+                expected_store = native_store_key(parts[1], parts[2])
+            except (ValueError, TypeError, IndexError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if root.store_key != expected_store:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            closure, bodies = owner[:2]
+            identities = closure.message_identities(root.store_key, root.slices)
+            if len(identities) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            row = bodies.get((root.store_key, identities[0]))
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            content = validate_native_message_content(row, group_id=root.group_id,
+                content_scope=archive_content_scope(parts[1], parts[2]))
+            encoded = (content.body if content.payload is None else
+                       await read_attachment_payload(content.payload, read_object=read_native_object))
+            raw = decode_payload_bytes(encoded, codec=content.compression,
+                                       raw_digest=content.raw_digest, raw_size=content.raw_size)
+            if is_execution:
+                restored[reference] = (restore_native_user_input(reference, raw) if path == ("stored_user_input",)
+                                       else restore_native_text_payload(reference, raw))
+            elif path == "arguments_payload":
+                restored[reference] = restore_native_tool_arguments_payload(reference, raw)
+            else:
+                restored[reference] = restore_native_tool_result_payload(reference, raw)
+        return (expand_native_execution_content(record, restored) if is_execution
+                else expand_native_tool_content(record, restored))
+
     async def visit(reference: ObjectRef, domain: PersistenceDomain, *, root: bool = True) -> None:
         source = source_for(domain, reference)
         if root:
@@ -294,9 +400,13 @@ async def _purge_unreferenced_objects(
         for nested_domain, nested in iter_runtime_object_dependencies(reference, payload, default_domain=domain):
             await visit(nested, nested_domain)
 
-    async def collect(value: JsonValue, domain: PersistenceDomain, *, archive_owner: bool = True) -> None:
+    async def collect(value: JsonValue, domain: PersistenceDomain, *, archive_owner: bool = True,
+                      owner_group: object = None) -> None:
         require_known_retention(value)
         for root in iter_native_message_roots(value) if archive_owner else ():
+            owner = native_groups.get(owner_group)
+            if owner_group is not None and (owner is None or owner[3] != root.group_id):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             closure = native_closures.get(root.group_id)
             if closure is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -331,13 +441,29 @@ async def _purge_unreferenced_objects(
                         scope_namespace, scope_tenant = capture_record_scope(record)
                         semantic = expand_snapshot_capture(record, binding_contents,
                             namespace=scope_namespace, tenant_id=scope_tenant)
-                        if record.kind == "task_graph_binding_capture":
-                            await collect(capture_retention_value(record), domain)
+                        await collect(capture_retention_value(record), domain, owner_group=store.storage_group)
                         await collect(capture_retention_value(semantic), PersistenceDomain.TASK, archive_owner=False)
                 elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
-                    await collect(dict(record.data), domain)
-                    if record.kind == "execution":
-                        semantic = expand_retained_execution_content(record, binding_contents)
+                    await collect(dict(record.data), domain, owner_group=store.storage_group)
+                    if record.kind in {"execution", "tool_operation"}:
+                        native_expanded = await expand_native_templates(record, store)
+                        from .codec import pending_operation_reference
+                        from .state import record_key
+                        parts = decode_key_components(record.key, maximum=RECORD_KEY_MAX_BYTES)
+                        identities = tuple(identity for _, payload in execution_payload_slots(
+                            decode_envelope(record.data).value.get("payload"))
+                            if (identity := pending_operation_reference(payload)) is not None)
+                        keys = tuple(record_key(parts[1], parts[2], "checkpoint", "tool_operation", (identity,)) for identity in identities)
+                        checkpoint_store = stores[PersistenceDomain.CHECKPOINT]
+                        if keys and checkpoint_store.storage_group is not store.storage_group:
+                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                        rows = await checkpoint_store.read(lambda tx: tx.get_records(keys)) if keys else {}
+                        owners = {}
+                        for key, row in rows.items():
+                            owners[key] = expand_tool_content(await expand_native_templates(row, checkpoint_store), binding_contents)
+                        operations = pending_operation_values(record, owners, namespace=parts[1], tenant_id=parts[2])
+                        semantic = expand_tool_content(expand_retained_execution_content(native_expanded, binding_contents,
+                            operations=operations), binding_contents)
                         await collect(dict(semantic.data), domain, archive_owner=False)
             if len(records) < 1000:
                 break
@@ -347,7 +473,7 @@ async def _purge_unreferenced_objects(
             facts = await store.read(lambda tx: tx.scan_facts_page(after=fact_cursor, limit=1000))
             for fact in facts:
                 require_known_retention(fact.data, state=fact.state)
-                await collect(dict(fact.data), domain)
+                await collect(dict(fact.data), domain, owner_group=store.storage_group)
             if len(facts) < 1000:
                 break
             fact_cursor = FactScanCursor(facts[-1].stream_key, facts[-1].sequence)
@@ -356,7 +482,7 @@ async def _purge_unreferenced_objects(
             operations = await store.read(lambda tx: tx.scan_operations_page(after=operation_cursor, limit=1000))
             for operation in operations:
                 require_known_retention(operation.data, state=operation.state)
-                await collect(dict(operation.data), domain)
+                await collect(dict(operation.data), domain, owner_group=store.storage_group)
             if len(operations) < 1000:
                 break
             operation_cursor = OperationScanCursor(operations[-1].key)
@@ -382,24 +508,6 @@ async def _purge_unreferenced_objects(
             if group_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-            async def read_native_object(reference: ObjectRef) -> bytes:
-                # A physical SQL group can serve several archive object
-                # routes. Native snapshots have no domain routing slot.
-                sources = {id(source): source for source in archive_objects.values()}
-                source = None
-                for candidate_source in sources.values():
-                    stat = await read_metadata(candidate_source, reference.key)
-                    if stat is not None:
-                        if stat.digest != reference.digest or stat.size != reference.size:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        source = candidate_source
-                if source is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                encoded = await read_object(source, reference.key,
-                                            expected_digest=reference.digest, expected_size=reference.size)
-                protected.add(reference.key)
-                return encoded
-
             encoded = await read_attachment_payload(content.payload, read_object=read_native_object)
             if len(encoded) != content.payload.size or hashlib.sha256(encoded).hexdigest() != content.payload.digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -424,7 +532,6 @@ async def _purge_unreferenced_objects(
     # outer guard invalidates cached content proofs before admitting writers.
     for group, (closure, bodies, domain, group_id, sequence_ids) in native_groups.items():
         from sqlalchemy import delete, select
-        from ._native_content_index import replace_owner_edges
 
         native_metadata = build_step_sql_metadata()
         unused = (
@@ -442,20 +549,6 @@ async def _purge_unreferenced_objects(
                 for store_key, scoped_ids in by_store.items():
                     for offset in range(0, len(scoped_ids), 128):
                         batch = scoped_ids[offset:offset + 128]
-                        target_ids = select(table.c.id).where(
-                            table.c.store_locator == native_store_locator(store_key),
-                            table.c.store_key == store_key, table.c.sha256.in_(batch),
-                        )
-                        if table is native_metadata.tables["ai_step_sequences"]:
-                            await replace_owner_edges(group.context, session, "sequence", target_ids, ())
-                            await replace_owner_edges(group.context, session, "message", target_ids, ())
-                            edge_kinds = ("record", "fact", "operation", "snapshot", "sequence", "candidate_sequence")
-                        else:
-                            edge_kinds = ("message", "candidate_message")
-                        edges = native_metadata.tables["ai_native_content_edges"]
-                        await session.execute(delete(edges).where(
-                            edges.c.edge_kind.in_(edge_kinds), edges.c.target_id.in_(target_ids),
-                        ))
                         removed = await session.execute(delete(table).where(
                             table.c.store_locator == native_store_locator(store_key),
                             table.c.store_key == store_key, table.c.sha256.in_(batch),

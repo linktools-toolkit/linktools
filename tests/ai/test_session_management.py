@@ -217,8 +217,8 @@ async def test_management_authorization_uses_one_sql_select(tmp_path, resource) 
                 record = await sessions.read_authorized("session", _PRINCIPAL, AuthorizationAction.SESSION_READ)
                 assert record.owner_principal_id == "owner"
             else:
-                record = await executions.load_authorized("execution", _PRINCIPAL, AuthorizationAction.EXECUTION_READ)
-                assert record.principal_id == "owner"
+                record = await executions.authorize_execution("execution", _PRINCIPAL, AuthorizationAction.EXECUTION_READ)
+                assert record.owner_principal_id == "owner"
             assert len(selects) == 1
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)

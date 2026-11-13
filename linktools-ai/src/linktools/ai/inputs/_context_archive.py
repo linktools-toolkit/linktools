@@ -7,6 +7,10 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
+from ..asset import AssetStoreReader
+from ._instruction_codec import RepositoryInstructionCodec
+from ._instruction_payload import RepositoryInstructionPayload
+from ..spec import RepositoryInstructions
 from ..core import JsonValue, PersistenceDomain, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..execution import RuntimePayloadRef
@@ -33,10 +37,12 @@ class PreparedExecutionContext:
 
 class ExecutionContextArchive:
     def __init__(self, store: StateStore, objects: ObjectStore, *, namespace: str, tenant_id: str,
-                 object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None) -> None:
+                 object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
+                 asset_sources: Mapping[str, AssetStoreReader] | None = None) -> None:
         self._store = store
         self._objects = objects
         self._object_reader = object_reader
+        self._instructions = RepositoryInstructionCodec(asset_sources)
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._archive: ContentArchive | None = None
@@ -57,6 +63,33 @@ class ExecutionContextArchive:
         if self._native is not None:
             self._native.bind_message_archive(self._archive)
         return self._archive
+
+    async def encode_repository_instructions(
+        self, value: Mapping[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        """Project accepted instructions without copying retained Rule bytes."""
+        return await self._instructions.encode(value)
+
+    async def decode_repository_instructions(self, value: object) -> dict[str, JsonValue]:
+        """Materialize an instruction projection using its original Asset owners."""
+        return await self._instructions.decode(value)
+
+    async def prepare_repository_instruction_payload(
+        self, instructions: RepositoryInstructions, *, source_domain: PersistenceDomain,
+    ) -> RuntimePayloadRef:
+        """Retain accepted instruction identity and only verified Asset references."""
+        stored = await self.encode_repository_instructions(instructions.to_payload())
+        return RepositoryInstructionPayload.capture(instructions, stored).to_reference(source_domain)
+
+    async def load_repository_instruction_payload(
+        self, reference: RuntimePayloadRef, *, source_domain: PersistenceDomain | None = None,
+    ) -> RepositoryInstructions:
+        """Recover admission or overlay instructions from the original owners."""
+        stored = RepositoryInstructionPayload.from_reference(reference, source_domain=source_domain)
+        instructions = RepositoryInstructions.from_payload(
+            await self.decode_repository_instructions(stored.instructions)
+        )
+        return instructions
 
     async def prepare(
         self, context: ExecutionInputContext, *, history_root: ArchiveRoot | NativeMessageRoot | None = None,
@@ -102,7 +135,7 @@ class ExecutionContextArchive:
         instruction_index = None
         if instructions is not None:
             instruction_index = len(values)
-            values.append(("json", canonical_json_bytes(instructions)))
+            values.append(("json", canonical_json_bytes(await self.encode_repository_instructions(instructions))))
         skill_indices = []
         for skill in semantic["preload_skills"]:
             skill_indices.append(len(values))
@@ -148,7 +181,7 @@ class ExecutionContextArchive:
             instructions = json.loads(bodies[0])
             if not isinstance(instructions, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return instructions
+            return await self.decode_repository_instructions(instructions)
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -206,7 +239,7 @@ class ExecutionContextArchive:
                       for name, items in maps.items()}
             result = ExecutionInputContext(history,
                 session_metadata=fields["session_metadata"], memory=fields["memory"],
-                repository_instructions=None if instruction_index is None else bodies[instruction_index],
+                repository_instructions=None if instruction_index is None else await self.decode_repository_instructions(bodies[instruction_index]),
                 replace_history_system_prompt=value["replace_history_system_prompt"],
                 unavailable_reason=value["unavailable_reason"],
                 preload_skills=tuple(bodies[index] for index in skill_indices))

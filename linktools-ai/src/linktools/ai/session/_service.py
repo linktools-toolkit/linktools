@@ -391,9 +391,11 @@ class SessionManager(Generic[HandleT]):
 
     async def _prepare_resume_session(
         self, agent_id: str, session_id: str, principal: Principal,
+        *, read_session: SessionRecordReader | None = None,
     ) -> SessionRecord:
         """Read one authorized snapshot for this resume, never for a later call."""
-        return await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+        return await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ,
+                                          read_session=read_session)
 
     async def _resume(
         self,
@@ -407,9 +409,12 @@ class SessionManager(Generic[HandleT]):
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
+        read_session: SessionRecordReader | None = None,
+        execution: SessionExecutionService[HandleT] | None = None,
     ) -> HandleT:
         async with self.consume_session(session_id, request.principal.tenant_id):
-            record = await self._prepare_resume_session(agent_id, session_id, request.principal)
+            record = await self._prepare_resume_session(agent_id, session_id, request.principal,
+                **({"read_session": read_session} if read_session is not None else {}))
             record = await self.reconcile_admission(record)
             if record.cwd is not None and self._canonicalize_path is None:
                 raise AIError(
@@ -427,7 +432,7 @@ class SessionManager(Generic[HandleT]):
             )
             if record.agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-            return await self._execution.start_for_session(
+            return await (execution or self._execution).start_for_session(
                 agent_id,
                 binding_digest,
                 session_id,
@@ -1014,9 +1019,10 @@ class SessionManager(Generic[HandleT]):
         await self.reconcile_admission(current)
 
     async def read_authorized(
-        self, session_id: str, principal: Principal, action: AuthorizationAction
+        self, session_id: str, principal: Principal, action: AuthorizationAction,
+        *, read_session: SessionRecordReader | None = None,
     ) -> SessionRecord:
-        record = await self._read_session(
+        record = await (read_session or self._read_session)(
             session_id, tenant_id=principal.tenant_id
         )
         if record is None:

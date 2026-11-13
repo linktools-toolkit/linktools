@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Compression and decoded integrity shared by Runtime history payloads."""
+"""Bounded decompression for bytes selected by their fixed content address."""
 
-import hashlib
 import zlib
 
 from ..errors import AIError, ErrorCode
@@ -39,7 +38,7 @@ def decode_payload_bytes(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     elif codec != "raw":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if len(content) != raw_size or hashlib.sha256(content).hexdigest() != raw_digest:
+    if len(content) != raw_size:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return content
 

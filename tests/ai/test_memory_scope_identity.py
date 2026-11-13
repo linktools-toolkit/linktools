@@ -143,7 +143,7 @@ def test_memory_scope_codec_and_snapshot_classify_invalid_owner_as_integrity(
     stored = replace(repository._stored("memory", (record.memory_id,), record), data=corrupt)
     with pytest.raises(AIError) as restored:
         validate_snapshot_domain(namespace="namespace", tenant_id="tenant", domain=PersistenceDomain.MEMORY,
-                                 records=(stored,), aliases=(), facts=(), operations=(), sequences={})
+                                 records=(stored,), facts=(), operations=(), sequences={})
     assert restored.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

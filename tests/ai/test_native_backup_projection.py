@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent
 
 from linktools.ai.steps import native_store_locator
-from linktools.ai.core import canonical_sha256
+from linktools.ai.persistence._run_registration import RunRegistrationReference
 from linktools.ai.errors import AIError
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._native_backup_projection import NativeBackupProjections
@@ -27,7 +27,8 @@ def _digest(value: str) -> str:
 def _inventory():
     store = SqlStepStore.scope_key(namespace="portable", tenant_id="tenant")
     run = RunRecord(run_id="run", registration_id="registration", metadata={"native": "body"})
-    row = dict(SqlStepStore._record_values(run), store_key=store, store_locator=native_store_locator(store))
+    row = dict(SqlStepStore._record_values(run), store_key=store, store_locator=native_store_locator(store),
+               managed_start_key=b"start")
     event = StepEvent(run_id="run", kind="run_started", step_index=1, idempotency_key="start")
     event_row = dict(SqlStepStore._event_values(event), store_key=store, store_locator=native_store_locator(store),
                      idempotency_key=b"start", outcome=None, run_fields=0,
@@ -39,10 +40,7 @@ def _inventory():
 def test_portable_run_projection_restores_reference_and_rejects_registration_substitution() -> None:
     run, _, backup = _inventory()
     data = _encode_step_envelope(OfficialStepReader.project_run(run))
-    reference = encode_envelope({"type": "native_agent_run_reference", "payload": {
-        "run": run.run_id, "registration": run.registration_id,
-        "projection_sha256": canonical_sha256(data), "metadata": {}, "removed": [], "started_at": None,
-    }})
+    reference = RunRegistrationReference.capture(run, OfficialStepReader.project_run(run)).to_data()
     projected = StoredRecord(record_key("portable", "tenant", "trace", "agent_run", (run.run_id,)),
         None, None, "agent_run", b'run', None, 1, None, 0, None, data)
     validator = NativeBackupProjections(backup, namespace="portable", tenant_id="tenant")

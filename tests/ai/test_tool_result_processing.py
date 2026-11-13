@@ -167,10 +167,20 @@ def _stored_bytes(root: Path) -> bytes:
             for table, column in (
                 ("ai_state_records", "payload_json"),
                 ("ai_state_facts", "payload_json"),
-                ("ai_step_messages", "message"),
+                ("ai_step_tool_operations", "payload_json"),
             ):
                 for (payload,) in connection.execute(f"SELECT {column} FROM {table}"):
                     walk(json.loads(payload))
+            from linktools.ai.persistence._payload import decode_payload_bytes
+            for body, compression, raw_size, digest, payload_json in connection.execute(
+                "SELECT message, compression, raw_size, sha256, payload_json FROM ai_step_messages"
+            ):
+                if payload_json is not None:
+                    walk(json.loads(payload_json))
+                else:
+                    raw = decode_payload_bytes(body, codec=compression, raw_digest=digest, raw_size=raw_size)
+                    blobs.append(raw)
+                    walk(json.loads(raw))
     return b"\n".join(blobs)
 
 

@@ -194,7 +194,7 @@ async def test_supply_final_projection_is_confirmation_but_initial_load_and_publ
         _assert_confirmation(projection.value, fault, "task_terminal_confirmation")
         assert (await service.supply_task_input(started.execution_id, principal=principal, value="accepted")).status is ExecutionStatus.SUCCEEDED
         with monkeypatch.context() as patch:
-            patch.setattr(service, "load_authorized", unavailable)
+            patch.setattr(service.manager, "load_result_authorized", unavailable)
             with pytest.raises(AIError) as public:
                 await service.result(started.execution_id, principal=principal)
         assert public.value is fault

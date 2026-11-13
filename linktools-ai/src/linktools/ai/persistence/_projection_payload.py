@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Self-contained bytes for one captured, unpublished Trace projection."""
 
-import hashlib
 import json
 from dataclasses import replace
 from types import MappingProxyType
@@ -101,7 +100,8 @@ def decode_projection_payload(content: bytes) -> CapturedExecutionProjection:
                 or len(checkpoints) != positions[3] - positions[2]
                 or any(value.agent_run_id != run.agent_run_id for value in (*events, *checkpoints, *interactions))
                 or len({digest for digest, _ in payloads}) != len(payloads)
-                or any(hashlib.sha256(data).hexdigest() != digest for digest, data in payloads)):
+                or any(len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest)
+                       for digest, _ in payloads)):
             raise ValueError("invalid Trace projection identity or frontier")
         contents = dict(payloads)
         for interaction in interactions:
