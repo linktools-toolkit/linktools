@@ -196,7 +196,7 @@ async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(r
 
 
 @pytest.mark.asyncio
-async def test_rerun_dependency_failure_never_falls_back_to_captured_success(tmp_path: Path) -> None:
+async def test_rerun_dependency_failure_never_falls_back_to_captured_success() -> None:
     observed: list[TaskStatus] = []
 
     async def source(context: TaskNodeContext[None]) -> JsonValue:
@@ -224,7 +224,7 @@ async def test_rerun_dependency_failure_never_falls_back_to_captured_success(tmp
     consumer = Task("consumer.rerun-observer", answer, effect_policy="none")
     scorer = Task("consumer.rerun-score", score, effect_policy="none")
     async with (
-        Persistence.open('rerun-failure-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_200,
+        Persistence.open('rerun-failure-consumers', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_200,
     ):
         async with (
             TaskEngine.open(producer, consumer, scorer, persistence=persistence_200, context=CONTEXT) as engine,
@@ -248,7 +248,7 @@ async def test_rerun_dependency_failure_never_falls_back_to_captured_success(tmp
             ))
             run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("workflow", graph_template=GraphTargetSpec(template=template, outputs={"answer": "B"})),),
-                (rule_scorer(scorer),)), PRINCIPAL, "start-rerun-failure"))
+                (rule_scorer(scorer),), policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start-rerun-failure"))
             view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
             assert view.completion == "complete", view.needs_attention
             assert observed == [TaskStatus.SUCCEEDED, TaskStatus.FAILED]
