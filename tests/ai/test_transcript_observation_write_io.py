@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Observation appends fence once when pending head metadata is unchanged."""
+"""Observation appends publish complete and pending head metadata in one CAS."""
 
 from dataclasses import replace
 from pathlib import Path
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
-@pytest.mark.parametrize("transition", ("complete", "clear_pending", "same_shell"))
+@pytest.mark.parametrize("transition", ("complete", "clear_pending", "same_shell", "new_pending"))
 async def test_observation_append_preserves_pending_facts_and_stale_fence(
     tmp_path: Path, backend: str, transition: str,
 ) -> None:
@@ -32,7 +32,7 @@ async def test_observation_append_preserves_pending_facts_and_stale_fence(
         await repository.create_head("run")
         first = ModelResponse(parts=[TextPart("first")])
         second = replace(first, parts=[TextPart("second")])
-        if transition != "complete":
+        if transition in {"clear_pending", "same_shell"}:
             initial = await repository.prepare_observation(
                 "run", (), first_message_index=0, pending=first, pending_keys=("part:0",),
             )
@@ -40,8 +40,8 @@ async def test_observation_append_preserves_pending_facts_and_stale_fence(
         before = await repository.get_head("run")
         prepared = await repository.prepare_observation(
             "run", (first,), first_message_index=0,
-            pending=second if transition == "same_shell" else None,
-            pending_keys=("part:0",) if transition == "same_shell" else (),
+            pending=second if transition in {"same_shell", "new_pending"} else None,
+            pending_keys=("part:0",) if transition in {"same_shell", "new_pending"} else (),
         )
         statements = []
         def capture(_connection, _cursor, statement, _parameters, _context, _many):
@@ -56,13 +56,15 @@ async def test_observation_append_preserves_pending_facts_and_stale_fence(
                 event.remove(engine, "before_cursor_execute", capture)
         if engine is not None:
             updates = [sql for sql in statements if sql.startswith("UPDATE ai_state_records")]
-            assert len(updates) == (2 if transition == "clear_pending" else 1)
+            assert len(updates) == 1
         assert await repository.load_messages("run") == (first,)
         head = await repository.get_head("run")
         assert head.message_count == 1
-        if transition == "same_shell":
-            assert head.pending == before.pending
-            assert head.pending_part_count == before.pending_part_count == 1
+        if transition in {"same_shell", "new_pending"}:
+            if transition == "same_shell":
+                assert head.pending == before.pending
+                assert head.pending_part_count == before.pending_part_count
+            assert head.pending_part_count == 1
             parts, keys = await store.read(lambda tx: repository.capture_pending_in_transaction(tx, head))
             restored = await repository.read_pending_message(head.pending, parts)
             assert restored == second and keys == ("part:0",)
@@ -88,6 +90,11 @@ async def test_observation_append_rollback_keeps_original_head_and_retry(
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         store, repository = archive.state_store, archive.transcript_repository
         await repository.create_head("run")
+        pending = ModelResponse(parts=[TextPart("pending")])
+        initial = await repository.prepare_observation(
+            "run", (), first_message_index=0, pending=pending, pending_keys=("part:0",),
+        )
+        await store.mutate(lambda tx: repository.commit_observation(tx, initial))
         before = await repository.get_head("run")
         message = ModelResponse(parts=[TextPart("complete")])
         prepared = await repository.prepare_observation(

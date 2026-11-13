@@ -621,13 +621,13 @@ class TranscriptRepository:
             if guarded is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return
-        await self.append_chunks(transaction, prepared.owner_id, prepared.chunks)
-        entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
-        if entry is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        head, record = entry
-        next_head = replace(head, pending=prepared.pending, pending_part_count=len(prepared.pending_parts))
-        if not prepared.chunks or next_head != head:
+        if prepared.chunks:
+            await self._append_chunks(
+                transaction, prepared.owner_id, prepared.chunks, None,
+                pending_state=(prepared.pending, len(prepared.pending_parts)),
+            )
+        else:
+            next_head = replace(head, pending=prepared.pending, pending_part_count=len(prepared.pending_parts))
             upgraded = replace(
                 record,
                 data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
@@ -834,6 +834,7 @@ class TranscriptRepository:
         *,
         projection: ContextProjection | None = None,
         checkpoint_fact: StoredFact | None = None,
+        pending_state: tuple[RuntimePayloadRef | None, int] | None = None,
     ) -> None:
         if not chunks:
             return
@@ -867,6 +868,8 @@ class TranscriptRepository:
             chunk_count=base_head.chunk_count + len(chunks),
             quality=base_head.quality if quality is None else quality,
         )
+        if pending_state is not None:
+            next_head = replace(next_head, pending=pending_state[0], pending_part_count=pending_state[1])
         upgraded = replace(
             head_record,
             data=encode_envelope(
