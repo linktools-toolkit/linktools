@@ -143,7 +143,7 @@ class _SessionExecutionAdapter:
             budget_scope_id=budget_scope_id,
             **({"_start_read": self.start_read} if isinstance(self._execution, DefaultExecutionService)
                and self.start_read is not None and session is self.start_read.session
-               and session is not None and session.active_execution_id is None else {}),
+               and session is not None else {}),
         )
 
     async def cancel(self, execution_id: str, *, principal: Principal, idempotency_key: str) -> None:

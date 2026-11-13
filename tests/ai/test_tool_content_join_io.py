@@ -19,15 +19,16 @@ from .test_native_tool_result_runtime import _settle
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("native", (False, True))
-async def test_keyed_tool_payload_join_preserves_sources(tmp_path: Path, native: bool) -> None:
+@pytest.mark.parametrize(("native", "tail"), ((False, False), (True, False), (True, True)))
+async def test_keyed_tool_payload_join_preserves_sources(tmp_path: Path, native: bool, tail: bool) -> None:
     config = PersistenceStorage.sqlite(tmp_path / "joined.db")
     async with Persistence.open("native-result", tenant_id="tenant", storage=config) as state:
         commands, commit, current, checkpoint = await _prepare(state, "done", "done")
         operation, payload = await _settle(state, "receipt")
         if native:
-            checkpoint = replace(checkpoint, messages=[ModelRequest(parts=[
-                ToolReturnPart("tool", "receipt", tool_call_id="call")]), *checkpoint.messages])
+            returned = ModelRequest(parts=[ToolReturnPart("tool", "receipt", tool_call_id="call")])
+            checkpoint = replace(checkpoint, messages=([*checkpoint.messages, returned] if tail
+                                                       else [returned, *checkpoint.messages]))
             await _publish(commands, commit, current, checkpoint)
     async with Persistence.open("native-result", tenant_id="tenant", storage=config, read_only=True) as state:
         repository = state.checkpoint.tools
@@ -40,6 +41,9 @@ async def test_keyed_tool_payload_join_preserves_sources(tmp_path: Path, native:
             if statement.lstrip().upper().startswith(("SELECT", "WITH")):
                 reads.append(statement)
 
+        # Tail messages join directly; an interior slice adds one batched range
+        # read, independent of the number of requested operation identities.
+        expected_reads = 2 if native and not tail else 1
         event.listen(engine, "before_cursor_execute", capture)
         try:
             value = await repository.get_operation(operation.tool_operation_id, tenant_id="tenant")
@@ -49,19 +53,19 @@ async def test_keyed_tool_payload_join_preserves_sources(tmp_path: Path, native:
             joined = [sql for sql in reads if "content_owners" in sql]
             assert len(joined) == 1 and "ai_step_tool_operations" in joined[0]
             if archive_open:
-                assert len(reads) == 1
+                assert len(reads) == expected_reads
             else:
                 assert "ai_step_tool_operations" in reads[0] and "content_owners" not in reads[0]
             reads.clear()
             assert await repository.get_operations((operation.tool_operation_id, "missing", operation.tool_operation_id),
                                                    tenant_id="tenant") == (value,)
-            assert len(reads) == 1
+            assert len(reads) == expected_reads
             reads.clear()
             assert await repository.list_by_execution(operation.execution_id, tenant_id="tenant") == (value,)
-            assert len(reads) == 1
+            assert len(reads) == expected_reads
             reads.clear()
             assert await repository.list_by_agent_run(operation.agent_run_id, tenant_id="tenant") == (value,)
-            assert len(reads) == 1
+            assert len(reads) == expected_reads
             reads.clear()
             assert await repository.get_operation(operation.tool_operation_id, tenant_id="other") is None
             assert await repository.get_operations((), tenant_id="tenant") == ()

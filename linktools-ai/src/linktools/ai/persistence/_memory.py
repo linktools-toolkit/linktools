@@ -356,6 +356,11 @@ class InMemoryStateStore:
         self._storage_group.add_member(self)
 
     @property
+    def record_cache_enabled(self) -> bool:
+        """Whether ordinary record observations use the bounded cache."""
+        return self._reads.enabled
+
+    @property
     def content_dependencies(self) -> tuple[StateStore, ...]:
         return self._content_dependencies
 

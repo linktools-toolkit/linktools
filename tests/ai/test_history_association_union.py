@@ -104,7 +104,7 @@ async def test_history_associations_join_counter_and_dependency_keys(
         assert [event.event_type for event in events] == [
             "MODEL_REQUEST_STARTED", "MODEL_REQUEST_SUCCEEDED", "TOOL_CALL_STARTED"]
         assert len(statements) == 1
-        assert "ai_state_counters" in str(statements[0])
+        assert "ai_step_run_admissions.event_high_water AS counter_value" in str(statements[0])
         statements.clear()
         assert await archive.read_history_associations(
             agent_run_id=run_id, message_seqs=(2, *range(100, 164)),

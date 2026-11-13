@@ -339,8 +339,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 payloads = await self._execution_content.read_payloads((record,), result_only=True)
                 metadata = replace(metadata, result_record=decode_execution_content(record.data, payloads, result=True))
             return metadata
+        from ._memory import InMemoryStateStore
         from ._sql import SqlStateStore
-        source_scope = fresh or isinstance(self._store, SqlStateStore) and not self._store.record_cache_enabled
+        source_scope = fresh or isinstance(self._store, (InMemoryStateStore, SqlStateStore)) and not self._store.record_cache_enabled
         return await self.read_content(lambda _group: read()) if source_scope else await read()
 
     async def get_result_record(self, execution_id: str, *, tenant_id: str,
@@ -433,8 +434,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             await self._execution_content.prefetch_projection_owners((key,), bindings=True, result=True)
             record = ((await self._refresh_records((key,))).get(key) if fresh else await self._store.read_record(key))
             return None if record is None else await self._decode_view(record, execution_id)
+        from ._memory import InMemoryStateStore
         from ._sql import SqlStateStore
-        source_scope = fresh or isinstance(self._store, SqlStateStore) and not self._store.record_cache_enabled
+        source_scope = fresh or isinstance(self._store, (InMemoryStateStore, SqlStateStore)) and not self._store.record_cache_enabled
         return await self.read_content(read) if source_scope else await read(None)
 
     async def _decode_view(self, record: StoredRecord, execution_id: str) -> tuple[ResourceRef, ExecutionView]:

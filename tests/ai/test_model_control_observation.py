@@ -133,18 +133,23 @@ async def test_unscoped_dispatch_reads_fresh_source_at_every_boundary(
     async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
         await _seed(state)
         source = state.execution.executions.state_store
-        original = source.read
+        group = source.storage_group
+        original = group.read_many
         reads = 0
 
-        async def read(callback):
+        async def read(stores, callback):
             nonlocal reads
             reads += 1
-            return await original(callback)
+            return await original(stores, callback)
 
-        monkeypatch.setattr(source, "read", read)
+        monkeypatch.setattr(group, "read_many", read)
         for _ in range(2):
             await state.run_store.require_active_producer("run")
         assert reads == 2
+        await _advance_execution(state.execution.executions)
+        with pytest.raises(AIError) as raised:
+            await state.run_store.require_active_producer("run")
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
 
 
 @pytest.mark.asyncio
@@ -155,15 +160,17 @@ async def test_execution_inspection_without_cache_reads_source_each_time(
     async with _state(backend, tmp_path) as state:
         await _seed(state)
         repository = state.execution.executions
-        original = repository.state_store.read
+        group = repository.state_store.storage_group
+        original = group.read_many
         reads = 0
 
-        async def read(callback):
+        async def read(stores, callback):
             nonlocal reads
-            reads += 1
-            return await original(callback)
+            if repository.state_store in stores:
+                reads += 1
+            return await original(stores, callback)
 
-        monkeypatch.setattr(repository.state_store, "read", read)
+        monkeypatch.setattr(group, "read_many", read)
         first = await repository.get("execution", tenant_id="tenant")
         assert await repository.get("execution", tenant_id="tenant") == first
         assert reads == 2
