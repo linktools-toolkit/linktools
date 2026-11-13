@@ -2421,6 +2421,7 @@ class LocalExecutionBackend:
         *,
         repository_instruction_frontier: str | None = None,
         capability_ref: CapabilityRef | None = None,
+        operation_id: str | None,
     ) -> PendingDeferredCall:
         try:
             arguments = normalize_json_value(call.args_as_dict())
@@ -2466,8 +2467,7 @@ class LocalExecutionBackend:
             raw_metadata["linktools"] = {
                 "repository_instruction_frontier": repository_instruction_frontier,
             }
-        references = await self._tool_operation_references(execution, source_agent_run_id)
-        operation_id = references.get(call.tool_call_id) or tool_operation_id(
+        operation_id = operation_id or tool_operation_id(
             tenant_id=self._tenant_id, execution_id=execution.execution_id,
             agent_run_id=source_agent_run_id, tool_call_id=call.tool_call_id,
         )
