@@ -175,3 +175,19 @@ async def test_decoded_checkpoint_preparation_does_not_reencode_retry_tail(atomi
     assert json.loads(values["messages"])["checkpoint"] == {"output_retries_used": 3}
     assert values["run_id"] == "run" and values["step_index"] == 2
     assert prepared.root.count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_count", (-1, True, "1"))
+async def test_decoded_checkpoint_rejects_invalid_retry_before_writing(atomic_store, retry_count) -> None:
+    store, engine = atomic_store
+    snapshot = NativeCheckpoint.from_snapshot(ContinuableSnapshot(
+        run_id="run", step_index=2, messages=[ModelRequest(parts=[UserPromptPart("question")])],
+        idempotency_key="checkpoint",
+    ), output_retries_used=1)
+    invalid = replace(snapshot, output_retries_used=retry_count)
+    with pytest.raises(ValueError, match="checkpoint state is invalid"):
+        await store.save_snapshot(invalid)
+    async with engine.connect() as connection:
+        for table in ("ai_step_snapshots", "ai_step_sequences", "ai_step_messages"):
+            assert await connection.scalar(text(f"SELECT COUNT(*) FROM {table}")) == 0

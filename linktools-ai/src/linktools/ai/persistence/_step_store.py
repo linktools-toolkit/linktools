@@ -1635,6 +1635,7 @@ class SqlStepStore:
             checkpoint = {
                 "output_retries_used": decoded.output_retries_used,
             }
+            NativeCheckpoint.validate_descriptor(checkpoint)
         messages = self._frozen_messages.snapshot(decoded.messages)
         previous = self._message_inputs.get(snapshot.run_id)
         baseline = None if previous is None else (previous[3], previous[0], previous[1])
