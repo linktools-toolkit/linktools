@@ -90,13 +90,13 @@ async def test_observation_append_rollback_keeps_original_head_and_retry(
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         store, repository = archive.state_store, archive.transcript_repository
         await repository.create_head("run")
-        pending = ModelResponse(parts=[TextPart("pending")])
+        pending = ModelResponse(parts=[TextPart("complete")])
         initial = await repository.prepare_observation(
             "run", (), first_message_index=0, pending=pending, pending_keys=("part:0",),
         )
         await store.mutate(lambda tx: repository.commit_observation(tx, initial))
         before = await repository.get_head("run")
-        message = ModelResponse(parts=[TextPart("complete")])
+        message = pending
         prepared = await repository.prepare_observation(
             "run", (message,), first_message_index=0, pending=None, pending_keys=(),
         )
