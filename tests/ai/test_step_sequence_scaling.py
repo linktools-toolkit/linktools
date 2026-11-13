@@ -189,8 +189,8 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ["missing-child", "wrong-count", "wrong-message"])
-async def test_corrupt_sequence_fails_closed_after_reopening(tmp_path: Path, damage: str) -> None:
+@pytest.mark.parametrize("damage", ["missing-child", "wrong-count", "missing-message", "repointed-message"])
+async def test_sequence_structure_and_address_resolution_after_reopening(tmp_path: Path, damage: str) -> None:
     url = f"sqlite+aiosqlite:///{tmp_path / 'corrupt-sequence.db'}"
     engine = create_async_engine(url)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
@@ -217,15 +217,23 @@ async def test_corrupt_sequence_fails_closed_after_reopening(tmp_path: Path, dam
                     "UPDATE ai_step_sequences SET tree_count = tree_count + 2 WHERE sha256 = :root"
                 ), {"root": root})
             else:
-                other = await connection.scalar(text(
+                other = "f" * 64 if damage == "missing-message" else await connection.scalar(text(
                     "SELECT message_sha256 FROM ai_step_sequences WHERE sha256 <> :root LIMIT 1"
                 ), {"root": root})
                 await connection.execute(text(
                     "UPDATE ai_step_sequences SET message_sha256 = :other WHERE sha256 = :root"
                 ), {"other": other, "root": root})
-        with pytest.raises(ValueError):
-            await cold.latest_snapshot(run_id="run")
-        assert await cold.list_snapshots(run_id="run") == []
+        if damage == "repointed-message":
+            # The stored pointer is authoritative; reading does not recompute
+            # a checksum to reject an otherwise valid node/content association.
+            restored = await cold.latest_snapshot(run_id="run")
+            assert restored.messages[:-1] == snapshot.messages[:-1]
+            assert restored.messages[-1] in snapshot.messages[:-1]
+            assert await cold.list_snapshots(run_id="run") == [restored]
+        else:
+            with pytest.raises(ValueError):
+                await cold.latest_snapshot(run_id="run")
+            assert await cold.list_snapshots(run_id="run") == []
     finally:
         await cold.close()
         await engine.dispose()

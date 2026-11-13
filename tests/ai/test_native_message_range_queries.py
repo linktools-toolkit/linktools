@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from sqlalchemy import event
+from sqlalchemy import event, update
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -200,9 +200,25 @@ async def test_range_hydration_returns_only_selected_bodies_and_one_read(tmp_pat
                 await content.hydrate_ranges((selected,), bad)
         bad = [dict(row) for row in rows]
         body_row = next(row for row in bad if row["message"] is not None)
+        # Hydration trusts the query's content-address join, not a second hash
+        # of the node fields or selected message bytes.
         body_row["message_sha256"] = "f" * 64
+        assert await content.hydrate_ranges((selected,), bad) == (decoded,)
+        body_row["sha256"] = "e" * 64
         with pytest.raises(ValueError, match="corrupt"):
             await content.hydrate_ranges((selected,), bad)
+
+        # A dangling content address in storage still cannot load an unrelated
+        # body: the scoped JOIN leaves the selected message missing.
+        stored = next(row for row in rows if row["message"] is not None)
+        async with engine.begin() as connection:
+            await connection.execute(update(content._nodes).where(
+                content._nodes.c.store_key == native.store_key,
+                content._nodes.c.sha256 == stored["sha256"],
+            ).values(message_sha256="f" * 64))
+            dangling = (await connection.execute(plan.statement)).mappings().all()
+        with pytest.raises(ValueError, match="missing or corrupt"):
+            await content.hydrate_ranges((selected,), dangling)
     finally:
         await native.close()
         await engine.dispose()
