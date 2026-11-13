@@ -142,7 +142,7 @@ async def test_dataset_task_report_and_idempotency_use_one_public_case_declarati
 
 
 @pytest.mark.asyncio
-async def test_native_graph_named_outputs_preserve_dependencies_and_successful_null(tmp_path: Path) -> None:
+async def test_native_graph_named_outputs_preserve_dependencies_and_successful_null() -> None:
     received: list[ScoringInput] = []
 
     async def prepare(context: TaskNodeContext[None]) -> JsonValue:
@@ -172,7 +172,7 @@ async def test_native_graph_named_outputs_preserve_dependencies_and_successful_n
         TaskNode("empty", task=empty_task),
     ))
     async with (
-        Persistence.open('graph-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_162,
+        Persistence.open('graph-consumers', storage=PersistenceStorage.in_memory(), tenant_id=TENANT) as persistence_162,
         TaskEngine.open(prepare_task, answer_task, empty_task, scorer, persistence=persistence_162, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -182,7 +182,7 @@ async def test_native_graph_named_outputs_preserve_dependencies_and_successful_n
         )), principal=PRINCIPAL, idempotency_key="publish-graphs")
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("workflow", graph_template=GraphTargetSpec(template=graph, outputs={"answer": "finish", "optional": "empty"})),),
-            (rule_scorer(scorer),)), PRINCIPAL, "start-graphs"))
+            (rule_scorer(scorer),), policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start-graphs"))
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         assert (await run.create_report()).scores[0].mean == 1.0

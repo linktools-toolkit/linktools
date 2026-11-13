@@ -152,7 +152,7 @@ async def test_asset_and_features_declarations_share_output_semantics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_root_and_task_defaults_use_native_schema_correction(tmp_path: Path) -> None:
+async def test_root_and_task_defaults_use_native_schema_correction() -> None:
     feedback: list[str] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -172,7 +172,7 @@ async def test_root_and_task_defaults_use_native_schema_correction(tmp_path: Pat
     features = RuntimeFeatures("default-output")
     features.agent("default", output_schema=_Count.model_json_schema(), output_retries=1,
                    allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('default-output', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_169, Runtime.attach(persistence=persistence_169, features=model_features(_Models(_UsageFunctionModel(respond)), features)) as runtime, TaskEngine.open(persistence=persistence_169, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('default-output', storage=PersistenceStorage.in_memory()) as persistence_169, Runtime.attach(persistence=persistence_169, features=model_features(_Models(_UsageFunctionModel(respond)), features)) as runtime, TaskEngine.open(persistence=persistence_169, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
         for options, expected in (
             ({}, {"count": 3}), ({"output": None}, {"count": 3}),
