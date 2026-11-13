@@ -374,8 +374,7 @@ async def test_update_source_hints_never_replace_post_authorization_owners(
         else:
             with pytest.raises(AIError) as raised:
                 await service.read_model_interaction_updates("execution", principal=_PRINCIPAL)
-            expected = ErrorCode.STORAGE_INTEGRITY_ERROR if change == "content" else ErrorCode.AUTHORIZATION_DENIED
-            assert raised.value.code is expected
+            assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
             assert not observed
     finally:
         await state.close()

@@ -5548,8 +5548,6 @@ class LocalExecutionBackend:
                 return await publish_boundary(run=run, events=events, snapshot=snapshot)
 
         async def publish_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
-            if run is None and not events and snapshot is None:
-                return
             terminal = any(isinstance(event, NativeLifecycleEvent) for event in events)
 
             def require_publication() -> None:

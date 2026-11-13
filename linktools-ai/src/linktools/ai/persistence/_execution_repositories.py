@@ -421,7 +421,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return header
 
     async def get_observation(self, execution_id: str, *, tenant_id: str) -> ExecutionObservationRecord | None:
-        """Read model coverage from its execution owner only."""
+        """Read model coverage control and policy without restoring binding or result."""
         if tenant_id != self._tenant_id:
             return None
         key = self._key("execution", (execution_id,))

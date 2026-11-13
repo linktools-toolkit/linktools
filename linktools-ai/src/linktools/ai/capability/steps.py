@@ -363,7 +363,17 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         ctx = self._atomic_model_context
         if ctx is None:
             return None
-        return _BoundaryModel(model, lambda: self._atomic_publish_model(ctx))
+        confirmed = None
+
+        async def publish() -> None:
+            nonlocal confirmed
+            try:
+                confirmed = await self._atomic_publish_model(ctx, confirmed=confirmed)
+            except BaseException:
+                confirmed = None
+                raise
+
+        return _BoundaryModel(model, publish)
 
     def _atomic_effective_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
         if self.run_id is not None:
@@ -543,15 +553,26 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         self._atomic_pending_events.append(self._atomic_prepare_event(ctx, kind="model_request_started"))
         return request_context
 
-    async def _atomic_publish_model(self, ctx: RunContext[AgentDepsT]) -> None:
+    async def _atomic_publish_model(
+        self, ctx: RunContext[AgentDepsT], *, confirmed: ContinuableSnapshot | None = None,
+    ) -> ContinuableSnapshot | None:
         self._atomic_stash_live_history(ctx)
         messages = list(ctx.messages)
         snapshot = None
         if self.capture_frontier or (_has_model_response(messages) and is_provider_valid(messages)):
             snapshot = self._atomic_prepare_snapshot(ctx, messages, ctx.run_step, _snapshot_state(messages))
-        await self._atomic_commit(snapshot=snapshot)
+        unchanged = (isinstance(self.store, CapturingStepStore)
+                     and snapshot is not None and confirmed is not None
+                     and replace(snapshot, timestamp=confirmed.timestamp,
+                                 idempotency_key=confirmed.idempotency_key) == confirmed)
+        # A transport retry still crosses the producer fence before dispatch.
+        # Reuse only the complete recovery point confirmed by this request wrapper.
+        await self._atomic_commit(snapshot=None if unchanged else snapshot)
+        if unchanged:
+            snapshot = confirmed
         if snapshot is not None:
             await self._atomic_confirm_snapshot(ctx, snapshot)
+        return snapshot
 
     async def after_model_request(
         self,
