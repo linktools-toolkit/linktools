@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Retention reuses encoding only; source CAS remains the closing authority."""
+"""Retention reuses decoded owner metadata; source CAS remains the closing authority."""
 from dataclasses import replace
 from pathlib import Path
 
@@ -76,8 +76,51 @@ async def test_retention_observed_wire_preserves_policy_and_physical_cas(
             else:
                 closed, value = await close
                 assert closed and value.retention_closed
-        assert policies and bool(encodings) is (case == "fallback")
+        assert bool(policies) is (case == "fallback")
+        assert bool(encodings) is (case == "fallback")
         assert not bodies
         restored = await repository.get_fresh("execution", tenant_id="tenant")
         assert restored.result == observed.value.result and restored.binding == observed.value.binding
         assert restored.retention_closed is (case != "stale")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ("terminal", "hold", "handoff"))
+async def test_observed_retention_preserves_closure_authority_without_content_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, condition: str,
+) -> None:
+    from linktools.ai.core import ExecutionEventType, ExecutionStatus, StopReason, UsageMetrics
+    from linktools.ai.execution import ExecutionRecoveryDetail, RecoveryHandoffPhase, RecoveryTerminalHandoff, RecoveryTerminalOutcome
+    from .test_retention_read_io import _execution
+
+    value = replace(_execution(), status=ExecutionStatus.FAILED,
+                    dependency_hold_ids=("dependent",) if condition == "hold" else ())
+    if condition == "handoff":
+        outcome = RecoveryTerminalOutcome(ExecutionStatus.FAILED, ErrorCode.EXECUTION_FAILED.value,
+            {}, StopReason.ERROR, None, None, UsageMetrics(), ExecutionEventType.EXECUTION_FAILED,
+            {}, value.updated_at)
+        value = replace(value, recovery=ExecutionRecoveryDetail(
+            handoff_phase=RecoveryHandoffPhase.PREPARED,
+            terminal_handoff=RecoveryTerminalHandoff(outcome, None, None)))
+    async with Persistence.open("retention-owner", tenant_id="tenant",
+            storage=PersistenceStorage.sqlite(tmp_path / "owner.db")) as state:
+        repository = state.execution.executions
+        await repository.create_execution(value)
+        observed = await repository.get_observed(value.execution_id, tenant_id="tenant")
+        assert observed is not None
+
+        async def unexpected_read(*args, **kwargs):
+            pytest.fail("closing an observed owner must not reload immutable content")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(ExecutionContent, "expand_policies", unexpected_read)
+            patch.setattr(ExecutionContent, "expand_projection_components", unexpected_read)
+            released, retained = await repository.state_store.mutate(
+                lambda tx: repository.close_retention_in_transaction(
+                    tx, value.execution_id, tenant_id="tenant", observed=observed))
+        assert released is (condition == "terminal")
+        assert retained.retention_closed is (condition == "terminal")
+        assert retained.dependency_hold_ids == value.dependency_hold_ids
+        assert retained.recovery_handoff is (condition == "handoff")
+        fresh = await repository.get_fresh(value.execution_id, tenant_id="tenant")
+        assert fresh.retention_closed is (condition == "terminal")

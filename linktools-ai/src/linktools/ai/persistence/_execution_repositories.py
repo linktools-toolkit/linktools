@@ -2298,11 +2298,21 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     or stored.storage_revision != observed.storage_revision):
                 stored = replace(await self._stored_content("execution", (execution_id,), current,
                     state=current.status.value, previous_value=current), storage_revision=observed.storage_revision)
-            # The original wire preserves unchanged content locations, not source
-            # authority. The physical CAS below still fences this observation.
-            expanded, = await self._execution_content.expand_policies((stored,))
-            expanded, = await self._execution_content.expand_projection_components((expanded,), recovery=True)
-            current = decode_execution_retention(expanded.data)
+                expanded, = await self._execution_content.expand_policies((stored,))
+                expanded, = await self._execution_content.expand_projection_components((expanded,), recovery=True)
+                current = decode_execution_retention(expanded.data)
+            else:
+                # This exact decoded owner already carries closure metadata.
+                # Reuse it without restoring unrelated immutable bodies; the
+                # physical CAS below rejects any intervening owner update.
+                current = ExecutionRetentionRecord(
+                    execution_id=current.execution_id, session_id=current.session_id,
+                    status=current.status, conversation=current.conversation,
+                    started_at=current.started_at, retention_closed=current.retention_closed,
+                    dependency_hold_ids=current.dependency_hold_ids,
+                    recovery_handoff=current.recovery_state is ExecutionRecoveryState.HANDOFF,
+                    revision=current.revision, updated_at=current.updated_at,
+                )
         if current.status not in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
