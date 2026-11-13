@@ -23,7 +23,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import decode_execution_observation, decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -53,7 +53,7 @@ from .contracts import (
     IdempotencyTerminalUpdate,
     ResultRecord,
 )
-from .contracts import RuntimePayloadRef, ExecutionMembershipRecord
+from .contracts import RuntimePayloadRef, ExecutionMembershipRecord, ExecutionObservationRecord
 from ._plan import PersistenceDomain
 from .state import (
     FactQuery,
@@ -419,6 +419,21 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 or header.id != identity):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return header
+
+    async def get_observation(self, execution_id: str, *, tenant_id: str) -> ExecutionObservationRecord | None:
+        """Read model coverage without restoring result payloads."""
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key("execution", (execution_id,))
+        async def read(_group: object) -> ExecutionObservationRecord | None:
+            await self._execution_content.prefetch_projection_owners((key,), bindings=True)
+            record = await self._store.read_record(key)
+            if record is None:
+                return None
+            self._decode_header(record, execution_id)
+            record, = await self._execution_content.expand_bindings((record,))
+            return decode_execution_observation(record.data)
+        return await self.read_content(read)
 
     async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
         return await self._get_view(execution_id, tenant_id=tenant_id, fresh=False)

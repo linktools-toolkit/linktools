@@ -119,6 +119,9 @@ async def test_update_read_does_not_disclose_metadata_without_current_authority(
                 if failure == "policy" or principal.principal_id != _PRINCIPAL.principal_id:
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                 authorized = True
+                if failure == "missing":
+                    await state.execution.executions.state_store.mutate(lambda tx: tx.delete_record(
+                        state.execution.executions.execution_record_key("execution")))
         repository = state.execution.executions
         get = repository.get_view
         async def fresh_get(*args, **kwargs):
@@ -314,7 +317,6 @@ async def test_update_source_hints_never_replace_post_authorization_owners(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, change: str,
 ) -> None:
     from linktools.ai.core import AuthorizationAction, ResourceRef
-    from linktools.ai.execution import ExecutionView
     from linktools.ai.persistence.state import RecordQuery
 
     state = Persistence(_storage(backend, tmp_path))
@@ -325,13 +327,13 @@ async def test_update_source_hints_never_replace_post_authorization_owners(
         original = await repository.get("execution", tenant_id="tenant")
         assert original is not None
         observed = []
-        get_view = repository.get_view
+        from linktools.ai.persistence.codec import decode_execution_view
+        expand_bindings = repository._execution_content.expand_bindings
 
-        async def tracked_view(identity: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
-            value = await get_view(identity, tenant_id=tenant_id)
-            if value is not None:
-                observed.append(value[1])
-            return value
+        async def tracked_bindings(records):
+            values = await expand_bindings(records)
+            observed.extend(decode_execution_view(value.data, tenant_id="tenant")[1] for value in values)
+            return values
 
         async def forbidden_history(*args: object, **kwargs: object) -> None:
             raise AssertionError("denied or missing sources must not disclose history")
@@ -361,7 +363,7 @@ async def test_update_source_hints_never_replace_post_authorization_owners(
                         binding.key, expected_storage_revision=binding.storage_revision,
                     ))
 
-        monkeypatch.setattr(repository, "get_view", tracked_view)
+        monkeypatch.setattr(repository._execution_content, "expand_bindings", tracked_bindings)
         if change != "binding":
             monkeypatch.setattr(state.run_store.read_store(PersistenceDomain.TRACE), "capture_history", forbidden_history)
         service = _service(state, authorization=Authorization())

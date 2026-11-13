@@ -353,6 +353,8 @@ async def test_capture_rejects_failed_authority_before_reading_model_metadata(
                 if failure == "denied":
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                 authorized = True
+                if failure == "disappeared":
+                    await repository.state_store.mutate(lambda tx: tx.delete_record(repository.execution_record_key("execution")))
         async def get_after_auth(*args, **kwargs):
             return None if authorized else await get(*args, **kwargs)
         async def unexpected(*args, **kwargs):
@@ -786,6 +788,8 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
                 if phase == "denied":
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                 authorized = True
+                if phase == "postauth_missing":
+                    await repository.state_store.mutate(lambda tx: tx.delete_record(repository.execution_record_key("execution")))
         async def get_after_auth(*args, **kwargs):
             return None if authorized and phase == "postauth_missing" else await get(*args, **kwargs)
         class MissingReaderRepository:

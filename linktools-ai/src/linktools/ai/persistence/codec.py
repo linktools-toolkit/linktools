@@ -204,6 +204,7 @@ from .contracts import (
     ToolOperationMetadata,
     PendingOperationSource,
     ExecutionMembershipRecord,
+    ExecutionObservationRecord,
     TranscriptChunk,
     TranscriptHeadRecord,
     TranscriptMessageRef,
@@ -1818,6 +1819,21 @@ def decode_tool_operation_metadata(value: Mapping[str, JsonValue]) -> ToolOperat
         status = _decode_domain(fields["status"], ToolOperationStatus, codec, persisted=True)
         return ToolOperationMetadata(*identities, status)
     except (ValueError, TypeError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def decode_execution_observation(value: Mapping[str, JsonValue]) -> ExecutionObservationRecord:
+    """Decode only the current owner fields used by model observations."""
+    source, codec = _execution_projection_fields(value)
+    _execution_binding_summary(_execution_projection_field(source, "binding", codec))
+    names = ("execution_id", "agent_run_seq", "durable_trace", "status")
+    values = {name: _execution_projection_field(source, name, codec) for name in names}
+    try:
+        validate_resource_id(values["execution_id"])
+        if values["agent_run_seq"] < 0:
+            raise ValueError("invalid agent run sequence")
+        return ExecutionObservationRecord(**values)
+    except (AIError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
@@ -3443,4 +3459,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["decode_execution_event_control", "decode_tool_operation_metadata", "decode_execution_membership", "pending_operation_reference", "native_tool_error_reference", "native_tool_arguments_reference", "decode_execution_producer_authority", "decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["decode_execution_observation", "decode_execution_event_control", "decode_tool_operation_metadata", "decode_execution_membership", "pending_operation_reference", "native_tool_error_reference", "native_tool_arguments_reference", "decode_execution_producer_authority", "decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
