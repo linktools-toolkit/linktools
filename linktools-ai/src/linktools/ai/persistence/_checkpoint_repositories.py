@@ -1233,7 +1233,9 @@ class ToolRepositoryImpl(_RepositoryBase):
                 argument_ref, result_ref = fields.get("arguments_payload"), fields.get("result_payload")
                 share_arguments = not (isinstance(argument_ref, Mapping) and native_tool_arguments_reference(argument_ref) is not None)
                 share_result = not (isinstance(result_ref, Mapping) and native_tool_result_reference(result_ref) is not None)
-                if share_arguments and arguments or share_result and results:
+                call_id = fields.get("tool_call_id")
+                if (share_arguments and call_id in arguments
+                        or share_result and call_id in results):
                     selected.append(stored)
                     eligibility.append((share_arguments, share_result))
             expanded = await self._tool_content.expand_many(tuple(selected))

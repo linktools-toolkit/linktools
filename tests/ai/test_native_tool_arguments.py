@@ -151,3 +151,72 @@ async def test_fixed_arguments_still_reject_corrupt_owner_digest(tmp_path: Path)
         await state.checkpoint.tools.state_store.mutate(corrupt)
         with pytest.raises(AIError, match=ErrorCode.STORAGE_INTEGRITY_ERROR.value):
             await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")
+
+
+@pytest.mark.asyncio
+async def test_mixed_publication_does_not_expand_already_shared_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.messages import ModelRequest, ToolReturnPart
+    from sqlalchemy import event
+    from linktools.ai.persistence._checkpoint_repositories import ToolRepositoryImpl
+    from linktools.ai.persistence._tool_operation_content import ToolOperationContent
+
+    async with Persistence.open("native-result", tenant_id="tenant",
+                                storage=PersistenceStorage.sqlite(tmp_path / "mixed.db")) as state:
+        commands, commit, current, checkpoint = await _prepare(state, "done", "done")
+        arguments = StoredPayload.inline_bytes(canonical_json_bytes({"x": 1}))
+        first = await state.checkpoint.tools.admit(replace(
+            _request(), arguments_payload=arguments, arguments_digest=canonical_sha256({"x": 1})))
+        second = await state.checkpoint.tools.admit(replace(
+            _request(), tool_operation_id="operation-b", tool_call_id="call-b"))
+        receipt = StoredPayload.inline_bytes(encode_model_messages((ModelRequest(parts=[
+            ToolReturnPart("runtime", "result-b", tool_call_id=second.tool_operation_id)]),)))
+        await state.checkpoint.tools.complete_payload(second.tool_operation_id, tenant_id="tenant",
+            owner=second.owner, fence=second.fence, result_payload=receipt)
+        checkpoint = replace(checkpoint, messages=[
+            ModelResponse(parts=[ToolCallPart("tool", {"x": 1}, tool_call_id="call")]),
+            ModelRequest(parts=[ToolReturnPart("tool", "result-b", tool_call_id="call-b")]),
+            *checkpoint.messages])
+        share = ToolRepositoryImpl.share_published_results
+        expand = ToolOperationContent.expand_many
+        repeated = False
+        expanded = []
+        reads = []
+        expanding = False
+
+        async def tracked_expand(content, records):
+            nonlocal expanding
+            if repeated:
+                expanded.extend(records)
+            expanding = repeated
+            try:
+                return await expand(content, records)
+            finally:
+                expanding = False
+
+        async def repeat_share(repository, **kwargs):
+            nonlocal repeated
+            await share(repository, **kwargs)
+            repeated = True
+            try:
+                await share(repository, **kwargs)
+            finally:
+                repeated = False
+
+        def capture_sql(_connection, _cursor, statement, _parameters, _context, _many):
+            if expanding and statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                reads.append(statement)
+
+        monkeypatch.setattr(ToolOperationContent, "expand_many", tracked_expand)
+        monkeypatch.setattr(ToolRepositoryImpl, "share_published_results", repeat_share)
+        engine = state.checkpoint.tools.state_store.storage_group.context.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", capture_sql)
+        try:
+            await _publish(commands, commit, current, checkpoint)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture_sql)
+        assert expanded == []
+        assert reads == []
+        assert (await state.checkpoint.tools.get_operation(first.tool_operation_id, tenant_id="tenant")).arguments_payload == arguments
+        assert (await state.checkpoint.tools.get_operation(second.tool_operation_id, tenant_id="tenant")).result_payload == receipt
