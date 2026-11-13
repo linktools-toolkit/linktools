@@ -8,15 +8,16 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from pydantic import TypeAdapter
+
 from ..errors import AIError, ErrorCode
-from ..core import canonical_json_bytes
 from ._record_key import decode_key_components
 from ._run_counters import run_counter_address
 from ._schema import build_runtime_sql_metadata
 from ._plan import PersistenceDomain
 from ._sql import SqlStateStore
 from ._step_contracts import StepEvent, TOOL_ERROR_CODE_METADATA_KEY
-from .codec import _decode_step_envelope
+from .codec import _decode_step_envelope, _encode_step_envelope
 from .state import (FactQuery, SqlStateRowReader, SqlStateTransaction, StateTransaction,
                     StoredFact, STREAM_KEY_MAX_BYTES, record_key, stream_key)
 
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
     from sqlalchemy import Table, Select
     from sqlalchemy.ext.asyncio import AsyncSession
     from ._native_event_reference import NativeEventReferences
+
+_STEP_EVENT_ADAPTER = TypeAdapter(StepEvent)
 
 _REQUEST = "linktools.ai.model_request_seq"
 _MESSAGE = "linktools.ai.message_seq"
@@ -116,11 +119,12 @@ class SqlTraceEventStore:
             if _decode_step_envelope(fact.data) != event:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             fields = payload["value"]["payload"]["fields"]
-            for name in _PROMOTED:
-                fields.pop(name, None)
-            fields["metadata"]["$mapping"] = [pair for pair in fields["metadata"]["$mapping"]
-                                                if pair[0] not in (_REQUEST, TOOL_ERROR_CODE_METADATA_KEY)
-                                                and not (response and pair[0] == _MESSAGE)]
+            payload = {"type": "step_event", **{key: value for key, value in fields.items()
+                                                   if key not in _PROMOTED}, "metadata": {
+                key: value for key, value in event.metadata.items()
+                if key not in (_REQUEST, TOOL_ERROR_CODE_METADATA_KEY)
+                and not (response and key == _MESSAGE)
+            }}
         elif payload["value"]["type"] != "native_event_reference":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         message_identity = _identity(event.metadata.get(_MESSAGE))
@@ -158,44 +162,39 @@ class SqlTraceEventStore:
             payload = copy.deepcopy(row["payload_json"])
             if isinstance(payload, str):
                 payload = json.loads(payload)
-            if payload["value"]["type"] == "step_event":
-                fields = payload["value"]["payload"]["fields"]
-                if any(name in fields for name in _PROMOTED):
+            if not isinstance(payload, dict):
+                raise ValueError("Trace payload must be an object")
+            if payload.get("type") == "step_event":
+                residual = {key: value for key, value in payload.items() if key != "type"}
+                if any(key in residual for key in _PROMOTED):
                     raise ValueError("Trace body duplicates promoted fields")
-                fields.update(agent_run_id=run_id, event_type=row["kind"], step_index=row["step_index"],
-                              timestamp={"$datetime": row["timestamp"]}, tool_call_id=_text(row["tool_call_id"]),
-                              event_index=row["event_index"], **scalars)
-                metadata = fields["metadata"]["$mapping"]
-                if not isinstance(metadata, list):
-                    raise ValueError("Trace metadata must be a mapping sequence")
-                previous_key = None
-                for pair in metadata:
-                    if not isinstance(pair, list) or len(pair) != 2:
-                        raise ValueError("Trace metadata pair is malformed")
-                    key = canonical_json_bytes(pair[0])
-                    if previous_key is not None and previous_key >= key:
-                        raise ValueError("Trace residual metadata is not canonical")
-                    previous_key = key
+                metadata = residual["metadata"]
+                if not isinstance(metadata, dict):
+                    raise ValueError("Trace metadata must be an object")
                 response = row["kind"] == "MODEL_REQUEST_SUCCEEDED"
-                if any(pair[0] in (_REQUEST, TOOL_ERROR_CODE_METADATA_KEY)
-                       or response and pair[0] == _MESSAGE for pair in metadata):
+                if any(key in metadata for key in (_REQUEST, TOOL_ERROR_CODE_METADATA_KEY)) or response and _MESSAGE in metadata:
                     raise ValueError("Trace metadata duplicates promoted fields")
                 if not response and row["message_identity"] is not None:
                     raise ValueError("Trace message identity has no response role")
-                metadata.extend([key, value] for key, value in (
+                metadata.update((key, value) for key, value in (
                     (_REQUEST, _text(row["request_identity"])), (_MESSAGE, _text(row["message_identity"])),
                     (TOOL_ERROR_CODE_METADATA_KEY, _text(row["error_code"]))) if value is not None)
-                metadata.sort(key=lambda pair: canonical_json_bytes(pair[0]))
-                event = _decode_step_envelope(payload)
-                if not isinstance(event, StepEvent):
-                    raise ValueError("Trace body is not an event")
+                event = _STEP_EVENT_ADAPTER.validate_python(dict(
+                    agent_run_id=run_id, event_type=row["kind"], step_index=row["step_index"],
+                    timestamp=timestamp, tool_call_id=_text(row["tool_call_id"]),
+                    event_index=row["event_index"], metadata=metadata, **scalars,
+                ))
+                payload = _encode_step_envelope(event)
+                payload["value"]["payload"]["fields"].update(
+                    (key, value) for key, value in residual.items() if key != "metadata"
+                )
                 if row["order_key"] != _order(event.timestamp, sequence) or row["request_number"] != _request_number(event.metadata.get(_REQUEST)):
                     raise ValueError("Trace query projection differs")
                 message_identity = _identity(event.metadata.get(_MESSAGE))
                 if (row["history_identity"] != _history_identity(event)
                         or row["message_identity"] != (message_identity if response else None)):
                     raise ValueError("Trace history projection differs")
-            elif payload["value"]["type"] == "native_event_reference":
+            elif payload.get("value", {}).get("type") == "native_event_reference":
                 reference = payload["value"]["payload"]
                 if (reference.get("run") != run_id or reference.get("index") != row["event_index"]
                         or any(value is not None for value in scalars.values()) or row["history_identity"] is not None):

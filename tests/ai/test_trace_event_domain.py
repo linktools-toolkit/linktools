@@ -223,8 +223,8 @@ async def test_promoted_and_residual_metadata_round_trip_together(
             response = kind == "MODEL_REQUEST_SUCCEEDED"
             assert row["message_identity"] == (b"2" if response else None)
             assert row["history_identity"] == (b"01" if response else b"call")
-            metadata = row["payload_json"]["value"]["payload"]["fields"]["metadata"]["$mapping"]
-            assert ([MESSAGE, "2"] in metadata) is not response
+            metadata = row["payload_json"]["metadata"]
+            assert (metadata.get(MESSAGE) == "2") is not response
 
 
 @pytest.mark.asyncio
@@ -257,7 +257,7 @@ async def test_inline_scalar_columns_preserve_values_without_json_duplicates(tmp
         await _append(archive, event)
         row, = await archive.state_store.read(lambda tx: archive._trace_events.read_rows(
             tx, FactQuery(archive._stream(run_id, "event"))))
-        fields = row["payload_json"]["value"]["payload"]["fields"]
+        fields = row["payload_json"]
         for name, value in values.items():
             assert row[name] == (None if value is None else value.encode("utf-8"))
             assert name not in fields
@@ -270,7 +270,7 @@ async def test_inline_scalar_columns_preserve_values_without_json_duplicates(tmp
         restored = archive._trace_events.row_to_fact(projected)
         assert restored.data["value"]["payload"]["fields"]["future_note"] == "extension"
         assert _decode_step_envelope(restored.data) == event
-        projected["payload_json"]["value"]["payload"]["fields"]["agent_id"] = values["agent_id"]
+        projected["payload_json"]["agent_id"] = values["agent_id"]
         with pytest.raises(AIError) as caught:
             archive._trace_events.row_to_fact(projected)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -300,7 +300,7 @@ async def test_history_index_batches_merge_exact_roles_before_limit(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", ("reordered", "duplicate"))
+@pytest.mark.parametrize("corruption", ("not_object", "non_string_value"))
 async def test_promoted_metadata_does_not_repair_corrupt_residual_mapping(
     tmp_path: Path, corruption: str,
 ) -> None:
@@ -313,11 +313,36 @@ async def test_promoted_metadata_does_not_repair_corrupt_residual_mapping(
         fact = StoredFact(archive._stream(run_id, "event"), 1, archive._agent_run_key(run_id),
                           "step_event", None, event.event_type, _encode_step_envelope(event))
         row = archive._trace_events.row_values(fact, event)
-        pairs = row["payload_json"]["value"]["payload"]["fields"]["metadata"]["$mapping"]
-        if corruption == "reordered":
-            pairs.reverse()
+        if corruption == "not_object":
+            row["payload_json"]["metadata"] = [["a", "first"]]
         else:
-            pairs.append(pairs[-1].copy())
+            row["payload_json"]["metadata"]["a"] = 42
         with pytest.raises(AIError) as caught:
             archive._trace_events.row_to_fact(row)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_sql_trace_metadata_retains_extensions_without_domain_wrapper(tmp_path):
+    import json
+    from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope
+
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        event = replace(_event(run_id, "MODEL_REQUEST_STARTED"), metadata={
+            REQUEST: "1", "custom.说明": "原样保留", "custom.empty": "",
+            "custom.json": '{"nested": [1, 2]}',
+        })
+        await _append(archive, event)
+        restored = await _trace(archive, run_id, 1)
+        assert restored[0][1].metadata == event.metadata
+        rows = await archive.state_store.read(lambda tx: archive._trace_events.scan(tx))
+        fact = archive._trace_events.row_to_fact(rows[0])
+        assert _decode_step_envelope(fact.data).metadata == event.metadata
+        # SQL owns its column projection; it need not duplicate the portable
+        # domain envelope around the remaining metadata. Export still uses it.
+        body = rows[0]["payload_json"]
+        if isinstance(body, str):
+            body = json.loads(body)
+        assert len(json.dumps(body, ensure_ascii=False).encode()) < len(
+            json.dumps(_encode_step_envelope(event), ensure_ascii=False).encode()
+        )
