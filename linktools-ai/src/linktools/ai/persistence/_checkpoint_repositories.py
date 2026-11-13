@@ -448,6 +448,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         transaction: StateTransaction,
         request: ToolOperationAdmission,
         *, observed: Observed[ToolOperationRecord] | None = None, known_new: bool = False,
+        arguments_source: tuple[NativeMessageRoot, bytes, int] | None = None,
     ) -> Observed[ToolOperationRecord]:
         validate_lease_owner(request.owner)
         if known_new and (observed is not None or request.recovery_agent_run_id is not None):
@@ -496,7 +497,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                             "tool_operation", "agent_run", (request.agent_run_id,)
                         ),
                         state=value.status.value,
-                    ))
+                    ), arguments_source=arguments_source)
                 )
                 return Observed(value, 0)
             current = await self._decode(record, ToolOperationRecord)

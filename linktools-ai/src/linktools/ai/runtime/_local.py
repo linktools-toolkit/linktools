@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
+    ModelResponse,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -5543,6 +5544,10 @@ class LocalExecutionBackend:
                     return False
             return True
 
+        # Only the most recent confirmed model response is an admission source.
+        # This is a boundary receipt, not a cross-run content-existence cache.
+        argument_sources = {}
+
         async def commit_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
             async with self._run_store.native_event_publication(agent_run_id):
                 return await publish_boundary(run=run, events=events, snapshot=snapshot)
@@ -5634,6 +5639,22 @@ class LocalExecutionBackend:
                 if written is None:
                     raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                 native.confirm_prepared_step(written)
+                if snapshot is not None:
+                    argument_sources.clear()
+                    content = written.native_messages
+                    if (content is not None and content.root is not None and snapshot.messages
+                            and isinstance(snapshot.messages[-1], ModelResponse)):
+                        message = snapshot.messages[-1]
+                        root = native.message_root(content.root).slice(len(snapshot.messages) - 1, len(snapshot.messages))
+                        raw = encode_model_messages((message,))
+                        seen = set()
+                        for index, part in enumerate(message.parts):
+                            if isinstance(part, ToolCallPart):
+                                if part.tool_call_id in seen:
+                                    argument_sources.pop(part.tool_call_id, None)
+                                else:
+                                    argument_sources[part.tool_call_id] = (root, raw, index)
+                                seen.add(part.tool_call_id)
                 source = native.run_from_receipt(written)
                 if source is not None:
                     self._run_store.confirm_step_run(source, receipt=written)
@@ -5662,6 +5683,7 @@ class LocalExecutionBackend:
                 receipt = await self._runtime_commands.commit_tool_admission_boundary(
                     request, execution=owner.observed, observed=observed,
                     write=write, readback_write=readback, known_new=known_new,
+                    arguments_source=argument_sources.get(request.tool_call_id),
                 )
                 owner.observed = receipt.execution
                 session = captured_session if owner.attempt is None else owner.attempt.session

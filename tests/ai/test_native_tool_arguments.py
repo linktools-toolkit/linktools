@@ -151,3 +151,46 @@ async def test_fixed_arguments_still_reject_corrupt_owner_digest(tmp_path: Path)
         await state.checkpoint.tools.state_store.mutate(corrupt)
         with pytest.raises(AIError, match=ErrorCode.STORAGE_INTEGRITY_ERROR.value):
             await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ("exact", "defaulted", "coerced", "foreign"))
+async def test_admission_uses_confirmed_source_without_republishing_arguments(tmp_path: Path, case: str) -> None:
+    from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
+    from sqlalchemy import event
+    from linktools.ai.persistence import SqlStepStore
+
+    args = {"count": 1}
+    source_args = {} if case == "defaulted" else {"count": "1"} if case == "coerced" else args
+    message = ModelResponse(parts=[ToolCallPart("tool", source_args,
+        tool_call_id="other" if case == "foreign" else "call")])
+    payload = StoredPayload.inline_bytes(canonical_json_bytes(args))
+    config = PersistenceStorage.sqlite(tmp_path / "direct-arguments.db")
+    async with Persistence.open("native-result", tenant_id="tenant", storage=config) as state:
+        tools = state.checkpoint.tools
+        native = SqlStepStore.for_state_store(tools.state_store, namespace="native-result", tenant_id="tenant")
+        assert native is not None
+        receipt = await native.commit_step_receipt(run=RunRecord(run_id="run"),
+            snapshot=ContinuableSnapshot(run_id="run", step_index=1, messages=[message]))
+        assert receipt.native_messages is not None and receipt.native_messages.root is not None
+        source = (native.message_root(receipt.native_messages.root), encode_model_messages((message,)), 0)
+        request = replace(_request(), arguments_payload=payload, arguments_digest=canonical_sha256(args))
+        statements = []
+        engine = tools.state_store.context.engine
+        def capture(connection, cursor, statement, parameters, context, many):
+            statements.append(statement)
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            await tools.state_store.mutate(lambda tx: tools.admit_in_transaction(
+                tx, request, known_new=True, arguments_source=source))
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        inserted = sum(sql.startswith("INSERT INTO ai_step_messages") for sql in statements)
+        assert inserted == (0 if case == "exact" else 1)
+        records = await tools.state_store.read(lambda tx: tx.scan_records())
+        stored = next(record for record in records if record.kind == "tool_operation")
+        wire = decode_envelope(stored.data).value["payload"]["fields"]["arguments_payload"]
+        assert (native_tool_arguments_reference(wire) is not None) is (case == "exact")
+    async with Persistence.open("native-result", tenant_id="tenant", storage=config, read_only=True) as state:
+        restored = await state.checkpoint.tools.get_operation("operation", tenant_id="tenant")
+        assert restored.arguments_payload == payload

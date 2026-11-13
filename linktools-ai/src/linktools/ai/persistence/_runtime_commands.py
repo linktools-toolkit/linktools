@@ -1932,6 +1932,7 @@ class StateCommands:
         observed: Observed[ToolOperationRecord] | None = None,
         next_execution: ExecutionRecord | None = None,
         known_new: bool = False,
+        arguments_source: tuple[NativeMessageRoot, bytes, int] | None = None,
         write: Callable[[StateGroupTransaction], Awaitable[None]] | None = None,
         readback_write: Callable[[], Awaitable[bool]] | None = None,
         stores: Sequence[StateStore] = (),
@@ -1972,6 +1973,7 @@ class StateCommands:
                     raise
                 effect = await tools.admit_in_transaction(
                     group.transaction(tools.state_store), request, observed=observed, known_new=known_new,
+                    arguments_source=arguments_source,
                 )
                 usage = None
                 if budget is not None and effect.value.status is ToolOperationStatus.CLAIMED:

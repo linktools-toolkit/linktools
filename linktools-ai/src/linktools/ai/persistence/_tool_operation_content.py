@@ -20,7 +20,7 @@ from ._payload import decode_payload_bytes
 from ._message_root import NativeMessageRoot, NativeToolResultReference, NativeToolArgumentsReference
 from ._native_tool_error import NativeToolErrorReference, prepare_native_tool_error, restore_native_tool_error_payload
 from ._native_tool_result import restore_native_tool_result_payload
-from ._native_tool_arguments import restore_native_tool_arguments_payload
+from ._native_tool_arguments import prepare_native_tool_arguments, restore_native_tool_arguments_payload
 from ._step_store import SqlStepStore
 from ..steps import native_store_key
 from .codec import (TOOL_PAYLOAD_CODEC, decode_envelope, encode_envelope,
@@ -161,6 +161,7 @@ class ToolOperationContent:
     async def encode(
         self, record: StoredRecord, *, previous: StoredRecord | None = None,
         error_source: NativeToolErrorReference | None = None,
+        arguments_source: tuple[NativeMessageRoot, bytes, int] | None = None,
     ) -> StoredRecord:
         native_retained = {} if previous is None else {name: reference
             for name, payload in tool_payload_slots(decode_envelope(previous.data).value["payload"])
@@ -178,6 +179,15 @@ class ToolOperationContent:
         selected = {}
         for name, payload in tool_payload_slots(decode_envelope(record.data).value["payload"]):
             fields = payload.get("fields", {})
+            if name == "arguments_payload" and arguments_source is not None:
+                root, raw, part_index = arguments_source
+                reference = prepare_native_tool_arguments(root, raw, part_index, decode_domain(payload, StoredPayload))
+                owner = value["fields"]
+                if (reference is not None and reference.tool_name == owner["tool_name"]
+                        and reference.tool_call_id == owner["tool_call_id"]):
+                    retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
+                                             "fields": {"content": reference.to_json()}}
+                    continue
             if name == "error_payload" and error_source is not None:
                 owner = value["fields"]
                 selected_error = prepare_native_tool_error(error_source, error_events[error_source],
