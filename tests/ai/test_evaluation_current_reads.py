@@ -232,7 +232,7 @@ async def test_current_cursor_rejects_wrong_scope_manifest_and_position(
 async def test_rescore_current_pages_use_only_selected_source_trials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with completed(tmp_path, count=3) as (evaluations, storage, source, scorer, policy):
+    async with completed(tmp_path, count=3, memory_tasks=True) as (evaluations, storage, source, scorer, policy):
         repository = storage.evaluation.records
         record = await repository.get(source.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         plans = record.manifest.trials
