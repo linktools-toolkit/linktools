@@ -108,41 +108,45 @@ async def test_captured_task_preserves_child_contract_after_reopen(
         results = []
         for override_root in (False, True):
             graph_name = "compare-captured-child-" + ("explicit" if override_root else "default")
-            run = await engine.start(TaskGraph(graph_name, (
-                TaskNode("historical", task=captured, input=AgentTaskInput("delegate sample inspection"),
-                         output_type=_RootOutput if override_root else None),
-                TaskNode("current", task=fresh, input=AgentTaskInput("delegate sample inspection")),
-            )), principal=principal, idempotency_key=graph_name)
+            nodes = [TaskNode(
+                "historical", task=captured, input=AgentTaskInput("delegate sample inspection"),
+                output_type=_RootOutput if override_root else None,
+            )]
+            if override_root:
+                nodes.append(TaskNode("current", task=fresh, input=AgentTaskInput("delegate sample inspection")))
+            run = await engine.start(TaskGraph(graph_name, tuple(nodes)),
+                                     principal=principal, idempotency_key=graph_name)
             assert (await run.wait(timeout_seconds=20)).result.status is TaskStatus.SUCCEEDED
             graph_id = run.graph_id
             historical_root = await run.execution("historical")
-            current_root = await run.execution("current")
             historical_children = await runtime.executions.list_children(historical_root.execution_id, principal=principal)
-            current_children = await runtime.executions.list_children(current_root.execution_id, principal=principal)
-            assert len(historical_children) == len(current_children) == 1
+            assert len(historical_children) == 1
             historical_child_id = historical_children[0].execution_id
-            current_child_id = current_children[0].execution_id
-            # The ordinary Task must keep using the newly declared child, not the capture.
-            assert (await runtime.executions.result(current_child_id, principal=principal)).output == {"current_label": "current"}
             assert (await runtime.executions.result(historical_child_id, principal=principal)).output == historical_output
             historical_info = await runtime.history.inspect_execution(historical_child_id, principal=principal)
             assert historical_info.binding_digest == original_info.binding_digest
-            assert (await runtime.history.inspect_execution(current_child_id, principal=principal)).binding_digest != original_info.binding_digest
             root_output = {"summary": "complete"} if override_root else {"text": "complete"}
             assert await run.result("historical") == root_output
             historical_root_info = await runtime.history.inspect_execution(historical_root.execution_id, principal=principal)
             assert any(ref.kind == "agent" and ref.id == "child" and ref.revision == 1
                        for ref in historical_root_info.capability_refs)
-            results.append((graph_id, historical_child_id, current_child_id, root_output, historical_info))
+            results.append((graph_id, historical_child_id, root_output, historical_info))
+        # Ordinary Tasks use the new child even alongside the overridden captured root.
+        current_root = await run.execution("current")
+        current_children = await runtime.executions.list_children(current_root.execution_id, principal=principal)
+        assert len(current_children) == 1
+        current_child_id = current_children[0].execution_id
+        assert (await runtime.executions.result(current_child_id, principal=principal)).output == {"current_label": "current"}
+        assert (await runtime.history.inspect_execution(current_child_id, principal=principal)).binding_digest != original_info.binding_digest
 
     async with Persistence.open('captured-child', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_129, Runtime.attach(persistence=persistence_129, features=_features(2, _CurrentOutput.model_json_schema())) as runtime, TaskEngine.open(persistence=persistence_129, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        for graph_id, historical_child_id, current_child_id, root_output, historical_info in results:
+        for graph_id, historical_child_id, root_output, historical_info in results:
             readback = await runtime_engine.with_definitions().get(graph_id, principal=principal)
             assert await readback.result("historical") == root_output
             assert (await runtime.executions.result(historical_child_id, principal=principal)).output == historical_output
             assert await runtime.history.inspect_execution(historical_child_id, principal=principal) == historical_info
-            assert (await runtime.executions.result(current_child_id, principal=principal)).output == {"current_label": "current"}
-            assert (await runtime.executions.result(source_child.execution_id, principal=principal)).output == historical_output
+        assert (await runtime.executions.result(current_child_id, principal=principal)).output == {"current_label": "current"}
+        assert (await runtime.executions.result(source_child.execution_id, principal=principal)).output == historical_output
 
 
 

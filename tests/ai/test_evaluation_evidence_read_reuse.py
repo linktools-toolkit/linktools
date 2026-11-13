@@ -20,7 +20,7 @@ from sqlalchemy import event
 from linktools.ai.core import AuthorizationAction, Principal, ResourceRef, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
-    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
+    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy, EvaluationSpec,
     EvidenceAttachmentRef, RescoreRequest, StartEvaluationRequest,
 )
 
@@ -31,6 +31,7 @@ from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_objec
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.task import Task
+from linktools.ai.storage import StorageRoute
 
 from ._sqlite_failure_timeline import sqlite_failure_evidence
 
@@ -53,8 +54,12 @@ class Policy:
 
 
 @asynccontextmanager
-async def completed(path: Path, *, count: int = 2) -> AsyncIterator[tuple[Evaluations, Persistence, EvaluationRun, Task, Policy]]:
+async def completed(
+    path: Path, *, count: int = 2, memory_tasks: bool = False,
+) -> AsyncIterator[tuple[Evaluations, Persistence, EvaluationRun, Task, Policy]]:
     storage = PersistenceStorage.sqlite(path / "state.sqlite")
+    if memory_tasks:
+        storage = PersistenceStorage.from_plan(replace(storage.plan, task=StorageRoute.memory()))
     policy = Policy()
     async with Persistence.open('evidence-read', storage=storage, tenant_id='evaluation-consumers') as persistence_52:
         target = Task("evidence-read.target", echo, effect_policy="none")
@@ -67,7 +72,8 @@ async def completed(path: Path, *, count: int = 2) -> AsyncIterator[tuple[Evalua
                 CaseSpec.task(CaseRef("dataset", f"case-{i}", 1), input={"answer": "yes"}, expected="yes")
                 for i in range(count))), principal=PRINCIPAL, idempotency_key="dataset")
             run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "run"))
+                (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
+                policy=EvaluationPolicy(allow_volatile=memory_tasks)), PRINCIPAL, "run"))
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             policy.calls.clear()
             yield evaluations, persistence_52, run, scorer, policy
@@ -148,7 +154,8 @@ async def test_snapshot_rechecks_authorization_after_all_evidence_reads(
 async def test_snapshot_full_source_reads_are_bounded_and_source_owner_is_preserved(
     tmp_path: Path,
 ) -> None:
-    async with completed(tmp_path, count=3) as (evaluations, storage, run, scorer, policy):
+    # Only source-record SQL reads are measured; task graphs never cross a reopen boundary.
+    async with completed(tmp_path, count=3, memory_tasks=True) as (evaluations, storage, run, scorer, policy):
         source_id = run.experiment_id
         for rescore in (False, True):
             if rescore:

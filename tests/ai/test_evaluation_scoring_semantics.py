@@ -565,8 +565,10 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
                 (rule_scorer(rule if score_only else judge),),
                 policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "start"))
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-            scoring = await run.rescore(RescoreRequest((rule_scorer(judge),), "rescore")) if score_only else run
-            assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            scoring = run
+            if score_only:
+                scoring = await run.rescore(RescoreRequest((rule_scorer(judge),), "rescore"))
+                assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             scorer_usage = [await history.graph_usage(item.scorer_graph.graph_id, principal=PRINCIPAL)
                             for item in (await scoring.scores()).items]
             assert any(item.unknown_usage_requests for item in scorer_usage) is unknown_usage
@@ -584,10 +586,10 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
             with monkeypatch.context() as patch:
                 patch.setattr(evaluations._history, "graph_usage", changed_usage)
                 repeated = await evaluations.create_comparison_report(replace(spec, cutoff=report.cutoff), principal=PRINCIPAL)
+                permissive = await evaluations.create_comparison_report(replace(spec, cutoff=report.cutoff,
+                    gate_policy=replace(spec.gate_policy, require_complete_usage=False)), principal=PRINCIPAL)
             assert repeated.gate == report.gate and repeated.cutoff == report.cutoff
-            permissive = await evaluations.create_comparison_report(replace(spec,
-                gate_policy=replace(spec.gate_policy, require_complete_usage=False)), principal=PRINCIPAL)
-            assert permissive.gate == "pass"
+            assert permissive.gate == "pass" and permissive.cutoff == report.cutoff
 
 
 @pytest.mark.asyncio
