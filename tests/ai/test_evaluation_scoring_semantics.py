@@ -119,7 +119,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
     body = b"Do not expose binary bodies through input evidence"
     received: list[ScoringInput] = []
     async with (
-        Persistence.open('scoring-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_110,
+        Persistence.open('scoring-input', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_110,
         Runtime.attach(persistence=persistence_110, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         async def score(context: TaskNodeContext[None]) -> JsonValue:
@@ -151,7 +151,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
                                                         (judge, "judge", judge_include_input)))
             run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("candidate", task=target.ref),), scorers,
-                policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"))
+                policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "start"))
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             assert len(received) == 1
             scores = (await run.scores()).items
