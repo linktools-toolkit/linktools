@@ -519,6 +519,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         journal: ModelRequestJournal | None = None,
         interaction_recorder: ModelInteractionRecorder | None = None,
         event_sink: ModelRequestEventSink | None = None,
+        model_boundary: Callable[[Model], Awaitable[Model]] | None = None,
         budget: RunBudgetContext | None = None,
     ) -> None:
         self.id = "linktools.ai.model-observation"
@@ -541,6 +542,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         )
         self._interaction_recorder = interaction_recorder
         self._event_sink = event_sink
+        self._model_boundary = model_boundary
         self._budget = budget
         self._prepared_models: dict[int, PreparedRequestModel] = {}
         self._serving_model_ids: dict[int, str] = {}
@@ -655,9 +657,12 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             # A summary may have reused this wrapper before the logical request.
             prepared_model.reset_response_observation()
             self._prepared_models[fact.model_request_seq] = prepared_model
-            if self._interaction_recorder is not None:
+            dispatched = model
+            if self._model_boundary is not None:
+                dispatched = await self._model_boundary(model)
+            elif self._interaction_recorder is not None:
                 await self._interaction_recorder.commit_history_boundary()
-            return self._client_recorders[fact.model_request_seq].wrap_model(model)
+            return self._client_recorders[fact.model_request_seq].wrap_model(dispatched)
 
         def provider_failed(error: Exception) -> None:
             if request_sequence is None:

@@ -112,9 +112,13 @@ class RuntimeStepBoundaryStore(Protocol):
 
 
 class _BoundaryModel(WrapperModel):
-    def __init__(self, wrapped: Model, publish: Callable[[], Awaitable[None]]) -> None:
+    def __init__(
+        self, wrapped: Model, publish: Callable[[], Awaitable[None]],
+        history_ready: Callable[[], bool],
+    ) -> None:
         super().__init__(wrapped)
         self._publish = publish
+        self._history_ready = history_ready
 
     async def request(
         self, messages: list[ModelMessage], model_settings: ModelSettings | None,
@@ -373,7 +377,21 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
                 confirmed = None
                 raise
 
-        return _BoundaryModel(model, publish)
+        return _BoundaryModel(model, publish, lambda: any(
+            event.kind == "model_request_started" for event in self._atomic_pending_events
+        ))
+
+    @classmethod
+    async def publish_model_boundary(cls, model: Model) -> Model | None:
+        """Publish an immediate native wrapper and unwrap only this invocation.
+
+        The original wrapper remains the retry entry point, so every later
+        dispatch still crosses its producer fence.
+        """
+        if type(model) is not _BoundaryModel or not model._history_ready():
+            return None
+        await model._publish()
+        return model.wrapped
 
     def _atomic_effective_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
         if self.run_id is not None:
@@ -460,11 +478,26 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
                 prepared_run, started = prepared
                 pending_events = (started, *pending_events)
         prepared_events = (*pending_events, *events)
-        await self._atomic_write(run=prepared_run, events=prepared_events, snapshot=snapshot)
+        # Consume the committed prefix before propagating cancellation, otherwise
+        # terminal cleanup can replay a start whose Trace projection is settled.
+        operation = asyncio.create_task(self._atomic_write(run=prepared_run, events=prepared_events, snapshot=snapshot))
+        cancelled = None
+        while True:
+            try:
+                await asyncio.shield(operation)
+                break
+            except asyncio.CancelledError as error:
+                if operation.done():
+                    operation.result()
+                    cancelled = cancelled or error
+                    break
+                cancelled = cancelled or error
         self._atomic_pending_run = None
         self._atomic_pending_events.clear()
         if shared_start:
             self._atomic_start_published = True
+        if cancelled is not None:
+            raise cancelled
 
     @durable_operation("commit_boundary")
     async def _atomic_write(

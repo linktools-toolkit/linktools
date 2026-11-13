@@ -132,7 +132,7 @@ from ._harness import (
     BindReferencedInputOrigins, ReinjectRuntimeSystemPrompt, SummaryProviderModel,
     FallbackProviderModel,
 )
-from ..capability.steps import StepBoundaryCapabilities
+from ..capability.steps import AtomicStepPersistence, StepBoundaryCapabilities
 from ..model.messages import without_history_system_prompts
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
@@ -1208,6 +1208,15 @@ async def _materialize_agent(
         if scope.event_sink is not None:
             await scope.event_sink(DurableBoundary(event_type, payload))
 
+    async def commit_model_boundary(model: Model) -> Model:
+        if (isinstance(scope.run_store, RuntimeAgentRunStore)
+                and scope.run_store.can_join_step_projection(scope.agent_run_id)):
+            dispatched = await AtomicStepPersistence.publish_model_boundary(model)
+            if dispatched is not None:
+                return dispatched
+        await run_recorder.commit_history_boundary()
+        return model
+
     model_observation_kwargs = dict(
         source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
@@ -1219,6 +1228,7 @@ async def _materialize_agent(
         journal=model_journal,
         interaction_recorder=run_recorder,
         event_sink=publish_model_request_event,
+        model_boundary=commit_model_boundary,
         budget=scope.budget,
     )
     model_observation = (

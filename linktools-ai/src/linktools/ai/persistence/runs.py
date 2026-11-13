@@ -80,7 +80,7 @@ from ._native_event_reference import NativeEventReferences
 from ._step_store import SqlStepStore, StepWriteReceipt
 from ..steps import NativeStepSource
 from ._sql import SqlStateStore
-from .state import StateGroupTransaction, StateTransaction
+from .state import StateGroupTransaction, StateTransaction, StateStore
 
 if TYPE_CHECKING:
     from .capabilities import RuntimeCapabilityWrites
@@ -235,6 +235,22 @@ class RuntimeAgentRunStore(AgentRunStore):
         return (run_id in self._step_boundaries and run_id in self._execution_producers
                 and all(self.execution_persistence(run_id)[1:]) and isinstance(archive, StateStepArchive)
                 and archive.can_share_native_start(native))
+
+    def can_join_step_projection(self, run_id: str) -> bool:
+        """Admit only synchronous Trace backed by the native transaction group."""
+        if run_id not in self._step_boundaries:
+            return False
+        archive = self._archive_for_run(PersistenceDomain.TRACE, run_id)
+        native = self.step_store
+        return (self.trace_persistence.synchronous(run_id)
+                and isinstance(native, SqlStepStore)
+                and isinstance(archive, StateStepArchive)
+                and isinstance(archive.state_store, SqlStateStore)
+                and self._execution_repository is not None
+                and self._execution_repository.state_store.storage_group is archive.state_store.storage_group
+                and archive.state_store.context.engine is native.storage_context.engine
+                and all(store.storage_group is archive.state_store.storage_group
+                        for store in archive.transaction_stores))
 
     @classmethod
     def project_native_event(cls, source: NativeStepEvent, *, event_index: int) -> StepEvent:
@@ -1729,14 +1745,23 @@ class RuntimeAgentRunStore(AgentRunStore):
         flight: _AgentRunProjectionFlight,
         *,
         execution_id: str,
+        write: Callable[[StateGroupTransaction, Callable[[], Awaitable[None]]], Awaitable[None]] | None = None,
+        readback_write: Callable[[], Awaitable[CommitObservation[None]]] | None = None,
+        stores: Sequence[StateStore] = (),
     ) -> None:
         """PREPARE + DURABLE COMMIT without the run lock, then FINALIZE."""
+        if (write is None) != (readback_write is None):
+            await self.abandon_execution_projection(flight)
+            raise ValueError("joint publication requires both write and readback")
         delegated = False
         try:
             async with self.native_event_publication(captured.run.agent_run_id):
                 captured = replace(captured, run=self._canonical_trace_run(captured.run))
                 delegated = True
-                await self._commit_captured_execution_projection(captured, flight, execution_id=execution_id)
+                await self._commit_captured_execution_projection(
+                    captured, flight, execution_id=execution_id, write=write,
+                    readback_write=readback_write, stores=stores,
+                )
         except BaseException:
             if not delegated:
                 await self.abandon_execution_projection(flight)
@@ -1744,9 +1769,15 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     async def _commit_captured_execution_projection(
         self, captured: CapturedExecutionProjection, flight: _AgentRunProjectionFlight, *, execution_id: str,
+        write: Callable[[StateGroupTransaction, Callable[[], Awaitable[None]]], Awaitable[None]] | None = None,
+        readback_write: Callable[[], Awaitable[CommitObservation[None]]] | None = None,
+        stores: Sequence[StateStore] = (),
     ) -> None:
         archive = self._archives.get(PersistenceDomain.TRACE)
         if not isinstance(archive, StateStepArchive):
+            if write is not None:
+                await self.abandon_execution_projection(flight)
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if not isinstance(archive, _StepArchiveBatch):
                 await self.abandon_execution_projection(flight)
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1826,7 +1857,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             )
             await self._fence_durability_flight(flight, unknown)
             raise unknown from result.error
-        if not captured.events and not captured.checkpoints and not captured.interactions and captured.transcript is None:
+        if write is None and not captured.events and not captured.checkpoints and not captured.interactions and captured.transcript is None:
             await self.finalize_execution_projection(flight, captured)
             return
         started = monotonic()
@@ -1885,12 +1916,17 @@ class RuntimeAgentRunStore(AgentRunStore):
 
         async def operation() -> ExecutionRunSealHead:
             async def commit(group: StateGroupTransaction) -> ExecutionRunSealHead:
-                await archive.sync_prepared_projection(
-                    captured.run, events=captured.events, checkpoints=prepared.checkpoints,
-                    interactions=interactions, observation=observation,
-                    producer_generation=captured.producer_generation, execution_id=execution_id,
-                    archive=interaction_archive,
-                )
+                async def publish_projection() -> None:
+                    await archive.sync_prepared_projection(
+                        captured.run, events=captured.events, checkpoints=prepared.checkpoints,
+                        interactions=interactions, observation=observation,
+                        producer_generation=captured.producer_generation, execution_id=execution_id,
+                        archive=interaction_archive,
+                    )
+                if write is None:
+                    await publish_projection()
+                else:
+                    await write(group, publish_projection)
                 head = await archive.execution_history_head_record(captured.run.agent_run_id)
                 if (
                     head.event_count != expected_head.event_count
@@ -1902,10 +1938,16 @@ class RuntimeAgentRunStore(AgentRunStore):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return head
 
-            return await archive.state_store.storage_group.mutate(archive.transaction_stores, commit)
+            return await archive.state_store.storage_group.mutate(
+                tuple(dict.fromkeys((*archive.transaction_stores, *stores))), commit,
+            )
 
         async def readback() -> CommitObservation[ExecutionRunSealHead]:
             try:
+                if readback_write is not None:
+                    joined = await readback_write()
+                    if joined.state is not DurableCommitState.COMMITTED:
+                        return CommitObservation(joined.state, error=joined.error)
                 head = await archive.execution_history_head_record(
                     captured.run.agent_run_id
                 )
