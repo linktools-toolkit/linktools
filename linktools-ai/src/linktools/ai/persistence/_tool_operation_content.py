@@ -140,6 +140,7 @@ class ToolOperationContent:
         active = active_state_scope()
         if (not keys and query is None or active is None or active.writable
                 or active.group is not self.store.storage_group
+                or self.store not in active.transactions
                 or not isinstance(active.record_reader, ContentReferenceReader)
                 or self.store.storage_group.opened_archive is None):
             return

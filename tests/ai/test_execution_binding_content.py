@@ -690,9 +690,9 @@ async def test_batch_configuration_validates_each_fixed_owner_once(tmp_path: Pat
         calls["binding"] += 1
         return original_binding(record, raw)
 
-    def policy(reference: tuple[str, str, str], raw: bytes) -> object:
+    def policy(raw: bytes) -> object:
         calls["policy"] += 1
-        return original_policy(reference, raw)
+        return original_policy(raw)
 
     monkeypatch.setattr(_execution_content, "expand_binding", binding)
     monkeypatch.setattr(_execution_policy_content, "decode_policy", policy)

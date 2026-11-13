@@ -289,6 +289,7 @@ class ExecutionContent:
         """Capture current control rows and only the immutable slots consumed next."""
         active = active_state_scope()
         if (not keys or active is None or active.group is not self._store.storage_group
+                or self._store not in active.transactions
                 or not isinstance(active.record_reader, ContentReferenceReader)
                 or self._store.storage_group.opened_archive is None):
             return
@@ -326,6 +327,7 @@ class ExecutionContent:
         """Use earlier reference addresses only to batch a fresh owner observation."""
         active = active_state_scope()
         if (active is None or active.writable or active.group is not self._store.storage_group
+                or self._store not in active.transactions
                 or not isinstance(active.record_reader, GroupRecordReader)):
             return
         try:

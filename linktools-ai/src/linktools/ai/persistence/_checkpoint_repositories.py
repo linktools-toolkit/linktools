@@ -803,6 +803,8 @@ class ToolRepositoryImpl(_RepositoryBase):
         async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
             await self._tool_content.prefetch_owners(keys)
             records = await transaction.get_records(keys)
+            if any(record.kind != "tool_operation" for record in records.values()):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             expanded = await self._tool_content.expand_many(tuple(records[key] for key in keys if key in records))
             values = tuple([await self._decode(record, ToolOperationRecord) for record in expanded])
             if any(value.tool_operation_id != identity for identity, value in zip(
