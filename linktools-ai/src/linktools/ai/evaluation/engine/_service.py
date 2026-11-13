@@ -1505,6 +1505,21 @@ class Evaluations:
         await self._state.publish_evidence(bundle)
         await self._state.publish_trial_evidence(record.experiment_id, EvaluationTrialEvidence(intent.trial, bundle.ref))
 
+    async def _capture_task_result(
+        self, graph_id: str, node_id: str, *, principal: Principal, expected_digest: str | None,
+    ) -> JsonValue:
+        from ...history import History
+
+        if type(self._history) is History and expected_digest is not None:
+            return await self._history.task_result(
+                graph_id, node_id, principal=principal, expected_digest=expected_digest,
+            )
+        # Custom readers keep their existing call contract and capture validation.
+        body = await self._history.task_result(graph_id, node_id, principal=principal)
+        if canonical_sha256(body) != expected_digest:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
+        return body
+
     async def _capture_target_input(
         self, state: TaskGraphState, principal: Principal, *, graph_target: bool,
     ) -> tuple[InlineValue | None, tuple[str, ...]]:
@@ -1536,15 +1551,13 @@ class Evaluations:
                         if isinstance(reference, TaskNodeResultRef):
                             dependency = states[reference.node_id]
                             status, reason, digest = dependency.status, dependency.error_code, dependency.result_digest
-                            body = (await self._history.task_result(state.graph_id, reference.node_id, principal=principal)
+                            body = (await self._capture_task_result(state.graph_id, reference.node_id, principal=principal, expected_digest=digest)
                                     if status is TaskStatus.SUCCEEDED else None)
                         else:
                             if reference.namespace != self._namespace or reference.tenant_id != principal.tenant_id:
                                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                             status, reason, digest = TaskStatus.SUCCEEDED, None, reference.result_digest
-                            body = await self._history.task_result(reference.graph_id, reference.node_id, principal=principal)
-                        if status is TaskStatus.SUCCEEDED and canonical_sha256(body) != digest:
-                            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
+                            body = await self._capture_task_result(reference.graph_id, reference.node_id, principal=principal, expected_digest=digest)
                         dependencies[name] = {"status": status.value.lower(), "value": body, "reason": reason}
                     value = {"kind": "task_input", "input": dict(parameters), "dependencies": dependencies}
                 inputs[node.node_id] = value

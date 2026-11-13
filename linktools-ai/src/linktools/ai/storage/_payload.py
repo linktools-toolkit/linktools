@@ -98,21 +98,36 @@ class StoredPayload:
         return self._value
 
     @classmethod
+    def _inline(cls, encoding: str, value: JsonValue) -> "StoredPayload":
+        if encoding == "json":
+            owned = canonical_json_bytes(normalize_json_value(value))
+            digest, size = hashlib.sha256(owned).hexdigest(), len(owned)
+        else:
+            digest, size = _inline_digest_size(encoding, value)
+            owned = cast(str, value)
+        if cls is not StoredPayload:
+            return cls("inline", encoding, digest, size,
+                       cast(JsonValue, json.loads(owned)) if encoding == "json" else value)
+        result = object.__new__(cls)
+        object.__setattr__(result, "kind", "inline")
+        object.__setattr__(result, "encoding", encoding)
+        object.__setattr__(result, "digest", digest)
+        object.__setattr__(result, "size", size)
+        object.__setattr__(result, "ref", None)
+        object.__setattr__(result, "_value", owned)
+        return result
+
+    @classmethod
     def inline_json(cls, value: JsonValue) -> "StoredPayload":
-        normalized = normalize_json_value(value)
-        digest, size = _inline_digest_size("json", normalized)
-        return cls("inline", "json", digest, size, normalized)
+        return cls._inline("json", value)
 
     @classmethod
     def inline_text(cls, value: str) -> "StoredPayload":
-        digest, size = _inline_digest_size("utf-8", value)
-        return cls("inline", "utf-8", digest, size, value)
+        return cls._inline("utf-8", value)
 
     @classmethod
     def inline_bytes(cls, value: bytes) -> "StoredPayload":
-        encoded = base64.b64encode(value).decode("ascii")
-        digest, size = _inline_digest_size("base64", encoded)
-        return cls("inline", "base64", digest, size, encoded)
+        return cls._inline("base64", base64.b64encode(value).decode("ascii"))
 
     @classmethod
     def object(cls, reference: "ObjectRef") -> "StoredPayload":

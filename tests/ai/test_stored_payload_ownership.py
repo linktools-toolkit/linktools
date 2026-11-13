@@ -160,3 +160,51 @@ async def test_restored_sdk_metadata_cannot_mutate_retained_input(kind: str) -> 
     assert second_metadata == {"nested": {"labels": ["original"]}}
     assert stored.view == second.view == original_view
     assert encode_domain(stored) == original_wire
+
+
+@pytest.mark.parametrize("kind", ("json", "text", "bytes"))
+def test_inline_factories_hash_once_and_external_descriptors_remain_checked(
+    monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    from linktools.ai.storage import _payload
+
+    original = hashlib.sha256
+    hashes = []
+
+    def counted(value: bytes):
+        hashes.append(value)
+        return original(value)
+
+    monkeypatch.setattr(_payload.hashlib, "sha256", counted)
+    payload = (StoredPayload.inline_json({"values": [1, 1.0, True, -0.0]}) if kind == "json"
+               else StoredPayload.inline_text("你好") if kind == "text"
+               else StoredPayload.inline_bytes(b"\x00\xffpayload"))
+    assert len(hashes) == 1
+    assert payload.digest == original(hashes[0]).hexdigest()
+    assert payload.size == len(hashes[0])
+    wire = payload.to_json()
+    assert StoredPayload.from_json(wire) == payload
+    assert len(hashes) == 2
+    with pytest.raises(ValueError, match="does not match"):
+        StoredPayload("inline", payload.encoding, "0" * 64, payload.size, payload.value)
+    with pytest.raises(ValueError, match="does not match"):
+        StoredPayload.from_json({**wire, "size": payload.size + 1})
+    with pytest.raises(ValueError):
+        StoredPayload.from_json({**wire, "value": "changed"})
+
+
+@pytest.mark.parametrize("kind", ("json", "text", "bytes"))
+def test_inline_factories_preserve_subclass_initialization(kind: str) -> None:
+    calls = []
+
+    class CustomPayload(StoredPayload):
+        def __init__(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            super().__init__(*args, **kwargs)
+
+    payload = (CustomPayload.inline_json({"value": 1.0}) if kind == "json"
+               else CustomPayload.inline_text("text") if kind == "text"
+               else CustomPayload.inline_bytes(b"bytes"))
+    assert isinstance(payload, CustomPayload)
+    assert len(calls) == 1
+    assert StoredPayload.from_json(payload.to_json()).to_json() == payload.to_json()

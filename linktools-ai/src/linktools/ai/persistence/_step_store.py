@@ -1081,7 +1081,7 @@ class SqlStepStore:
         """Bind checkpoint headers to an authenticated complete message closure.
 
         Callers authenticate every unique canonical message before this method.
-        Only the terminal message participates in the checkpoint retry digest;
+        Only the terminal message is needed to reconstruct the retry envelope;
         shared historical prefixes need not be hydrated again for each header.
         """
         for row in backup.snapshots:
@@ -1625,16 +1625,15 @@ class SqlStepStore:
     ) -> "tuple[dict[str, SqlValue], PreparedNativeMessages]":
         decoded = NativeCheckpoint.decode(snapshot)
         if isinstance(snapshot, NativeCheckpoint):
-            # Only the tail carries the retry envelope; the captured history is
-            # already independent and must retain its structural prefix proof.
-            snapshot = NativeCheckpoint.encode(replace(snapshot, messages=snapshot.messages[-1:]),
-                                               output_retries_used=snapshot.output_retries_used)
+            # Persist only native header fields; retry state has its own descriptor.
+            snapshot = ContinuableSnapshot(**{
+                field.name: getattr(snapshot, field.name) for field in fields(ContinuableSnapshot)
+            })
         values = self._record_values(snapshot)
         checkpoint = None
         if isinstance(decoded, NativeCheckpoint):
             checkpoint = {
                 "output_retries_used": decoded.output_retries_used,
-                "message_sha256": hashlib.sha256(encode_model_messages(snapshot.messages[-1:])).hexdigest(),
             }
         messages = self._frozen_messages.snapshot(decoded.messages)
         previous = self._message_inputs.get(snapshot.run_id)
@@ -1875,9 +1874,9 @@ class SqlStepStore:
     ) -> None:
         """Verify checkpoint header/retry binding using only its last message.
 
-        The caller authenticates every unique message body and the complete
-        sequence closure separately. The checkpoint digest binds its terminal
-        message plus control header, so repeated prefixes need not be decoded.
+        The caller validates the message bodies and sequence closure separately.
+        Retry state belongs to this snapshot row; reconstruct its envelope without
+        decoding repeated prefixes or computing a second content checksum.
         """
         sequence = cls.snapshot_message_sequence(data)
         if (payload is None) != (sequence.count == 0):

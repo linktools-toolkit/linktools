@@ -137,7 +137,7 @@ async def test_restore_shared_prefixes_reads_linear_body_volume_and_preserves_sn
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ("early_body", "missing_node", "header_digest"))
+@pytest.mark.parametrize("damage", ("early_body", "missing_node", "retry_type"))
 async def test_restore_rejects_corrupt_prefix_content_nodes_and_checkpoint_headers(tmp_path: Path, damage: str) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'native.db'}")
     store = SqlStepStore(engine, namespace="restore-cost", tenant_id="tenant")
@@ -158,7 +158,7 @@ async def test_restore_rejects_corrupt_prefix_content_nodes_and_checkpoint_heade
             else:
                 wire = backup.to_json()
                 descriptor = json.loads(wire["snapshots"][0]["messages"])
-                descriptor["checkpoint"]["message_sha256"] = "0" * 64
+                descriptor["checkpoint"]["output_retries_used"] = True
                 wire["snapshots"][0]["messages"] = json.dumps(descriptor)
                 backup = NativeStepBackup.from_json(wire)
         async with store.storage_context.sessions() as session, session.begin():
