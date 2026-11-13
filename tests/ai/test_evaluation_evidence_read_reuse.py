@@ -6,6 +6,7 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.evaluation.engine import Evaluations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -144,44 +145,44 @@ async def test_snapshot_rechecks_authorization_after_all_evidence_reads(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rescore", (False, True))
 async def test_snapshot_full_source_reads_are_bounded_and_source_owner_is_preserved(
-    tmp_path: Path, rescore: bool,
+    tmp_path: Path,
 ) -> None:
     async with completed(tmp_path, count=3) as (evaluations, storage, run, scorer, policy):
         source_id = run.experiment_id
-        if rescore:
-            run = await run.rescore(RescoreRequest((rule_scorer(scorer),), "rescore"))
-            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-        await evaluations.close()
-        source = await storage.evaluation.records.get(source_id, tenant_id=PRINCIPAL.tenant_id)
-        source_key = storage.evaluation.records._key("evaluation", (source_id,))
-        source_locator = sha256(source_key).hexdigest()
-        statements = []
+        for rescore in (False, True):
+            if rescore:
+                run = await run.rescore(RescoreRequest((rule_scorer(scorer),), "rescore"))
+                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            await asyncio.gather(*evaluations._watchers.values())
+            source = await storage.evaluation.records.get(source_id, tenant_id=PRINCIPAL.tenant_id)
+            source_key = storage.evaluation.records._key("evaluation", (source_id,))
+            source_locator = sha256(source_key).hexdigest()
+            statements = []
 
-        def capture(_connection, _cursor, sql, parameters, _context, _many):
-            if sql.startswith("SELECT") and (source_key in parameters or source_locator in parameters):
-                statements.append(sql)
+            def capture(_connection, _cursor, sql, parameters, _context, _many):
+                if sql.startswith("SELECT") and (source_key in parameters or source_locator in parameters):
+                    statements.append(sql)
 
-        engine = storage.evaluation.records.state_store.context.engine.sync_engine
-        event.listen(engine, "before_cursor_execute", capture)
-        policy.calls.clear()
-        try:
-            report = await run.preview_report()
-        finally:
-            event.remove(engine, "before_cursor_execute", capture)
-        assert 1 <= len(statements) <= (6 if rescore else 2), "source reads must not grow with evidence count"
-        assert len(report.trials) == 3 and report.scores[0].mean == 1.0
-        assert await report_count(storage) == 0
-        evidence_ids = {link.evidence_ref.evidence_id for link in source.evidence}
-        evidence_calls = [(action, resource) for action, resource in policy.calls
-                          if action is AuthorizationAction.EVALUATION_EVIDENCE_READ]
-        assert {resource.id for _, resource in evidence_calls if resource.id in evidence_ids} == evidence_ids
-        source_calls = [resource for _, resource in evidence_calls if resource.id == source_id]
-        assert sum(resource.owner_principal_id is None for resource in source_calls) >= len(evidence_ids)
-        assert sum(resource.owner_principal_id == PRINCIPAL.principal_id for resource in source_calls) >= len(evidence_ids)
-        if rescore:
-            assert all(resource.id != run.experiment_id for _, resource in evidence_calls)
+            engine = storage.evaluation.records.state_store.context.engine.sync_engine
+            event.listen(engine, "before_cursor_execute", capture)
+            policy.calls.clear()
+            try:
+                report = await run.preview_report()
+            finally:
+                event.remove(engine, "before_cursor_execute", capture)
+            assert 1 <= len(statements) <= (6 if rescore else 2), "source reads must not grow with evidence count"
+            assert len(report.trials) == 3 and report.scores[0].mean == 1.0
+            assert await report_count(storage) == 0
+            evidence_ids = {link.evidence_ref.evidence_id for link in source.evidence}
+            evidence_calls = [(action, resource) for action, resource in policy.calls
+                              if action is AuthorizationAction.EVALUATION_EVIDENCE_READ]
+            assert {resource.id for _, resource in evidence_calls if resource.id in evidence_ids} == evidence_ids
+            source_calls = [resource for _, resource in evidence_calls if resource.id == source_id]
+            assert sum(resource.owner_principal_id is None for resource in source_calls) >= len(evidence_ids)
+            assert sum(resource.owner_principal_id == PRINCIPAL.principal_id for resource in source_calls) >= len(evidence_ids)
+            if rescore:
+                assert all(resource.id != run.experiment_id for _, resource in evidence_calls)
 
 
 @pytest.mark.asyncio
