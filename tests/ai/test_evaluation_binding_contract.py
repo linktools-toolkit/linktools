@@ -71,7 +71,7 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
 
 
 @pytest.mark.asyncio
-async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunning(tmp_path: Path) -> None:
+async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunning() -> None:
     calls: list[str] = []
 
     async def target(context: TaskNodeContext[None]) -> JsonValue:
@@ -85,7 +85,7 @@ async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunn
     changed = Task("consumer.named", target, effect_policy="none", cancel=cancel)
     scorer = Task("consumer.named-score", exact, effect_policy="none")
     async with (
-        Persistence.open('drift-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_76,
+        Persistence.open('drift-consumers', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_76,
         TaskEngine.open(original, scorer, persistence=persistence_76, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -93,7 +93,7 @@ async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunn
             CaseSpec.task(CaseRef("drift", "one", 1), input={"answer": "yes"}, expected="yes"),
         )), principal=PRINCIPAL, idempotency_key="publish-drift")
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("current", task=original.ref),), (rule_scorer(scorer),)), PRINCIPAL, "start-drift"))
+            (CandidateSpec("current", task=original.ref),), (rule_scorer(scorer),), policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start-drift"))
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         async with (
@@ -109,11 +109,11 @@ async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunn
 
 
 @pytest.mark.asyncio
-async def test_strict_comparison_cannot_mix_datasets_even_when_both_scores_pass(tmp_path: Path) -> None:
+async def test_strict_comparison_cannot_mix_datasets_even_when_both_scores_pass() -> None:
     target = Task("consumer.dataset-target", echo, effect_policy="none")
     scorer = Task("consumer.dataset-score", exact, effect_policy="none")
     async with (
-        Persistence.open('different-dataset-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_97,
+        Persistence.open('different-dataset-consumers', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_97,
         TaskEngine.open(target, scorer, persistence=persistence_97, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -123,7 +123,7 @@ async def test_strict_comparison_cannot_mix_datasets_even_when_both_scores_pass(
                 CaseSpec.task(CaseRef(name, "one", 1), input={"answer": "yes"}, expected="yes"),
             )), principal=PRINCIPAL, idempotency_key=f"publish-{name}")
             run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, f"start-{name}"))
+                (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),), policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, f"start-{name}"))
             view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
             assert view.completion == "complete", view.needs_attention
             assert (await run.create_report()).scores[0].mean == 1.0
