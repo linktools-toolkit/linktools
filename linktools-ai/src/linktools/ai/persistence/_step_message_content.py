@@ -473,10 +473,8 @@ class NativeMessageContent:
             if table is self._messages:
                 ContentRecord.from_native_row(row)
             else:
-                node = ImmutableSequenceNode(_digest(row["message_sha256"]), _count(row["tree_count"]),
+                ImmutableSequenceNode(_digest(row["message_sha256"]), _count(row["tree_count"]),
                                              row["left_sha256"], row["right_sha256"], row["next_sha256"])
-                if node.identity != row["sha256"]:
-                    raise ValueError("native message sequence identity is invalid")
             row_size = sum(len(value.encode("utf-8")) if isinstance(value, str) else len(value)
                            for value in row.values() if isinstance(value, (str, bytes)))
             if batch and (len(batch) >= 64 or size + row_size > 256 * 1024):
@@ -754,7 +752,7 @@ class NativeMessageContent:
                     except AIError as error:
                         raise ValueError("native range sequence is corrupt") from error
                     expected = ImmutableSequenceNode.forest_weights(remaining)[0] if forest else remaining
-                    if row["sha256"] != identity or node.identity != identity or node.tree_count != expected:
+                    if row["sha256"] != identity or node.tree_count != expected:
                         raise ValueError("native range sequence is corrupt")
                     if forest and ((remaining > expected) != (node.next_forest is not None)):
                         raise ValueError("native range forest is incomplete")
