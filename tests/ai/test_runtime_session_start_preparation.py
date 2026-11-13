@@ -419,3 +419,45 @@ async def test_session_start_authorizes_source_owner_after_remote_cached_replace
                 assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
                 assert decisions and set(decisions) == {"replacement"}
                 assert calls == 0
+
+
+@pytest.mark.parametrize("settled", (False, True))
+@pytest.mark.parametrize("backend", ("sqlite", "memory"))
+async def test_session_start_identity_capture_is_call_local_and_invalidated_by_settle(tmp_path, monkeypatch, settled, backend):
+    from linktools.ai.runtime._execution import DefaultExecutionService
+    from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
+
+    captures = []
+    original_identity = DefaultExecutionService._request_identity
+    original_settle = _PendingExecutionTurns.settle_session
+
+    async def read_identity(self, *args, **kwargs):
+        captures.append(kwargs.get("captured"))
+        return await original_identity(self, *args, **kwargs)
+
+    async def settle(self, *args, **kwargs):
+        result = await original_settle(self, *args, **kwargs)
+        return settled or result
+
+    monkeypatch.setattr(DefaultExecutionService, "_request_identity", read_identity)
+    monkeypatch.setattr(_PendingExecutionTurns, "settle_session", settle)
+    features = _features(_answer)
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+    storage = PersistenceStorage.sqlite(tmp_path / "capture.db") if backend == "sqlite" else PersistenceStorage.in_memory()
+    async with Persistence.open("session-start-preparation", storage=storage) as state:
+        async with Runtime.attach(persistence=state, features=features, metrics=None) as runtime:
+            target = await runtime.agents.get().create_session("session")
+            handle = await target.start("question", idempotency_key="request")
+            await handle.wait(timeout_seconds=5)
+            assert captures
+            if settled:
+                assert captures[0] is None
+            else:
+                assert captures[0] is not None and captures[0].identity is None
+            captures.clear()
+            replay = await target.start("question", idempotency_key="request")
+            assert replay.execution_id == handle.execution_id
+            if not settled:
+                assert captures[0] is not None
+                assert captures[0].identity is not None
+                assert captures[0].identity.resource_id == handle.execution_id

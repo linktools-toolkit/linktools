@@ -13,7 +13,8 @@ from typing import Protocol
 
 
 from ._feature_policy import _RuntimeFeaturePolicy
-from ..session import SessionPendingExecutionLookup, SessionReleaseCallback, SessionManager
+from ._execution import DefaultExecutionService, _SessionStartRead
+from ..session import SessionPendingExecutionLookup, SessionReleaseCallback, SessionManager, SessionRecordReader
 from ..agent import AgentBinding, AgentBindingContract
 from ..core import (
     AuthorizationAction,
@@ -116,6 +117,7 @@ class _SessionTranscriptStore(Protocol):
 class _SessionExecutionAdapter:
     def __init__(self, execution: _SessionExecutionService) -> None:
         self._execution = execution
+        self.start_read: _SessionStartRead | None = None
 
     async def start_for_session(self, agent_id: str, binding_digest: str, session_id: str,
                                 request: ResumeSessionRequest, *,
@@ -139,6 +141,9 @@ class _SessionExecutionAdapter:
             binding_contract=binding_contract, resolved_binding=resolved_binding, dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
+            **({"_start_read": self.start_read} if isinstance(self._execution, DefaultExecutionService)
+               and self.start_read is not None and session is self.start_read.session
+               and session is not None and session.active_execution_id is None else {}),
         )
 
     async def cancel(self, execution_id: str, *, principal: Principal, idempotency_key: str) -> None:
@@ -157,13 +162,27 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         elif not (await self._current_policy()).session.enabled:
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
 
+    async def _resume(self, agent_id: str, binding_digest: str, session_id: str,
+                      request: ResumeSessionRequest, **kwargs) -> ExecutionHandle:
+        execution = self._admission_execution
+        if not isinstance(execution, DefaultExecutionService):
+            return await super()._resume(agent_id, binding_digest, session_id, request, **kwargs)
+        adapter = _SessionExecutionAdapter(execution)
+        async def read_session(identity: str, *, tenant_id: str) -> SessionRecord | None:
+            adapter.start_read = await execution._read_session_start(identity, request.idempotency_key, tenant_id=tenant_id)
+            return adapter.start_read.session
+        return await super()._resume(agent_id, binding_digest, session_id, request,
+            read_session=read_session, execution=adapter, **kwargs)
+
     async def _prepare_resume_session(
         self, agent_id: str, session_id: str, principal: Principal,
+        *, read_session: SessionRecordReader | None = None,
     ) -> SessionRecord:
         # Runtime starts preserve lazy session creation, but the authorized
         # record is consumed by this same resume rather than fetched twice.
         try:
-            record = await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+            record = await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ,
+                                                read_session=read_session)
         except AIError as error:
             if error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.AUTHORIZATION_DENIED}:
                 raise

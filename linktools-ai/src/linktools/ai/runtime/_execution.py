@@ -297,6 +297,13 @@ class _LiveExecutionStreamBroker(Protocol):
     def abandon_prepared_local_producer(self, execution_id: str) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _SessionStartRead:
+    """One admission attempt's read hints, never a reservation or reusable cache."""
+    session: "SessionRecord | None"
+    identity: IdempotencyRecord | None
+
+
 class _ExecutionRuntimeBridge:
     def __init__(self) -> None:
         self._port: _ExecutionRuntimePort | None = None
@@ -586,8 +593,10 @@ class DefaultExecutionService(TaskExecutionService):
     async def _request_identity(
         self, scope: str, idempotency_key: str, *, tenant_id: str,
         include_remote: bool = False,
+        captured: _SessionStartRead | None = None,
     ) -> tuple[int, IdempotencyRecord | None]:
-        identity = await self._state.idempotency.get(scope, idempotency_key, tenant_id=tenant_id)
+        identity = (captured.identity if captured is not None else
+                    await self._state.idempotency.get(scope, idempotency_key, tenant_id=tenant_id))
         if identity is not None:
             return identity.request_identity_version, identity
         pending = self._runtime_bridge.pending_turns
@@ -908,6 +917,13 @@ class DefaultExecutionService(TaskExecutionService):
             return ExecutionHandle(execution.execution_id)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    async def _read_session_start(self, session_id: str, idempotency_key: str, *, tenant_id: str) -> _SessionStartRead:
+        from ..persistence.commands import StateCommands
+        session, identity = await StateCommands.read_session_start(
+            self._sessions, self._state.idempotency, session_id, idempotency_key, tenant_id=tenant_id,
+        )
+        return _SessionStartRead(session, identity)
+
     async def start_for_session(
         self,
         agent_id: str,
@@ -921,6 +937,7 @@ class DefaultExecutionService(TaskExecutionService):
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
+        _start_read: _SessionStartRead | None = None,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -931,6 +948,7 @@ class DefaultExecutionService(TaskExecutionService):
             session_agent_id=agent_id,
             session=session,
             scope="session.resume",
+            start_read=_start_read,
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
@@ -1106,6 +1124,7 @@ class DefaultExecutionService(TaskExecutionService):
         resolved_binding: AgentBinding | None = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
+        start_read: _SessionStartRead | None = None,
     ) -> ExecutionHandle:
         metric_delivery: _TerminalMetricDelivery | None = None
 
@@ -1140,6 +1159,7 @@ class DefaultExecutionService(TaskExecutionService):
                     binding_contract=binding_contract,
                     resolved_binding=resolved_binding,
                     capture_metric=capture_metric,
+                    start_read=start_read,
                 )
             async with self._session_guard(request.principal.tenant_id, session_id):
                 return await self._start_unlocked(
@@ -1164,6 +1184,7 @@ class DefaultExecutionService(TaskExecutionService):
                     binding_contract=binding_contract,
                     resolved_binding=resolved_binding,
                     capture_metric=capture_metric,
+                    start_read=start_read,
                 )
         finally:
             admission_done.set_result(None)
@@ -1196,6 +1217,7 @@ class DefaultExecutionService(TaskExecutionService):
         budget_scope_id: str | None = None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
         prepared_input: _ExecutionStartContext | None = None,
+        start_read: _SessionStartRead | None = None,
     ) -> ExecutionHandle:
         if budget_scope_id is not None and (
             not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
@@ -1246,6 +1268,7 @@ class DefaultExecutionService(TaskExecutionService):
                 session_id, tenant_id=request.principal.tenant_id,
             )
             if session is None or settled:
+                start_read = None
                 current_session = await self._load_session(
                     session_id, tenant_id=request.principal.tenant_id
                 )
@@ -1298,6 +1321,7 @@ class DefaultExecutionService(TaskExecutionService):
         idempotency_key = request.idempotency_key
         identity_version, existing = await self._request_identity(
             scope, idempotency_key, tenant_id=request.principal.tenant_id, include_remote=prepared_input is not None,
+            captured=start_read,
         )
         request_digest = _request_digest(
             request,

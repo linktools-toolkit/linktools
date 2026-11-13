@@ -60,6 +60,7 @@ from .contracts import (
     ExecutionTerminalPublication,
     ExecutionTerminalWriteReceipt,
     IdempotencyRecord,
+    IdempotencyRepository,
     RuntimePayloadRef,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
@@ -86,7 +87,7 @@ from .durability import (
     run_durable_commit,
 )
 from ._execution_commands import _execution_history_seal
-from ._execution_repositories import ExecutionRepositoryImpl
+from ._execution_repositories import ExecutionRepositoryImpl, IdempotencyRepositoryImpl
 from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._conversation_repositories import (
     ConversationHistoryRepositoryImpl,
@@ -204,6 +205,27 @@ class StateCommands:
         self._background_tasks = background_tasks
         self._observe_cancellation = observe_cancellation
         self._capability_writes = capability_writes
+
+    @staticmethod
+    async def read_session_start(
+        sessions: SessionRepository, identities: IdempotencyRepository,
+        session_id: str, idempotency_key: str, *, tenant_id: str,
+    ) -> tuple[SessionRecord | None, IdempotencyRecord | None]:
+        """Capture admission hints in one short read; reservation remains the authority."""
+        stores = _dedupe_stores((sessions.state_store, identities.state_store))
+        async def read(group: StateGroupTransaction | None):
+            if (isinstance(group, GroupRecordReader) and isinstance(sessions, SessionRepositoryImpl)
+                    and isinstance(identities, IdempotencyRepositoryImpl)):
+                keys = {sessions.state_store: (sessions.session_record_key(session_id),)}
+                store = identities.state_store
+                keys[store] = (*keys.get(store, ()), identities._key("idempotency",
+                    identities._identity_key("session.resume", idempotency_key)))
+                await group.get_records(keys)
+            return (await sessions.get(session_id, tenant_id=tenant_id),
+                    await identities.get("session.resume", idempotency_key, tenant_id=tenant_id))
+        if _same_group(stores):
+            return await stores[0].storage_group.read_many(stores, read)
+        return await read(None)
 
     async def _load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self._execution.state_store.read(
