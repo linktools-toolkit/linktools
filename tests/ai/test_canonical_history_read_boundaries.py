@@ -244,7 +244,10 @@ async def test_history_and_trace_pagination_preserve_cross_run_and_child_order(t
 
 
 @pytest.mark.asyncio
-async def test_history_replay_projection_omits_only_duplicate_calls_at_original_coordinates(tmp_path: Path) -> None:
+@pytest.mark.parametrize("changed_replay", (False, True))
+async def test_history_replay_projection_omits_only_duplicate_calls_at_original_coordinates(
+    tmp_path: Path, changed_replay: bool,
+) -> None:
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 
     storage = Persistence(PersistenceStorage.sqlite(tmp_path / "replayed-calls.db"))
@@ -259,17 +262,21 @@ async def test_history_replay_projection_omits_only_duplicate_calls_at_original_
             run_id, agent_conversation_id=conversation_id, metadata={"agent_run_seq": "1"},
         ), execution_id="root")
         original = ToolCallPart("echo", {"value": "original"}, tool_call_id="replayed")
+        second = ToolCallPart("echo", {"value": "second"}, tool_call_id="replayed-second")
         repeated = ModelResponse(parts=[
-            original, TextPart("new text"), ToolCallPart("echo", {"value": "new"}, tool_call_id="new"),
+            original,
+            replace(second, args={"value": "changed"}) if changed_replay else second,
+            TextPart("new text"),
+            ToolCallPart("echo", {"value": "new"}, tool_call_id="new"),
         ])
         messages = (
-            ModelRequest(parts=[UserPromptPart("question")]), ModelResponse(parts=[original]),
+            ModelRequest(parts=[UserPromptPart("question")]), ModelResponse(parts=[original, second]),
             ModelRequest(parts=[ToolReturnPart("echo", "original", tool_call_id="replayed")]), repeated,
         )
         repository = archive.transcript_repository
         prepared = await repository.prepare_observation(
             run_id, messages[:3], first_message_index=0, pending=repeated,
-            pending_keys=("part:0", "part:1", "part:2"),
+            pending_keys=("part:0", "part:1", "part:2", "part:3"),
         )
         await archive.state_store.mutate(lambda transaction: repository.commit_observation(transaction, prepared))
         async def append_request(request: int, message: int, call_id: str) -> None:
@@ -277,7 +284,7 @@ async def test_history_replay_projection_omits_only_duplicate_calls_at_original_
                 run_id, "MODEL_REQUEST_SUCCEEDED", request, agent_conversation_id=conversation_id,
                 metadata={
                     "linktools.ai.model_request_seq": str(request), "linktools.ai.message_seq": str(message),
-                    **({"linktools.ai.replayed_tool_call_indices": "[0]"} if request == 2 else {}),
+                    **({"linktools.ai.replayed_tool_call_indices": "[0,1]"} if request == 2 else {}),
                 },
             ), execution_id="root")
             await archive.append_event(StepEvent(
@@ -286,14 +293,26 @@ async def test_history_replay_projection_omits_only_duplicate_calls_at_original_
                 metadata={"linktools.ai.model_request_seq": str(request)},
             ), execution_id="root")
         await append_request(1, 2, "replayed")
+        await archive.append_event(StepEvent(
+            run_id, "TOOL_CALL_STARTED", 1, tool_name="echo", tool_call_id="replayed-second",
+            agent_conversation_id=conversation_id,
+            metadata={"linktools.ai.model_request_seq": "1"},
+        ), execution_id="root")
         reader = StepExecutionHistoryReader(
             namespace="history", executions=_Executions(_record("root")), store=archive,
             cursor_signer=HmacCursorSigner("history", b"history"),
         )
+        if changed_replay:
+            from linktools.ai.errors import AIError, ErrorCode
+
+            with pytest.raises(AIError) as invalid:
+                await reader.history("root", tenant_id="tenant", cursor=None, limit=100)
+            assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            return
         pending = await reader.history("root", tenant_id="tenant", cursor=None, limit=100)
         frozen = await reader.history("root", tenant_id="tenant", cursor=None, limit=1)
         assert [(item.item_kind, item.part_index) for item in pending.items if item.message_seq == 4] == [
-            ("assistant", 1), ("tool_call", 2),
+            ("assistant", 2), ("tool_call", 3),
         ]
         assert all(item.model_request_seq is None for item in pending.items if item.message_seq == 4)
         completed = await repository.prepare_observation(
@@ -317,13 +336,13 @@ async def test_history_replay_projection_omits_only_duplicate_calls_at_original_
             if cursor is None:
                 break
         assert [(item.item_kind, item.message_seq, item.part_index, item.model_request_seq) for item in items] == [
-            ("user", 1, 0, None), ("tool_call", 2, 0, 1), ("tool_result", 3, None, 1),
-            ("assistant", 4, 1, 2), ("tool_call", 4, 2, 2),
+            ("user", 1, 0, None), ("tool_call", 2, 0, 1), ("tool_call", 2, 1, 1), ("tool_result", 3, None, 1),
+            ("assistant", 4, 2, 2), ("tool_call", 4, 3, 2),
         ]
         assert (await reader.history("root", tenant_id="tenant", cursor=None, limit=10,
                                      message_seq=4, part_index=0)).items == ()
         selected = await reader.history("root", tenant_id="tenant", cursor=None, limit=10,
-                                        message_seq=4, part_index=2)
+                                        message_seq=4, part_index=3)
         assert selected.items == (items[-1],)
         stored = [message async for message in archive.iter_message_range(agent_run_id=run_id, start=3, end=4)]
         assert stored == [repeated]
