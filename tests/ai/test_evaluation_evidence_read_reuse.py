@@ -7,8 +7,9 @@ from linktools.ai.task.engine import TaskEngine
 from linktools.ai.evaluation.engine import Evaluations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+import sqlite3
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -55,7 +56,7 @@ class Policy:
 
 @asynccontextmanager
 async def completed(
-    path: Path, *, count: int = 2, memory_tasks: bool = False,
+    path: Path, *, count: int = 2, memory_tasks: bool = False, experiment_id: str | None = None,
 ) -> AsyncIterator[tuple[Evaluations, Persistence, EvaluationRun, Task, Policy]]:
     storage = PersistenceStorage.sqlite(path / "state.sqlite")
     if memory_tasks:
@@ -68,15 +69,45 @@ async def completed(
             TaskEngine.open(target, scorer, persistence=persistence_52, context=CONTEXT, authorization=policy) as engine,
             Evaluations.open(engine) as evaluations,
         ):
-            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), tuple(
-                CaseSpec.task(CaseRef("dataset", f"case-{i}", 1), input={"answer": "yes"}, expected="yes")
-                for i in range(count))), principal=PRINCIPAL, idempotency_key="dataset")
-            run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
-                policy=EvaluationPolicy(allow_volatile=memory_tasks)), PRINCIPAL, "run"))
-            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            if experiment_id is None:
+                dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), tuple(
+                    CaseSpec.task(CaseRef("dataset", f"case-{i}", 1), input={"answer": "yes"}, expected="yes")
+                    for i in range(count))), principal=PRINCIPAL, idempotency_key="dataset")
+                run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                    (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
+                    policy=EvaluationPolicy(allow_volatile=memory_tasks)), PRINCIPAL, "run"))
+                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            else:
+                run = await evaluations.get(experiment_id, principal=PRINCIPAL)
             policy.calls.clear()
             yield evaluations, persistence_52, run, scorer, policy
+
+
+@pytest.fixture(scope="module")
+def completed_source_copy(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Callable[[Path], Awaitable[str]]:
+    frozen: tuple[Path, str] | None = None
+
+    async def prepare(destination: Path) -> str:
+        nonlocal frozen
+        if frozen is None:
+            source = tmp_path_factory.mktemp("completed-evidence-writer")
+            async with completed(source) as (_evaluations, _storage, run, _scorer, _policy):
+                experiment_id = run.experiment_id
+            # All writers are closed. Moving their directory makes accidental
+            # reads through the original physical location fail.
+            stopped = source.rename(source.with_name(source.name + "-stopped"))
+            frozen = stopped / "state.sqlite", experiment_id
+        database, experiment_id = frozen
+        with (
+            closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)) as source,
+            closing(sqlite3.connect(destination / "state.sqlite")) as copied,
+        ):
+            source.backup(copied)
+        return experiment_id
+
+    return prepare
 
 
 async def report_count(storage: Persistence) -> int:
@@ -233,12 +264,17 @@ async def test_snapshot_checks_each_evidence_policy_after_revocation(tmp_path: P
 @pytest.mark.parametrize("deadline_field", ("metadata_expires_at", "content_expires_at"))
 async def test_snapshot_checks_expiry_clock_for_each_cached_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deadline_field: str,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         now = datetime.now(timezone.utc)
         deadline = now + timedelta(hours=1)
         repository = storage.evaluation.records
+        initial = await repository.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        assert initial.metadata_expires_at is None and initial.content_expires_at is None
+        assert len(initial.evidence) == 2
         await repository.update(run.experiment_id, lambda record: replace(record, **{deadline_field: deadline}))
         read = repository.read_evidence
         calls = 0
@@ -310,8 +346,10 @@ async def test_snapshot_revalidates_sources_before_releasing_content(
 @pytest.mark.asyncio
 async def test_snapshot_keeps_evidence_integrity_checks_with_reused_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         repository = storage.evaluation.records
         read = repository.read_evidence
@@ -327,6 +365,7 @@ async def test_snapshot_keeps_evidence_integrity_checks_with_reused_source(
         with pytest.raises(AIError) as caught:
             await run.create_report()
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert calls == 2
         assert await report_count(storage) == 0
 
 
