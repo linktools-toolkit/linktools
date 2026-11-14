@@ -465,7 +465,7 @@ async def test_cancel_fences_unstarted_trials_and_reconcile_after_reopen_is_idem
 
 
 @pytest.mark.asyncio
-async def test_human_score_waits_for_one_decision_and_rescore_keeps_prior_result(tmp_path: Path) -> None:
+async def test_human_score_waits_for_one_decision_and_rescore_keeps_prior_result() -> None:
     calls: list[str] = []
 
     async def target(context: TaskNodeContext[None]) -> JsonValue:
@@ -475,7 +475,7 @@ async def test_human_score_waits_for_one_decision_and_rescore_keeps_prior_result
     task = Task("consumer.human-target", target, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     async with (
-        Persistence.open('human-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_430,
+        Persistence.open('human-consumers', storage=PersistenceStorage.in_memory(), tenant_id=TENANT) as persistence_430,
         TaskEngine.open(task, persistence=persistence_430, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -483,7 +483,8 @@ async def test_human_score_waits_for_one_decision_and_rescore_keeps_prior_result
             CaseSpec.task(CaseRef("human", "one", 1), input={"answer": "yes"}, expected="yes"),
         )), principal=PRINCIPAL, idempotency_key="publish-human")
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("current", task=task.ref),), (scorer,)), PRINCIPAL, "start-human"))
+            (CandidateSpec("current", task=task.ref),), (scorer,),
+            policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start-human"))
 
         async def wait_for_human(scoring_run: EvaluationRun) -> ScoreAttemptView:
             while True:
