@@ -2021,18 +2021,36 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             await second_engine.dispose()
 
 
+@pytest.fixture(scope="module")
+def unconfirmed_tool_source_copy(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Callable[[Path], Awaitable[tuple[Path, Path, Path]]]:
+    frozen: Path | None = None
+
+    async def copy(destination: Path) -> tuple[Path, Path, Path]:
+        nonlocal frozen
+        if frozen is None:
+            source = tmp_path_factory.mktemp("unconfirmed-tool-process")
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setenv("LINKTOOLS_TEST_STEP_DATABASE", str(source / "native.db"))
+                await _exit_at_boundary(
+                    source / "runtime.db", source / "effects.txt", "sqlite", "effect_unconfirmed",
+                )
+            frozen = source.rename(source.with_name(source.name + "-stopped"))
+        # The process is dead. Copy raw databases and their WAL/SHM sidecars
+        # without opening SQLite, so each reader performs its own crash recovery.
+        shutil.copytree(frozen, destination, dirs_exist_ok=True)
+        return destination / "runtime.db", destination / "effects.txt", destination / "native.db"
+
+    return copy
+
+
 @pytest.mark.asyncio
 async def test_abandoned_tool_claim_waits_for_explicit_recovery_after_restart(
     tmp_path: Path,
+    unconfirmed_tool_source_copy: Callable[[Path], Awaitable[tuple[Path, Path, Path]]],
 ) -> None:
-    database = tmp_path / "active-claim-restart.db"
-    effect_log = tmp_path / "active-claim-effects.txt"
-    await _exit_at_boundary(
-        database,
-        effect_log,
-        "sqlite",
-        "effect_unconfirmed",
-    )
+    database, effect_log, native_database = await unconfirmed_tool_source_copy(tmp_path)
     committed_effects = effect_log.read_text().splitlines()
     assert len(committed_effects) == 1
     execution_id = committed_effects[0]
@@ -2044,7 +2062,7 @@ async def test_abandoned_tool_claim_waits_for_explicit_recovery_after_restart(
         effect_log=effect_log,
     )
     try:
-        application.capability(native_checkpoint(), scope="runtime")
+        application.capability(native_checkpoint(database=native_database), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_1981, Runtime.attach(persistence=persistence_1981, features=model_features(_ToolModels(), application)) as runtime:
             current = await runtime._state.execution.executions.get(
@@ -2085,15 +2103,9 @@ async def test_abandoned_tool_claim_waits_for_explicit_recovery_after_restart(
 @pytest.mark.asyncio
 async def test_idempotent_replay_does_not_claim_active_tool_execution(
     tmp_path: Path,
+    unconfirmed_tool_source_copy: Callable[[Path], Awaitable[tuple[Path, Path, Path]]],
 ) -> None:
-    database = tmp_path / "active-claim-replay.db"
-    effect_log = tmp_path / "active-claim-replay-effects.txt"
-    await _exit_at_boundary(
-        database,
-        effect_log,
-        "sqlite",
-        "effect_unconfirmed",
-    )
+    database, effect_log, native_database = await unconfirmed_tool_source_copy(tmp_path)
     committed_effects = effect_log.read_text().splitlines()
     assert len(committed_effects) == 1
     execution_id = committed_effects[0]
@@ -2105,7 +2117,7 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
         effect_log=effect_log,
     )
     try:
-        application.capability(native_checkpoint(), scope="runtime")
+        application.capability(native_checkpoint(database=native_database), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_2047, Runtime.attach(persistence=persistence_2047, features=model_features(_ToolModels(), application)) as runtime:
             tools = await runtime._state.checkpoint.tools.list_by_execution(
@@ -2743,15 +2755,14 @@ async def test_conversation_preparation_failure_keeps_owner_retryable(
 @pytest.mark.asyncio
 async def test_cold_cancel_preserves_unconfirmed_tool_effect_after_process_exit(
     tmp_path: Path,
+    unconfirmed_tool_source_copy: Callable[[Path], Awaitable[tuple[Path, Path, Path]]],
 ) -> None:
-    database = tmp_path / "cold-cancel.db"
-    effect_log = tmp_path / "cold-cancel-effects.txt"
-    await _exit_at_boundary(database, effect_log, "sqlite", "effect_unconfirmed")
+    database, effect_log, native_database = await unconfirmed_tool_source_copy(tmp_path)
     effects = effect_log.read_text().splitlines()
     execution_id, = effects
     calls: list[str] = []
     application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
-    application.capability(native_checkpoint(), scope="runtime")
+    application.capability(native_checkpoint(database=native_database), scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
     async with Persistence.open(
         "session-tool-crash", storage=PersistenceStorage.sqlite(database),
