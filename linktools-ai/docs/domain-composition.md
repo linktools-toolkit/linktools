@@ -89,6 +89,29 @@ forwarding facade just to reduce the number of `service` references.
   `connection=...` must instead be closed by that caller after Runtime closes.
   Native snapshots are not copied into a second Runtime checkpoint archive.
 
+## Resource ownership is selected per resource
+
+`Runtime.attach` borrows Persistence, not every object in `features`. Resource
+declarations still determine who initializes and closes each dependency:
+
+| Resource supplied to Runtime | Initialization and close owner | Existing public call shape |
+| --- | --- | --- |
+| Persistence opened by `Runtime.open` | Runtime | One Runtime context |
+| Persistence supplied to `Runtime.attach` | Host; it must already be open and writable | Outer Persistence context, inner Runtime context |
+| `AssetCapability(store)` in `RuntimeFeatures` | Runtime, even with `attach` or an already initialized store | Pass the declaration directly for ownership transfer |
+| Asset source in `features.borrow()` | Host; initialize before borrowers and close after all borrowers finish | Pass the live borrowed source, not an inspection resolution |
+| Default `StepPersistenceCapability()` adapter | Runtime creates/closes the adapter over Execution storage; its external SQL engine remains host-owned | No extra store context; requires an Execution SQL route |
+| Explicit StepStore in `StepPersistenceCapability(store=...)` or native `StepPersistence(store=...)` | Caller; Runtime does not close it | Keep the store usable through producer cleanup |
+
+Runtime releases owned dependencies only after producer cleanup succeeds. A
+producer close failure leaves those dependencies available for retrying
+`runtime.close()`; closing borrowed Persistence first would remove that recovery
+path. Partial initialization also uses the same cleanup ownership rather than
+transferring it to the failing capability. The existing
+`test_runtime_resource_ownership.py` checks these combinations, explicit stores
+inside wrappers, partial initialization and close retry; this table does not add
+a new lifecycle or automatic recovery mechanism.
+
 ## Failure, cancellation, and recovery boundaries
 
 A wait timeout or a cancelled observer is not proof that the producer stopped.
