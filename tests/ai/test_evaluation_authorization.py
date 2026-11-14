@@ -233,7 +233,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
 
 
 @pytest.mark.asyncio
-async def test_shared_graph_capture_requires_its_own_permission(tmp_path: Path) -> None:
+async def test_shared_graph_capture_requires_its_own_permission() -> None:
     async def answer(context: TaskNodeContext[None]) -> JsonValue:
         return context.input["answer"]
 
@@ -242,7 +242,7 @@ async def test_shared_graph_capture_requires_its_own_permission(tmp_path: Path) 
     target = Task("shared.graph-target", answer, effect_policy="none")
     scorer = Task("shared.graph-score", exact, effect_policy="none")
     async with (
-        Persistence.open('shared-graph', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_232,
+        Persistence.open('shared-graph', storage=PersistenceStorage.in_memory(), tenant_id=TENANT) as persistence_232,
         TaskEngine.open(target, scorer, persistence=persistence_232, context=CONTEXT, authorization=authorization) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -258,7 +258,7 @@ async def test_shared_graph_capture_requires_its_own_permission(tmp_path: Path) 
         )), principal=PUBLISHER, idempotency_key="dataset")
         request = StartEvaluationRequest(EvaluationSpec(
             dataset, (CandidateSpec("graph", graph_template=GraphTargetSpec(capture=capture, selector="terminal_sinks")),),
-            (rule_scorer(scorer),),
+            (rule_scorer(scorer),), policy=EvaluationPolicy(allow_volatile=True),
         ), OPERATOR, "evaluate")
         with pytest.raises(AIError) as denied:
             await evaluations.start(request)
