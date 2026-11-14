@@ -6,7 +6,7 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.evaluation.engine import Evaluations
 
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -38,6 +38,7 @@ from .test_evaluation_consumers import (
     CONTEXT, EVALUATION_COMPLETION_TIMEOUT_SECONDS, PRINCIPAL, echo, exact, rule_scorer,
 )
 from .test_evaluation_evidence_read_reuse import Policy, completed, report_count
+from .test_evaluation_evidence_read_reuse import completed_source_copy as completed_source_copy
 from .test_evaluation_retention import Offline
 from ._sqlite_failure_timeline import sqlite_failure_evidence
 
@@ -164,8 +165,10 @@ async def test_current_reads_reload_native_recovery_state_without_updating_evalu
 @pytest.mark.asyncio
 async def test_current_cursor_survives_mutable_revision_and_reads_new_native_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         repository = storage.evaluation.records
         before = await repository.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
@@ -188,8 +191,10 @@ async def test_current_cursor_survives_mutable_revision_and_reads_new_native_sta
 @sqlite_failure_evidence
 async def test_current_cursor_rejects_wrong_scope_manifest_and_position(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, scorer, policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, scorer, policy):
         other = await run.rescore(RescoreRequest((rule_scorer(scorer),), "cursor-other"))
         await evaluations.close()
         owner = evaluations
@@ -273,8 +278,10 @@ async def test_rescore_current_pages_use_only_selected_source_trials(
 @pytest.mark.asyncio
 async def test_direct_trial_and_case_reads_do_not_scan_pages_or_case_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         owner = evaluations
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
@@ -312,8 +319,10 @@ async def test_direct_trial_and_case_reads_do_not_scan_pages_or_case_content(
 @pytest.mark.asyncio
 async def test_current_reads_preserve_frozen_trial_and_score_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         frozen_trials = await run.trials(limit=1)
         frozen_scores = await run.scores(limit=1)
@@ -419,8 +428,10 @@ async def test_current_reads_validate_selected_evidence_and_attachment_integrity
 @pytest.mark.asyncio
 async def test_unselected_bad_attachment_does_not_block_current_window_or_direct_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         reference = await _add_attachment(storage, run.experiment_id, 1)
         objects = storage.object_store(PersistenceDomain.EVALUATION)
