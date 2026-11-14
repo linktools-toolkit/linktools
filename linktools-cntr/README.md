@@ -70,7 +70,7 @@ linktools-cntr 内置了常用容器定义，开箱即用：
 
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `CONTAINER_TYPE` | str | — | 容器运行时：`docker` / `docker-rootless`（Podman 已不再支持） |
+| `CONTAINER_TYPE` | str | — | 容器运行时：`docker` / `docker-rootless` |
 | `DOCKER_USER` | str | 当前用户 | 部分 rootless 容器使用此用户权限运行 |
 | `DOCKER_HOST` | str | `/var/run/docker.sock` | Docker Daemon 地址 |
 | `DOCKER_APP_PATH` | str | `~/.linktools/data/container/app` | 容器数据持久化目录（建议置于 SSD） |
@@ -186,7 +186,7 @@ ct-cntr doctor --runtime      # 额外对实际 docker/compose 运行时校验 c
 
 ### 本地文件配置（`.linktools.json`）
 
-`.linktools.json`/`linktools.json` 是通用的项目清单（project profile，`linktools.core.ProjectProfile` 负责读取与合并），不是 cntr 专属格式，也不是独立的配置系统——它只是接入现有 ConfigResolver 的两个轻量文件层：用户级 `~/.linktools/linktools.json` 与本地级 `<root>/.linktools.json`。不要求 `version`/`kind`/`schema_version`/`components`。容器仓库可以在根目录放置本地文件，声明该仓库对 `linktools-cntr` 的版本要求（`requires`），以及仓库内容器的本地默认环境值（`env`）。缺失该文件的仓库正常可用，行为不变。
+`.linktools.json`/`linktools.json` 是通用的项目清单（project profile，`linktools.core.ProjectProfile` 负责读取与合并），不是 cntr 专属格式，也不是独立的配置系统——它只是接入现有 ConfigResolver 的两个轻量文件层：用户级 `~/.linktools/linktools.json` 与本地级 `<root>/.linktools.json`。不要求 `version`/`kind`/`schema_version`/`components`。容器仓库可以在根目录放置本地文件，声明该仓库对 `linktools-cntr` 的版本要求（`requires`），以及仓库内容器的本地默认环境值（`env`）。缺失该文件的仓库正常可用。
 
 ```json
 {
@@ -199,13 +199,13 @@ ct-cntr doctor --runtime      # 额外对实际 docker/compose 运行时校验 c
 }
 ```
 
-cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用户级文件、`ct-cntr config set` 持久化值、运行时覆盖都不能放宽或覆盖仓库自身声明的兼容性要求。不满足（或 specifier 非法）时，`repo add`/`repo update`/加载都会在该仓库的 `container.py` 被导入前拒绝；`requires` 中的其他 key（如未来的 `linktools-ai`）cntr 完全忽略。
+cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用户级文件、`ct-cntr config set` 持久化值、运行时覆盖都不能放宽或覆盖仓库自身声明的兼容性要求。不满足（或 specifier 非法）时，`repo add`/`repo update`/加载都会在该仓库的 `container.py` 被导入前拒绝；`requires` 中的其他 key（如 `linktools-ai`）cntr 完全忽略。
 
-### Compose 渲染后 Hook
+### Compose 渲染 Hook
 
 容器发现由内部 Loader 完成；访问 `manager.containers` 时会自动通过生命周期执行一次所有容器的 `on_init()`。容器内部的 `self.containers` 直接引用已构造的完整注册表，因此在 `on_init()` 中访问不会递归，但不应依赖其他容器的 `on_init()` 已经完成。初始化期间不应通过 `self.manager.containers` 间接重新进入初始化；任一 `on_init()` 失败将终止本次初始化。
 
-在容器的 `on_init()` 中通过 `self.hooks.register(HookPhase.BEFORE_COMPOSE_RENDER, ...)` 或 `self.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, ...)` 注册 Hook。两者都接收渲染后的 Compose 字典，可原地修改，按 `order`、依赖关系和注册顺序执行。`BEFORE_COMPOSE_RENDER` 在模板解析和映射校验之后、服务/网络默认值补全之前执行，注入的服务同样获得框架默认值；`AFTER_COMPOSE_RENDER` 在默认值补全之后执行。同一准备阶段只在首次渲染时执行；进入新的执行准备阶段会重置框架生成的 Compose、Dockerfile 和服务缓存，保留显式赋值的覆盖。没有 Compose 模板时不执行。
+在容器的 `on_init()` 中通过 `self.hooks.register(HookPhase.BEFORE_COMPOSE_RENDER, ...)` 或 `self.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, ...)` 注册 Hook，按 `order`、依赖关系和注册顺序执行。两者成对括住同一次渲染：`BEFORE_COMPOSE_RENDER` 在模板渲染之前执行，不接收数据，可先调整模板会解析到的容器状态；`AFTER_COMPOSE_RENDER` 在模板解析及服务、网络默认值补全之后执行，接收渲染后的 Compose 字典，可原地修改。同一准备阶段只在首次渲染时执行；进入新的执行准备阶段会重置框架生成的 Compose、Dockerfile 和服务缓存，保留显式赋值的覆盖。没有 Compose 模板时不执行。
 
 ```python
 from typing import TYPE_CHECKING
@@ -227,15 +227,7 @@ class Container(BaseContainer):
         compose["services"]["app"].setdefault("labels", {})["example.enabled"] = "true"
 ```
 
-修改会体现在后续缓存、Compose 文件和执行计划中。`ct-cntr doctor`、执行计划等只读操作也可能触发渲染，因此此 Hook 只应修改传入的内存字典，不应写文件或执行其他外部操作。
-
-迁移表：
-
-- `ct-cntr plan up` → `ct-cntr up --dry-run`
-- `ct-cntr plan restart` → `ct-cntr restart --dry-run`
-- `ct-cntr plan down` → `ct-cntr down --dry-run`
-
-旧 JSON 输出分别改为追加 `--json`。`--json` 必须与 `--dry-run` 同时使用。
+修改会体现在后续缓存、Compose 文件和执行计划中。`ct-cntr doctor`、执行计划等只读操作也可能触发渲染，因此这两个 Hook 只应调整内存中的状态或字典，不应写文件或执行其他外部操作。
 
 ```bash
 ct-cntr repo status
@@ -249,9 +241,9 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 
 `up`：确定范围 → 显式目标初始化 → 比较关联运行消费者的实际生成文件挂载 → 实际目标启动 hook → 准备显式镜像 → 检查 → Compose 应用、确认就绪并记录成功快照 → 启动后 hook。`restart` 全部准备和检查通过后才停止显式目标。
 
-生成配置的容器可按需定义自己的 `config_path` cached property，调用 `self.prepare_files(files)` 返回内容 hash 目录。它在同一集成快照内固定内容和路径，只注册已有启动 hook，不立即写文件；Compose 模板直接引用该真实路径。框架不要求或扫描这个属性，不需要额外集成回调、配置 revision getter、标签或 `current` 软链。
+生成配置的容器可按需定义自己的 `config_path` cached property，调用 `self.prepare_files(files)` 返回内容 hash 目录。它在同一集成快照内固定内容和路径，只注册已有启动 hook，不立即写文件；Compose 模板直接引用该真实路径。框架不要求或扫描这个属性，也不需要额外集成回调或配置 revision getter。
 
-调用方有独立版本时可用 `self.prepare_files(files, revision="release-2026-10-17")`。显式 revision 由调用方管理，不混入内容摘要；框架将字符串编码到独立目录命名空间，文件内容或名称变化须同步换版本。mode 仅用于初次创建；复用时不校验或重置现存权限及归属，仍校验字节内容、目录结构和软链接。同次声明或现存目录发生版本冲突时拒绝，不覆盖旧代。版本在声明时捕获，启动时无需再传；未传则采用内容寻址；移除旧 group 摘要因子后，升级时默认路径会变化一次，之后相同输入保持稳定。清理仍按引用和回滚版本保留，没有永久历史版本注册。
+调用方有独立版本时可用 `self.prepare_files(files, revision="release-2026-10-17")`。显式 revision 由调用方管理，不混入内容摘要；框架将字符串编码到独立目录命名空间，文件内容或名称变化须同步换版本。mode 仅用于初次创建；复用时不校验或重置现存权限及归属，仍校验字节内容、目录结构和软链接。同次声明或现存目录发生版本冲突时拒绝，不覆盖旧代。版本在声明时捕获，启动时无需再传；未传则采用内容寻址，相同输入保持稳定。清理仍按引用和回滚版本保留，没有永久历史版本注册。
 
 相关且已运行的消费者只有生成文件挂载变化才参与应用，不额外拉取或构建镜像。若同时有环境变量、端口、镜像等其他待应用变更，要求显式选择该消费者；未变化或未运行消费者不启动、不初始化。默认内容寻址下，配置内容相同则路径相同，Compose 不因配置而重建；内容变化则由声明的挂载路径变化触发重建。普通配置部署不对 Nginx 执行热加载；ACME 续期仍由证书脚本负责 reload。
 
@@ -261,10 +253,10 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 
 每服务的恢复快照保留完整项目依赖；同次操作按快照内容复用解析结果，读取工作副本时隔离修改，跨操作重新读取磁盘。准备前后模型仍分别比较，不复用过期配置。
 
-批量应用可能部分成功。成功模型记录真实不可变配置路径，失败项用旧模型和旧路径恢复；独立的已确认成功项可以保留，不再切换共享 `current` 或维护配置组事务。原有共享 bind 输入变更的关联恢复继续生效。恢复不撤销应用写入数据库或持久卷的外部副作用。
+批量应用可能部分成功。成功模型记录真实不可变配置路径，失败项用旧模型和旧路径恢复；独立的已确认成功项可以保留。共享 bind 输入变更时关联容器随之恢复。恢复不撤销应用写入数据库或持久卷的外部副作用。
 
 
-容器组依赖用于选择参与服务，真正的启动先后由 Compose `depends_on` 等依赖决定。没有额外的隐式全局运行依赖门禁；未选中的 Nginx 不替其他容器拦截启动，实际应用 Nginx 时仍执行它自身的检查。实际依赖环直接报错，不再自动使用 Bootstrap 配置。配置检查失败不停止旧服务或切换 `current`；后置通知失败明确报告“已应用、后置处理失败”，不反向触发部署回滚。
+容器组依赖用于选择参与服务，真正的启动先后由 Compose `depends_on` 等依赖决定。未选中的 Nginx 不替其他容器拦截启动，实际应用 Nginx 时仍执行它自身的检查。配置检查失败不停止旧服务；后置通知失败明确报告“已应用、后置处理失败”，不反向触发部署回滚。
 
 详见 [生命周期与文件准备](docs/lifecycle.md)。
 
@@ -275,7 +267,6 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 
 ## 声明式集成与配置发布
 
-`integrations` 返回声明或列表/元组组合，不再接受 key/value 字典。
 导航和 OIDC 回调独立声明，使用原站点对象引用；只有一个站点时可省略引用：
 
 ```python
@@ -318,9 +309,8 @@ OIDC 回调必须包含 scheme 和 host，普通 path 不自动补全。独立�
 同一容器可以返回多个 endpoint。跨声明引用时保存原 endpoint 对象，
 例如 `load_nginx_url(ResolvedSite.find(self, self.proxy_endpoint))`；多站点省略引用会明确报错。
 `ResolvedSite.find` 返回 ConfigLazy，由 Config.resolve 执行查找；直接读取站点属性前先解析。
-URL/端口参数接收字面值或 ConfigValue；配置键显式使用 ConfigRef，不再隐式查键。
-`Nginx` 不含 `local_id` / `link` / `auth_rule`；授权规则归 `Authelia.access`，
-OIDC 回调仍由 `Authelia.oidc` 声明准确的绝对地址。
+URL/端口参数接收字面值或 ConfigValue；配置键显式使用 ConfigRef。
+授权规则归 `Authelia.access`，OIDC 回调由 `Authelia.oidc` 声明准确的绝对地址。
 
 `Flare.public` 创建带描述的应用；`Flare.container(name, icon, url)` 创建容器分区书签；
 `Flare.bookmark` 支持自定义分区。
@@ -330,8 +320,7 @@ OIDC 回调仍由 `Authelia.oidc` 声明准确的绝对地址。
 服务应用、文件变更判断和恢复统一由框架负责。
 导航 URL 不负责注册代理；仅 endpoint 内省略 URL 的首页应用关联该主入口。
 `auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
-外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。
-详见 [集成协议与迁移说明](docs/integrations.md)。
+详见 [集成协议](docs/integrations.md)。
 
 ### Nginx 与 SafeLine 网络
 
@@ -339,7 +328,7 @@ SafeLine 独立拥有 `safeline-ce` 网络，Tengine 和其他 SafeLine 服务�
 启用 SafeLine 时，Nginx 额外加入该网络，固定为 `.253`；Tengine 固定为 `.254`。
 Nginx 保留自己的应用网络，但 Tengine 不加入它。网段沿用 `SAFELINE_SUBNET_PREFIX`，默认 `172.22.242`。
 
-回源契约仍是 `http://nginx:<NGINX_WAF_PORT>`，默认 `http://nginx:8000`，已有正确配置无需改名。
+回源契约为 `http://nginx:<NGINX_WAF_PORT>`，默认 `http://nginx:8000`。
 固定地址避免容器重建后双向代理仍使用旧 IP；两者不共享网络命名空间，Nginx 健康检查不等待 Tengine。
 回源端口只走业务/认证路由，不再次进入 WAF，也不跳转 HTTPS。入口覆盖 `X-Forwarded-For` 为真实客户端地址；SafeLine 保留 Host 并按原生 `$proxy_add_x_forwarded_for` 追加代理地址。
 该端口不发布到宿主机，仍仅允许 Tengine 的精确 TCP 来源；realip 递归仅信任 `.253`、`.254` 两个代理，不信任整个网段。无需私有回源头，也不因缺少客户端身份直接返回 400；认证与业务按自身规则处理。

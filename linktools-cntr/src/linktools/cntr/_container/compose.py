@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
-    # Rendering and post-render hooks must remain read-only. This
+    # Rendering and its before/after hooks must remain read-only. This
     # needs no transaction of its own: rendering may resolve settings from
     # another container, and a store-wide transaction would collide with
     # that container's own transaction (CacheStore's nesting guard is
@@ -28,17 +28,17 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
         path = container.get_source_path(name)
         if not os.path.exists(path):
             continue
+        # Paired with the AFTER_COMPOSE_RENDER call below: this one fires
+        # before the template is rendered (no payload); hooks may adjust
+        # container state that the template then resolves.
+        from ..lifecycle.hooks import HookPhase
+        container.hooks.call(HookPhase.BEFORE_COMPOSE_RENDER)
         data = yaml.safe_load(container.render_template(path))
         if data is None:
             data = {}
         if not isinstance(data, dict):
             from ..errors import ContainerError
             raise ContainerError(f"Compose root must be a mapping: {path}")
-        # Before-defaults hooks see the raw template model and may inject
-        # services/networks that then receive the same framework defaults
-        # as template-declared ones.
-        from ..lifecycle.hooks import HookPhase
-        container.hooks.call(HookPhase.BEFORE_COMPOSE_RENDER, data)
         if "services" in data and isinstance(data["services"], dict):
             for name, service in data["services"].items():
                 if not isinstance(service, dict):
