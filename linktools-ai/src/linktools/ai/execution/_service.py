@@ -902,6 +902,11 @@ class TaskExecutionService:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return project_execution_view(current)
         if current.status is ExecutionStatus.FAILED:
+            if resolution.kind == "failed":
+                if (current.error_code != resolution.error_code.value
+                        or dict(current.safe_error_details) != dict(resolution.safe_details)):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                return project_execution_view(current)
             if (
                 resolution.kind != "applied"
                 or applied_digest is None
@@ -918,6 +923,17 @@ class TaskExecutionService:
             raise AIError(ErrorCode.TASK_NOT_READY)
         if resolution.kind == "unknown":
             return project_execution_view(current)
+
+        if resolution.kind == "failed":
+            await self.fail_task(
+                execution_id,
+                principal=principal,
+                error=AIError(resolution.error_code, retryable=False,
+                              safe_details=resolution.safe_details),
+                attempt=project_execution_view(current),
+            )
+            with self._confirm_task_terminal(execution_id):
+                return await self.inspect(execution_id, principal=principal)
 
         if resolution.kind == "not_applied":
             now = datetime.now(timezone.utc)
