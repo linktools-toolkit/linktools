@@ -114,8 +114,8 @@ def _runtime_feature_policy(
             return rebound
         return capability
 
-    captured_persistence_ids: set[str] = set()
     capability_revisions: dict[str, int] = {}
+    captured_capabilities: list[AbstractCapability[AgentContext[object]]] = []
     runtime_capability_values = []
     for candidate in candidates:
         if candidate.scope != "runtime":
@@ -130,6 +130,8 @@ def _runtime_feature_policy(
                 rebound.wrapped = wrapped
                 return rebound
             selected = consume_runtime_declaration(capability)
+            if selected is not None:
+                captured_capabilities.append(selected)
             if selected is None or not isinstance(selected, CapabilityPersistence):
                 return selected
             identity = selected.id
@@ -137,9 +139,9 @@ def _runtime_feature_policy(
                 if capability is not candidate.value:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capability leaves require a registered identity")
                 identity = candidate.id
-            if identity in captured_persistence_ids:
+            identity, = capability_persistence_ids(((identity, selected),))
+            if identity in capability_revisions:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            captured_persistence_ids.add(identity)
             capability_revisions[identity] = candidate.revision
             bound = copy(selected)
             bound.id = identity
@@ -150,6 +152,7 @@ def _runtime_feature_policy(
             runtime_capability_values.append(selected)
     if not execution_declared:
         runtime_capability_values.append(execution_capability)
+        captured_capabilities.append(execution_capability)
     runtime_capabilities = tuple(runtime_capability_values)
     runtime_ids: set[str] = set()
 
@@ -161,11 +164,8 @@ def _runtime_feature_policy(
 
     for capability in runtime_capabilities:
         capability.apply(register_runtime_id)
-    validate_persistence_capabilities(runtime_capabilities)
-    capability_ids = capability_persistence_ids(
-        tuple((capability.id or "", capability) for capability in runtime_capabilities),
-    )
+    validate_persistence_capabilities(captured_capabilities)
     return _RuntimeFeaturePolicy(
         runtime_capabilities, execution_capability, session_capability,
-        memory_scope, tool_responses, capability_revisions, tuple(capability_ids),
+        memory_scope, tool_responses, capability_revisions, tuple(capability_revisions),
     )
