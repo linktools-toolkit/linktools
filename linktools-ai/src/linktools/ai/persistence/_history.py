@@ -1980,12 +1980,26 @@ class TranscriptRepository:
         observed_head: TranscriptHeadRecord | None = None,
     ) -> tuple[StoredFact, ...]:
         """Materialize only the first bounded fact page inside the metadata read."""
-        head = await self._resolve_observed_head(transaction, owner_id, observed_head)
+        batch_head_and_seek = observed_head is None and 0 < start < end
+        if batch_head_and_seek:
+            head_key = self._head_key(owner_id)
+            block = (start // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
+            seek_key = self._seek_key(owner_id, block)
+            records = await transaction.get_records((head_key, seek_key))
+            head_record = records.get(head_key)
+            head = self._validate_observed_head(
+                owner_id, None if head_record is None else self._decode_head(head_record),
+            )
+            sequence = self._seek_record_sequence(records.get(seek_key), message_index=start)
+        else:
+            head = await self._resolve_observed_head(transaction, owner_id, observed_head)
+            sequence = None
         if end > head.message_count:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if start == end:
             return ()
-        sequence = await self._seek_fact_sequence(transaction, owner_id, start)
+        if not batch_head_and_seek:
+            sequence = await self._seek_fact_sequence(transaction, owner_id, start)
         return tuple(await transaction.list_facts(FactQuery(
             self._transcript_stream(owner_id),
             after_sequence=sequence,
@@ -2004,8 +2018,12 @@ class TranscriptRepository:
             return None
         block = (message_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
         record = await transaction.get_record(self._seek_key(owner_id, block))
+        return self._seek_record_sequence(record, message_index=message_index)
+
+    def _seek_record_sequence(self, record: StoredRecord | None, *, message_index: int) -> int | None:
         if record is None:
             return None
+        block = (message_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
         try:
             seek = _decode_enveloped_domain(record.data, TranscriptSeekRecord)
         except (AIError, TypeError, ValueError):

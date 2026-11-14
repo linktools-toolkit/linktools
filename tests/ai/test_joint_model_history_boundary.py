@@ -149,6 +149,32 @@ async def test_joint_boundary_settles_preparation_rollback_and_lost_ack(tmp_path
     monkeypatch.setattr(native, "write_prepared_step", write_step)
     monkeypatch.setattr(StateStepArchive, "sync_prepared_projection", sync_projection)
 
+    if fault == "cancel_commit":
+        from linktools.ai.runtime._local import LocalExecutionBackend
+
+        cleanup_entered, cleanup_release = asyncio.Event(), asyncio.Event()
+        cancel = LocalExecutionBackend.cancel
+        finish_revoked = LocalExecutionBackend._finish_revoked_worker
+        request_cancel = LocalExecutionBackend._request_worker_cancel
+
+        async def cancel_during_cleanup(self, execution, **kwargs):
+            await asyncio.wait_for(cleanup_entered.wait(), 5)
+            return await cancel(self, execution, **kwargs)
+
+        async def pause_cleanup(self, *args, **kwargs):
+            if injected and asyncio.current_task() is caller:
+                cleanup_entered.set()
+                await asyncio.wait_for(cleanup_release.wait(), 5)
+            return await finish_revoked(self, *args, **kwargs)
+
+        def release_cleanup(self, execution_id, task):
+            request_cancel(self, execution_id, task)
+            cleanup_release.set()
+
+        monkeypatch.setattr(LocalExecutionBackend, "cancel", cancel_during_cleanup)
+        monkeypatch.setattr(LocalExecutionBackend, "_finish_revoked_worker", pause_cleanup)
+        monkeypatch.setattr(LocalExecutionBackend, "_request_worker_cancel", release_cleanup)
+
     async def provider(messages, info):
         provider_calls.append(True)
         return ModelResponse(parts=[TextPart("done")])

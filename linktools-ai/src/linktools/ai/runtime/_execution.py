@@ -2440,11 +2440,7 @@ class DefaultExecutionService(TaskExecutionService):
             return publication.execution
 
         async def wait_once() -> ExecutionResult:
-            execution = await self.manager.load_result_authorized(
-                execution_id,
-                principal,
-                AuthorizationAction.EXECUTION_READ,
-            )
+            execution = await load_confirmed_terminal()
             self._live_broker.abandon_prepared_local_producer(execution_id)
             status = execution.status
             poll_backoff = 1.0

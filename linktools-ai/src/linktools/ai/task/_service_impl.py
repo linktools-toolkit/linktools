@@ -1375,6 +1375,12 @@ class DefaultTaskGraphService(TaskGraphService):
             tenant_id,
             graph_state,
         )
+        if (
+            request.resolution.kind == "failed"
+            and principal_identity_payload(request.principal)
+            != principal_identity_payload(admission.principal)
+        ):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if self._preflight is not None:
             self._preflight.validate_effect_resolution(
                 node,
@@ -1392,6 +1398,10 @@ class DefaultTaskGraphService(TaskGraphService):
                 "resolution": {
                     "kind": request.resolution.kind,
                     "value": request.resolution.value,
+                    **({
+                        "error_code": request.resolution.error_code,
+                        "safe_details": dict(request.resolution.safe_details),
+                    } if request.resolution.kind == "failed" else {}),
                 },
             }
         )
