@@ -7,7 +7,11 @@ from ._runtime_test_helpers import model_features
 
 from linktools.ai.persistence import Persistence
 import asyncio
-from collections.abc import Mapping
+import shutil
+import sqlite3
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import closing
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1133,38 +1137,22 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
         await runtime._state.close()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("resolution", "expected_tool_status", "expected_retries"),
-    (
-        pytest.param(
-            ToolEffectApplied({"confirmed": True}),
-            ToolOperationStatus.COMPLETED,
-            0,
-            id="applied",
-        ),
-        pytest.param(
-            ToolEffectNotApplied(),
-            ToolOperationStatus.PENDING,
-            1,
-            id="not-applied",
-        ),
-        pytest.param(
-            ToolEffectFailed(),
-            ToolOperationStatus.FAILED,
-            0,
-            id="failed",
-        ),
-    ),
-)
-@pytest.mark.parametrize("with_cancel", (False, True), ids=("resume", "cancel"))
-async def test_public_recovery_converges_after_tool_effect_resolution(
-    tmp_path: Path,
-    resolution: Any,
-    expected_tool_status: ToolOperationStatus,
-    expected_retries: int,
-    with_cancel: bool,
-) -> None:
+@dataclass(frozen=True)
+class _UnresolvedToolSource:
+    directory: Path
+    execution_id: str
+    agent_run_id: str
+    operation_id: str
+    fence: int
+    producer_generation: int
+    calls: tuple[str, ...]
+    durable_interaction_count: int | None
+    cancel_status: OperationStatus | None
+
+
+async def _prepare_unresolved_tool_source(
+    tmp_path: Path, with_cancel: bool,
+) -> _UnresolvedToolSource:
     database = tmp_path / "recovery-resolution.db"
     state = _split_sqlite_storage(database)
     calls: list[str] = []
@@ -1178,8 +1166,10 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
         started=tool_started,
         release=release_tool,
     )
+    durable_interaction_count = None
+    cancel_status = None
     try:
-        application.capability(native_checkpoint(), scope="runtime")
+        application.capability(native_checkpoint(database=tmp_path / "native.db"), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1204, Runtime.attach(persistence=persistence_1204, features=model_features(_RecoveryToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -1233,94 +1223,204 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
                 durable_interaction_count = await trace_archive.model_interaction_count(
                     agent_run_id=agent_run_id
                 )
+            if with_cancel:
+                receipt = await runtime._state.execution.operations.get(
+                    cancel_key, tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert receipt is not None
+                cancel_status = receipt.status
             operation_id = effects[0].operation_id
             fence = effects[0].fence
 
-        release_tool.set()
-        await runtime._state.close()
-        state = _split_sqlite_storage(database)
-        reopened_application = _application(
-            calls,
-            effect_policy="non_replay_safe",
-            effect_log=effect_log,
-        )
-        reopened_application.capability(native_checkpoint(), scope="runtime")
-        reopened_application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1273, Runtime.attach(persistence=persistence_1273, features=model_features(_RecoveryToolModels(), reopened_application)) as runtime:
-            execution = await runtime.executions.get(execution_id)
-
-            resolution_result = await execution.resolve_tool_effect(
-                operation_id,
-                expected_fence=fence,
-                resolution=resolution,
-                idempotency_key=f"resolve-{expected_tool_status.value.lower()}",
-            )
-            assert resolution_result.status is expected_tool_status
-
-            recovered = await execution.recover()
-            assert recovered.execution_id == execution_id
-            result = (await execution.wait(timeout_seconds=15)).result
-            expected_execution_status = (
-                ExecutionStatus.CANCELLED
-                if with_cancel
-                else ExecutionStatus.SUCCEEDED
-            )
-            assert result.status is expected_execution_status
-
-            tool = await runtime._state.checkpoint.tools.get_operation(
-                operation_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert tool is not None
-            expected_final_tool_status = (
-                ToolOperationStatus.COMPLETED
-                if not with_cancel
-                and expected_tool_status is ToolOperationStatus.PENDING
-                else expected_tool_status
-            )
-            assert tool.status is expected_final_tool_status
-            retry_count = 0 if with_cancel else expected_retries
-            assert calls == ["lookup"] * (1 + retry_count)
-            assert effect_log.read_text().splitlines() == [execution_id] * (
-                1 + retry_count
-            )
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            checkpoint = await runtime._state.execution.executions.get(
-                execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert checkpoint is not None
-            assert checkpoint.recovery_state.value == "completed"
-
-            if with_cancel:
-                interactions_after = await runtime._run_store.read_store(
-                    PersistenceDomain.TRACE
-                ).model_interaction_count(
-                    agent_run_id=agent_run_id,
-                )
-                assert interactions_after == durable_interaction_count
-                operation = await runtime._state.execution.operations.get(
-                    cancel_key,
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert operation is not None
-                assert operation.status is OperationStatus.SUCCEEDED
-            else:
-                assert runtime.history is not None
-                history = await runtime.history.history(
-                    execution_id,
-                    principal=runtime.default_principal,
-                    include_content=True,
-                )
-                assert history.items
     finally:
         release_tool.set()
         await runtime._state.close()
+    return _UnresolvedToolSource(
+        tmp_path, execution_id, agent_run_id, operation_id, fence,
+        checkpoint_before.producer_generation, tuple(calls),
+        durable_interaction_count, cancel_status,
+    )
+
+
+@pytest.fixture(scope="module")
+def unresolved_tool_source(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Callable[[Path, bool], Awaitable[_UnresolvedToolSource]]:
+    sources: dict[bool, _UnresolvedToolSource] = {}
+
+    async def prepare(destination: Path, with_cancel: bool) -> _UnresolvedToolSource:
+        if with_cancel not in sources:
+            root = tmp_path_factory.mktemp("unresolved-tool")
+            source = await _prepare_unresolved_tool_source(root, with_cancel)
+            stopped = root.rename(root.with_name(root.name + "-stopped"))
+            sources[with_cancel] = replace(source, directory=stopped)
+        source = sources[with_cancel]
+        for name in (
+            "recovery-resolution-execution.db",
+            "recovery-resolution-conversation.db",
+            "native.db",
+        ):
+            with (
+                closing(sqlite3.connect(
+                    f"{(source.directory / name).as_uri()}?mode=ro", uri=True,
+                )) as original,
+                closing(sqlite3.connect(destination / name)) as copied,
+            ):
+                original.backup(copied)
+        shutil.copyfile(
+            source.directory / "recovery-effects.txt", destination / "recovery-effects.txt",
+        )
+        return source
+
+    return prepare
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resolution", "expected_tool_status", "expected_retries"),
+    (
+        pytest.param(
+            ToolEffectApplied({"confirmed": True}),
+            ToolOperationStatus.COMPLETED,
+            0,
+            id="applied",
+        ),
+        pytest.param(
+            ToolEffectNotApplied(),
+            ToolOperationStatus.PENDING,
+            1,
+            id="not-applied",
+        ),
+        pytest.param(
+            ToolEffectFailed(),
+            ToolOperationStatus.FAILED,
+            0,
+            id="failed",
+        ),
+    ),
+)
+@pytest.mark.parametrize("with_cancel", (False, True), ids=("resume", "cancel"))
+async def test_public_recovery_converges_after_tool_effect_resolution(
+    tmp_path: Path,
+    resolution: Any,
+    expected_tool_status: ToolOperationStatus,
+    expected_retries: int,
+    with_cancel: bool,
+    unresolved_tool_source: Callable[[Path, bool], Awaitable[_UnresolvedToolSource]],
+) -> None:
+    source = await unresolved_tool_source(tmp_path, with_cancel)
+    execution_id, agent_run_id = source.execution_id, source.agent_run_id
+    operation_id, fence = source.operation_id, source.fence
+    durable_interaction_count = source.durable_interaction_count
+    calls = list(source.calls)
+    cancel_key = "cancel-after-effect-recovery"
+    database = tmp_path / "recovery-resolution.db"
+    effect_log = tmp_path / "recovery-effects.txt"
+    state = _split_sqlite_storage(database)
+    reopened_application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+    )
+    reopened_application.capability(native_checkpoint(database=tmp_path / "native.db"), scope="runtime")
+    reopened_application.capability(TraceCapability(), scope="runtime")
+    async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1273, Runtime.attach(persistence=persistence_1273, features=model_features(_RecoveryToolModels(), reopened_application)) as runtime:
+        execution = await runtime.executions.get(execution_id)
+        current = await runtime._state.execution.executions.get(
+            execution_id, tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert current is not None and current.status is ExecutionStatus.RECOVERY_REQUIRED
+        assert current.producer_generation == source.producer_generation
+        effects = await execution.recovery_effects()
+        assert len(effects) == 1
+        assert (effects[0].operation_id, effects[0].fence) == (operation_id, fence)
+        operation = await runtime._state.checkpoint.tools.get_operation(
+            operation_id, tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert operation is not None and operation.status is ToolOperationStatus.EFFECT_UNKNOWN
+        assert operation.producer_generation == source.producer_generation
+        session = await runtime._state.conversation.sessions.get(
+            "session", tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert session is not None and session.active_execution_id == execution_id
+        with pytest.raises(AIError) as unresolved:
+            await execution.recover()
+        assert unresolved.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+        if with_cancel:
+            receipt = await runtime._state.execution.operations.get(
+                cancel_key, tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert receipt is not None and receipt.status is source.cancel_status
+
+        resolution_result = await execution.resolve_tool_effect(
+            operation_id,
+            expected_fence=fence,
+            resolution=resolution,
+            idempotency_key=f"resolve-{expected_tool_status.value.lower()}",
+        )
+        assert resolution_result.status is expected_tool_status
+
+        recovered = await execution.recover()
+        assert recovered.execution_id == execution_id
+        result = (await execution.wait(timeout_seconds=15)).result
+        expected_execution_status = (
+            ExecutionStatus.CANCELLED
+            if with_cancel
+            else ExecutionStatus.SUCCEEDED
+        )
+        assert result.status is expected_execution_status
+
+        tool = await runtime._state.checkpoint.tools.get_operation(
+            operation_id,
+            tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert tool is not None
+        expected_final_tool_status = (
+            ToolOperationStatus.COMPLETED
+            if not with_cancel
+            and expected_tool_status is ToolOperationStatus.PENDING
+            else expected_tool_status
+        )
+        assert tool.status is expected_final_tool_status
+        retry_count = 0 if with_cancel else expected_retries
+        assert calls == ["lookup"] * (1 + retry_count)
+        assert effect_log.read_text().splitlines() == [execution_id] * (
+            1 + retry_count
+        )
+        session_record = await runtime._state.conversation.sessions.get(
+            "session",
+            tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert session_record is not None
+        assert session_record.active_execution_id is None
+        checkpoint = await runtime._state.execution.executions.get(
+            execution_id,
+            tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert checkpoint is not None
+        assert checkpoint.recovery_state.value == "completed"
+
+        if with_cancel:
+            interactions_after = await runtime._run_store.read_store(
+                PersistenceDomain.TRACE
+            ).model_interaction_count(
+                agent_run_id=agent_run_id,
+            )
+            assert interactions_after == durable_interaction_count
+            operation = await runtime._state.execution.operations.get(
+                cancel_key,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert operation is not None
+            assert operation.status is OperationStatus.SUCCEEDED
+        else:
+            assert runtime.history is not None
+            history = await runtime.history.history(
+                execution_id,
+                principal=runtime.default_principal,
+                include_content=True,
+            )
+            assert history.items
 
 
 @pytest.mark.asyncio
