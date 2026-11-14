@@ -163,3 +163,29 @@ values; do not rely on an embedded object ID to retain an external asset.
 Only supported transaction-store changes receive that adapter's publication and
 cache behavior. This protocol does not publish arbitrary application hot state.
 One transaction may still execute several SQL statements and network round trips.
+
+### Native containers and callback owners
+
+A custom native container must expose its children through the SDK `apply` and
+`visit_and_replace` contracts and preserve replacements when forwarding hooks.
+Persistence discovery uses the leaves visited during declaration capture; a
+custom container does not need a separate partition registration or a built-in
+container type. Each nested persistent leaf needs its own explicit native `id`.
+The outer registration supplies the revision, not a shared ID for every child.
+A directly registered persistent leaf without an ID may use its registration ID.
+Duplicate participant IDs and duplicate built-in persistence domains remain
+conflicts, including inside custom containers and wrappers.
+
+| Stage | Callback owner | Retained boundary |
+| --- | --- | --- |
+| Declaration capture | Reusable capability declaration | Discovers participant IDs/revisions and partitions; does not attach a run writer to the original declaration |
+| `bind_persistence(writer)` | Independent run-local capability | The writer belongs to this run and partition; binding preserves the commit policy and borrowed buffer |
+| Native `for_agent` / `for_run` replacement | Effective native capability instance | Future submissions use the replacement's callback; a write accepted during `for_run` before it returns retains the earlier owner |
+| Deferred flush | Callback captured by each accepted submission | Later native replacements do not retarget pending writes to a different instance |
+| Execution sealing / Runtime close | Existing execution and writer lifecycle | Sealing rejects later writes/bindings; close drains or reports unresolved work without taking ownership of borrowed resources |
+
+The container paths are exercised by `test_custom_persistence_container.py`.
+`test_capability_persistence_lifecycle.py` separately covers native replacements
+and two concurrent runs: their writers remain independent, and early/late writes
+reach the callbacks that accepted them. These are owner-local lifecycle checks,
+not evidence of cross-process callback replay.
