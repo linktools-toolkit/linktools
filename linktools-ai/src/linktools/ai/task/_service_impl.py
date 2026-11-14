@@ -1871,14 +1871,12 @@ class DefaultTaskGraphService(TaskGraphService):
             await asyncio.sleep(fallback_backoff)
             return min(30.0, fallback_backoff * 2)
         try:
-            await asyncio.wait_for(
-                waiter.wait_graph_activity(
+            async with asyncio.timeout(fallback_backoff):
+                await waiter.wait_graph_activity(
                     graph_id,
                     tenant_id=tenant_id,
                     after_generation=after_generation,
-                ),
-                timeout=fallback_backoff,
-            )
+                )
         except asyncio.TimeoutError:
             return min(30.0, fallback_backoff * 2)
         return 1.0

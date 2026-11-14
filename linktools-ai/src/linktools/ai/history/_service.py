@@ -359,10 +359,10 @@ class DefaultExecutionHistoryService:
     ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
         """Authorize one bounded capture-and-suffix operation before opening its read scope."""
         if type(self) is DefaultExecutionHistoryService and type(self._reader) is StepExecutionHistoryReader:
-            source_hint = await self._authorize_header(execution_id, principal, capture_configuration=True)
+            await self._authorize_header(execution_id, principal)
             return await self._reader.read_authorized_model_interaction_updates(
                 execution_id, tenant_id=principal.tenant_id, executions=self._executions,
-                after_cutoffs=after_cutoffs, limit=limit, source_hint=source_hint,
+                after_cutoffs=after_cutoffs, limit=limit,
             )
         return await _read_model_interaction_updates(
             self, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,

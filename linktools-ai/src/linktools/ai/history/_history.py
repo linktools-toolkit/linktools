@@ -534,6 +534,7 @@ class History:
         node_id: str,
         *,
         principal: Principal,
+        expected_digest: str | None = None,
     ) -> JsonValue:
         record = await self._task_result_record(
             graph_id,
@@ -549,6 +550,8 @@ class History:
         output = execution.output
         if canonical_sha256(output) != record.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if expected_digest is not None and record.result_digest != expected_digest:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         return output
 
     async def artifacts(

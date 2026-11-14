@@ -459,6 +459,9 @@ class TracePersistence:
             if not buffer.entries:
                 self._cleanup.pop(buffer.id, None)
 
+    def synchronous(self, agent_run_id: str) -> bool:
+        return agent_run_id not in self._terminal_runs and not self.buffered(agent_run_id)
+
     def buffered(self, agent_run_id: str) -> bool:
         return self._caches.get(agent_run_id) is not None
 

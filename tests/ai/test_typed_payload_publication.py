@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._step_payload_owner import PAYLOAD_CODEC
@@ -115,6 +116,72 @@ async def test_mixed_payload_publish_invalidates_cached_absence(tmp_path: Path, 
                 await original(*args, **kwargs)
                 return None  # MySQL may not report which members of a batch were new.
 
+            async def unsupported(*args, **kwargs):
+                return None
+
+            monkeypatch.setattr(dialect, "insert_ignore_conflict_many_returning", unsupported)
             monkeypatch.setattr(dialect, "insert_ignore_conflict_many", insert)
         await archive.ensure_content(((PAYLOAD_CODEC, b"old"), (PAYLOAD_CODEC, b"new")))
         assert await store.read_record(key) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rollback", (False, True))
+async def test_mixed_payload_batch_reuses_only_returned_rows(tmp_path: Path, rollback: bool) -> None:
+    async with Persistence.open("payload-publish", tenant_id="tenant",
+                                storage=PersistenceStorage.sqlite(tmp_path / "returned.db")) as state:
+        scope, store = await state.execution.executions.state_store.storage_group.open_archive(create=True)
+        archive = ContentArchive(store, scope, namespace="payload-publish", tenant_id="tenant", object_store=None)
+        await archive.ensure_content(((PAYLOAD_CODEC, b"old"),))
+        mixed, fresh = PreparedArchive(), PreparedArchive()
+        await archive.prepare_content(((PAYLOAD_CODEC, b"old"), (PAYLOAD_CODEC, b"new")), mixed)
+        await archive.prepare_content(((PAYLOAD_CODEC, b"new"),), fresh)
+        candidate, = fresh.records.values()
+        statements = []
+
+        def observe(connection, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH", "INSERT")):
+                statements.append(statement)
+
+        async def publish(transaction):
+            await archive.publish(transaction, mixed)
+            assert await transaction.get_record(candidate.key) == candidate
+            await archive.publish(transaction, fresh)
+            if rollback:
+                raise ValueError("roll back the new content")
+
+        engine = store.storage_group.context.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", observe)
+        try:
+            if rollback:
+                with pytest.raises(AIError) as caught:
+                    await store.mutate(publish)
+                assert caught.value.code is ErrorCode.INTERNAL_ERROR
+                assert isinstance(caught.value.__cause__, ValueError)
+                assert str(caught.value.__cause__) == "roll back the new content"
+            else:
+                await store.mutate(publish)
+        finally:
+            event.remove(engine, "before_cursor_execute", observe)
+        assert len(statements) == 1
+        assert statements[0].startswith("INSERT INTO ai_step_messages")
+        assert await store.read_record(candidate.key) == (None if rollback else candidate)
+        if rollback:
+            await archive.ensure_content(((PAYLOAD_CODEC, b"new"),))
+            assert await store.read_record(candidate.key) == candidate
+
+
+@pytest.mark.asyncio
+async def test_mysql_payload_returning_fallback_does_not_execute() -> None:
+    from linktools.ai.storage import MySQLDialect
+    from linktools.ai.persistence._step_schema import build_step_sql_metadata
+
+    class NoExecute:
+        async def execute(self, statement):
+            pytest.fail("unsupported RETURNING must leave execution to the count fallback")
+
+    table = build_step_sql_metadata().tables["ai_step_messages"]
+    assert await MySQLDialect().insert_ignore_conflict_many_returning(
+        NoExecute(), table=table, rows=({"sha256": "a" * 64},),
+        index_elements=("store_locator", "sha256"), returning=("sha256",),
+    ) is None

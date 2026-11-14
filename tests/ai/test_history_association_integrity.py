@@ -3,7 +3,6 @@
 """History indexes preserve captured cuts and reject incomplete coverage."""
 
 from linktools.ai.persistence import Persistence
-import copy
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -421,13 +420,10 @@ async def test_associations_validate_each_locator_for_reused_source_fact(tmp_pat
             await transaction.insert_record(replace(record, key=alias))
 
         if backend == "sqlite":
-            table, store = archive._trace_events.table, archive.state_store
-            rows = await store.read(lambda tx: tx.read_sql_rows(store.context, select(table).where(
-                table.c.store_key == store.store_key, table.c.run_id == run_id.encode("utf-8"),
-            )))
-            payload = copy.deepcopy(rows[0]["payload_json"])
-            payload["value"]["payload"]["fields"]["event_type"] = "TOOL_CALL_SUCCEEDED"
-            await _change_trace_row(archive, run_id, 1, values={"payload_json": payload})
+            await _change_trace_row(
+                archive, run_id, 1, values={"payload_json": {"type": "step_event", "metadata": {},
+                                                    "event_type": "TOOL_CALL_SUCCEEDED"}},
+            )
         else:
             await archive.state_store.mutate(corrupt)
         with pytest.raises(AIError) as raised:

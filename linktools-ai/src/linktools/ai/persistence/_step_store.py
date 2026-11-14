@@ -530,12 +530,12 @@ class SqlStepStore:
                 rows.append(row)
             # Private occurrence keys retain insertion occurrences; managed sources
             # must fail on conflict until their exact body is proven.
-            batch_size = _BATCH_SIZE if keyed and not managed else 1
+            batch_size = 1 if managed else _BATCH_SIZE
             for offset in range(0, len(rows), batch_size):
-                if not keyed or managed:
-                    await session.execute(self._table("events").insert().values(rows[offset]))
-                    continue
                 batch = rows[offset:offset + batch_size]
+                if not keyed or managed:
+                    await session.execute(self._table("events").insert().values(batch))
+                    continue
                 inserted = await self._context.dialect.insert_ignore_conflict_many(
                     session, table=self._table("events"), rows=batch,
                     index_elements=("store_locator", "run_id", "idempotency_key"),
@@ -1081,7 +1081,7 @@ class SqlStepStore:
         """Bind checkpoint headers to an authenticated complete message closure.
 
         Callers authenticate every unique canonical message before this method.
-        Only the terminal message participates in the checkpoint retry digest;
+        Only the terminal message is needed to reconstruct the retry envelope;
         shared historical prefixes need not be hydrated again for each header.
         """
         for row in backup.snapshots:
@@ -1625,17 +1625,17 @@ class SqlStepStore:
     ) -> "tuple[dict[str, SqlValue], PreparedNativeMessages]":
         decoded = NativeCheckpoint.decode(snapshot)
         if isinstance(snapshot, NativeCheckpoint):
-            # Only the tail carries the retry envelope; the captured history is
-            # already independent and must retain its structural prefix proof.
-            snapshot = NativeCheckpoint.encode(replace(snapshot, messages=snapshot.messages[-1:]),
-                                               output_retries_used=snapshot.output_retries_used)
+            # Persist only native header fields; retry state has its own descriptor.
+            snapshot = ContinuableSnapshot(**{
+                field.name: getattr(snapshot, field.name) for field in fields(ContinuableSnapshot)
+            })
         values = self._record_values(snapshot)
         checkpoint = None
         if isinstance(decoded, NativeCheckpoint):
             checkpoint = {
                 "output_retries_used": decoded.output_retries_used,
-                "message_sha256": hashlib.sha256(encode_model_messages(snapshot.messages[-1:])).hexdigest(),
             }
+            NativeCheckpoint.validate_descriptor(checkpoint)
         messages = self._frozen_messages.snapshot(decoded.messages)
         previous = self._message_inputs.get(snapshot.run_id)
         baseline = None if previous is None else (previous[3], previous[0], previous[1])
@@ -1679,7 +1679,7 @@ class SqlStepStore:
         if snapshot_id is None:
             raise RuntimeError("snapshot insertion did not return its physical identity")
         content = await self._message_content.publish_in_session(session, prepared, owner_inserted=True)
-        targets = content.publication_targets(
+        content.confirm_publication(
             session, store_key=self._store_key, roots=tuple(span.first for span in prepared.root.slices),
         )
         await self._prune_snapshots(session, values["run_id"])
@@ -1875,9 +1875,9 @@ class SqlStepStore:
     ) -> None:
         """Verify checkpoint header/retry binding using only its last message.
 
-        The caller authenticates every unique message body and the complete
-        sequence closure separately. The checkpoint digest binds its terminal
-        message plus control header, so repeated prefixes need not be decoded.
+        The caller validates the message bodies and sequence closure separately.
+        Retry state belongs to this snapshot row; reconstruct its envelope without
+        decoding repeated prefixes or computing a second content checksum.
         """
         sequence = cls.snapshot_message_sequence(data)
         if (payload is None) != (sequence.count == 0):

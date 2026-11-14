@@ -55,7 +55,7 @@ from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     EventKind,
     RunRecord,
-    SnapshotSaved,
+    SnapshotSavedEvent,
     SnapshotState,
     StepEvent,
     is_provider_valid,
@@ -112,9 +112,13 @@ class RuntimeStepBoundaryStore(Protocol):
 
 
 class _BoundaryModel(WrapperModel):
-    def __init__(self, wrapped: Model, publish: Callable[[], Awaitable[None]]) -> None:
+    def __init__(
+        self, wrapped: Model, publish: Callable[[], Awaitable[None]],
+        history_ready: Callable[[], bool],
+    ) -> None:
         super().__init__(wrapped)
         self._publish = publish
+        self._history_ready = history_ready
 
     async def request(
         self, messages: list[ModelMessage], model_settings: ModelSettings | None,
@@ -363,7 +367,31 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         ctx = self._atomic_model_context
         if ctx is None:
             return None
-        return _BoundaryModel(model, lambda: self._atomic_publish_model(ctx))
+        confirmed = None
+
+        async def publish() -> None:
+            nonlocal confirmed
+            try:
+                confirmed = await self._atomic_publish_model(ctx, confirmed=confirmed)
+            except BaseException:
+                confirmed = None
+                raise
+
+        return _BoundaryModel(model, publish, lambda: any(
+            event.kind == "model_request_started" for event in self._atomic_pending_events
+        ))
+
+    @classmethod
+    async def publish_model_boundary(cls, model: Model) -> Model | None:
+        """Publish an immediate native wrapper and unwrap only this invocation.
+
+        The original wrapper remains the retry entry point, so every later
+        dispatch still crosses its producer fence.
+        """
+        if type(model) is not _BoundaryModel or not model._history_ready():
+            return None
+        await model._publish()
+        return model.wrapped
 
     def _atomic_effective_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
         if self.run_id is not None:
@@ -450,11 +478,26 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
                 prepared_run, started = prepared
                 pending_events = (started, *pending_events)
         prepared_events = (*pending_events, *events)
-        await self._atomic_write(run=prepared_run, events=prepared_events, snapshot=snapshot)
+        # Consume the committed prefix before propagating cancellation, otherwise
+        # terminal cleanup can replay a start whose Trace projection is settled.
+        operation = asyncio.create_task(self._atomic_write(run=prepared_run, events=prepared_events, snapshot=snapshot))
+        cancelled = None
+        while True:
+            try:
+                await asyncio.shield(operation)
+                break
+            except asyncio.CancelledError as error:
+                if operation.done():
+                    operation.result()
+                    cancelled = cancelled or error
+                    break
+                cancelled = cancelled or error
         self._atomic_pending_run = None
         self._atomic_pending_events.clear()
         if shared_start:
             self._atomic_start_published = True
+        if cancelled is not None:
+            raise cancelled
 
     @durable_operation("commit_boundary")
     async def _atomic_write(
@@ -471,7 +514,7 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
                                                else deepcopy(snapshot.messages))
         self._atomic_last_snapshot_step = snapshot.step_index
         await ctx.emit(
-            SnapshotSaved(
+            SnapshotSavedEvent(
                 persistence_run_id=snapshot.run_id,
                 conversation_id=snapshot.conversation_id,
                 step_index=snapshot.step_index,
@@ -543,15 +586,26 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         self._atomic_pending_events.append(self._atomic_prepare_event(ctx, kind="model_request_started"))
         return request_context
 
-    async def _atomic_publish_model(self, ctx: RunContext[AgentDepsT]) -> None:
+    async def _atomic_publish_model(
+        self, ctx: RunContext[AgentDepsT], *, confirmed: ContinuableSnapshot | None = None,
+    ) -> ContinuableSnapshot | None:
         self._atomic_stash_live_history(ctx)
         messages = list(ctx.messages)
         snapshot = None
         if self.capture_frontier or (_has_model_response(messages) and is_provider_valid(messages)):
             snapshot = self._atomic_prepare_snapshot(ctx, messages, ctx.run_step, _snapshot_state(messages))
-        await self._atomic_commit(snapshot=snapshot)
+        unchanged = (isinstance(self.store, CapturingStepStore)
+                     and snapshot is not None and confirmed is not None
+                     and replace(snapshot, timestamp=confirmed.timestamp,
+                                 idempotency_key=confirmed.idempotency_key) == confirmed)
+        # A transport retry still crosses the producer fence before dispatch.
+        # Reuse only the complete recovery point confirmed by this request wrapper.
+        await self._atomic_commit(snapshot=None if unchanged else snapshot)
+        if unchanged:
+            snapshot = confirmed
         if snapshot is not None:
             await self._atomic_confirm_snapshot(ctx, snapshot)
+        return snapshot
 
     async def after_model_request(
         self,

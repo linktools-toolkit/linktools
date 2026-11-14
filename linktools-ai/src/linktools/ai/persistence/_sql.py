@@ -2072,12 +2072,7 @@ class _SqlTransaction:
         if not unique_keys:
             return
         if owners == ("ai_step_messages",):
-            try:
-                for key in unique_keys:
-                    await self.delete_record(key)
-            except BaseException as error:
-                self._abort_mutation(error)
-                raise
+            await self._delete_payload_records(unique_keys)
             return
         from sqlalchemy import delete, tuple_, update
 
@@ -2137,6 +2132,43 @@ class _SqlTransaction:
             self._record_cache[key] = None
             self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key, store_key=self._store_key)})
         self._log_batch("delete_records", len(deleted_keys), statement_count)
+
+    async def _delete_payload_records(self, keys: Sequence[bytes]) -> None:
+        from sqlalchemy import and_, delete, or_, update
+
+        owner = self._payload_owner()
+        table = owner.table
+        facts = self._table("ai_state_facts")
+        try:
+            for offset in range(0, len(keys), _RECORD_DELETE_BATCH_SIZE):
+                current = await self.get_records(keys[offset:offset + _RECORD_DELETE_BATCH_SIZE])
+                if not current:
+                    continue
+                conditions = tuple((owner.condition(key), record.storage_revision)
+                                   for key, record in sorted(current.items()))
+                # Fence fact writers before removing either the owners or their facts.
+                guarded = await self._execute(update(table).where(or_(
+                    *(and_(condition, table.c.gc_revision == revision) for condition, revision in conditions)
+                )).values(gc_revision=table.c.gc_revision + 1))
+                if guarded.rowcount != len(current):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await self._execute(delete(facts).where(
+                    facts.c.store_key == self._store_key,
+                    _keys_match(facts.c.owner_key, tuple(current)),
+                ))
+                deleted = await self._execute(delete(table).where(or_(
+                    *(and_(condition, table.c.gc_revision == revision + 1) for condition, revision in conditions)
+                )))
+                if deleted.rowcount != len(current):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                self._deleted_records = True
+                for key in current:
+                    self._guarded_record_revisions.pop(key, None)
+                    self._record_cache[key] = None
+                    self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key, store_key=self._store_key)})
+        except BaseException as error:
+            self._abort_mutation(error)
+            raise
 
     async def delete_record(
         self, key: bytes, *, expected_storage_revision: int | None = None

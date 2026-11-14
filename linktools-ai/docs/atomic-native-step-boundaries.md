@@ -154,7 +154,7 @@ Keeping all keys and all user-visible history cannot provide constant space.
 Configured snapshot pruning retires roots while preserving replay tombstones
 and the latest complete recovery point. It does not authorize dropping history
 owned by Conversation, Trace, a task handoff, or another retained snapshot.
-Active snapshots use the `(store_digest, run_id, pruned)` index and equality
+Active snapshots use the `(store_locator, run_id, pruned)` index and equality
 on the non-null boolean, including on MySQL 5.7. Tombstones therefore do not
 expand the active scan. Pruning reads one row containing the retention cutoff
 and latest complete ID, then retires older roots in metadata batches of at most
@@ -163,42 +163,37 @@ independent of historical tombstones. Reducing an unlimited existing history
 can still require a larger one-time scan and update. The update also preserves
 complete points that become visible after the retention read.
 
-Native SQL message and sequence reclamation follows a derived dependency index.
-Actual State and snapshot owners publish or release their roots in the same SQL
-transaction as their conditional write. Sequence edges preserve shared content.
-The index is rebuildable data, not a second history or retention owner. It adds
-linear metadata space in exchange for incremental reclamation; it is not a
-claim that every workload occupies fewer rows.
+Native SQL message and sequence reclamation is explicit offline maintenance.
+Call `SqlStepStore.purge_unreferenced_content(exclusive=guard)` only after closing
+all other adapters to the database, including adapters in other processes. The
+guard must drain and exclude remaining readers and writers for the complete
+maintenance operation. Closing only new admission is insufficient: no prepared
+publication or confirmed-content cache may survive that window. The collector
+invalidates its own context's content caches before normal work resumes; it
+cannot invalidate another process's memory. Reopen other adapters after cleanup.
 
-Relevant successful commits run a separate best-effort maintenance transaction
-with a budget of 32 candidates, limited to the native partitions bound to that
-storage group. Work beyond the budget remains queued for later boundaries;
-there is no additional background scheduler. Target revisions protect publication racing a
-delete, and candidate revisions prevent an old collector from swallowing newly
-queued work. They are optimistic concurrency counters, not signatures or new
-content identities. A failed collector leaves work for a later boundary and
-does not change an already committed execution result. Replay tombstones and
-all visible retained histories remain owned. Terminal state alone never
-authorizes deleting them. Partial-slice owners conservatively pin their full
-forest; a new publication canonicalizes its visible message sequence.
+The collector follows committed State and snapshot roots directly. There is no
+derived edge table, per-commit cleanup transaction, or background collector.
+Replay tombstones and all visible retained histories remain owned. Terminal
+state alone never authorizes deleting them. Partial-slice roots retain the
+sequence dependencies required to read their visible messages.
 
 Owner selection and native SQL row capture share one consistent read snapshot.
 Decoding and external object reads occur after releasing that transaction; a
 paused iterator does not retain a database transaction. A bare native root is a
-locator rather than a permanent retention claim. If a cached publication proof
-has lost its old dependencies, a confirmed transaction rollback permits one
-cold rebuild per prepared candidate from its immutable messages, with the same
-canonical root. A multi-root transaction may encounter more than one such
-candidate; the same candidate cannot repeatedly restart it. Unknown commit
-outcomes never enter that retry path.
+locator rather than a permanent retention claim. Normal publication reuses this
+adapter's committed content and its successful immutable INSERTs in the same
+transaction; it does not query physical row IDs merely to confirm that content.
+The offline lifecycle above is therefore required before reclaiming dependencies.
+A reopened writer can reconstruct reclaimed content from original messages under
+a new owner, but retrying a pruned replay key must not resurrect its old snapshot.
 
-External object bytes and generic archive content still use the explicitly
-exclusive offline collector. It discovers orphan message candidates by hash,
-validates retained bodies in batches of at most 128 before deleting anything,
-and never loads orphan bodies merely to delete them. Its retained root and
-sequence metadata still scale with the namespace. A single large retained body
-may exceed the typical batch size: this is bounded by body count, not a fixed
-byte cap. Existing offline exclusion and unresolved-retention checks remain.
+Offline collection discovers orphan candidates by identity, validates retained
+bodies in batches of at most 128 before deleting anything, and never loads orphan
+bodies merely to delete them. Its retained root and sequence metadata still
+scale with the namespace. A single large retained body may exceed the typical
+batch size: this is bounded by body count, not a fixed byte cap. Existing offline
+exclusion and unresolved-retention checks remain.
 
 ## Why other storage owners remain
 
