@@ -1209,6 +1209,8 @@ def _decode_record_cursor(cursor: str | None) -> tuple[bytes | None, bytes | Non
     try:
         if not isinstance(cursor, str) or not cursor:
             raise ValueError("cursor length")
+        if "+" in cursor or "/" in cursor:
+            raise ValueError("cursor encoding")
         raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
         key_size = int.from_bytes(raw[:2], "big")
         if not 1 <= key_size <= RECORD_KEY_MAX_BYTES or len(raw) <= 2 + key_size:
