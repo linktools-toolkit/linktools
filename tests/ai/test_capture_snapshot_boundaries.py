@@ -58,9 +58,11 @@ async def test_capture_snapshot_preserves_opaque_markers_and_attachment_bytes(tm
 
 
 @pytest.mark.asyncio
-async def test_opaque_capture_coexists_with_relocated_native_history(tmp_path: Path) -> None:
+@pytest.mark.parametrize("attachment", (False, True))
+async def test_opaque_capture_coexists_with_relocated_native_history(tmp_path: Path, attachment: bool) -> None:
     from dataclasses import replace
-    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+    from linktools.ai.model.messages import encode_model_messages
     from linktools.ai.core import service_principal
     from linktools.ai.persistence import PersistenceDomain, SqlStepStore
     from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
@@ -71,7 +73,9 @@ async def test_opaque_capture_coexists_with_relocated_native_history(tmp_path: P
     source.mkdir()
     snapshots = InMemoryObjectStore()
     limits = SnapshotLimits(10000, 10 * 1024 * 1024)
-    message = ModelResponse(parts=[TextPart("native body")])
+    message = (ModelRequest(parts=[UserPromptPart([
+        'native "value" \n\\path 中文', BinaryContent(b"\x00\xffattachment", media_type="application/octet-stream"),
+    ])]) if attachment else ModelResponse(parts=[TextPart("native body")]))
     principal = service_principal("tenant", "owner")
     async with _archive(source, "sqlite") as (state, archive, run):
         native = SqlStepStore(archive.state_store.context, namespace=state.namespace, tenant_id=state.tenant_id)
@@ -92,10 +96,14 @@ async def test_opaque_capture_coexists_with_relocated_native_history(tmp_path: P
         finally:
             await native.close()
     before = json.loads(await read_object(snapshots, snapshot.key, expected_digest=snapshot.digest, expected_size=snapshot.size))
+    if attachment:
+        rows = [row for group in before["native_messages"] for row in group["messages"]]
+        assert len(rows) == 1 and isinstance(rows[0]["payload_json"], dict)
     target = tmp_path / "restored"
     await Persistence.restore_snapshot(snapshot, object_store=snapshots, root=target, limits=limits)
     async with Persistence.open("archive-boundaries", tenant_id="tenant", storage=PersistenceStorage.from_root(target)) as state:
-        assert [item async for item in state.run_store.read_store(PersistenceDomain.TRACE).iter_messages(agent_run_id="run")] == [message]
+        messages = [item async for item in state.run_store.read_store(PersistenceDomain.TRACE).iter_messages(agent_run_id="run")]
+        assert encode_model_messages(messages) == encode_model_messages([message])
         async with TaskEngine.open(persistence=state, context=CONTEXT) as engine:
             assert (await engine.inputs.read_agent(capture, principal=principal)).prompt[0].metadata == {
                 "$dataclass": "archive_root", "fields": {}}

@@ -467,6 +467,8 @@ class NativeMessageContent:
         # must abort the enclosing owner mutation, including earlier batches.
         batch: list[Mapping[str, object]] = []
         size = 0
+        json_bind = (table.c.payload_json.type.bind_processor(session.get_bind().dialect)
+                     if table is self._messages else None)
         for row in rows:
             validate_native_store_key(row["store_key"])
             _digest(row["sha256"])
@@ -477,6 +479,10 @@ class NativeMessageContent:
                                              row["left_sha256"], row["right_sha256"], row["next_sha256"])
             row_size = sum(len(value.encode("utf-8")) if isinstance(value, str) else len(value)
                            for value in row.values() if isinstance(value, (str, bytes)))
+            if table is self._messages and row["payload_json"] is not None:
+                # Account for the actual JSON binding, including Unicode escaping.
+                encoded = json_bind(row["payload_json"])
+                row_size += len(encoded.encode("utf-8")) if isinstance(encoded, str) else len(encoded)
             if batch and (len(batch) >= 64 or size + row_size > 256 * 1024):
                 await self._context.dialect.insert_immutable_many(
                     session, table=table, rows=batch,
