@@ -260,7 +260,9 @@ class TaskExecutionService:
         key = tenant_id, execution_id
         state, owner = await self._handoff.release_hold(key, hold_id)
         if owner and state is not None:
-            await self._run_handoff_cleanup(execution_id, tenant_id, state)
+            # The durable hold still prevents cleanup. Relinquish the local
+            # claim before I/O so failure cannot strand later consumers.
+            await self._handoff.finish_release(key, state, succeeded=False)
         current = await self._repositories.executions.release_dependency_hold(
             execution_id,
             tenant_id=tenant_id,
