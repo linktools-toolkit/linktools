@@ -97,7 +97,7 @@ is intended; Task's execution handle keeps its Task cancellation settlement.
 Preserve the existing graph and execution idempotency keys when resolving an
 uncertain outcome instead of blindly starting a new execution.
 
-The existing execution-service protocol exposes
+The Task-facing Agent execution port exposes
 `request_terminal_handoff(execution_id, *, tenant_id, terminal_commit=False)`.
 The keyword matches the concrete producer operation and the Task read adapter;
 it forwards the existing terminal-commit flag to producer-owned handoff
@@ -130,10 +130,10 @@ later reads and recovery. The node executor is resolved lazily because it is
 constructed from the bound Task definitions. This does not add another public
 adapter, producer, resource owner or user-managed lifecycle.
 
-The existing port's dispatch remains intentional: start/get call the port's
-methods, while inspection and retention use its service. These two surfaces
-are not required to be the same object. No new identity check or forwarding
-API is needed to preserve advanced producer implementations.
+The port exposes producer read/control, retention and history operations, plus
+`get(..., cancel=...)` for Task's graph-aware cancellation callback. Its service
+and execution-binding collaborators remain private and may differ internally.
+Task does not impose an equality check or acquire another producer lifecycle.
 
 Recovery retains three phases: resolve all admitted Agent bindings, validate
 all referenced executions, then dispatch eligible producers. The Task executor
@@ -154,14 +154,15 @@ application call, port method, persisted contract or lifecycle is required.
   effect facts and recorded response fixtures. Fixture playback creates no live
   MCP client. Stable model naming stays with the execution view, resources
   with Asset/Workspace; do not move fixture authority into the protocol client.
-- Task's admission/capture, observation/history, retention and cancellation
-  paths still reach multiple parts of AgentExecutionPort. Address their actual
-  operation and lifetime contracts together; adding three forwarding methods
-  does not complete this boundary.
-- Memory still has domain-specific projection/restore logic in Runtime. Preserve
-  its admitted scope. Planning now owns its store and native projection; Runtime
-  still selects the run owner. Model plan tools, execution plan mode and Task
-  scheduling remain three different concepts.
+- Task's Agent execution port now covers admission/capture, observation/history,
+  retention and cancellation through public operations. Preserve these complete
+  operation and lifetime contracts when changing the remaining domain boundaries.
+- `memory.PersistentMemoryStore` owns persistent Memory operations, mutation
+  receipts and capture/seed. Runtime selects the admitted scope and resources,
+  then delegates capture and restore to that adapter. Persistence retains
+  transaction authority, and the adapter borrows its resources. Planning owns
+  its store and native projection; Runtime selects the run owner. Model plan
+  tools, execution plan mode and Task scheduling remain three different concepts.
 - The capability program covers resource capture and admitted Memory reuse;
   crash recovery, custom persistent callbacks and the remaining extension
   paths still require their own evidence. The [complete current Task port
