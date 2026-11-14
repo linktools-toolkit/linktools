@@ -179,6 +179,37 @@ probe; the final receipt test with opt-in measurement passed all 15 cases.
 
 ## Candidate boundaries and proof obligations
 
+### Duplicate owner rows in terminal content reads
+
+A matched probe at `082b09527f417fcea3c7adc9f6684e768592f626`
+identified one narrower duplication inside the existing terminal write query:
+the same Execution record was selected as both a content owner and an additional
+record. The query now omits the overlapping additional role only for the same
+store instance, key and non-payload route. The fresh owner read, referenced
+content, current-transaction comparison and physical CAS remain unchanged.
+The original large-additional-batch fallback is retained before deduplication,
+including its separate typed-payload routing.
+
+In the fixed two-turn fixture, returned/decoded Execution owner rows change
+**4 → 2**. Their compact UTF-8 JSON representations change **13,766 → 6,883
+bytes**. These are logical row JSON bytes, not disk or network measurements.
+SELECT 31, INSERT 129, UPDATE 44 and **46 total / 38 write commits** are unchanged.
+No immutable body read or durability boundary was removed.
+
+The phase audit also rules out two tempting but incorrect shortcuts here:
+conversation preparation already batches transcript metadata and its descriptor;
+the subsequent write reads require their own current snapshot. Additional
+`get_records` calls after terminal prefetch were transaction-cache hits, not
+extra SQL. The locally held Execution projection had physical revision 2 while
+the current source was revision 14, so it could not replace the fresh source.
+
+Four new regressions cover large owner rows, missing keys, different partitions
+sharing a key, later owner batches, extras-only reads and the mixed typed-payload
+fallback threshold. The unfixed query fails the two overlap cases. The candidate
+passes 49 focused content-source, group/CAS, shared-terminal and measurement
+cases, preserving the original model/tool/history/replay assertions. This is a
+returned-row reduction only; the write-transaction objective remains open.
+
 ### Admission and activation
 
 These are currently separated by history/metadata capture, preload/input-context
