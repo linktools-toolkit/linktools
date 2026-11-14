@@ -34,6 +34,11 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
         if not isinstance(data, dict):
             from ..errors import ContainerError
             raise ContainerError(f"Compose root must be a mapping: {path}")
+        # Before-defaults hooks see the raw template model and may inject
+        # services/networks that then receive the same framework defaults
+        # as template-declared ones.
+        from ..lifecycle.hooks import HookPhase
+        container.hooks.call(HookPhase.BEFORE_COMPOSE_RENDER, data)
         if "services" in data and isinstance(data["services"], dict):
             for name, service in data["services"].items():
                 if not isinstance(service, dict):

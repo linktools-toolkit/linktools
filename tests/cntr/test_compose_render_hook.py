@@ -76,6 +76,32 @@ def test_compose_render_hook_skipped_without_compose_template(
     assert container.docker_compose is None
 
 
+def test_before_compose_render_hooks_run_before_defaults(
+        fresh_manager: "ContainerManager", tmp_path: "Path") -> None:
+    (tmp_path / "compose.yml").write_text("""\
+services:
+  app:
+    image: busybox
+""", encoding="utf-8")
+
+    container = BaseContainer(fresh_manager, tmp_path, name="999-custom")
+
+    def inject_service(compose: "dict[str, Any]") -> None:
+        assert "container_name" not in compose["services"]["app"]
+        compose["services"]["sidecar"] = {"image": "busybox"}
+
+    container.hooks.register(HookPhase.BEFORE_COMPOSE_RENDER, inject_service, key="inject")
+
+    rendered = container.docker_compose
+    # The hook-injected service received the same framework defaults as the
+    # template-declared one.
+    sidecar = rendered["services"]["sidecar"]
+    assert sidecar["container_name"] == container.get_service_name("sidecar")
+    assert sidecar["hostname"] == "sidecar"
+    assert "restart" in sidecar
+    assert "logging" in sidecar
+
+
 def test_cached_compose_defers_operation_values_and_retries_failed_render(fresh_manager, tmp_path):
     import pytest
 

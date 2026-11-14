@@ -132,7 +132,8 @@ def test_plan_matches_dependency_ordered_dispatch_and_supported_manager_phases(l
 
 @pytest.mark.parametrize("action", ["up", "restart", "down"])
 @pytest.mark.parametrize("phase", [HookPhase.CHECK, HookPhase.AFTER_START,
-                                   HookPhase.AFTER_COMPOSE_RENDER, HookPhase.AFTER_REMOVE])
+                                   HookPhase.AFTER_COMPOSE_RENDER, HookPhase.BEFORE_COMPOSE_RENDER,
+                                   HookPhase.AFTER_REMOVE])
 def test_unused_invalid_manager_phase_does_not_block_plan_or_dispatch(lifecycle_case, action, phase):
     manager, _, context, events = lifecycle_case
     _register(manager.hooks, phase, events, None, "unused", after=("missing",))
