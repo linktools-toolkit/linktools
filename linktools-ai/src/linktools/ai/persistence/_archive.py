@@ -5,7 +5,6 @@
 import base64
 import binascii
 import hashlib
-import json
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -309,14 +308,12 @@ class ContentRecord:
 
     def to_native_values(self) -> dict[str, object]:
         return {"message": self.body, "compression": self.compression, "raw_size": self.raw_size,
-                "payload_json": None if self.payload is None else canonical_json_bytes(self.payload.to_json()).decode("utf-8")}
+                "payload_json": None if self.payload is None else self.payload.to_json()}
 
     @classmethod
     def from_native_row(cls, row: Mapping[str, object]) -> "ContentRecord":
         try:
             payload = row["payload_json"]
-            if isinstance(payload, str):
-                payload = json.loads(payload)
             return cls("model-message", row.get("message_sha256", row.get("sha256")), row["raw_size"],
                        row["compression"], None if payload is None else StoredPayload.from_json(payload), row["message"])
         except (KeyError, TypeError, ValueError) as error:

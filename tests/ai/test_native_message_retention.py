@@ -8,11 +8,12 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.steps import native_store_locator, native_store_key
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice, SqlStepStore
 from linktools.ai.persistence._archive import ContentArchive, ImmutableSequenceNode
@@ -104,13 +105,18 @@ async def test_cross_owner_message_roots_outlive_native_snapshot_pruning(tmp_pat
         old = _snapshot("run", 1, "retained elsewhere" * 10_000)
         if object_backed:
             old = replace(old, messages=[ModelRequest(parts=[UserPromptPart([
-                "retained elsewhere", BinaryContent(b"retained file", media_type="image/png"),
+                'retained "value" \\path\n', BinaryContent(b"retained file", media_type="image/png"),
             ])])])
         await native.save_snapshot(old)
         async with engine.connect() as connection:
             first = await connection.scalar(select(table.c.sequence_root).where(table.c.store_key == native.store_key))
             messages = build_step_sql_metadata().tables["ai_step_messages"]
             body = (await connection.execute(select(messages))).mappings().one()
+        # A typed manifest is stored as a JSON object, not an escaped JSON string.
+        if object_backed:
+            assert isinstance(body["payload_json"], dict)
+        restored = await native.latest_snapshot(run_id="run")
+        assert encode_model_messages(restored.messages) == encode_model_messages(old.messages)
         content = validate_native_message_content(body, group_id=group_id)
         reference = next(iter(content.object_refs()), None)
         assert (reference is not None) is object_backed
@@ -369,5 +375,46 @@ async def test_object_gc_invalidates_evidence_before_offline_guard_releases(monk
                 await call
         assert events == ["entered", "collected", "invalidated", "released"]
     finally:
+        await state.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_attachment_manifest_inserts_respect_bound_byte_budget(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'manifest-batches.db'}")
+    await provision_database(engine)
+    state = SqlStateStore(engine)
+    await state.initialize()
+    group_id, archive_store = await state.storage_group.open_archive(create=True)
+    archive = ContentArchive(archive_store, group_id, namespace="steps", tenant_id="one",
+                             object_store=InMemoryObjectStore())
+    native = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    native.bind_message_archive(archive)
+    bound_sizes = []
+
+    def observe(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().startswith("INSERT INTO ai_step_messages"):
+            batches = parameters if executemany else (parameters,)
+            bound_sizes.append(sum(
+                len(value.encode("utf-8")) if isinstance(value, str) else len(value)
+                for batch in batches
+                for value in (batch.values() if isinstance(batch, dict) else batch)
+                if isinstance(value, (str, bytes))
+            ))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", observe)
+    messages = [ModelRequest(parts=[UserPromptPart([
+        str(index) + '中文"\\path\n' * 9000,
+        BinaryContent(b"attachment", media_type="application/octet-stream"),
+    ])]) for index in range(3)]
+    try:
+        await native.save_snapshot(replace(_snapshot("run", 1, "unused"), messages=messages))
+        assert len(bound_sizes) > 1
+        assert all(size <= 256 * 1024 for size in bound_sizes)
+        restored = await native.latest_snapshot(run_id="run")
+        assert encode_model_messages(restored.messages) == encode_model_messages(messages)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", observe)
+        await native.close()
         await state.close()
         await engine.dispose()
