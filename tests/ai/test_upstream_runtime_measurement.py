@@ -5,6 +5,9 @@
 import asyncio
 import json
 import os
+import re
+from contextvars import ContextVar
+from functools import wraps
 from collections import Counter
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -15,6 +18,9 @@ from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
 from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability.steps import AtomicStepPersistence
+from linktools.ai.persistence._runtime_commands import StateCommands
+from linktools.ai.persistence._retention import RuntimeRetentionController
 from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.persistence import SqlStepStore
@@ -90,6 +96,48 @@ async def test_two_turn_storage_measurement(
         for name in names:
             monkeypatch.setattr(cls, name, traced(getattr(cls, name), prefix, name))
 
+    # Labels follow the real async owner, including its owned child tasks. Each
+    # SQL statement retains its own path: nested owners can share a transaction.
+    boundaries: ContextVar[tuple[str, ...]] = ContextVar("measurement_boundaries", default=())
+
+    def owned(original, label):
+        @wraps(original)
+        async def invoke(*args, **kwargs):
+            selected = label(*args, **kwargs) if callable(label) else label
+            token = boundaries.set((*boundaries.get(), selected))
+            try:
+                return await original(*args, **kwargs)
+            finally:
+                boundaries.reset(token)
+        return invoke
+
+    for cls, prefix, names in (
+        (StateCommands, "execution", (
+            "read_session_start", "reserve_start_checkpoint", "commit_start_checkpoint",
+            "commit_agent_attempt_checkpoint", "commit_prepared_agent_attempt_checkpoint",
+            "commit_start_attempt_checkpoint", "commit_tool_admission_boundary",
+            "commit_tool_terminal_boundary", "commit_tool_admission", "commit_tool_terminal",
+            "commit_terminal_checkpoint", "commit_pending_turn", "commit_cancel_checkpoint",
+            "commit_recovery_handoff",
+        )),
+        (RuntimeRetentionController, "retention", ("release_execution_handoff", "release_session")),
+        (local_module.LocalExecutionBackend, "runtime", (
+            "_commit_success", "release_runtime_execution", "_release_session_execution",
+        )),
+    ):
+        for name in names:
+            monkeypatch.setattr(cls, name, owned(getattr(cls, name), f"{prefix}.{name}"))
+
+    def native_boundary(self, **kwargs):
+        kinds = [value.kind for value in (*self._atomic_pending_events, *kwargs.get("events", ()))]
+        snapshot = kwargs.get("snapshot")
+        return "native.commit[" + ",".join(kinds or ["no_events"]) + ";snapshot=" + (
+            "none" if snapshot is None else snapshot.state
+        ) + "]"
+
+    monkeypatch.setattr(AtomicStepPersistence, "_atomic_commit",
+                        owned(AtomicStepPersistence._atomic_commit, native_boundary))
+
     original_record = _sql._record_from_row
     def record_from_row(row):
         result = original_record(row)
@@ -123,20 +171,56 @@ async def test_two_turn_storage_measurement(
             return await original_require(self, agent_run_id)
         monkeypatch.setattr(RuntimeAgentRunStore, "require_active_producer", fresh)
 
-    mutations: dict[int, bool] = {}
+    transactions: list[dict[str, object]] = []
+    open_transactions: dict[int, dict[str, object]] = {}
+    transaction_rounds = []
+    table_pattern = re.compile(r'\b(?:FROM|JOIN|INTO|UPDATE)\s+["`\[]?(ai_[A-Za-z0-9_]+)', re.IGNORECASE)
+
+    def new_transaction(connection, *, began_in_window):
+        transaction = {"id": len(transactions) + 1, "begin_boundary": list(boundaries.get()),
+                       "began_in_window": began_in_window, "statements": [], "outcome": "open"}
+        transactions.append(transaction)
+        open_transactions[id(connection)] = transaction
+        return transaction
+
     def sql(connection, cursor, statement, parameters, context, many):
+        if not active:
+            return
         word = statement.lstrip().split()[0].upper()
         count("sql." + word)
         count("sql.bind_text_blob_bytes", _bind_bytes(parameters))
-        if word in {"INSERT", "UPDATE", "DELETE"}:
-            mutations[id(connection)] = True
+        transaction = open_transactions.get(id(connection))
+        if transaction is None:
+            transaction = new_transaction(connection, began_in_window=False)
+        transaction["statements"].append({
+            "verb": word, "tables": sorted(set(table_pattern.findall(statement))),
+            "access": "write" if word in {"INSERT", "UPDATE", "DELETE"} else "read" if word == "SELECT" else "control",
+            "boundary": list(boundaries.get()), "bound_text_blob_bytes": _bind_bytes(parameters),
+        })
+
     def begin(connection):
-        count("sql.transactions")
-        mutations[id(connection)] = False
+        if active:
+            count("sql.transactions")
+            new_transaction(connection, began_in_window=True)
+
+    def finish(connection, outcome):
+        transaction = open_transactions.pop(id(connection), None)
+        if active:
+            count("sql." + ("commits" if outcome == "commit" else "rollbacks"))
+        if transaction is not None:
+            transaction["outcome"] = outcome
+            transaction["end_boundary"] = list(boundaries.get())
+            transaction["access"] = "write" if any(
+                item["access"] == "write" for item in transaction["statements"]
+            ) else "read_only"
+            if active and outcome == "commit" and transaction["access"] == "write":
+                count("sql.write_commits")
+
     def commit(connection):
-        count("sql.commits")
-        if mutations.pop(id(connection), False):
-            count("sql.write_commits")
+        finish(connection, "commit")
+
+    def rollback(connection):
+        finish(connection, "rollback")
 
     calls: Counter[str] = Counter()
     effects: list[str] = []
@@ -173,6 +257,7 @@ async def test_two_turn_storage_measurement(
     event.listen(Engine, "before_cursor_execute", sql)
     event.listen(Engine, "begin", begin)
     event.listen(Engine, "commit", commit)
+    event.listen(Engine, "rollback", rollback)
     try:
         async with Persistence.open("turn-io", storage=storage) as persistence, Runtime.attach(
             persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
@@ -183,6 +268,8 @@ async def test_two_turn_storage_measurement(
             backend = runtime._execution_service.runtime_backend()
             for turn in range(2):
                 counts.clear()
+                transactions = []
+                open_transactions.clear()
                 active = True
                 execution = await session.start(f"question-{turn}", idempotency_key=f"round-{turn}")
                 result = await execution.wait(timeout_seconds=15)
@@ -197,7 +284,18 @@ async def test_two_turn_storage_measurement(
                 if owner is not None:
                     await asyncio.wait_for(owner.closed.wait(), 10)
                 active = False
+                assert sum(tx["outcome"] == "commit" for tx in transactions) == counts["sql.commits"]
+                assert sum(tx["outcome"] == "rollback" for tx in transactions) == counts["sql.rollbacks"]
+                assert sum(tx["outcome"] == "commit" and tx["access"] == "write" for tx in transactions) == counts["sql.write_commits"]
                 rows.append(dict(counts))
+                transaction_rounds.append({
+                    "turn": turn, "transactions": transactions,
+                    "unattributed_statements": sum(not item["boundary"] for tx in transactions for item in tx["statements"]),
+                    "unattributed_transactions": sum(not any(item["boundary"] for item in tx["statements"]) for tx in transactions),
+                    "unattributed_write_statements": sum(item["access"] == "write" and not item["boundary"]
+                                                         for tx in transactions for item in tx["statements"]),
+                    "open_transactions": len(open_transactions),
+                })
             table_rows_after = await table_counts() if inspect_tables else {}
             assert calls == {"question-0": 4, "question-1": 4}
             assert len(effects) == 6
@@ -217,12 +315,14 @@ async def test_two_turn_storage_measurement(
         event.remove(Engine, "before_cursor_execute", sql)
         event.remove(Engine, "begin", begin)
         event.remove(Engine, "commit", commit)
+        event.remove(Engine, "rollback", rollback)
         await steps.close()
         await engine.dispose()
     output = Path(os.environ.get("TURN_IO_OUTPUT", ".dev/turn-io-measurement.jsonl"))
     with output.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"label": os.environ.get("TURN_IO_LABEL", "current"), "source_root": str(root), "tool_payload_bytes": len(payload), "checkpointed": checkpointed, "capture_frontier": os.environ.get("TURN_IO_FRONTIER", "1") == "1",
                                  "coordinated": coordinated, "terminal": terminal, "rounds": rows,
+                                 "transaction_attribution": transaction_rounds,
                                  "table_row_delta": {name: table_rows_after[name] - table_rows_before.get(name, 0) for name in table_rows_after},
                                  "assertions": {"tools": len(effects), "model_calls": sum(calls.values()),
                                                 "history_messages": len(page.items), "history_tool_returns": 6,
