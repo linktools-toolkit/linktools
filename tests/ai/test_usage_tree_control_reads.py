@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Usage traversal preserves per-node authorization without loading payloads."""
 
+from pathlib import Path
+
 import pytest
 
 from linktools.ai.core import Principal, TenantAuthorizationPolicy
@@ -15,12 +17,15 @@ from .test_runtime_usage_summary import _GraphUsageHistory, _UsageService
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("graph", (False, True))
 @pytest.mark.parametrize("outcome", ("success", "denied", "missing"))
 async def test_usage_tree_reads_only_membership_after_initial_authorization(
-    monkeypatch: pytest.MonkeyPatch, graph: bool, outcome: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str, graph: bool, outcome: str,
 ) -> None:
-    async with Persistence.open("execution-query", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as state:
+    storage = (PersistenceStorage.in_memory() if backend == "memory"
+               else PersistenceStorage.sqlite(tmp_path / "usage.db"))
+    async with Persistence.open("execution-query", tenant_id="tenant", storage=storage) as state:
         repository = state.execution.executions
         for record in (_record("root", agent_id="agent"),
                        _record("child", agent_id="agent", parent_execution_id="root")):
@@ -29,15 +34,11 @@ async def test_usage_tree_reads_only_membership_after_initial_authorization(
         history_type = _GraphUsageHistory if graph else History
         history = history_type(service, tenant_id="tenant", executions=repository,
                                authorization=TenantAuthorizationPolicy("tenant"))
-        original_get = repository.get
         original_header = repository.get_header
         original_usage = service.usage
-        full_reads = []
 
         async def read_full(execution_id, *, tenant_id):
-            full_reads.append(execution_id)
-            assert not graph and full_reads == ["root"]
-            return await original_get(execution_id, tenant_id=tenant_id)
+            raise AssertionError("usage authorization loaded execution bodies")
 
         async def read_header(execution_id, *, tenant_id):
             if outcome == "missing" and execution_id == "child":
@@ -68,4 +69,3 @@ async def test_usage_tree_reads_only_membership_after_initial_authorization(
             assert raised.value.code is (ErrorCode.AUTHORIZATION_DENIED if outcome == "denied"
                                          else ErrorCode.STORAGE_INTEGRITY_ERROR)
             assert service.calls == ["root"]
-        assert full_reads == ([] if graph else ["root"])

@@ -819,7 +819,7 @@ class History:
         builtin = type(executions) is ExecutionRepositoryImpl
         read_execution = executions.get_header if builtin else executions.get
         read_children = executions.list_child_views if builtin else executions.list_children
-        await self._authorized_record(execution_id, principal)
+        await self._authorized_record(execution_id, principal, metadata_only=True)
         explicit_ids = (
             None if cutoffs is None else {value.execution_id for value in cutoffs}
         )
