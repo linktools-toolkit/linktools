@@ -140,6 +140,9 @@ async def test_immutable_content_insert_compares_winners_without_body_reads(dial
         rowcount = 1
         sql = ""
 
+        def get_bind(self):
+            return SimpleNamespace(dialect=dialect)
+
         async def execute(self, statement, parameters=None):
             self.sql = str(statement.compile(dialect=dialect)).upper()
             return SimpleNamespace(rowcount=self.rowcount)
