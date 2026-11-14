@@ -585,12 +585,13 @@ async def test_public_stream_emits_pending_semantic_event_immediately() -> None:
 
 @pytest.mark.asyncio
 async def test_live_overflow_skips_semantic_events_already_emitted_ephemerally() -> None:
+    event_count = event_module._QUEUE_LIMIT + 2
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
     events = _EventReader({})
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, revision=260, event_seq=260),
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=event_count, event_seq=event_count),
         events,
         broker,
     )
@@ -619,13 +620,13 @@ async def test_live_overflow_skips_semantic_events_already_emitted_ephemerally()
             "execution",
             sequence,
             ExecutionEventType.EXECUTION_SUCCEEDED
-            if sequence == 260
+            if sequence == event_count
             else ExecutionEventType.TOOL_CALL_STARTED,
             {}
-            if sequence == 260
+            if sequence == event_count
             else {"call_id": f"call-{sequence}", "tool_name": "tool"},
         )
-        for sequence in range(1, 261)
+        for sequence in range(1, event_count + 1)
     )
     events.pages[0] = durable
     for event in durable[1:]:
@@ -638,7 +639,7 @@ async def test_live_overflow_skips_semantic_events_already_emitted_ephemerally()
     broker.complete("execution")
 
     remaining = [item async for item in iterator]
-    assert [item.durable_seq for item in remaining] == list(range(2, 261))
+    assert [item.durable_seq for item in remaining] == list(range(2, event_count + 1))
     assert remaining[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
 
 
@@ -647,7 +648,7 @@ async def test_live_broker_durable_overflow_switches_to_repository_replay() -> N
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
-    for sequence in range(1, 300):
+    for sequence in range(1, event_module._QUEUE_LIMIT + 2):
         broker.publish_event(
             "execution",
             ExecutionEventType.TOOL_CALL_STARTED,
@@ -661,6 +662,7 @@ async def test_live_broker_durable_overflow_switches_to_repository_replay() -> N
 
 @pytest.mark.asyncio
 async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
+    event_count = event_module._QUEUE_LIMIT + 2
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
@@ -668,7 +670,7 @@ async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
     second = broker.subscribe("execution")
     assert first is not None
 
-    for index in range(300):
+    for index in range(event_count):
         broker.publish_event(
             "execution",
             ExecutionEventType.TOOL_CALL_STARTED,
@@ -680,7 +682,7 @@ async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
     assert second.replay_required
     assert len(first._queue) == 1
     assert len(second._queue) == 1
-    assert broker._pending_event_counts["execution"] == 300
+    assert broker._pending_event_counts["execution"] == event_count
 
     await broker.wait_for_activity("execution")
     broker.publish(
@@ -699,7 +701,7 @@ async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
     )
     assert not broker._activity["execution"].is_set()
 
-    broker.confirm_events("execution", first_event_seq=1, count=301)
+    broker.confirm_events("execution", first_event_seq=1, count=event_count + 1)
     assert broker._activity["execution"].is_set()
     assert "execution" not in broker._pending_event_counts
     await first.close()
@@ -708,6 +710,7 @@ async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
 
 @pytest.mark.asyncio
 async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
+    event_count = event_module._QUEUE_LIMIT + 2
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
@@ -716,13 +719,13 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
             "execution",
             sequence,
             ExecutionEventType.EXECUTION_SUCCEEDED
-            if sequence == 300
+            if sequence == event_count
             else ExecutionEventType.TOOL_CALL_STARTED,
             {}
-            if sequence == 300
+            if sequence == event_count
             else {"call_id": f"call-{sequence}", "tool_name": "tool"},
         )
-        for sequence in range(1, 301)
+        for sequence in range(1, event_count + 1)
     )
     for event in durable:
         broker.publish_event(
@@ -736,8 +739,8 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
     service = _service(
         _execution(
             status=ExecutionStatus.SUCCEEDED,
-            revision=300,
-            event_seq=300,
+            revision=event_count,
+            event_seq=event_count,
         ),
         _EventReader({0: durable}),
         broker,
@@ -751,7 +754,7 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
         )
     ]
 
-    assert [item.durable_seq for item in streamed] == list(range(1, 301))
+    assert [item.durable_seq for item in streamed] == list(range(1, event_count + 1))
     assert streamed[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
 
 

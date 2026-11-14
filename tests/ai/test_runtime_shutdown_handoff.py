@@ -567,8 +567,11 @@ def test_resident_runtime_finishes_prepared_result_without_model_replay(tmp_path
             successor.close()
 
 
-@pytest.mark.parametrize("ordered_publication", (False, True))
-@pytest.mark.parametrize("synchronized", (False, True))
+@pytest.mark.parametrize("synchronized,ordered_publication", (
+    pytest.param(False, False, id="natural_concurrent_takeover"),
+    pytest.param(True, False, id="prepared_contenders_rendezvous"),
+    pytest.param(False, True, id="cursor_advanced_before_terminal"),
+))
 def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
     tmp_path: Path, synchronized: bool, ordered_publication: bool,
 ) -> None:

@@ -32,11 +32,13 @@ from ._runtime_test_helpers import _Models
 _NAMESPACE = "recovery-ownership"
 
 
-def _capabilities(*, conversation: bool = False) -> RuntimeFeatures:
+def _capabilities(
+    *, conversation: bool = False, native_database: Path | None = None,
+) -> RuntimeFeatures:
     group = RuntimeFeatures(_NAMESPACE)
     if conversation:
         group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    group.capability(native_checkpoint(), scope="runtime")
+    group.capability(native_checkpoint(database=native_database), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
@@ -58,6 +60,7 @@ def _storage(database: Path, phase: str) -> PersistenceStorage:
 def _runtime_process(
     connection: Connection, database: str, mode: str, phase: str,
     execution_id: str | None, auto_recover: bool, recovery_barrier, publication_order=None,
+    native_database: Path | None = None,
 ) -> None:
     async def run() -> None:
         nonlocal execution_id
@@ -82,7 +85,7 @@ def _runtime_process(
             yield "owner answer"
 
         state = _storage(Path(database), phase)
-        async with Persistence.open(_NAMESPACE, storage=state) as persistence_77, Runtime.attach(persistence=persistence_77, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == 'session')), auto_recover=auto_recover) as runtime:
+        async with Persistence.open(_NAMESPACE, storage=state) as persistence_77, Runtime.attach(persistence=persistence_77, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == 'session', native_database=native_database)), auto_recover=auto_recover) as runtime:
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None
                 tenant = runtime.default_principal.tenant_id
@@ -361,13 +364,13 @@ class _RuntimeProcess:
     def __init__(
         self, database: Path, *, mode: str = "session", phase: str = "active",
         execution_id: str | None = None, auto_recover: bool = True, recovery_barrier=None,
-        publication_order=None,
+        publication_order=None, native_database: Path | None = None,
     ) -> None:
         context = multiprocessing.get_context("spawn")
         self.connection, child = context.Pipe()
         self.process = context.Process(
             target=_runtime_process,
-            args=(child, str(database), mode, phase, execution_id, auto_recover, recovery_barrier, publication_order),
+            args=(child, str(database), mode, phase, execution_id, auto_recover, recovery_barrier, publication_order, native_database),
         )
         self.process.start()
         child.close()

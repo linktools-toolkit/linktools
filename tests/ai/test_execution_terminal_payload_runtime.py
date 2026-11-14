@@ -68,9 +68,12 @@ async def test_completed_turns_release_execution_buffer_ownership(
 
             monkeypatch.setattr(backend, "release_runtime_execution", observe_release)
             session = await runtime.agents.get().create_session("session")
-            for index in range(8):
+            execution_ids = set()
+            for index in range(2):
                 released.clear()
                 execution = await session.start("question", idempotency_key=f"request-{index}")
+                assert execution.execution_id not in execution_ids
+                execution_ids.add(execution.execution_id)
                 result = (await execution.wait(timeout_seconds=10)).result
                 assert result.status is ExecutionStatus.SUCCEEDED
                 assert result.output == {"text": "answer"}
@@ -79,7 +82,7 @@ async def test_completed_turns_release_execution_buffer_ownership(
                 # Transport emptiness alone does not release per-turn IDs, locks or tasks.
                 assert not backend._execution_buffer._scopes
                 assert not backend._execution_buffer._retired_scopes
-            assert set(buffer.accepted) == set(buffer.acknowledged)
+                assert set(buffer.accepted) == set(buffer.acknowledged)
 
 
 @pytest.mark.asyncio

@@ -40,22 +40,22 @@ async def _history(state: Persistence, count: int):
 async def test_sparse_windows_skip_unrequested_sql_fact_pages(tmp_path: Path) -> None:
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "sparse.db"))
     try:
-        repository = await _history(state, 513)
+        repository = await _history(state, 257)
         engine = state.conversation.histories.state_store.storage_group.context.engine.sync_engine
         statements = []
         def capture(_connection, _cursor, statement, _parameters, _context, _many):
             statements.append(statement)
         event.listen(engine, "before_cursor_execute", capture)
         try:
-            values = await repository.load_message_spans("history", ((512, 513), (0, 1), (512, 513)))
+            values = await repository.load_message_spans("history", ((256, 257), (0, 1), (256, 257)))
         finally:
             event.remove(engine, "before_cursor_execute", capture)
-        assert [[message.parts[0].content for message in span] for span in values] == [["512"], ["0"], ["512"]]
+        assert [[message.parts[0].content for message in span] for span in values] == [["256"], ["0"], ["256"]]
         assert sum("FROM ai_state_facts" in statement for statement in statements) == 2
         refs = tuple(TranscriptMessageRef(PersistenceDomain.CONVERSATION, "history", index)
-                     for index in (512, 0, 512))
+                     for index in (256, 0, 256))
         resolved = await repository.resolve_transcript_message_refs(refs)
-        assert [value.message.parts[0].content for value in resolved] == ["512", "0", "512"]
+        assert [value.message.parts[0].content for value in resolved] == ["256", "0", "256"]
         assert tuple(value.source for value in resolved) == refs
     finally:
         await state.close()

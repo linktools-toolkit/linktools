@@ -6,8 +6,10 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.evaluation.engine import Evaluations
 
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+import asyncio
+import sqlite3
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +21,7 @@ from sqlalchemy import event
 from linktools.ai.core import AuthorizationAction, Principal, ResourceRef, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
-    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
+    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy, EvaluationSpec,
     EvidenceAttachmentRef, RescoreRequest, StartEvaluationRequest,
 )
 
@@ -30,6 +32,7 @@ from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_objec
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.task import Task
+from linktools.ai.storage import StorageRoute
 
 from ._sqlite_failure_timeline import sqlite_failure_evidence
 
@@ -52,8 +55,12 @@ class Policy:
 
 
 @asynccontextmanager
-async def completed(path: Path, *, count: int = 2) -> AsyncIterator[tuple[Evaluations, Persistence, EvaluationRun, Task, Policy]]:
+async def completed(
+    path: Path, *, count: int = 2, memory_tasks: bool = False, experiment_id: str | None = None,
+) -> AsyncIterator[tuple[Evaluations, Persistence, EvaluationRun, Task, Policy]]:
     storage = PersistenceStorage.sqlite(path / "state.sqlite")
+    if memory_tasks:
+        storage = PersistenceStorage.from_plan(replace(storage.plan, task=StorageRoute.memory()))
     policy = Policy()
     async with Persistence.open('evidence-read', storage=storage, tenant_id='evaluation-consumers') as persistence_52:
         target = Task("evidence-read.target", echo, effect_policy="none")
@@ -62,14 +69,45 @@ async def completed(path: Path, *, count: int = 2) -> AsyncIterator[tuple[Evalua
             TaskEngine.open(target, scorer, persistence=persistence_52, context=CONTEXT, authorization=policy) as engine,
             Evaluations.open(engine) as evaluations,
         ):
-            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), tuple(
-                CaseSpec.task(CaseRef("dataset", f"case-{i}", 1), input={"answer": "yes"}, expected="yes")
-                for i in range(count))), principal=PRINCIPAL, idempotency_key="dataset")
-            run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "run"))
-            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            if experiment_id is None:
+                dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), tuple(
+                    CaseSpec.task(CaseRef("dataset", f"case-{i}", 1), input={"answer": "yes"}, expected="yes")
+                    for i in range(count))), principal=PRINCIPAL, idempotency_key="dataset")
+                run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                    (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
+                    policy=EvaluationPolicy(allow_volatile=memory_tasks)), PRINCIPAL, "run"))
+                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            else:
+                run = await evaluations.get(experiment_id, principal=PRINCIPAL)
             policy.calls.clear()
             yield evaluations, persistence_52, run, scorer, policy
+
+
+@pytest.fixture(scope="module")
+def completed_source_copy(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Callable[[Path], Awaitable[str]]:
+    frozen: tuple[Path, str] | None = None
+
+    async def prepare(destination: Path) -> str:
+        nonlocal frozen
+        if frozen is None:
+            source = tmp_path_factory.mktemp("completed-evidence-writer")
+            async with completed(source) as (_evaluations, _storage, run, _scorer, _policy):
+                experiment_id = run.experiment_id
+            # All writers are closed. Moving their directory makes accidental
+            # reads through the original physical location fail.
+            stopped = source.rename(source.with_name(source.name + "-stopped"))
+            frozen = stopped / "state.sqlite", experiment_id
+        database, experiment_id = frozen
+        with (
+            closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)) as source,
+            closing(sqlite3.connect(destination / "state.sqlite")) as copied,
+        ):
+            source.backup(copied)
+        return experiment_id
+
+    return prepare
 
 
 async def report_count(storage: Persistence) -> int:
@@ -105,111 +143,138 @@ async def test_public_read_evidence_fetches_its_source_once_on_every_call(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("publish", (False, True))
 async def test_snapshot_rechecks_authorization_after_all_evidence_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publish: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         get_cases = storage.evaluation.records.get_cases
-        revoked = False
+        for publish in (False, True):
+            revoked = False
+            denied = False
+            policy.calls.clear()
 
-        async def revoke(refs):
-            nonlocal revoked
-            cases = await get_cases(refs)
-            revoked = True
-            policy.reject = lambda action, resource: (
-                action is AuthorizationAction.EVALUATION_EVIDENCE_READ
-                and resource.id == run.experiment_id
-                and resource.owner_principal_id == PRINCIPAL.principal_id)
-            return cases
+            def reject(action: AuthorizationAction, resource: ResourceRef) -> bool:
+                nonlocal denied
+                matched = (
+                    revoked and action is AuthorizationAction.EVALUATION_EVIDENCE_READ
+                    and resource.id == run.experiment_id
+                    and resource.owner_principal_id == PRINCIPAL.principal_id
+                )
+                if matched:
+                    denied = True
+                return matched
 
-        monkeypatch.setattr(storage.evaluation.records, "get_cases", revoke)
-        with pytest.raises(AIError) as caught:
-            await (run.create_report() if publish else run.preview_report())
-        assert revoked and caught.value.code is ErrorCode.AUTHORIZATION_DENIED
-        assert await report_count(storage) == 0
+            async def revoke(refs):
+                nonlocal revoked
+                cases = await get_cases(refs)
+                revoked = True
+                return cases
+
+            policy.reject = reject
+            with monkeypatch.context() as patch:
+                patch.setattr(storage.evaluation.records, "get_cases", revoke)
+                with pytest.raises(AIError) as caught:
+                    await (run.create_report() if publish else run.preview_report())
+            assert revoked and denied, publish
+            assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED, publish
+            assert await report_count(storage) == 0
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rescore", (False, True))
 async def test_snapshot_full_source_reads_are_bounded_and_source_owner_is_preserved(
-    tmp_path: Path, rescore: bool,
+    tmp_path: Path,
 ) -> None:
-    async with completed(tmp_path, count=3) as (evaluations, storage, run, scorer, policy):
+    # Only source-record SQL reads are measured; task graphs never cross a reopen boundary.
+    async with completed(tmp_path, count=3, memory_tasks=True) as (evaluations, storage, run, scorer, policy):
         source_id = run.experiment_id
-        if rescore:
-            run = await run.rescore(RescoreRequest((rule_scorer(scorer),), "rescore"))
-            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-        await evaluations.close()
-        source = await storage.evaluation.records.get(source_id, tenant_id=PRINCIPAL.tenant_id)
-        source_key = storage.evaluation.records._key("evaluation", (source_id,))
-        source_locator = sha256(source_key).hexdigest()
-        statements = []
+        for rescore in (False, True):
+            if rescore:
+                run = await run.rescore(RescoreRequest((rule_scorer(scorer),), "rescore"))
+                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            await asyncio.gather(*evaluations._watchers.values())
+            source = await storage.evaluation.records.get(source_id, tenant_id=PRINCIPAL.tenant_id)
+            source_key = storage.evaluation.records._key("evaluation", (source_id,))
+            source_locator = sha256(source_key).hexdigest()
+            statements = []
 
-        def capture(_connection, _cursor, sql, parameters, _context, _many):
-            if sql.startswith("SELECT") and (source_key in parameters or source_locator in parameters):
-                statements.append(sql)
+            def capture(_connection, _cursor, sql, parameters, _context, _many):
+                if sql.startswith("SELECT") and (source_key in parameters or source_locator in parameters):
+                    statements.append(sql)
 
-        engine = storage.evaluation.records.state_store.context.engine.sync_engine
-        event.listen(engine, "before_cursor_execute", capture)
-        policy.calls.clear()
-        try:
-            report = await run.preview_report()
-        finally:
-            event.remove(engine, "before_cursor_execute", capture)
-        assert 1 <= len(statements) <= (6 if rescore else 2), "source reads must not grow with evidence count"
-        assert len(report.trials) == 3 and report.scores[0].mean == 1.0
-        assert await report_count(storage) == 0
-        evidence_ids = {link.evidence_ref.evidence_id for link in source.evidence}
-        evidence_calls = [(action, resource) for action, resource in policy.calls
-                          if action is AuthorizationAction.EVALUATION_EVIDENCE_READ]
-        assert {resource.id for _, resource in evidence_calls if resource.id in evidence_ids} == evidence_ids
-        source_calls = [resource for _, resource in evidence_calls if resource.id == source_id]
-        assert sum(resource.owner_principal_id is None for resource in source_calls) >= len(evidence_ids)
-        assert sum(resource.owner_principal_id == PRINCIPAL.principal_id for resource in source_calls) >= len(evidence_ids)
-        if rescore:
-            assert all(resource.id != run.experiment_id for _, resource in evidence_calls)
+            engine = storage.evaluation.records.state_store.context.engine.sync_engine
+            event.listen(engine, "before_cursor_execute", capture)
+            policy.calls.clear()
+            try:
+                report = await run.preview_report()
+            finally:
+                event.remove(engine, "before_cursor_execute", capture)
+            assert 1 <= len(statements) <= (6 if rescore else 2), "source reads must not grow with evidence count"
+            assert len(report.trials) == 3 and report.scores[0].mean == 1.0
+            assert await report_count(storage) == 0
+            evidence_ids = {link.evidence_ref.evidence_id for link in source.evidence}
+            evidence_calls = [(action, resource) for action, resource in policy.calls
+                              if action is AuthorizationAction.EVALUATION_EVIDENCE_READ]
+            assert {resource.id for _, resource in evidence_calls if resource.id in evidence_ids} == evidence_ids
+            source_calls = [resource for _, resource in evidence_calls if resource.id == source_id]
+            assert sum(resource.owner_principal_id is None for resource in source_calls) >= len(evidence_ids)
+            assert sum(resource.owner_principal_id == PRINCIPAL.principal_id for resource in source_calls) >= len(evidence_ids)
+            if rescore:
+                assert all(resource.id != run.experiment_id for _, resource in evidence_calls)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ("evidence", "source", "owner"))
 @sqlite_failure_evidence
-async def test_snapshot_checks_each_evidence_policy_after_revocation(tmp_path: Path, boundary: str) -> None:
+async def test_snapshot_checks_each_evidence_policy_after_revocation(tmp_path: Path) -> None:
     async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         second = record.evidence[1].evidence_ref.evidence_id
-        revoked = False
+        for boundary in ("evidence", "source", "owner"):
+            revoked = False
+            denied = False
+            policy.calls.clear()
 
-        def reject(action, resource):
-            nonlocal revoked
-            if action is not AuthorizationAction.EVALUATION_EVIDENCE_READ:
-                return False
-            if resource.id == second:
-                revoked = True
-            return revoked and (
-                boundary == "evidence" and resource.id == second
-                or boundary == "source" and resource.id == run.experiment_id and resource.owner_principal_id is None
-                or boundary == "owner" and resource.id == run.experiment_id and resource.owner_principal_id == PRINCIPAL.principal_id)
+            def reject(action: AuthorizationAction, resource: ResourceRef, boundary: str = boundary) -> bool:
+                nonlocal revoked, denied
+                if action is not AuthorizationAction.EVALUATION_EVIDENCE_READ:
+                    return False
+                if resource.id == second:
+                    revoked = True
+                matched = revoked and (
+                    boundary == "evidence" and resource.id == second
+                    or boundary == "source" and resource.id == run.experiment_id
+                    and resource.owner_principal_id is None
+                    or boundary == "owner" and resource.id == run.experiment_id
+                    and resource.owner_principal_id == PRINCIPAL.principal_id
+                )
+                if matched:
+                    denied = True
+                return matched
 
-        policy.reject = reject
-        with pytest.raises(AIError) as caught:
-            await run.create_report()
-        assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
-        assert await report_count(storage) == 0
+            policy.reject = reject
+            with pytest.raises(AIError) as caught:
+                await run.create_report()
+            assert revoked and denied, boundary
+            assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED, boundary
+            assert await report_count(storage) == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("deadline_field", ("metadata_expires_at", "content_expires_at"))
 async def test_snapshot_checks_expiry_clock_for_each_cached_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deadline_field: str,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         now = datetime.now(timezone.utc)
         deadline = now + timedelta(hours=1)
         repository = storage.evaluation.records
+        initial = await repository.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        assert initial.metadata_expires_at is None and initial.content_expires_at is None
+        assert len(initial.evidence) == 2
         await repository.update(run.experiment_id, lambda record: replace(record, **{deadline_field: deadline}))
         read = repository.read_evidence
         calls = 0
@@ -281,8 +346,10 @@ async def test_snapshot_revalidates_sources_before_releasing_content(
 @pytest.mark.asyncio
 async def test_snapshot_keeps_evidence_integrity_checks_with_reused_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    completed_source_copy: Callable[[Path], Awaitable[str]],
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    experiment_id = await completed_source_copy(tmp_path)
+    async with completed(tmp_path, experiment_id=experiment_id) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         repository = storage.evaluation.records
         read = repository.read_evidence
@@ -298,13 +365,13 @@ async def test_snapshot_keeps_evidence_integrity_checks_with_reused_source(
         with pytest.raises(AIError) as caught:
             await run.create_report()
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert calls == 2
         assert await report_count(storage) == 0
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", (False, True))
 async def test_snapshot_checks_retained_attachment_integrity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
@@ -321,19 +388,23 @@ async def test_snapshot_checks_retained_attachment_integrity(
         await repository.update(run.experiment_id, lambda value: replace(value,
             evidence=(replace(value.evidence[0], evidence_ref=bundle.ref),)))
         stat = objects.stat
-        checked = False
+        for missing in (False, True):
+            checked = False
 
-        async def changed(key):
-            nonlocal checked
-            result = await stat(key)
-            if key != reference.key:
-                return result
-            checked = True
-            return None if missing else replace(result, size=result.size + 1)
+            async def changed(key):
+                nonlocal checked
+                result = await stat(key)
+                if key != reference.key:
+                    return result
+                checked = True
+                return None if missing else replace(result, size=result.size + 1)
 
-        monkeypatch.setattr(objects, "stat", changed)
-        with pytest.raises(AIError) as caught:
-            await run.create_report()
-        assert checked
-        assert caught.value.code is (ErrorCode.INPUT_CAPTURE_UNAVAILABLE if missing else ErrorCode.STORAGE_INTEGRITY_ERROR)
-        assert await report_count(storage) == 0
+            with monkeypatch.context() as patch:
+                patch.setattr(objects, "stat", changed)
+                with pytest.raises(AIError) as caught:
+                    await run.create_report()
+            assert checked, missing
+            assert caught.value.code is (
+                ErrorCode.INPUT_CAPTURE_UNAVAILABLE if missing else ErrorCode.STORAGE_INTEGRITY_ERROR
+            ), missing
+            assert await report_count(storage) == 0

@@ -344,7 +344,21 @@ def test_start_cost_schemas_reject_extra_duplicate_and_bad_values_without_payloa
     assert "private-payload-sentinel" not in output
 
 
+def test_start_cost_report_keeps_budgets_when_allocation_is_not_measured(reporter: object) -> None:
+    data = dict(_START_LIFECYCLE)
+    for backend in ("owned", "subclass"):
+        data[backend + "_tracemalloc_session_peak_bytes"] = None
+        data[backend + "_tracemalloc_inherited_session"] = False
+    reporter.pytest_runtest_logreport(_report(_START_LIFECYCLE_NODE + "[0-success]", list(data.items())))
+    rows = [json.loads(line.split(" ", 1)[1]) for line in _output(reporter).splitlines()
+            if line.startswith("native_start_lifecycle_cost ")]
+    assert rows == [dict(data, metadata_bytes=0, scenario_outcome="success", test_outcome="passed")]
+
+
 @pytest.mark.parametrize("name,value", (
+    ("owned_select", None),
+    ("owned_tracemalloc_session_peak_bytes", True), ("owned_tracemalloc_session_peak_bytes", -1),
+    ("owned_tracemalloc_session_peak_bytes", 1.0), ("subclass_tracemalloc_session_peak_bytes", "not-a-count"),
     ("owned_select", True), ("owned_select", -1), ("owned_select", 1.0), ("owned_select", 2 ** 63),
     ("owned_tracemalloc_inherited_session", 1), ("subclass_tracemalloc_inherited_session", "false"),
     ("shared_start_signed_logical_byte_delta", True), ("shared_start_signed_logical_byte_delta", -1.0),

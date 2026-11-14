@@ -13,7 +13,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,7 +38,7 @@ from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime.agent_execution import AgentExecutionPort
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage, _memory
 from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.task import (
     DefaultTaskGraphService,
@@ -429,10 +430,12 @@ async def test_expired_running_binding_is_reconciled_before_graph_takeover(
             )
 
         monkeypatch.setattr(backend, "recover_execution", recover_after_reconciliation)
-        await asyncio.sleep(1.05)
-        await service.recover("bound-graph", RecoverGraphRequest(_ACTOR, "recover-expired-binding"))
-        assert observed_states and set(observed_states) == {TaskStatus.READY}
-        assert len(backend.claims) == 1
+        expired_at = lease.lease_expires_at + timedelta(seconds=1)
+        with monkeypatch.context() as clock:
+            clock.setattr(_memory, "datetime", SimpleNamespace(now=lambda tz: expired_at))
+            await service.recover("bound-graph", RecoverGraphRequest(_ACTOR, "recover-expired-binding"))
+            assert observed_states and set(observed_states) == {TaskStatus.READY}
+            assert len(backend.claims) == 1
 
 
 @pytest.mark.asyncio

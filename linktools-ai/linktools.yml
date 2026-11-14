@@ -81,15 +81,6 @@ checks:
     paths:
       - ../tests/ai
     groups:
-      evaluation-recovery:
-        - test_evaluation*
-        - test_captured*
-        - test_graph_capture*
-        - test_*recovery*.py
-        - test_runtime_shutdown_handoff.py
-        - test_idempotent_checkpoint_replacement.py
-        - test_idempotent_partial_frontier.py
-      runtime: []
+      runtime-evaluation: []
     shards:
-      evaluation-recovery: 3
-      runtime: 5
+      runtime-evaluation: 5

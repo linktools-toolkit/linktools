@@ -119,7 +119,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
     body = b"Do not expose binary bodies through input evidence"
     received: list[ScoringInput] = []
     async with (
-        Persistence.open('scoring-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_110,
+        Persistence.open('scoring-input', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_110,
         Runtime.attach(persistence=persistence_110, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         async def score(context: TaskNodeContext[None]) -> JsonValue:
@@ -151,7 +151,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
                                                         (judge, "judge", judge_include_input)))
             run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("candidate", task=target.ref),), scorers,
-                policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"))
+                policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "start"))
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             assert len(received) == 1
             scores = (await run.scores()).items
@@ -181,7 +181,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
 
     scorer = Task("semantics.projected-score", score, effect_policy="none")
     async with (
-        Persistence.open('projected-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_168,
+        Persistence.open('projected-input', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_168,
         Runtime.attach(persistence=persistence_168, context=CONTEXT, features=model_features(models, capabilities())) as runtime,
     ):
         target = Task.from_agent("semantics.projected-target", runtime.agents.get(), build_input=project)
@@ -195,7 +195,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
             )), principal=PRINCIPAL, idempotency_key="dataset")
             run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
-                policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"))
+                policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "start"))
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             assert received == [{"kind": "agent_input", "prompt": {"kind": "text", "text": models.prompts[0]}}]
             assert models.prompts == ["Prepared question: accepted input"]
@@ -221,7 +221,7 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
     template = TaskGraphTemplate((TaskNode("prepare", task=first, input={"fixed": "template data"}),
         TaskNode("finish", ("prepare",), task=second, input_refs={"prepared": TaskNodeResultRef("prepare")})))
     async with (
-        Persistence.open('graph-input', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_203,
+        Persistence.open('graph-input', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_203,
         TaskEngine.open(first, second, scorer, persistence=persistence_203, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -230,7 +230,7 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
         )), principal=PRINCIPAL, idempotency_key="dataset")
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", graph_template=GraphTargetSpec(template=template, outputs={"answer": "finish"})),),
-            (rule_scorer(scorer),)), PRINCIPAL, "start"))
+            (rule_scorer(scorer),), policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start"))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert len(received) == 1
         assert received[0]["inputs"]["prepare"]["input"] == {"fixed": "template data", "question": "original"}
@@ -565,8 +565,10 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
                 (rule_scorer(rule if score_only else judge),),
                 policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "start"))
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-            scoring = await run.rescore(RescoreRequest((rule_scorer(judge),), "rescore")) if score_only else run
-            assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+            scoring = run
+            if score_only:
+                scoring = await run.rescore(RescoreRequest((rule_scorer(judge),), "rescore"))
+                assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             scorer_usage = [await history.graph_usage(item.scorer_graph.graph_id, principal=PRINCIPAL)
                             for item in (await scoring.scores()).items]
             assert any(item.unknown_usage_requests for item in scorer_usage) is unknown_usage
@@ -584,10 +586,10 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
             with monkeypatch.context() as patch:
                 patch.setattr(evaluations._history, "graph_usage", changed_usage)
                 repeated = await evaluations.create_comparison_report(replace(spec, cutoff=report.cutoff), principal=PRINCIPAL)
+                permissive = await evaluations.create_comparison_report(replace(spec, cutoff=report.cutoff,
+                    gate_policy=replace(spec.gate_policy, require_complete_usage=False)), principal=PRINCIPAL)
             assert repeated.gate == report.gate and repeated.cutoff == report.cutoff
-            permissive = await evaluations.create_comparison_report(replace(spec,
-                gate_policy=replace(spec.gate_policy, require_complete_usage=False)), principal=PRINCIPAL)
-            assert permissive.gate == "pass"
+            assert permissive.gate == "pass" and permissive.cutoff == report.cutoff
 
 
 @pytest.mark.asyncio

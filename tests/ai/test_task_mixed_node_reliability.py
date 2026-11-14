@@ -3719,6 +3719,8 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from linktools.ai.storage._dialects import SQLiteDialect
+
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     attachment = b"RECOVERED_PROJECTED_ATTACHMENT"
@@ -3726,8 +3728,6 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
     attachment_path.write_bytes(attachment)
     workspace = Workspace.load(workspace_root)
     storage_root = tmp_path / "projected-file-state"
-    monkeypatch.setattr(task_local, "_LEASE_SECONDS", 1)
-    monkeypatch.setattr(task_local, "_HEARTBEAT_SECONDS", 0.1)
     application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     application.agent(
         "default",
@@ -3805,9 +3805,28 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
             await runtime.close()
 
     attachment_path.unlink()
-    await asyncio.sleep(1.1)
     recovered_storage = PersistenceStorage.from_root(storage_root, exclusive_writer=True)
     async with Persistence.open('projected-file-recovery', storage=recovered_storage) as persistence_3924, Runtime.attach(persistence=persistence_3924, features=model_features(models, application)) as runtime, task_engine_scope(runtime, persistence_3924) as runtime_engine:
+        snapshot = await persistence_3924.task.tasks.graph_state(graph_id, tenant_id=runtime.tenant_id)
+        assert snapshot is not None
+        abandoned = next(node for node in snapshot.node_states if node.node_id == "consumer")
+        assert abandoned.status is TaskStatus.RUNNING
+        assert abandoned.owner is not None and abandoned.fence > 0
+        assert abandoned.lease_expires_at is not None
+        expired_at = max(abandoned.lease_expires_at, datetime.now(timezone.utc)) + timedelta(seconds=1)
+
+        class AfterLeaseExpiry:
+            @classmethod
+            def now(cls, tz: timezone | None = None) -> datetime:
+                return expired_at.astimezone(tz)
+
+        async def database_after_expiry(self: SQLiteDialect, session: object) -> datetime:
+            return expired_at
+
+        # The original TaskEngine has stopped; expire its abandoned lease without shortening live leases.
+        monkeypatch.setattr(task_local, "datetime", AfterLeaseExpiry)
+        monkeypatch.setattr(SQLiteDialect, "database_now", database_after_expiry)
+        monkeypatch.setattr(SQLiteDialect, "database_current_time", database_after_expiry)
         worker = Task.from_agent(
             "example.projected-file-worker",
             runtime.agents.get("default"),
@@ -3823,6 +3842,7 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
         consumer_result = next(
             node for node in completed.node_states if node.node_id == "consumer"
         )
+        assert consumer_result.fence > abandoned.fence
         assert consumer_result.execution_id is not None
         interactions = await runtime.history.model_interactions(
             consumer_result.execution_id,

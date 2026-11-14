@@ -7,7 +7,6 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
-import time
 
 import pytest
 
@@ -24,8 +23,6 @@ def test_recovery_preserves_published_partial_tool_result(tmp_path: Path, rich: 
         from linktools.ai.core import CommitPolicy, ExecutionStatus
         from linktools.ai.persistence import Persistence, PersistenceStorage, PersistenceDomain
         from linktools.ai.runtime import Runtime, RuntimeFeatures
-        from linktools.ai.runtime import _tool as tool_owner
-        tool_owner.TOOL_OPERATION_LEASE_SECONDS = 1
         from tests.ai._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
         root, mode = Path(sys.argv[1]), sys.argv[2]
         rich = sys.argv[3] == "rich"
@@ -99,8 +96,6 @@ def test_recovery_preserves_published_partial_tool_result(tmp_path: Path, rich: 
         asyncio.run(main())
     ''')
     for mode, code in (("create", 73), ("resume", 0)):
-        if mode == "resume":
-            time.sleep(1.1)
         result = subprocess.run([sys.executable, "-c", script, str(tmp_path), mode, "rich" if rich else "plain"],
                                 env=dict(os.environ), capture_output=True, text=True, timeout=25)
         print(mode, result.stdout, result.stderr, flush=True)

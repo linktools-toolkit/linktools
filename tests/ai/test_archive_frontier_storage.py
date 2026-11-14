@@ -20,12 +20,17 @@ from linktools.ai.persistence.runs import ArchiveFrontierReader, ArchiveNodeRead
 from linktools.ai.persistence._archive import decode_archive_scope, ArchiveRoot, ContentArchive, PreparedArchive
 from linktools.ai.persistence._plan import PersistenceDomain
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
-from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
+from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction, _ARCHIVE_READ_FIXED_BINDS
 from linktools.ai.persistence.state import StateTransaction, StoredRecord, _ReadOnlyStateTransaction
 from linktools.ai.storage import create_sql_storage_context, dialect_for_name
 
 
 ALL = ArchiveNodeSlot.SELF | ArchiveNodeSlot.LEFT | ArchiveNodeSlot.RIGHT | ArchiveNodeSlot.NEXT
+# Each metadata and content slot binds both a locator and the raw key.
+_NODE_BINDS = 4 * int(ALL).bit_count()
+# Fill a node batch, then a mixed batch, and leave a direct-content tail.
+_NODE_REQUESTS = (999 - _ARCHIVE_READ_FIXED_BINDS) // _NODE_BINDS + 1
+_CONTENT_REQUESTS = (999 - _ARCHIVE_READ_FIXED_BINDS - _NODE_BINDS) // 2 + 1
 
 
 def _digest(value: str) -> bytes:
@@ -176,9 +181,10 @@ async def test_frontier_unions_overlaps_direct_keys_and_preserves_scope(tmp_path
 async def test_sql_frontier_batches_stay_within_999_parameters(tmp_path: Path) -> None:
     async with _archive_database(tmp_path / "bounded.db") as (engine, archive, prepared, root):
         actual = ArchiveNodeRead(archive._key("archive_sequence", root.slices[0].first), ALL, ALL)
-        requests = (actual,) + tuple(ArchiveNodeRead(_digest(f"missing-node-{index}"), ALL, ALL) for index in range(500))
+        requests = (actual,) + tuple(ArchiveNodeRead(_digest(f"missing-node-{index}"), ALL, ALL) for index in range(_NODE_REQUESTS - 1))
         contents = tuple(record.key for record in prepared.records.values() if record.kind == "archive_content")
-        contents += tuple(_digest(f"missing-content-{index}") for index in range(1200))
+        missing_contents = tuple(_digest(f"missing-content-{index}") for index in range(_CONTENT_REQUESTS - len(contents)))
+        contents = contents[1:] + missing_contents + contents[:1]
         parameter_counts = []
 
         def check_query(connection, cursor, statement, parameters, context, executemany) -> None:
@@ -205,8 +211,8 @@ def test_fixed_frontier_compiles_for_supported_server_dialects_with_bounded_para
     engine = create_async_engine("sqlite+aiosqlite://")
     metadata = build_runtime_sql_metadata(frozenset((PersistenceDomain.EXECUTION,)))
     transaction = _SqlTransaction(AsyncSession(engine), metadata, create_sql_storage_context(engine), _digest("store"))
-    requests = tuple(ArchiveNodeRead(_digest(f"node-{index}"), ALL, ALL) for index in range(500))
-    content_keys = tuple(_digest(f"body-{index}") for index in range(500))
+    requests = tuple(ArchiveNodeRead(_digest(f"node-{index}"), ALL, ALL) for index in range(_NODE_REQUESTS))
+    content_keys = tuple(_digest(f"body-{index}") for index in range(_CONTENT_REQUESTS))
     for dialect in (sqlite.dialect(), mysql.dialect(server_version_info=(5, 7, 44)), postgresql.dialect()):
         transaction._context.dialect = dialect_for_name(dialect.name)
         for nodes, contents in transaction._archive_read_batches(requests, content_keys):

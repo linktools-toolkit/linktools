@@ -3,7 +3,10 @@
 """TaskGraph explicit cancellation semantics."""
 
 from linktools.ai.persistence import Persistence
-import asyncio
+from datetime import timedelta
+from types import SimpleNamespace
+
+from linktools.ai.persistence import _memory
 
 import pytest
 
@@ -121,7 +124,7 @@ async def test_whole_graph_cancel_overrides_historical_failure_after_settlement(
 
 
 @pytest.mark.asyncio
-async def test_cancel_does_not_terminalize_expired_claim_without_execution_binding() -> None:
+async def test_cancel_does_not_terminalize_expired_claim_without_execution_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     state = PersistenceStorage.in_memory()
     state = Persistence(state)
     await state.initialize(namespace="task-cancel-unbound-claim", tenant_id="tenant")
@@ -136,7 +139,9 @@ async def test_cancel_does_not_terminalize_expired_claim_without_execution_bindi
             owner="worker",
             lease_seconds=1,
         )
-        await asyncio.sleep(1.05)
+        # Advance only the store clock; real claim/CAS/fencing behavior stays intact.
+        expired_at = lease.lease_expires_at + timedelta(seconds=1)
+        monkeypatch.setattr(_memory, "datetime", SimpleNamespace(now=lambda tz: expired_at))
         await repository.scheduler_state(graph.graph_id, tenant_id="tenant")
 
         cancelled = await repository.cancel_graph(

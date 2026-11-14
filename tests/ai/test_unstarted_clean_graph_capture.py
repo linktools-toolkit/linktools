@@ -26,15 +26,15 @@ from .test_captured_execution_context import _NoToolsModels
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("task_mode", "input_mode", "mode"), (
-    ("literal", "fixed_input", "declaration_graph"),
-    ("literal", "reproject_input", "declaration_graph"),
-    ("projected", "fixed_input", "declaration_graph"),
-    ("projected", "fixed_input", "materialized_graph"),
-    ("projected", "reproject_input", "declaration_graph"),
+@pytest.mark.parametrize(("task_mode", "input_mode", "mode", "durable"), (
+    ("literal", "fixed_input", "declaration_graph", True),
+    ("literal", "reproject_input", "declaration_graph", False),
+    ("projected", "fixed_input", "declaration_graph", False),
+    ("projected", "fixed_input", "materialized_graph", False),
+    ("projected", "reproject_input", "declaration_graph", False),
 ))
 async def test_clean_unstarted_graph_preserves_captured_input_semantics(
-    tmp_path: Path, task_mode: str, input_mode: str, mode: str,
+    tmp_path: Path, task_mode: str, input_mode: str, mode: str, durable: bool,
 ) -> None:
     work = tmp_path / "workspace"
     work.mkdir()
@@ -59,7 +59,10 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
             raise AIError(ErrorCode.TASK_NODE_FAILED)
         return "ready"
 
-    async with Persistence.open('clean-input', storage=PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True)) as persistence_60, Runtime.attach(persistence=persistence_60, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    # Keep one durable sentinel; projection variants exercise the same live owner.
+    storage = (PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True)
+               if durable else PersistenceStorage.in_memory())
+    async with Persistence.open('clean-input', storage=storage) as persistence_60, Runtime.attach(persistence=persistence_60, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         agent_task = Task.from_agent("clean.agent", runtime.agents.get(),
             build_input=project if task_mode == "projected" else None)

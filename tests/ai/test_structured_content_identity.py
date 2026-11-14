@@ -20,6 +20,25 @@ from linktools.ai.model.messages import (
 )
 
 
+@pytest.fixture(scope='module')
+def hash_seed_contracts() -> tuple[dict[str, object], dict[str, object]]:
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    probe = Path(__file__).with_name('structured_content_seed_probe.py')
+    results = []
+    for seed in ('1', '77'):
+        completed = subprocess.run(
+            [sys.executable, str(probe)], env=dict(os.environ, PYTHONHASHSEED=seed),
+            text=True, capture_output=True,
+        )
+        assert completed.returncode == 0, f'PYTHONHASHSEED={seed}\n{completed.stderr}'
+        results.append(json.loads(completed.stdout))
+    return results[0], results[1]
+
+
 def test_structured_content_retains_value_and_tag_after_reload() -> None:
     original = StructuredContent({'count': 1}, content='fixed rendering', tag='state')
     restored = decode_user_content_payload(encode_user_content((original,)))[0]
@@ -246,23 +265,8 @@ def test_structured_direct_mapping_keys_cannot_collide(value: object) -> None:
     assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
-def test_native_array_order_is_the_structured_request_identity() -> None:
-    import os
-    import subprocess
-    import sys
-
-    script = """
-import json
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, StructuredContent, UserPromptPart
-from linktools.ai.inputs import decode_user_content_payload, encode_user_content, input_intent
-item = StructuredContent({'nested': [{'beta', 'alpha', 'gamma'}]}, content='fixed')
-expected = json.loads(ModelMessagesTypeAdapter.dump_json([ModelRequest(parts=[UserPromptPart([item])])]))[0]['parts'][0]['content'][0]['value']
-restored = decode_user_content_payload(encode_user_content((item,)))[0]
-assert restored.value == expected
-assert input_intent((item,), ()).digest == input_intent((StructuredContent(expected, content='fixed'),), ()).digest
-"""
-    for seed in ('1', '77'):
-        subprocess.check_call([sys.executable, '-c', script], env=dict(os.environ, PYTHONHASHSEED=seed))
+def test_native_array_order_is_the_structured_request_identity(hash_seed_contracts) -> None:
+    assert all(result['array-order'] for result in hash_seed_contracts)
     first = StructuredContent(['alpha', 'beta'], content='fixed')
     second = StructuredContent(['beta', 'alpha'], content='fixed')
     assert input_intent((first,), ()).digest != input_intent((second,), ()).digest
@@ -299,39 +303,11 @@ def test_structured_native_serialization_does_not_change_plain_tool_snapshots() 
 
 
 @pytest.mark.parametrize('model_kind', ['model', 'dataclass'])
-def test_native_stable_set_serializers_keep_identity_across_process_hash_seeds(model_kind: str) -> None:
-    import os
-    import subprocess
-    import sys
-
-    script = """
-import sys
-from pydantic import BaseModel, field_serializer
-from pydantic.dataclasses import dataclass
-from pydantic_ai.messages import StructuredContent
-from linktools.ai.inputs import input_intent
-class Fields:
-    values: set[str]
-    ordered: list[str]
-    count: int
-    @field_serializer('count', when_used='json')
-    def json_count(self, value):
-        return f'count:{value}'
-    @field_serializer('values', when_used='json')
-    def sorted_values(self, value):
-        return sorted(value)
-if sys.argv[1] == 'model':
-    class State(Fields, BaseModel):
-        pass
-else:
-    State = dataclass(Fields)
-item = StructuredContent(State(values={'alpha','beta','gamma'}, ordered=['z','a'], count=1), content='fixed')
-print(input_intent((item,), ()).digest)
-"""
-    digests = [subprocess.check_output([sys.executable, '-c', script, model_kind],
-                                      env=dict(os.environ, PYTHONHASHSEED=seed), text=True).strip()
-               for seed in ('1', '77')]
-    assert digests[0] == digests[1]
+def test_native_stable_set_serializers_keep_identity_across_process_hash_seeds(
+    model_kind: str, hash_seed_contracts,
+) -> None:
+    first, second = hash_seed_contracts
+    assert first[f'stable-{model_kind}'] == second[f'stable-{model_kind}']
 
 
 def test_native_model_serialized_mapping_keys_cannot_collide() -> None:
@@ -359,75 +335,12 @@ def test_native_set_serializer_can_choose_non_array_representation() -> None:
 
 @pytest.mark.parametrize('owner_kind', ['model', 'dataclass', 'annotated-dataclass', 'root'])
 @pytest.mark.parametrize('member_kind', ['model', 'dataclass'])
-def test_native_frozen_members_with_stable_serializers_keep_identity_across_process_hash_seeds(owner_kind: str, member_kind: str) -> None:
-    import os
-    import subprocess
-    import sys
-
-    script = """
-from __future__ import annotations
-import json
-import sys
-from typing import Annotated
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_serializer
-from pydantic.dataclasses import dataclass
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, StructuredContent, UserPromptPart
-from linktools.ai.inputs import decode_user_content_payload, encode_user_content, input_intent
-class ItemFields:
-    key: str
-    groups: frozenset[str]
-    @field_serializer('key', when_used='json')
-    def json_key(self, value):
-        return value.upper()
-    @field_serializer('groups', when_used='json')
-    def sorted_groups(self, value):
-        return sorted(value)
-if sys.argv[2] == 'model':
-    class Item(ItemFields, BaseModel):
-        model_config = ConfigDict(frozen=True)
-else:
-    Item = dataclass(frozen=True)(ItemFields)
-members = {Item(key='a',groups=frozenset({'a','z'})), Item(key='b',groups=frozenset({'beta','gamma'}))}
-class StableMembers:
-    @field_serializer('values', when_used='json')
-    def sorted_values(self, value):
-        return sorted(value, key=lambda item: item.key)
-result = {}
-for alias in (False, True):
-    if sys.argv[1] == 'model':
-        class State(StableMembers, BaseModel):
-            model_config = ConfigDict(serialize_by_alias=alias)
-            values: set[Item] = Field(serialization_alias='items')
-        state = State(values=members)
-    elif sys.argv[1] == 'dataclass':
-        @dataclass(config=ConfigDict(serialize_by_alias=alias))
-        class State(StableMembers):
-            values: set[Item] = Field(serialization_alias='items')
-        state = State(values=members)
-    elif sys.argv[1] == 'annotated-dataclass':
-        @dataclass(config=ConfigDict(serialize_by_alias=alias))
-        class State(StableMembers):
-            values: Annotated[set[Item], Field(serialization_alias='items')]
-        state = State(values=members)
-    else:
-        class State(RootModel[set[Item]]):
-            @field_serializer('root', when_used='json')
-            def sorted_values(self, value):
-                return sorted(value, key=lambda item: item.key)
-        state = State(members)
-    item = StructuredContent(state,content='fixed')
-    restored = decode_user_content_payload(encode_user_content((item,)))[0]
-    expected = json.loads(ModelMessagesTypeAdapter.dump_json([ModelRequest(parts=[UserPromptPart([item])])]))[0]['parts'][0]['content'][0]['value']
-    assert restored.value == expected
-    expected_members = [{'key':'A','groups':['a','z']}, {'key':'B','groups':['beta','gamma']}]
-    assert restored.value == (expected_members if sys.argv[1] == 'root' else {'items' if alias else 'values':expected_members})
-    result[str(alias)] = input_intent((item,), ()).digest
-print(json.dumps(result,sort_keys=True))
-"""
-    digests = [subprocess.check_output([sys.executable, '-c', script, owner_kind, member_kind],
-                                      env=dict(os.environ, PYTHONHASHSEED=seed), text=True).strip()
-               for seed in ('1', '77')]
-    assert digests[0] == digests[1]
+def test_native_frozen_members_with_stable_serializers_keep_identity_across_process_hash_seeds(
+    owner_kind: str, member_kind: str, hash_seed_contracts,
+) -> None:
+    first, second = hash_seed_contracts
+    key = f'frozen-{owner_kind}-{member_kind}'
+    assert first[key] == second[key]
 
 
 @pytest.mark.parametrize('frozen_members', [False, True])
@@ -599,44 +512,5 @@ def test_native_nonfinite_json_constants_are_rejected() -> None:
 
 
 @pytest.mark.parametrize('owner_kind', ['model', 'annotated-dataclass', 'root'])
-def test_native_frozen_member_containers_keep_sdk_values_and_order(owner_kind: str) -> None:
-    import os
-    import subprocess
-    import sys
-
-    script = """
-from __future__ import annotations
-import json
-import sys
-from typing import Annotated
-from pydantic import BaseModel, ConfigDict, Field, RootModel
-from pydantic.dataclasses import dataclass
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, StructuredContent, UserPromptPart
-from linktools.ai.inputs import decode_user_content_payload, encode_user_content
-class Item(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    key: str
-    groups: frozenset[str]
-members = {Item(key='a',groups=frozenset({'a','z'})), Item(key='b',groups=frozenset({'beta','gamma'}))}
-if sys.argv[1] == 'model':
-    class State(BaseModel):
-        model_config = ConfigDict(serialize_by_alias=True)
-        values: set[Item] = Field(serialization_alias='items')
-    state = State(values=members)
-elif sys.argv[1] == 'annotated-dataclass':
-    @dataclass(config=ConfigDict(serialize_by_alias=True))
-    class State:
-        values: Annotated[set[Item], Field(serialization_alias='items')]
-    state = State(values=members)
-else:
-    state = RootModel[set[Item]](members)
-item = StructuredContent(state,content='fixed')
-restored = decode_user_content_payload(encode_user_content((item,)))[0]
-expected = json.loads(ModelMessagesTypeAdapter.dump_json([ModelRequest(parts=[UserPromptPart([item])])]))[0]['parts'][0]['content'][0]['value']
-assert restored.value == expected
-if sys.argv[1] != 'root':
-    assert set(restored.value) == {'items'}
-"""
-    for seed in ('1', '77'):
-        subprocess.check_call([sys.executable, '-c', script, owner_kind],
-                              env=dict(os.environ, PYTHONHASHSEED=seed))
+def test_native_frozen_member_containers_keep_sdk_values_and_order(owner_kind: str, hash_seed_contracts) -> None:
+    assert all(result[f'container-{owner_kind}'] for result in hash_seed_contracts)

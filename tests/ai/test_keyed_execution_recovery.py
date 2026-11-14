@@ -6,7 +6,8 @@ from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import model_features
 
 import asyncio
-from collections.abc import AsyncIterator
+import shutil
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from linktools.ai.core import (
     ResourceKind, SessionStatus, agent_conversation_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.execution import ExecutionRecoveryState
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 
@@ -29,16 +31,58 @@ from .test_live_history_readback_integration import _Models
 from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities
 
 
+@pytest.fixture(scope="module")
+def interrupted_active_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Callable[[], tuple[Path, dict[str, object]]]:
+    frozen: tuple[Path, dict[str, object]] | None = None
+
+    def prepare() -> tuple[Path, dict[str, object]]:
+        nonlocal frozen
+        if frozen is not None:
+            return frozen
+        root = tmp_path_factory.mktemp("keyed-active-owner")
+        owner = _RuntimeProcess(
+            root / "runtime.db", phase="active", native_database=root / "native.db",
+        )
+        try:
+            initial = owner.initial
+            owner.crash()
+            assert not owner.process.is_alive()
+            assert owner.process.exitcode is not None
+        finally:
+            owner.close()
+        assert (root / "runtime.db").is_file() and (root / "native.db").is_file()
+        # Keep the stopped writer's stores unopened, including their crash-time
+        # sidecars. Every recovery works on a complete, independent copy.
+        frozen = root, initial
+        return frozen
+
+    return prepare
+
+
 @asynccontextmanager
 async def _recoverable(
     tmp_path: Path, *, phase: str = "active", model_error: bool = False,
     model_started: asyncio.Event | None = None,
+    crash_template: tuple[Path, dict[str, object]] | None = None,
 ) -> AsyncIterator[tuple[Runtime, Runtime, Persistence, str, list[int], asyncio.Event]]:
-    database = tmp_path / "runtime.db"
-    owner = _RuntimeProcess(database, phase=phase)
-    execution_id = owner.initial["execution_id"]
-    owner.crash()
-    owner.close()
+    native_database = None
+    if crash_template is None:
+        database = tmp_path / "runtime.db"
+        owner = _RuntimeProcess(database, phase=phase)
+        execution_id = owner.initial["execution_id"]
+        owner.crash()
+        owner.close()
+    else:
+        assert phase == "active"
+        source, initial = crash_template
+        copied = tmp_path / "crash"
+        shutil.copytree(source, copied)
+        database = copied / "runtime.db"
+        native_database = copied / "native.db"
+        execution_id = initial["execution_id"]
+        assert isinstance(execution_id, str)
     release = asyncio.Event()
     calls = []
 
@@ -55,11 +99,23 @@ async def _recoverable(
     state = PersistenceStorage.sqlite(database)
     other_state = PersistenceStorage.sqlite(database)
     try:
-        async with Persistence.open(_NAMESPACE, storage=state) as persistence_54, Runtime.attach(persistence=persistence_54, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, Persistence.open(_NAMESPACE, storage=other_state) as persistence_57, Runtime.attach(persistence=persistence_57, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as other:
-            try:
-                yield runtime, other, runtime._state, execution_id, calls, release
-            finally:
-                release.set()
+        async with Persistence.open(_NAMESPACE, storage=state) as persistence_54:
+            if crash_template is not None:
+                original = await persistence_54.execution.executions.get(execution_id, tenant_id="default")
+                assert original is not None
+                assert original.status is ExecutionStatus.STARTED
+                assert original.recovery_state is ExecutionRecoveryState.ACTIVE
+                assert original.producer_generation == initial["generation"]
+                assert original.producer_claim_id == initial["claim_id"]
+                assert original.producer_claim_id is not None
+                session = await persistence_54.conversation.sessions.get("session", tenant_id="default")
+                assert session is not None and session.active_execution_id == execution_id
+                assert await persistence_54.execution.operations.get("recovery", tenant_id="default") is None
+            async with Runtime.attach(persistence=persistence_54, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(native_database=native_database))) as runtime, Persistence.open(_NAMESPACE, storage=other_state) as persistence_57, Runtime.attach(persistence=persistence_57, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(native_database=native_database))) as other:
+                try:
+                    yield runtime, other, runtime._state, execution_id, calls, release
+                finally:
+                    release.set()
     finally:
         release.set()
 
@@ -181,9 +237,12 @@ async def test_running_receipt_rejects_replay_and_caller_cancel_does_not_abandon
 @pytest.mark.parametrize("outcome", ("unknown", "launched_ack_lost", "rejected", "settled_ack_lost", "claims_unsettled"))
 async def test_launch_and_settlement_outcomes_do_not_repeat_takeover(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+    interrupted_active_template: Callable[[], tuple[Path, dict[str, object]]],
 ) -> None:
     started = asyncio.Event()
-    async with _recoverable(tmp_path, model_started=started) as (runtime, other, state, execution_id, _calls, _release):
+    async with _recoverable(
+        tmp_path, model_started=started, crash_template=interrupted_active_template(),
+    ) as (runtime, other, state, execution_id, _calls, _release):
         backend = runtime._execution_service.runtime_backend()
         launch = backend.launch
         if outcome == "settled_ack_lost":

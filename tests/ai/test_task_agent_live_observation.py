@@ -96,7 +96,11 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
             await asyncio.gather(ready, return_exceptions=True)
             outcome = await waiting
         assert outcome.result.status is TaskStatus.SUCCEEDED
-        assert outcome.observation_error is None
+        assert outcome.observation_error is None, (
+            outcome.observation_error.origin,
+            outcome.observation_error.cause_code,
+            dict(outcome.observation_error.safe_details),
+        )
         for index in range(producer_count):
             finished = [event for event in events if event.node_id == f"node-{index}"
                         and event.event.event.event_type == "TOOL_CALL_FINISHED"]

@@ -7,6 +7,8 @@ from ._runtime_test_helpers import model_features
 
 import asyncio
 import multiprocessing
+import shutil
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -188,12 +190,14 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
             assert node.error_code == (ErrorCode.EXECUTION_WAIT_TIMEOUT if earlier == "node" else ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED).value
 
 
-def _recovery_group(subagent: bool, change: str = "none") -> RuntimeFeatures:
+def _recovery_group(
+    subagent: bool, change: str = "none", *, native_database: Path | None = None,
+) -> RuntimeFeatures:
     async def marker(value: str) -> str:
         return value
 
     group = RuntimeFeatures("deadline-recovery")
-    group.capability(native_checkpoint(), scope="runtime")
+    group.capability(native_checkpoint(database=native_database), scope="runtime")
     group.tool(marker, effect_policy="non_replay_safe" if change == "tool" else "none")
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
                 allow_subagents=("child",) if subagent else ())
@@ -207,7 +211,7 @@ def _recovery_group(subagent: bool, change: str = "none") -> RuntimeFeatures:
 
 def _start_interrupted_graph(
     path: str, ready: object, backend: str, timeout: float | None = 0.5, subagent: bool = False,
-    interrupt_child: bool = True, missing_capture: bool = False,
+    interrupt_child: bool = True, missing_capture: bool = False, native_database: Path | None = None,
 ) -> None:
     observer_entered = asyncio.Event()
     model_entered = asyncio.Event()
@@ -228,7 +232,7 @@ def _start_interrupted_graph(
             await asyncio.sleep(30)
             return ModelResponse(parts=[TextPart("late")])
 
-        group = _recovery_group(subagent)
+        group = _recovery_group(subagent, native_database=native_database)
         async with Persistence.open('deadline-recovery', storage=PersistenceStorage.sqlite(Path(path)) if backend == 'sqlite' else PersistenceStorage.from_root(Path(path), exclusive_writer=True)) as persistence_230, Runtime.attach(persistence=persistence_230, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_230) as engine:
             task = Task.from_agent("deadline.agent", runtime.agents.get())
             run = await engine.with_definitions(task).start(
@@ -265,6 +269,49 @@ def _start_interrupted_graph(
         asyncio.run(start())
 
 
+@pytest.fixture(scope="module")
+def interrupted_child_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Callable[[], Awaitable[tuple[Path, str, datetime, str]]]:
+    frozen: tuple[Path, str, datetime, str] | None = None
+
+    async def prepare() -> tuple[Path, str, datetime, str]:
+        nonlocal frozen
+        if frozen is not None:
+            return frozen
+        root = tmp_path_factory.mktemp("deadline-interrupted-child")
+        context = multiprocessing.get_context("spawn")
+        read, write = context.Pipe(duplex=False)
+        process = context.Process(target=_start_interrupted_graph, args=(
+            str(root / "state.db"), write, "sqlite", 0.5, True, True, False, root / "native.db",
+        ))
+        process.start()
+        try:
+            assert await asyncio.to_thread(read.poll, 30), "Interrupted execution did not reach its ready boundary"
+            execution_id, started_at, tenant_id = read.recv()
+            assert started_at is not None
+        finally:
+            try:
+                process.terminate()
+                await asyncio.to_thread(process.join, 5)
+                terminated = not process.is_alive()
+                if not terminated:
+                    process.kill()
+                    await asyncio.to_thread(process.join, 5)
+                assert terminated, "Interrupted writer did not terminate; snapshot cannot be reused"
+                assert process.exitcode is not None
+            finally:
+                read.close()
+                write.close()
+        assert (root / "state.db").is_file() and (root / "native.db").is_file()
+        # No database in this directory is opened after the writer has stopped.
+        # Each recovery copies both stores and their crash-time sidecars.
+        frozen = root, execution_id, started_at, tenant_id
+        return frozen
+
+    return prepare
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend,subagent,change", (
     ("sqlite", False, "none"), ("local_sqlite", False, "none"),
@@ -275,23 +322,32 @@ def _start_interrupted_graph(
 ))
 async def test_agent_node_recovery_keeps_first_start_deadline(
     tmp_path: Path, backend: str, subagent: bool, change: str,
+    interrupted_child_template: Callable[[], Awaitable[tuple[Path, str, datetime, str]]],
 ) -> None:
-    path = tmp_path / "state.db"
-    context = multiprocessing.get_context("spawn")
-    read, write = context.Pipe(duplex=False)
-    process = context.Process(target=_start_interrupted_graph, args=(str(path), write, backend, None if change == "missing_capture" else 0.5, subagent, True, change == "missing_capture"))
-    process.start()
-    try:
-        assert await asyncio.to_thread(read.poll, 30), "Interrupted execution did not reach its ready boundary"
-        execution_id, started_at, tenant_id = read.recv()
-        assert started_at is not None
-    finally:
-        process.terminate()
-        await asyncio.to_thread(process.join, 5)
-        assert not process.is_alive()
-        assert process.exitcode is not None
-        read.close()
-        write.close()
+    native_database = None
+    if backend == "sqlite" and subagent and change in {"none", "metadata", "prompt", "tool", "revision"}:
+        source, execution_id, started_at, tenant_id = await interrupted_child_template()
+        copied = tmp_path / "crash"
+        shutil.copytree(source, copied)
+        path = copied / "state.db"
+        native_database = copied / "native.db"
+    else:
+        path = tmp_path / "state.db"
+        context = multiprocessing.get_context("spawn")
+        read, write = context.Pipe(duplex=False)
+        process = context.Process(target=_start_interrupted_graph, args=(str(path), write, backend, None if change == "missing_capture" else 0.5, subagent, True, change == "missing_capture"))
+        process.start()
+        try:
+            assert await asyncio.to_thread(read.poll, 30), "Interrupted execution did not reach its ready boundary"
+            execution_id, started_at, tenant_id = read.recv()
+            assert started_at is not None
+        finally:
+            process.terminate()
+            await asyncio.to_thread(process.join, 5)
+            assert not process.is_alive()
+            assert process.exitcode is not None
+            read.close()
+            write.close()
     # Read without a Runtime: startup reconciliation must not run before the
     # crash premise (including the real in-flight child) has been verified.
     snapshot = Persistence(PersistenceStorage.sqlite(path) if backend == "sqlite" else PersistenceStorage.from_root(path, exclusive_writer=True))
@@ -317,7 +373,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         await asyncio.sleep(30)
         return ModelResponse(parts=[TextPart("late")])
 
-    group = _recovery_group(subagent, change)
+    group = _recovery_group(subagent, change, native_database=native_database)
     owners = AsyncExitStack()
     persistence = await owners.enter_async_context(Persistence.open(
         "deadline-recovery",

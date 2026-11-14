@@ -404,18 +404,20 @@ async def test_metadata_read_failure_keeps_authoritative_error_channel() -> None
 async def test_standalone_watch_does_not_retain_previously_delivered_event_tasks() -> None:
     from .test_unified_wait_contract import _execution_event
 
+    # Exceed the retained-task bound while keeping the stream open.
+    event_count = 16
     bundle = await _bundle()
     try:
         async def tree(*args, ready=None, **kwargs):
             if ready is not None:
                 ready.set()
-            for sequence in range(1, 501):
+            for sequence in range(1, event_count + 1):
                 yield _execution_event(sequence)
             await asyncio.Event().wait()
 
         run = replace(bundle.execution_run, _watch_tree=tree)
         stream = run.watch(include_model_interactions=True)
-        for _ in range(501):
+        for _ in range(event_count + 1):
             await anext(stream)
         assert bundle.runtime._observation_sessions
         assert all(len(session.tasks) < 10 for session in bundle.runtime._observation_sessions)
@@ -454,13 +456,15 @@ async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_ca
     monkeypatch.setattr(_observation, "_FINAL_DRAIN_TIMEOUT", 0.01)
     bundle = await _bundle()
     try:
-        register = bundle.runtime._register_observation
+        binding = bundle.execution_run._binding
 
         def register_short_cleanup(session: _observation.ObservationSession) -> None:
             session.close_timeout = 0.1
-            register(session)
+            binding.register_observation(session)
 
-        monkeypatch.setattr(bundle.runtime, "_register_observation", register_short_cleanup)
+        run = replace(bundle.execution_run, _binding=replace(
+            binding, register_observation=register_short_cleanup,
+        ))
         original = bundle.runtime.history.capture_model_interaction_cutoffs
         release = asyncio.Event()
         entered = asyncio.Event()
@@ -477,13 +481,13 @@ async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_ca
                         pass
             return await original(*args, **kwargs)
         bundle.runtime.history.capture_model_interaction_cutoffs = capture
-        stream = bundle.execution_run.watch(include_model_interactions=True)
+        stream = run.watch(include_model_interactions=True)
         async def consume():
             return [event async for event in stream]
         pending = asyncio.create_task(consume())
         await asyncio.wait_for(entered.wait(), 1)
         try:
-            done, _ = await asyncio.wait({pending}, timeout=6)
+            done, _ = await asyncio.wait({pending}, timeout=1)
             assert pending in done
             with pytest.raises(ObservationError) as caught:
                 pending.result()

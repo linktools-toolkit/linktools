@@ -46,7 +46,7 @@ def package_checks(packages: "typing.Iterable[str]") -> "typing.List[typing.Dict
                     "pytest-args": "-n 4 --dist=loadfile --capture=fd -r%s --test-group=%s%s%s%s" % (
                         "a" if group != "all" else "s", group,
                         " --test-shard=" + shard if shard else "",
-                        " --durations=50" if group != "all" else "",
+                        " --durations=50",
                         " --tb=long -o verbosity_assertions=2 -o faulthandler_timeout=90" if group != "all" else "",
                     ),
                 })
