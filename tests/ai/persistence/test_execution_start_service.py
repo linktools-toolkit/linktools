@@ -236,6 +236,10 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
 
 @pytest.mark.asyncio
 async def test_task_start_holds_immediate_terminal_execution_before_return() -> None:
+    from linktools.ai.core import StopReason, UsageMetrics
+    from linktools.ai.persistence.contracts import ResultRecord
+    from linktools.ai.storage import StoredPayload
+
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="service-start-handoff", tenant_id="tenant")
     release_started = asyncio.Event()
@@ -250,13 +254,25 @@ async def test_task_start_holds_immediate_terminal_execution_before_return() -> 
             execution: ExecutionRecord,
         ) -> None:
             await super().launch(request, execution)
+            current = await self._repository.get(execution.execution_id, tenant_id=self._repository.tenant_id)
+            await self._repository.compare_and_swap(
+                current.execution_id, tenant_id=self._repository.tenant_id,
+                expected_revision=current.revision,
+                next_record=replace(current, status=ExecutionStatus.SUCCEEDED,
+                    revision=current.revision + 1, completed_at=current.updated_at,
+                    result=ResultRecord(StoredPayload.inline_json("answer"), StopReason.END_TURN,
+                        UsageMetrics(), current.updated_at)),
+            )
             await self.service.request_terminal_handoff(
                 execution.execution_id,
                 tenant_id=self._repository.tenant_id,
             )
 
-    async def release_terminal(execution_id: str, *, tenant_id: str) -> bool:
-        del execution_id, tenant_id
+    async def release_terminal(execution_id: str, *, tenant_id: str, terminal_commit: bool = False) -> bool:
+        current = await state.execution.executions.get(execution_id, tenant_id=tenant_id)
+        assert current is not None and current.status is ExecutionStatus.SUCCEEDED
+        assert terminal_commit is current.conversation
+        assert not current.dependency_hold_ids
         release_started.set()
         await release_finished.wait()
         return True
@@ -282,9 +298,11 @@ async def test_task_start_holds_immediate_terminal_execution_before_return() -> 
                 hold_id=hold_id,
             )
         )
-        await release_started.wait()
-        release_finished.set()
-        await cleanup
+        try:
+            await asyncio.wait_for(release_started.wait(), 5)
+        finally:
+            release_finished.set()
+            await asyncio.wait_for(cleanup, 5)
     finally:
         await state.close()
 
