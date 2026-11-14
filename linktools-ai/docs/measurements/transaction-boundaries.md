@@ -2,8 +2,9 @@
 
 ## Status and objective
 
-This is a measured baseline and correctness inventory, not a transaction-reduction
-implementation. The source baseline is
+The write-transaction work remains a measured baseline and correctness inventory.
+The implemented narrow slice below only removes redundant reads when a local
+terminal publication is already confirmed and retained. The source baseline is
 `776caf18b1c11d1e2f2122e79748521863c0c217` (tree
 `5ec1b6f1178b401edf7fbca15b05d3eeeeb33873`).
 
@@ -118,6 +119,64 @@ Effectful settlement already atomically writes the business result and Native
 tool event. A failed event publication can require a separate outcome-preserving
 transaction after rollback; that recovery path must not be deleted as a duplicate.
 
+## Confirmed terminal wait read reuse
+
+A wait that starts after this process has confirmed a complete terminal publication
+can use the same retained publication helper already used after wait/poll wakeups.
+Previously the first read always reloaded the source result, even while that exact
+publication was retained. The change reuses the existing helper at first entry;
+it adds no cache, lifetime extension, write batching or new durable owner.
+
+The helper still applies the current authorization policy. The wait still waits
+for an owned worker to settle, checks worker failure and uses the original result
+consumption/handoff path. No receipt means the original source read, including
+cold/remote and unconfirmed/unknown cases. External result bodies still use their
+original readers. The consumer scope is entered before choosing a receipt, so
+local lifetime cleanup cannot overtake consumption.
+
+A focused SQLite probe applies the same completed-worker, explicit dependency-hold
+fixture to `fc92b8d6` and the candidate. It uses the built-in tenant policy and an
+inline output. The hold keeps the real publication available; it is test setup,
+not a new production hold. Counts cover `wait()`, not setup or hold acquisition:
+
+| Case | Before SELECT / read commits | After SELECT / read commits | Outcome |
+| --- | ---: | ---: | --- |
+| Confirmed retained publication, success | 3 / 2 | 0 / 0 | Same output |
+| No retained publication, success | 3 / 2 | 3 / 2 | Original source fallback |
+| Retained publication, authorization revoked | 1 / 1 | 0 / 0 | Denied |
+| Retained publication, worker failure | 1 / 1 | 0 / 0 | Original failure |
+| No publication, revoked authorization or worker failure | 1 / 1 | 1 / 1 | Original rejection |
+
+These are read-only transactions; no write commit is removed. The original fixed
+8-model/6-tool/16-history probe remains **46 total / 38 write commits**, SELECT 31,
+INSERT 129, UPDATE 44 and 200,183 bound bytes. This slice does not solve the write
+transaction target.
+
+One availability change is intentional: an inline result with a confirmed retained
+publication can now be consumed when the redundant source-result query is
+unavailable. Authorization and worker-failure checks still apply. Without that
+receipt the same source failure still propagates. This is not permission to
+invent a result after an unknown commit or to suppress necessary body reads.
+
+Reproduce the retained-wait probe using the normal repository environment:
+
+```bash
+RECEIPT_WAIT_IO_OUTPUT=/tmp/receipt-wait.jsonl \
+PYTHONPATH="$PWD/linktools-ai/src:$PWD/linktools/src:$PWD" python - <<'PYTEST'
+import manage
+manage._run_pytest('linktools-ai', {'paths': [
+    'tests/ai/test_confirmed_turn_receipts_independent.py'
+    '::test_wait_started_after_publication_preserves_read_guards',
+]}, manage._check_environment(), 'all')
+PYTEST
+```
+
+The opt-in JSON logs counters only, not parameters. Focused verification covers
+receipt presence/absence, current authorization rejection, worker failure, source
+unavailability, real dependency holds and the existing retention/context contracts.
+The current slice passed 65 receipt/retention/exact-context tests and the fixed
+probe; the final receipt test with opt-in measurement passed all 15 cases.
+
 ## Candidate boundaries and proof obligations
 
 ### Admission and activation
@@ -205,6 +264,6 @@ checks, independent review and natural CI for its exact commit. A lower count
 without those semantics is not an optimization.
 
 This inventory does not prove 38 is a universal lower bound. It finds no safe
-production reduction within the examined unchanged contracts. The Draft remains
+write-transaction reduction within the examined unchanged contracts. The Draft remains
 open for a concrete candidate with measured benefit; broader workload attribution
 and server/application validation remain independent next steps.
