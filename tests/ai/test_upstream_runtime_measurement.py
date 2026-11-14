@@ -26,6 +26,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.migrate import provision_database
 from linktools.ai.core import CommitPolicy, ExecutionStatus
+from linktools.ai.execution import ExecutionManager
+from linktools.ai.runtime._conversation_service import ConversationService
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence import _sql
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
@@ -63,6 +65,8 @@ async def test_two_turn_storage_measurement(
     assert Path(local_module.__file__).resolve().is_relative_to(root)
     assert Path(_sql.__file__).resolve().is_relative_to(root)
     payload = "x" * int(os.environ.get("TURN_IO_TOOL_BYTES", "0")) or "done"
+    tool_effect_policy = os.environ.get("TURN_IO_TOOL_POLICY", "replay_safe")
+    assert tool_effect_policy in {"none", "replay_safe"}
     counts: Counter[str] = Counter()
     active = False
 
@@ -120,6 +124,7 @@ async def test_two_turn_storage_measurement(
             "commit_terminal_checkpoint", "commit_pending_turn", "commit_cancel_checkpoint",
             "commit_recovery_handoff",
         )),
+        (ExecutionManager, "execution", ("load_result_authorized",)),
         (RuntimeRetentionController, "retention", ("release_execution_handoff", "release_session")),
         (local_module.LocalExecutionBackend, "runtime", (
             "_commit_success", "release_runtime_execution", "_release_session_execution",
@@ -127,6 +132,10 @@ async def test_two_turn_storage_measurement(
     ):
         for name in names:
             monkeypatch.setattr(cls, name, owned(getattr(cls, name), f"{prefix}.{name}"))
+
+    monkeypatch.setattr(ConversationService, "load_session_context", classmethod(owned(
+        ConversationService.load_session_context.__func__, "conversation.load_session_context",
+    )))
 
     def native_boundary(self, **kwargs):
         kinds = [value.kind for value in (*self._atomic_pending_events, *kwargs.get("events", ()))]
@@ -244,7 +253,7 @@ async def test_two_turn_storage_measurement(
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope="runtime")
     if checkpointed:
         features.capability(StepPersistence(store=steps, capture_frontier=os.environ.get("TURN_IO_FRONTIER", "1") == "1"), scope="runtime")
-    features.tool(work, effect_policy="replay_safe")
+    features.tool(work, effect_policy=tool_effect_policy)
     features.agent("default", model="default", allow_tools=("work",))
     cache = InMemoryCacheBackend(max_bytes=16 * 1024 * 1024)
     storage = PersistenceStorage.sql(engine, cache=cache, coordination=cache if coordinated else None)
@@ -321,7 +330,7 @@ async def test_two_turn_storage_measurement(
     output = Path(os.environ.get("TURN_IO_OUTPUT", ".dev/turn-io-measurement.jsonl"))
     with output.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"label": os.environ.get("TURN_IO_LABEL", "current"), "source_root": str(root), "tool_payload_bytes": len(payload), "checkpointed": checkpointed, "capture_frontier": os.environ.get("TURN_IO_FRONTIER", "1") == "1",
-                                 "coordinated": coordinated, "terminal": terminal, "rounds": rows,
+                                 "coordinated": coordinated, "terminal": terminal, "tool_effect_policy": tool_effect_policy, "rounds": rows,
                                  "transaction_attribution": transaction_rounds,
                                  "table_row_delta": {name: table_rows_after[name] - table_rows_before.get(name, 0) for name in table_rows_after},
                                  "assertions": {"tools": len(effects), "model_calls": sum(calls.values()),
