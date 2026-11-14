@@ -4,9 +4,6 @@
 
 from dataclasses import dataclass, fields, replace
 from collections.abc import Mapping
-import hashlib
-
-from ..model.messages import encode_model_messages
 
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot
@@ -30,15 +27,9 @@ class NativeCheckpoint(ContinuableSnapshot):
         """Validate the complete native retry descriptor, not a partial projection."""
         if value is None:
             return
-        if (not isinstance(value, Mapping) or set(value) != {"output_retries_used", "message_sha256"}
-                or type(value["output_retries_used"]) is not int or value["output_retries_used"] < 0
-                or not isinstance(value["message_sha256"], str) or len(value["message_sha256"]) != 64):
+        if (not isinstance(value, Mapping) or set(value) != {"output_retries_used"}
+                or type(value["output_retries_used"]) is not int or value["output_retries_used"] < 0):
             raise ValueError("snapshot checkpoint state is invalid")
-        try:
-            if bytes.fromhex(value["message_sha256"]).hex() != value["message_sha256"]:
-                raise ValueError("snapshot checkpoint message digest is invalid")
-        except ValueError as error:
-            raise ValueError("snapshot checkpoint message digest is invalid") from error
 
     @classmethod
     def restore_descriptor(cls, snapshot: ContinuableSnapshot, descriptor: object) -> ContinuableSnapshot:
@@ -46,10 +37,7 @@ class NativeCheckpoint(ContinuableSnapshot):
         cls.validate_descriptor(descriptor)
         if descriptor is None:
             return snapshot
-        restored = cls.encode(snapshot, output_retries_used=descriptor["output_retries_used"])
-        if hashlib.sha256(encode_model_messages(restored.messages[-1:])).hexdigest() != descriptor["message_sha256"]:
-            raise ValueError("snapshot checkpoint state is corrupt or misbound")
-        return restored
+        return cls.encode(snapshot, output_retries_used=descriptor["output_retries_used"])
 
     @classmethod
     def from_snapshot(cls, snapshot: ContinuableSnapshot, *, output_retries_used: int) -> "NativeCheckpoint":

@@ -261,12 +261,19 @@ class TaskExecutionService:
         state, owner = await self._handoff.release_hold(key, hold_id)
         if owner and state is not None:
             await self._run_handoff_cleanup(execution_id, tenant_id, state)
-        await self._repositories.executions.release_dependency_hold(
+        current = await self._repositories.executions.release_dependency_hold(
             execution_id,
             tenant_id=tenant_id,
             hold_id=hold_id,
         )
-        await self.request_handoff_if_terminal(execution_id, tenant_id)
+        if current.status in {
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+        }:
+            await self.request_terminal_handoff(
+                execution_id, tenant_id=tenant_id, terminal_commit=current.conversation,
+            )
+        else:
+            await self.request_handoff_if_terminal(execution_id, tenant_id)
 
     async def request_terminal_handoff(
         self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,

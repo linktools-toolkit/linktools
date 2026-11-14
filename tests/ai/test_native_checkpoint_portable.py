@@ -88,7 +88,7 @@ async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstone
         corrupted = deepcopy(original)
         row = corrupted["native_checkpoints"][0]["snapshots"][-1]
         descriptor = json.loads(row["messages"])
-        descriptor["checkpoint"]["message_sha256"] = "0" * 64
+        descriptor["checkpoint"]["output_retries_used"] = -1
         row["messages"] = canonical_json_bytes(descriptor).decode()
         payload = canonical_json_bytes(corrupted)
         digest = hashlib.sha256(payload).hexdigest()

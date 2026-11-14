@@ -21,18 +21,18 @@ _RECOVER = "linktools.native_recovery"
 _PUBLICATION_HANDOFF = "linktools.native_publication_handoff"
 
 
-class PublicationTargetsUnavailable(ValueError):
-    """A receipt cannot supply IDs in the requested publication scope."""
+class PublicationUnavailable(ValueError):
+    """A receipt cannot confirm roots in the requested publication scope."""
 
 
-class _PublicationTargets(Protocol):
+class _PublicationConfirmation(Protocol):
     def __call__(
         self, session: "AsyncSession", *, store_key: bytes, roots: Sequence[str],
-    ) -> tuple[int, ...]: ...
+    ) -> None: ...
 
 
-def register_publication_targets(
-    session: "AsyncSession", store: bytes, roots: Sequence[str], resolve: _PublicationTargets,
+def register_publication(
+    session: "AsyncSession", store: bytes, roots: Sequence[str], resolve: _PublicationConfirmation,
 ) -> None:
     """Hand one receipt's live evidence to its pending durable owner."""
     resolve(session, store_key=store, roots=roots)
@@ -159,16 +159,6 @@ async def index_nodes(
     return sequences
 
 
-async def note_publication(
-    session: "AsyncSession", store: bytes, roots: Sequence[str], *, resolved: Mapping[str, int] | None = None,
-) -> dict[str, int]:
-    # Reuse only IDs read while indexing this publication's same-store nodes.
-    known = {} if resolved is None else resolved
-    targets = {root: known[root] for root in sorted(set(roots)) if root in known}
-    targets.update(await resolve_targets(session, "sequence", store, tuple(root for root in roots if root not in targets)))
-    return targets
-
-
 async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *, group_id: str | None) -> None:
     import hashlib
     import json
@@ -207,7 +197,7 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
                 # Verify the receipt's original scope, including its savepoint;
                 # a subset owner's roots do not change that scope.
                 resolve(session, store_key=store, roots=roots)
-            except PublicationTargetsUnavailable:
+            except PublicationUnavailable:
                 continue
             confirmed.setdefault(store, set()).update(roots)
     for store, roots in targets.items():
@@ -216,6 +206,6 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
             await resolve_targets(session, "sequence", store, tuple(sorted(missing)))
 
 
-__all__ = ["NativeContentUnavailable", "PublicationTargetsUnavailable", "stage_owner", "register_recovery",
-           "register_publication_targets", "run_native_mutation", "resolve_targets", "index_nodes",
-           "note_publication", "flush_owners"]
+__all__ = ["NativeContentUnavailable", "PublicationUnavailable", "stage_owner", "register_recovery",
+           "register_publication", "run_native_mutation", "resolve_targets", "index_nodes",
+           "flush_owners"]

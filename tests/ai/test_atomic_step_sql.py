@@ -419,7 +419,12 @@ async def test_unkeyed_physical_identity_collision_fails_without_losing_append(
 
     def collide(connection, statement, multiparams, params, execution_options):
         if isinstance(statement, Insert) and statement.table.name == table.name:
-            statement = statement.values(id=identity)
+            if statement._multi_values:
+                statement = table.insert().values([
+                    dict(row, id=identity) for row in statement._multi_values[0]
+                ])
+            else:
+                statement = statement.values(id=identity)
         return statement, multiparams, params
 
     event.listen(engine.sync_engine, "before_execute", collide, retval=True)

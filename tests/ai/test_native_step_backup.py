@@ -73,7 +73,7 @@ async def test_raw_backup_preserves_occurrences_order_and_pruned_identities(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ("descriptor", "retry_digest", "occurrence", "tombstone", "run_reference"))
+@pytest.mark.parametrize("damage", ("descriptor", "retry_type", "occurrence", "tombstone", "run_reference"))
 async def test_raw_backup_rejects_corruption_instead_of_skipping_rows(tmp_path: Path, damage: str) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'native.db'}")
     store = SqlStepStore(engine, namespace="backup", tenant_id="tenant")
@@ -87,9 +87,9 @@ async def test_raw_backup_rejects_corruption_instead_of_skipping_rows(tmp_path: 
         async with engine.begin() as connection:
             if damage == "descriptor":
                 await connection.execute(text("UPDATE ai_step_snapshots SET messages = '{}'"))
-            elif damage == "retry_digest":
+            elif damage == "retry_type":
                 value = json.loads(await connection.scalar(text("SELECT messages FROM ai_step_snapshots")))
-                value["checkpoint"]["message_sha256"] = "0" * 64
+                value["checkpoint"]["output_retries_used"] = True
                 await connection.execute(text("UPDATE ai_step_snapshots SET messages = :value"),
                                          {"value": json.dumps(value)})
             elif damage == "occurrence":
@@ -108,10 +108,10 @@ async def test_raw_backup_rejects_corruption_instead_of_skipping_rows(tmp_path: 
 
 def test_checkpoint_descriptor_rejects_unknown_state_and_invalid_retry_types() -> None:
     for descriptor in (
-        {"output_retries_used": True, "message_sha256": "0" * 64},
-        {"output_retries_used": -1, "message_sha256": "0" * 64},
-        {"output_retries_used": 0, "message_sha256": "G" * 64},
-        {"output_retries_used": 0, "message_sha256": "0" * 64, "pending": {}},
+        {"output_retries_used": True},
+        {"output_retries_used": -1},
+        {"output_retries_used": "0"},
+        {"output_retries_used": 0, "pending": {}},
     ):
         with pytest.raises(ValueError):
             NativeCheckpoint.validate_descriptor(descriptor)
@@ -154,9 +154,6 @@ def test_message_closure_enumerates_ordered_ranges_and_repeated_occurrences() ->
 
 
 def test_backup_snapshot_decodes_retry_binding_without_store_or_database() -> None:
-    import hashlib
-    from linktools.ai.model.messages import encode_model_messages
-
     snapshot = ContinuableSnapshot(run_id="run", step_index=2, messages=[], idempotency_key="checkpoint")
     encoded = NativeCheckpoint.encode(snapshot, output_retries_used=3)
     row = {"run_id": snapshot.run_id, "step_index": snapshot.step_index,
@@ -164,33 +161,29 @@ def test_backup_snapshot_decodes_retry_binding_without_store_or_database() -> No
            "idempotency_key": encode_native_replay_key(snapshot.idempotency_key), "sequence_root": None,
            "messages": json.dumps({"stored_messages": 0, "checkpoint": {
                "output_retries_used": 3,
-               "message_sha256": hashlib.sha256(encode_model_messages(encoded.messages[-1:])).hexdigest(),
            }})}
     original = dict(row)
     assert SqlStepStore.decode_backup_snapshot(row, ()) == encoded
     assert row == original
-    with pytest.raises(ValueError, match="corrupt or misbound"):
-        SqlStepStore.decode_backup_snapshot(dict(row, step_index=3), ())
+    # The row owns its control fields, without an independent checksum copy.
+    changed = NativeCheckpoint.decode(SqlStepStore.decode_backup_snapshot(dict(row, step_index=3), ()))
+    assert changed.step_index == 3 and changed.output_retries_used == 3
 
 
 @pytest.mark.parametrize("count", (0, 1, 1024))
 def test_checkpoint_tail_validation_preserves_empty_and_nonempty_retry_binding(count: int) -> None:
-    import hashlib
     from linktools.ai.model.messages import encode_model_messages
 
     messages = [] if count == 0 else [ModelRequest(parts=[UserPromptPart("terminal")])]
     snapshot = ContinuableSnapshot(run_id="run", step_index=2, messages=messages)
-    encoded = NativeCheckpoint.encode(snapshot, output_retries_used=3)
     row = {"run_id": snapshot.run_id, "step_index": snapshot.step_index,
            "timestamp": snapshot.timestamp.isoformat(), "state": snapshot.state,
            "idempotency_key": encode_native_replay_key(snapshot.idempotency_key), "sequence_root": None if count == 0 else "1" * 64,
            "messages": json.dumps({"stored_messages": count, "checkpoint": {
                "output_retries_used": 3,
-               "message_sha256": hashlib.sha256(encode_model_messages(encoded.messages[-1:])).hexdigest(),
            }})}
     payload = None if count == 0 else encode_model_messages(messages)
     SqlStepStore.validate_backup_snapshot_tail(row, payload)
-    with pytest.raises(ValueError, match="corrupt or misbound"):
-        SqlStepStore.validate_backup_snapshot_tail(dict(row, step_index=3), payload)
+    SqlStepStore.validate_backup_snapshot_tail(dict(row, step_index=3), payload)
     with pytest.raises(ValueError, match="does not match its count"):
         SqlStepStore.validate_backup_snapshot_tail(row, b"{}" if count == 0 else None)

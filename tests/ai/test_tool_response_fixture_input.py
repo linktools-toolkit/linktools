@@ -244,10 +244,10 @@ async def test_derived_fixture_mode_mismatch_fails_before_execution_reservation(
         assert mismatch.value.code is ErrorCode.BINDING_CONFLICT
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('fixture-modes', storage=storage) as persistence_207, Runtime.attach(persistence=persistence_207, features=model_features(RuntimeUsageModels())) as runtime:
-        async def unexpected_reservation(value: ExecutionStartReservation) -> None:
+        async def unexpected_reservation(value: ExecutionStartReservation, **kwargs) -> None:
             raise AssertionError("fixture mismatch must fail before execution admission")
 
-        monkeypatch.setattr(runtime._state.execution.executions, "reserve_start", unexpected_reservation)
+        monkeypatch.setattr(runtime._state.execution.executions, "_reserve_start", unexpected_reservation)
         original = await runtime.executions.get(fixture.execution_id)
         with pytest.raises(AIError) as missing:
             await original.fork("retain fixture mode")
@@ -270,7 +270,7 @@ async def test_fixture_asset_preflight_is_authorized_and_precedes_admission(auth
         reads.extend(refs)
         raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
 
-    async def unexpected_reservation(value: ExecutionStartReservation) -> None:
+    async def unexpected_reservation(value: ExecutionStartReservation, **kwargs) -> None:
         raise AssertionError("fixture preflight must precede execution admission")
 
     monkeypatch.setattr(assets, "read_versions", missing_version)
@@ -278,7 +278,7 @@ async def test_fixture_asset_preflight_is_authorized_and_precedes_admission(auth
     features = RuntimeFeatures("fixture-preflight")
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     async with Persistence.open('fixture-preflight', storage=storage) as persistence_241, Runtime.attach(persistence=persistence_241, authorization=Authorization(), features=model_features(RuntimeUsageModels(), features)) as runtime:
-        monkeypatch.setattr(runtime._state.execution.executions, "reserve_start", unexpected_reservation)
+        monkeypatch.setattr(runtime._state.execution.executions, "_reserve_start", unexpected_reservation)
         with pytest.raises(AIError) as rejected:
             await runtime.agents.get().start("question")
         assert rejected.value.code is (ErrorCode.ASSET_VERSION_NOT_FOUND if authorized else ErrorCode.AUTHORIZATION_DENIED)
@@ -453,16 +453,16 @@ async def test_fixture_disappearing_after_admission_preserves_execution_for_repa
     features = _persistence_capabilities(restart=True)
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     async with Persistence.open('fixture-repair', storage=storage) as persistence_387, Runtime.attach(persistence=persistence_387, features=model_features(RuntimeUsageModels(), features)) as runtime:
-        reserve = runtime._state.execution.executions.reserve_start
+        reserve = runtime._state.execution.executions._reserve_start
 
-        async def remove_after_admission(value: ExecutionStartReservation) -> object:
+        async def remove_after_admission(value: ExecutionStartReservation, **kwargs) -> object:
             nonlocal unavailable
-            admitted = await reserve(value)
+            admitted = await reserve(value, **kwargs)
             unavailable = True
             return admitted
 
         with monkeypatch.context() as patch:
-            patch.setattr(runtime._state.execution.executions, "reserve_start", remove_after_admission)
+            patch.setattr(runtime._state.execution.executions, "_reserve_start", remove_after_admission)
             execution = await runtime.agents.get().start("repair the same accepted execution")
         with pytest.raises(AIError) as missing:
             await execution.wait(timeout_seconds=10)

@@ -287,35 +287,18 @@ async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execu
     service._runtime_bridge = _ExecutionRuntimeBridge()
     service._handoff = HandoffGate()
 
-    class Executions:
-        def __init__(self) -> None:
-            self.state_store = execution_storage.execution.executions.state_store
+    from dataclasses import replace
+    from linktools.ai.core import StopReason, UsageMetrics
+    from linktools.ai.persistence.contracts import ResultRecord
+    from linktools.ai.storage import StoredPayload
+    from .test_step_projection import _execution
 
-        async def acquire_dependency_hold(
-            self,
-            execution_id: str,
-            *,
-            tenant_id: str,
-            hold_id: str,
-        ) -> bool:
-            del execution_id, tenant_id, hold_id
-            return True
-
-        async def release_dependency_hold(
-            self,
-            execution_id: str,
-            *,
-            tenant_id: str,
-            hold_id: str,
-        ) -> bool:
-            del execution_id, tenant_id, hold_id
-            return True
-
-        async def get(self, execution_id: str, *, tenant_id: str):
-            del execution_id, tenant_id
-            return None
-
-    service._repositories = SimpleNamespace(executions=Executions())
+    record = _execution()
+    await execution_storage.execution.executions.create_execution(replace(
+        record, status=ExecutionStatus.SUCCEEDED, completed_at=record.updated_at,
+        result=ResultRecord(StoredPayload.inline_json("answer"), StopReason.END_TURN, UsageMetrics(), record.updated_at),
+    ))
+    service._repositories = execution_storage.execution
     service._port = SimpleNamespace(read_source_execution=service._repositories.executions.get)
     release_started = asyncio.Event()
     release_finished = asyncio.Event()

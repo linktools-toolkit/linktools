@@ -3,7 +3,6 @@
 """Persistent snapshot sequences share prefixes without extra read round trips."""
 
 import json
-import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,36 +31,6 @@ class _ReadTraffic:
             self.count += 1
             self.reads.append((statement, tuple(parameters)))
 
-    def assert_publication_metadata(
-        self, start: int, *, store_key: bytes, node_bound: int, message_bound: int,
-    ) -> dict[str, list[tuple[object, ...]]]:
-        batches = {"ai_step_sequences": [], "ai_step_messages": []}
-        for statement, parameters in self.reads[start:]:
-            branches = " ".join(statement.split()).split(" UNION ALL ")
-            assert 1 <= len(branches) <= 2
-            offset = 0
-            for branch in branches:
-                match = re.fullmatch(
-                    r"SELECT \? AS anon_[0-9]+, (ai_step_sequences|ai_step_messages)\.sha256, \1\.id "
-                    r"FROM \1 WHERE \1\.store_locator = \? AND \1\.store_key = \? AND \1\.sha256 IN \([?, ]+\)",
-                    branch,
-                )
-                assert match is not None, f"Unexpected publication SQL: {statement}"
-                table = match.group(1)
-                count = branch.count("?")
-                bound = parameters[offset:offset + count]
-                assert bound[:3] == ("sequence" if table == "ai_step_sequences" else "message",
-                                     native_store_locator(store_key), store_key)
-                assert 0 < len(bound) - 3 <= 128
-                batches[table].append(bound[3:])
-                offset += count
-            assert offset == len(parameters)
-        assert len(self.reads[start:]) == max(len(values) for values in batches.values())
-        for table, bound in (("ai_step_sequences", node_bound), ("ai_step_messages", message_bound)):
-            identities = [identity for batch in batches[table] for identity in batch]
-            assert 0 < len(identities) <= bound
-            assert len(identities) == len(set(identities))
-        return batches
 
 
 @pytest.mark.asyncio
@@ -82,11 +51,8 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
                                          messages=messages[:length])
             start = len(traffic.reads)
             await store.save_snapshot(latest)
-            # One appended node references at most three existing frontier IDs.
-            traffic.assert_publication_metadata(
-                start, store_key=store.store_key, node_bound=4, message_bound=1,
-            )
-        assert traffic.count == size
+            assert traffic.reads[start:] == []
+        assert traffic.count == 0
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == size
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == size
@@ -134,12 +100,12 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
 
 
 @pytest.mark.asyncio
-async def test_snapshot_publication_resolves_metadata_across_batch_boundary(tmp_path: Path) -> None:
+async def test_snapshot_publication_does_not_read_metadata_across_batch_boundary(tmp_path: Path) -> None:
     url = f"sqlite+aiosqlite:///{tmp_path / 'metadata-batches.db'}"
     engine = create_async_engine(url)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
     await store.initialize(local=True)
-    # One publication crosses the real 128-ID lookup limit without growing history repeatedly.
+    # A large publication must not re-read IDs merely because it spans a batch.
     snapshot = ContinuableSnapshot(
         run_id="run", step_index=0, idempotency_key="batch",
         messages=[ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(129)],
@@ -148,11 +114,7 @@ async def test_snapshot_publication_resolves_metadata_across_batch_boundary(tmp_
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     try:
         await store.save_snapshot(snapshot)
-        batches = traffic.assert_publication_metadata(
-            0, store_key=store.store_key, node_bound=129, message_bound=129,
-        )
-        for lookups in batches.values():
-            assert sorted(map(len, lookups)) == [1, 128]
+        assert traffic.reads == []
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
         await store.close()
@@ -188,12 +150,7 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
         for snapshot in cases:
             start = len(traffic.reads)
             await store.save_snapshot(snapshot)
-            # This uncached writer receives each full branch as new input;
-            # ID reads stay bounded by that input, not unrelated stored history.
-            traffic.assert_publication_metadata(
-                start, store_key=store.store_key,
-                node_bound=4 * len(snapshot.messages), message_bound=len(snapshot.messages),
-            )
+            assert traffic.reads[start:] == []
             after = traffic.count
             await store.save_snapshot(snapshot)
             # Duplicate owners verify raw scope once, without publishing dependencies.
@@ -203,7 +160,7 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
             assert "ai_step_snapshots.store_locator =" in statement
             assert parameters == (native_store_locator(store.store_key), snapshot.run_id,
                                   encode_native_replay_key(snapshot.idempotency_key))
-        assert traffic.count == 2 * len(cases)
+        assert traffic.count == len(cases)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == len(cases)
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
@@ -232,8 +189,8 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ["missing-child", "wrong-count", "wrong-message"])
-async def test_corrupt_sequence_fails_closed_after_reopening(tmp_path: Path, damage: str) -> None:
+@pytest.mark.parametrize("damage", ["missing-child", "wrong-count", "missing-message", "repointed-message"])
+async def test_sequence_structure_and_address_resolution_after_reopening(tmp_path: Path, damage: str) -> None:
     url = f"sqlite+aiosqlite:///{tmp_path / 'corrupt-sequence.db'}"
     engine = create_async_engine(url)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
@@ -260,15 +217,23 @@ async def test_corrupt_sequence_fails_closed_after_reopening(tmp_path: Path, dam
                     "UPDATE ai_step_sequences SET tree_count = tree_count + 2 WHERE sha256 = :root"
                 ), {"root": root})
             else:
-                other = await connection.scalar(text(
+                other = "f" * 64 if damage == "missing-message" else await connection.scalar(text(
                     "SELECT message_sha256 FROM ai_step_sequences WHERE sha256 <> :root LIMIT 1"
                 ), {"root": root})
                 await connection.execute(text(
                     "UPDATE ai_step_sequences SET message_sha256 = :other WHERE sha256 = :root"
                 ), {"other": other, "root": root})
-        with pytest.raises(ValueError):
-            await cold.latest_snapshot(run_id="run")
-        assert await cold.list_snapshots(run_id="run") == []
+        if damage == "repointed-message":
+            # The stored pointer is authoritative; reading does not recompute
+            # a checksum to reject an otherwise valid node/content association.
+            restored = await cold.latest_snapshot(run_id="run")
+            assert restored.messages[:-1] == snapshot.messages[:-1]
+            assert restored.messages[-1] in snapshot.messages[:-1]
+            assert await cold.list_snapshots(run_id="run") == [restored]
+        else:
+            with pytest.raises(ValueError):
+                await cold.latest_snapshot(run_id="run")
+            assert await cold.list_snapshots(run_id="run") == []
     finally:
         await cold.close()
         await engine.dispose()
@@ -368,7 +333,7 @@ async def test_invalid_snapshot_descriptor_does_not_hide_other_valid_history(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rollback", (False, True))
-async def test_publication_ids_are_reused_only_within_their_live_owner_transaction(
+async def test_publication_receipts_are_reused_only_within_their_live_owner_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rollback: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'publication-ids.db'}")
@@ -385,13 +350,12 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
         roots = tuple(span.first for span in prepared.root.slices)
         for previous in receipts:
             with pytest.raises(ValueError, match="active transaction"):
-                previous.publication_targets(session, store_key=store.store_key, roots=roots)
+                previous.confirm_publication(session, store_key=store.store_key, roots=roots)
         receipt = await publish(content, session, prepared, **kwargs)
-        targets = receipt.publication_targets(session, store_key=store.store_key, roots=roots)
-        assert len(targets) == 1 and targets[0] > 0
+        receipt.confirm_publication(session, store_key=store.store_key, roots=roots)
         for scope, selected in ((native_store_key("0", "tenant"), roots), (store.store_key, ("0" * 64,))):
             with pytest.raises(ValueError, match="store, and roots"):
-                receipt.publication_targets(session, store_key=scope, roots=selected)
+                receipt.confirm_publication(session, store_key=scope, roots=selected)
         receipts.append(receipt)
         sessions.append(session)
         if fail_once:
@@ -411,14 +375,13 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
                 await store.save_snapshot(snapshot)
             projections.clear()
         await store.save_snapshot(snapshot)
-        # One bounded UNION verifies both node/message publication owners.
-        # Offline GC adds no online scan or dependency revision update.
-        assert len(projections) == 1
+        # Successful immutable writes already establish the publication closure.
+        assert not projections
         assert not any("ai_step_messages.message" in sql or "ai_step_messages.payload_json" in sql
                        for sql in projections)
         for receipt, session in zip(receipts, sessions):
             with pytest.raises(ValueError, match="active transaction"):
-                receipt.publication_targets(
+                receipt.confirm_publication(
                     session, store_key=store.store_key,
                     roots=tuple(span.first for span in receipt.root.slices),
                 )
@@ -431,7 +394,7 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rollback", (False, True))
-async def test_publication_ids_reject_a_completed_savepoint(
+async def test_publication_receipts_reject_a_completed_savepoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rollback: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'savepoint-ids.db'}")
@@ -446,14 +409,14 @@ async def test_publication_ids_reject_a_completed_savepoint(
         try:
             async with session.begin_nested():
                 receipt = await publish(content, session, prepared, **kwargs)
-                assert receipt.publication_targets(session, store_key=store.store_key, roots=roots)
+                receipt.confirm_publication(session, store_key=store.store_key, roots=roots)
                 if rollback:
                     raise RuntimeError("rollback savepoint")
         except RuntimeError as error:
             assert rollback and str(error) == "rollback savepoint"
         assert session.in_transaction()
         with pytest.raises(ValueError, match="active transaction"):
-            receipt.publication_targets(session, store_key=store.store_key, roots=roots)
+            receipt.confirm_publication(session, store_key=store.store_key, roots=roots)
         return receipt
 
     monkeypatch.setattr(NativeMessageContent, "publish_in_session", nested_publication)

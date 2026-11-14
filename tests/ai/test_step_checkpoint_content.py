@@ -22,7 +22,7 @@ from .test_atomic_step_sql import atomic_store as atomic_store
 
 
 def test_snapshot_descriptor_preserves_boundary_payload_and_rejects_overflow() -> None:
-    checkpoint = {"output_retries_used": 0, "message_sha256": "0" * 64}
+    checkpoint = {"output_retries_used": 0}
     descriptor = {"stored_messages": 1, "checkpoint": checkpoint}
     overhead = len(json.dumps(descriptor).encode("utf-8")) - 1
     checkpoint["output_retries_used"] = 10 ** (1024 - overhead - 1)
@@ -78,6 +78,8 @@ async def test_checkpoint_changes_share_message_bodies_and_restore_exact_state(a
                 body = ContentRecord.from_native_row(row)
                 assert b"\\u" not in decode_payload_bytes(body.body, codec=body.compression,
                     raw_digest=body.raw_digest, raw_size=body.raw_size)
+            descriptors = (await connection.execute(text("SELECT messages FROM ai_step_snapshots WHERE pruned = 0"))).scalars().all()
+            assert all(set(json.loads(item)["checkpoint"]) == {"output_retries_used"} for item in descriptors)
         # Re-publishing an ordinary business message reuses the same body.
         if messages and not messages[-1].metadata.get("linktools.ai.checkpoint-state"):
             await cold.save_snapshot(replace(first, idempotency_key="ordinary"))
@@ -88,8 +90,8 @@ async def test_checkpoint_changes_share_message_bodies_and_restore_exact_state(a
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ("budget", "boolean", "binding", "digest", "shape"))
-async def test_checkpoint_descriptor_rejects_corruption_and_cross_snapshot_binding(atomic_store, damage) -> None:
+@pytest.mark.parametrize("damage", ("negative", "boolean", "shape"))
+async def test_checkpoint_descriptor_rejects_invalid_retry_state(atomic_store, damage) -> None:
     store, engine = atomic_store
     snapshot = NativeCheckpoint.encode(ContinuableSnapshot(run_id="run", step_index=1,
         messages=[ModelRequest(parts=[UserPromptPart("question")])], idempotency_key="first"),
@@ -97,18 +99,13 @@ async def test_checkpoint_descriptor_rejects_corruption_and_cross_snapshot_bindi
     await store.save_snapshot(snapshot)
     async with engine.begin() as connection:
         descriptor = json.loads(await connection.scalar(text("SELECT messages FROM ai_step_snapshots")))
-        if damage == "binding":
-            await connection.execute(text("UPDATE ai_step_snapshots SET step_index = 9"))
+        checkpoint = descriptor["checkpoint"]
+        if damage in {"negative", "boolean"}:
+            checkpoint["output_retries_used"] = -1 if damage == "negative" else True
         else:
-            checkpoint = descriptor["checkpoint"]
-            if damage in {"budget", "boolean"}:
-                checkpoint["output_retries_used"] = 0 if damage == "budget" else True
-            elif damage == "digest":
-                checkpoint["message_sha256"] = "0" * 64
-            else:
-                checkpoint["extra"] = 1
-            await connection.execute(text("UPDATE ai_step_snapshots SET messages = :value"),
-                                     {"value": json.dumps(descriptor)})
+            checkpoint["extra"] = 1
+        await connection.execute(text("UPDATE ai_step_snapshots SET messages = :value"),
+                                 {"value": json.dumps(descriptor)})
     with pytest.raises(ValueError, match="checkpoint state"):
         await store.latest_snapshot(run_id="run")
 
@@ -118,7 +115,7 @@ async def test_checkpoint_descriptor_rejects_corruption_and_cross_snapshot_bindi
     {"application": "保持"},
     {"payload": {"data": "YWJj", "kind": "binary", "media_type": "image/png"}},
 ))
-async def test_checkpoint_digest_roundtrips_canonical_media(tmp_path: Path, metadata) -> None:
+async def test_checkpoint_state_roundtrips_canonical_media(tmp_path: Path, metadata) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'media.db'}")
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
     snapshot = NativeCheckpoint.encode(ContinuableSnapshot(run_id="run", step_index=2,
@@ -159,3 +156,38 @@ async def test_snapshot_lookup_keeps_scope_and_replay_identity(atomic_store, col
             assert await cold.latest_snapshot(run_id="run") is None
     finally:
         await cold.close()
+
+
+@pytest.mark.asyncio
+async def test_decoded_checkpoint_preparation_does_not_reencode_retry_tail(atomic_store, monkeypatch) -> None:
+    store, _ = atomic_store
+    snapshot = NativeCheckpoint.from_snapshot(ContinuableSnapshot(
+        run_id="run", step_index=2, messages=[ModelRequest(parts=[UserPromptPart("question")])],
+        idempotency_key="checkpoint",
+    ), output_retries_used=3)
+
+    def unexpected_encode(*args, **kwargs):
+        raise AssertionError("snapshot preparation must not rebuild a retry envelope")
+
+    monkeypatch.setattr(NativeCheckpoint, "encode", unexpected_encode)
+    values, prepared = await store._prepare_snapshot(snapshot)
+    assert "output_retries_used" not in values
+    assert json.loads(values["messages"])["checkpoint"] == {"output_retries_used": 3}
+    assert values["run_id"] == "run" and values["step_index"] == 2
+    assert prepared.root.count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_count", (-1, True, "1"))
+async def test_decoded_checkpoint_rejects_invalid_retry_before_writing(atomic_store, retry_count) -> None:
+    store, engine = atomic_store
+    snapshot = NativeCheckpoint.from_snapshot(ContinuableSnapshot(
+        run_id="run", step_index=2, messages=[ModelRequest(parts=[UserPromptPart("question")])],
+        idempotency_key="checkpoint",
+    ), output_retries_used=1)
+    invalid = replace(snapshot, output_retries_used=retry_count)
+    with pytest.raises(ValueError, match="checkpoint state is invalid"):
+        await store.save_snapshot(invalid)
+    async with engine.connect() as connection:
+        for table in ("ai_step_snapshots", "ai_step_sequences", "ai_step_messages"):
+            assert await connection.scalar(text(f"SELECT COUNT(*) FROM {table}")) == 0

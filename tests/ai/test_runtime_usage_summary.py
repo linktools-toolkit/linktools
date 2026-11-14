@@ -65,6 +65,7 @@ def _interaction(
 class _Executions:
     def __init__(self, record: object) -> None:
         self.record = record
+        self.metadata_reads = 0
 
     async def get(self, execution_id: str, *, tenant_id: str):
         assert tenant_id == "tenant"
@@ -73,6 +74,7 @@ class _Executions:
         return self.record
 
     async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
+        self.metadata_reads += 1
         record = await self.get(execution_id, tenant_id=tenant_id)
         if record is None:
             return None
@@ -126,7 +128,8 @@ class _UsageStore:
 
 
 @pytest.mark.asyncio
-async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
+@pytest.mark.parametrize("explicit", (False, True))
+async def test_usage_reads_only_captured_model_interaction_prefix(explicit: bool) -> None:
     namespace = "runtime-usage"
     tenant_id = "tenant"
     execution_id = "execution"
@@ -208,7 +211,9 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
         cursor_signer=HmacCursorSigner("usage", b"usage-key"),
     )
 
-    usage = await reader.usage(execution_id, tenant_id=tenant_id)
+    usage = await reader.usage(execution_id, tenant_id=tenant_id,
+        cutoffs=(UsageReadCutoff(execution_id, 1, 3),) if explicit else None)
+    assert reader._executions.metadata_reads == 1
 
     assert usage == UsageSummary(
         logical_requests=3,
@@ -333,3 +338,13 @@ async def test_graph_usage_counts_only_linked_execution_tree() -> None:
         UsageReadCutoff("child", 1, 1),
         UsageReadCutoff("root", 1, 1),
     )
+
+
+@pytest.mark.asyncio
+async def test_task_usage_reads_metadata_once_without_capturing_history() -> None:
+    record = SimpleNamespace(execution_id="task", binding_kind="task")
+    executions = _Executions(record)
+    reader = StepExecutionHistoryReader(namespace="runtime-usage", executions=executions,
+        store=object(), cursor_signer=HmacCursorSigner("usage", b"usage-key"))
+    assert await reader.usage("task", tenant_id="tenant") == UsageSummary()
+    assert executions.metadata_reads == 1

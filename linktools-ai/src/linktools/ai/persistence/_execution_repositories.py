@@ -23,7 +23,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import decode_execution_observation, decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -53,7 +53,7 @@ from .contracts import (
     IdempotencyTerminalUpdate,
     ResultRecord,
 )
-from .contracts import RuntimePayloadRef, ExecutionMembershipRecord
+from .contracts import RuntimePayloadRef, ExecutionMembershipRecord, ExecutionObservationRecord
 from ._plan import PersistenceDomain
 from .state import (
     FactQuery,
@@ -419,6 +419,21 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 or header.id != identity):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return header
+
+    async def get_observation(self, execution_id: str, *, tenant_id: str) -> ExecutionObservationRecord | None:
+        """Read model coverage control and policy without restoring binding or result."""
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key("execution", (execution_id,))
+        async def read(_group: object) -> ExecutionObservationRecord | None:
+            await self._execution_content.prefetch_projection_owners((key,))
+            record = await self._store.read_record(key)
+            if record is None:
+                return None
+            self._decode_header(record, execution_id)
+            record, = await self._execution_content.expand_policies((record,))
+            return decode_execution_observation(record.data)
+        return await self.read_content(read)
 
     async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
         return await self._get_view(execution_id, tenant_id=tenant_id, fresh=False)
@@ -1089,6 +1104,18 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         self, reservation: ExecutionStartReservation, *,
         input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
     ) -> ExecutionStartReservationResult:
+        return await self._reserve_start(reservation, input_context_write=input_context_write)
+
+    async def reserve_started(
+        self, reservation: ExecutionStartReservation,
+    ) -> ExecutionStartReservationResult:
+        """Insert a new admitted owner once inside the caller's group transaction."""
+        return await self._reserve_start(reservation, started=True)
+
+    async def _reserve_start(
+        self, reservation: ExecutionStartReservation, *, started: bool = False,
+        input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
+    ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
         self._idempotency._require_resource_kind(reservation.idempotency)
@@ -1157,29 +1184,41 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 if archive.store.storage_group is not self._store.storage_group:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
-            await transaction.insert_records(
-                (
-                    await self._stored_content(
-                        "execution",
-                        (reservation.execution.execution_id,),
-                        reservation.execution,
-                        state=reservation.execution.status.value,
-                    ),
-                    self._idempotency._stored(
-                        "idempotency",
-                        identity,
-                        reservation.idempotency,
-                        state=reservation.idempotency.status.value,
-                    ),
+            execution = reservation.execution
+            idempotency = reservation.idempotency
+            if started:
+                if (execution.status is not ExecutionStatus.PENDING_START
+                        or idempotency.status is not IdempotencyStatus.RESERVED
+                        or idempotency.resource_id != execution.execution_id):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                now = execution.created_at
+                execution = replace(
+                    execution, status=ExecutionStatus.STARTED,
+                    revision=execution.revision + 1, event_seq=execution.event_seq + 1,
+                    updated_at=now, started_at=execution.started_at or now,
+                    recovery=execution.recovery or (
+                        ExecutionRecoveryDetail() if execution.binding_kind == "agent" else None),
                 )
+                idempotency = replace(idempotency, status=IdempotencyStatus.STARTED, updated_at=now)
+            execution_record = await self._stored_content(
+                "execution", (execution.execution_id,), execution, state=execution.status.value,
             )
-            _logger.debug(
-                "execution start reserved: execution=%s",
-                reservation.execution.execution_id,
+            idempotency_record = self._idempotency._stored(
+                "idempotency", identity, idempotency, state=idempotency.status.value,
             )
-            return ExecutionStartReservationResult(
-                reservation.execution, reservation.idempotency, True
-            )
+            if started:
+                execution_record = replace(execution_record, storage_revision=1)
+                idempotency_record = replace(idempotency_record, storage_revision=1)
+            await transaction.insert_records((execution_record, idempotency_record))
+            if started:
+                await transaction.insert_facts((StoredFact(
+                    stream_key(self._namespace, self._tenant_id, self._domain.value,
+                               "execution", (execution.execution_id,)),
+                    execution.event_seq, execution_key, ExecutionEventType.EXECUTION_STARTED.value,
+                    None, None, {},
+                ),))
+            _logger.debug("execution start reserved: execution=%s", execution.execution_id)
+            return ExecutionStartReservationResult(execution, idempotency, True)
 
         return await self._store.mutate(mutate)
 
@@ -2179,7 +2218,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def get_result(
         self, execution_id: str, *, tenant_id: str
     ) -> ResultRecord | None:
-        execution = await self.get(execution_id, tenant_id=tenant_id)
+        # Result consumers depend on retained result bytes, not executable inputs.
+        # Custom repositories retain their existing full-read override contract.
+        execution = (await self.get_result_record(execution_id, tenant_id=tenant_id)
+                     if type(self) is ExecutionRepositoryImpl
+                     else await self.get(execution_id, tenant_id=tenant_id))
         return None if execution is None else execution.result
 
     async def acquire_dependency_hold(

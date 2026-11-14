@@ -54,7 +54,8 @@ class ExecutionContextArchive:
             return self._archive
         if not isinstance(self._store.storage_group, StateStorageGroup):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        opened = await self._store.storage_group.open_archive(create=create)
+        group = self._store.storage_group
+        opened = group.opened_archive or await group.open_archive(create=create)
         if opened is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         scope, store = opened

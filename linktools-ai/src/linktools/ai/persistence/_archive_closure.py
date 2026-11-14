@@ -591,12 +591,9 @@ class NativeMessageClosure(_SequenceClosure):
             checkpoint = descriptor["checkpoint"]
             if checkpoint is not None:
                 if (not isinstance(checkpoint, dict)
-                        or set(checkpoint) != {"output_retries_used", "message_sha256"}
+                        or set(checkpoint) != {"output_retries_used"}
                         or type(checkpoint["output_retries_used"]) is not int
-                        or checkpoint["output_retries_used"] < 0
-                        or not isinstance(checkpoint["message_sha256"], str)
-                        or len(checkpoint["message_sha256"]) != 64
-                        or any(char not in "0123456789abcdef" for char in checkpoint["message_sha256"])):
+                        or checkpoint["output_retries_used"] < 0):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             count = descriptor["stored_messages"]
             if type(count) is not int or count < 0 or (root is None) != (count == 0):

@@ -51,6 +51,8 @@ from ..inputs import (
     stored_user_input_view,
 )
 from ..capability.planning import PlanningStore
+from ..persistence.durability import CommitObservation, DurableCommitState
+from ..persistence.runs import NativeCheckpoint
 from ..persistence.planning import PlanStateStore
 from ._execution_payload import _materialize_execution_payloads
 from ..model.attachments import read_attachment_payload, store_attachment_payload
@@ -5539,17 +5541,25 @@ class LocalExecutionBackend:
                     return False
             if snapshot is not None:
                 actual_snapshot = await native.latest_snapshot(run_id=snapshot.run_id, include_interrupted=True)
+                if actual_snapshot is not None and isinstance(snapshot, NativeCheckpoint):
+                    actual_snapshot = NativeCheckpoint.decode(actual_snapshot)
                 if actual_snapshot != snapshot:
                     return False
             return True
 
         async def commit_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
-            async with self._run_store.native_event_publication(agent_run_id):
-                return await publish_boundary(run=run, events=events, snapshot=snapshot)
+            joint = (self._run_store.can_join_step_projection(agent_run_id)
+                     and any(event.kind == "model_request_started" for event in events))
+            return await guarded_publish(run=run, events=events, snapshot=snapshot, joint=joint)
 
-        async def publish_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
-            if run is None and not events and snapshot is None:
-                return
+        async def guarded_publish(*, run=None, events=(), snapshot=None, joint=False):
+            async with owner.boundary:
+                if joint:
+                    return await publish_boundary(run=run, events=events, snapshot=snapshot, joint=True)
+                async with self._run_store.native_event_publication(agent_run_id):
+                    return await publish_boundary(run=run, events=events, snapshot=snapshot)
+
+        async def publish_boundary(*, run=None, events=(), snapshot=None, joint=False) -> StepWriteReceipt | None:
             terminal = any(isinstance(event, NativeLifecycleEvent) for event in events)
 
             def require_publication() -> None:
@@ -5561,85 +5571,127 @@ class LocalExecutionBackend:
             managed = run is not None and self._run_store.has_pending_native_start(run.run_id)
             prepared = (await native.prepare_step(run=run, events=events, snapshot=snapshot, managed_start=True)
                         if managed else await native.prepare_step(run=run, events=events, snapshot=snapshot))
-            async with owner.boundary:
-                require_publication()
-                if owner.observed is None or owner.attempt is None:
-                    observed = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
-                    if (observed is None or observed.value.producer_generation != generation
-                            or observed.value.producer_claim_id != claim_id):
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    owner.observed = observed
-                observed = owner.observed
-                next_record = observed.value
-                written = None
+            require_publication()
+            if joint or owner.observed is None or owner.attempt is None:
+                observed = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
+                if (observed is None or observed.value.producer_generation != generation
+                        or observed.value.producer_claim_id != claim_id):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                owner.observed = observed
+            observed = owner.observed
+            next_record = observed.value
+            written = None
 
-                async def publish(group: StateGroupTransaction):
-                    nonlocal written
-                    transaction = group.transaction(state)
-                    if not isinstance(transaction, SqlStateTransaction):
-                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                    receipt = await repository.commit_boundary_in_transaction(
-                        transaction, observed, next_record=next_record,
-                        expected_producer_generation=generation, expected_producer_claim_id=claim_id,
-                        allow_cancelling=terminal,
-                    )
-                    source_receipt = (self._run_store.step_event_receipt(agent_run_id)
-                                      if managed or terminal else None)
-                    written = (await native.write_prepared_step(transaction, prepared, confirmed=source_receipt)
-                               if source_receipt is not None else await native.write_prepared_step(transaction, prepared))
-                    return receipt
-
-                async def persist():
-                    nonlocal observed, next_record, written
-                    while True:
-                        try:
-                            written = None
-                            return await state.storage_group.mutate((state,), publish)
-                        except AIError as error:
-                            actual = None
-                            if error.code in {ErrorCode.STORAGE_COMMIT_UNKNOWN, ErrorCode.STORAGE_CONFLICT}:
-                                actual = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
-                            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                                if (actual is not None and actual.value == next_record
-                                        and actual.storage_revision == observed.storage_revision + 1
-                                        and written is not None
-                                        and await verify_native(run=run, events=events, snapshot=snapshot, receipt=written)):
-                                    return actual
-                            elif (error.code is ErrorCode.STORAGE_CONFLICT and written is None
-                                    and actual is not None
-                                    and actual.storage_revision > observed.storage_revision
-                                    and (actual.value == observed.value or terminal
-                                         and actual.value.status is ExecutionStatus.CANCELLING
-                                         and actual.value.producer_generation == generation
-                                         and actual.value.producer_claim_id == claim_id)):
-                                # Cancellation stops new dispatch but must retain this
-                                # producer's terminal source and interrupted checkpoint.
-                                require_publication()
-                                observed = actual
-                                next_record = actual.value
-                                owner.observed = actual
-                                continue
-                            owner.observed = None
-                            if actual is not None and actual.value.status is ExecutionStatus.CANCELLING:
-                                raise AIError(ErrorCode.EXECUTION_CANCELLED) from error
-                            raise
-
-                task = asyncio.create_task(persist(), name=f"ai-step-boundary-{execution.execution_id}")
-                confirmed, cancelled = await self._await_checkpoint_task(
-                    task, label="native step boundary", execution_id=execution.execution_id,
+            async def publish(group: StateGroupTransaction):
+                nonlocal written
+                transaction = group.transaction(state)
+                if not isinstance(transaction, SqlStateTransaction):
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                receipt = await repository.commit_boundary_in_transaction(
+                    transaction, observed, next_record=next_record,
+                    expected_producer_generation=generation, expected_producer_claim_id=claim_id,
+                    allow_cancelling=terminal,
                 )
-                owner.observed = confirmed
-                session = captured_session if owner.attempt is None else owner.attempt.session
-                owner.attempt = _InitialAttemptCapture(confirmed.value, session)
-                if written is None:
-                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-                native.confirm_prepared_step(written)
-                source = native.run_from_receipt(written)
-                if source is not None:
-                    self._run_store.confirm_step_run(source, receipt=written)
-                if cancelled is not None:
-                    raise cancelled
-                return written
+                source_receipt = (self._run_store.step_event_receipt(agent_run_id)
+                                  if managed or terminal else None)
+                written = (await native.write_prepared_step(transaction, prepared, confirmed=source_receipt)
+                           if source_receipt is not None else await native.write_prepared_step(transaction, prepared))
+                return receipt
+
+            async def persist():
+                nonlocal observed, next_record, written
+                while True:
+                    joint_attempt = False
+                    try:
+                        written = None
+                        captured = await self._run_store.capture_execution_projection(agent_run_id) if joint else None
+                        if captured is not None:
+                            joint_attempt = True
+                            committed = None
+
+                            async def write(group: StateGroupTransaction, publish_projection) -> None:
+                                nonlocal committed
+                                receipt = await publish(group)
+                                await publish_projection()
+                                _, record = await repository.require_execution_producer_in_transaction(
+                                    group.transaction(state), execution.execution_id,
+                                    expected_producer_generation=generation, allow_cancelling=False,
+                                )
+                                # Trace may replace inline input with its shared native
+                                # root. Retain the final physical revision, not +1.
+                                committed = replace(receipt, storage_revision=record.storage_revision)
+
+                            async def readback_write() -> CommitObservation[None]:
+                                nonlocal committed
+                                if written is None:
+                                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                                actual = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
+                                if actual == observed:
+                                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                                if (actual is None or committed is None or actual.value != next_record
+                                        or actual.storage_revision != committed.storage_revision
+                                        or written is None
+                                        or not await verify_native(run=run, events=events, snapshot=snapshot, receipt=written)):
+                                    return CommitObservation(DurableCommitState.UNRESOLVED)
+                                committed = actual
+                                return CommitObservation(DurableCommitState.COMMITTED)
+
+                            await self._run_store.commit_captured_execution_projection(
+                                *captured, execution_id=execution.execution_id,
+                                write=write, readback_write=readback_write, stores=(state,),
+                            )
+                            if committed is None:
+                                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+                            return committed
+                        if joint:
+                            async with self._run_store.native_event_publication(agent_run_id):
+                                return await state.storage_group.mutate((state,), publish)
+                        return await state.storage_group.mutate((state,), publish)
+                    except AIError as error:
+                        actual = None
+                        if error.code in {ErrorCode.STORAGE_COMMIT_UNKNOWN, ErrorCode.STORAGE_CONFLICT}:
+                            actual = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
+                        if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                            if (not joint_attempt and actual is not None and actual.value == next_record
+                                    and actual.storage_revision == observed.storage_revision + 1
+                                    and written is not None
+                                    and await verify_native(run=run, events=events, snapshot=snapshot, receipt=written)):
+                                return actual
+                        elif (error.code is ErrorCode.STORAGE_CONFLICT and written is None
+                                and actual is not None
+                                and actual.storage_revision > observed.storage_revision
+                                and (actual.value == observed.value or terminal
+                                     and actual.value.status is ExecutionStatus.CANCELLING
+                                     and actual.value.producer_generation == generation
+                                     and actual.value.producer_claim_id == claim_id)):
+                            # Cancellation stops new dispatch but must retain this
+                            # producer's terminal source and interrupted checkpoint.
+                            require_publication()
+                            observed = actual
+                            next_record = actual.value
+                            owner.observed = actual
+                            continue
+                        owner.observed = None
+                        if actual is not None and actual.value.status is ExecutionStatus.CANCELLING:
+                            raise AIError(ErrorCode.EXECUTION_CANCELLED) from error
+                        raise
+
+            task = asyncio.create_task(persist(), name=f"ai-step-boundary-{execution.execution_id}")
+            confirmed, cancelled = await self._await_checkpoint_task(
+                task, label="native step boundary", execution_id=execution.execution_id,
+            )
+            owner.observed = confirmed
+            session = captured_session if owner.attempt is None else owner.attempt.session
+            owner.attempt = _InitialAttemptCapture(confirmed.value, session)
+            if written is None:
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            native.confirm_prepared_step(written)
+            source = native.run_from_receipt(written)
+            if source is not None:
+                self._run_store.confirm_step_run(source, receipt=written)
+            if cancelled is not None:
+                raise cancelled
+            return written
 
         initial_observed = owner.observed
 

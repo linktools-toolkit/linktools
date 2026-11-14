@@ -328,3 +328,36 @@ async def test_recovery_requests_bound_maximum_execution_identity_in_both_launch
         assert first == second and len(first) == 36
         keys.append(first)
     assert keys[0] != keys[1]
+
+
+@pytest.mark.asyncio
+async def test_unkeyed_event_batch_preserves_order_and_duplicate_occurrences(tmp_path):
+    from sqlalchemy import event as sql_event
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch.db'}")
+    store = SqlStepStore(engine, namespace="batch", tenant_id="tenant")
+    inserts = []
+
+    def observe(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.startswith("INSERT INTO ai_step_events"):
+            inserts.append(statement)
+
+    try:
+        await store.initialize(local=True)
+        await store.register_run(RunRecord(run_id="run", agent_name="agent"))
+        first = StepEvent(run_id="run", kind="model_request_started", step_index=0)
+        second = StepEvent(run_id="run", kind="model_request_completed", step_index=1)
+        expected = [first, second, replace(first)]
+        sql_event.listen(engine.sync_engine, "before_cursor_execute", observe)
+        try:
+            await store.commit_step(events=tuple(expected))
+        finally:
+            sql_event.remove(engine.sync_engine, "before_cursor_execute", observe)
+        assert len(inserts) == 1
+        assert await store.list_events(run_id="run") == expected
+        await store.close()
+        store = SqlStepStore(engine, namespace="batch", tenant_id="tenant")
+        assert await store.list_events(run_id="run") == expected
+    finally:
+        await store.close()
+        await engine.dispose()

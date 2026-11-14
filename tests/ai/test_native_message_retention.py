@@ -201,8 +201,8 @@ async def test_native_database_integrity_and_attachment_group_boundaries_fail_cl
                                             **content.to_native_values()), group_id="group")
 
 
-@pytest.mark.parametrize("checkpoint", [False, {}, {"output_retries_used": True, "message_sha256": "a" * 64},
-    {"output_retries_used": 0, "message_sha256": "unknown"}])
+@pytest.mark.parametrize("checkpoint", [False, {}, {"output_retries_used": True},
+    {"output_retries_used": -1}])
 def test_native_snapshot_retention_rejects_unknown_checkpoint_shape(checkpoint: object) -> None:
     import json
 

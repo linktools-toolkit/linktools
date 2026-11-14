@@ -648,3 +648,40 @@ async def test_failed_preparation_does_not_retain_partial_payload_reuse(
         assert not native._message_proofs and not native._message_content._known_messages
         await native.prepare_archived_messages(messages, bundle)
         assert len(puts) == 4 and puts[:2] == puts[2:]
+
+
+@pytest.mark.asyncio
+async def test_native_node_read_and_insert_do_not_rehash_addresses(tmp_path: Path, monkeypatch) -> None:
+    from linktools.ai.persistence._archive import ImmutableSequenceNode
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'node-address.db'}")
+    native = SqlStepStore(engine, namespace="messages", tenant_id="one")
+    await native.initialize(local=True)
+    content = native._message_content
+    try:
+        frozen = MessageArchive().snapshot(_messages("one", "two", "three"))
+        prepared = await content.prepare_append(frozen, prepare_payload=_inline)
+        content.confirm_committed(await _publish(native, content, prepared))
+        plan = content.range_query((prepared.root,))
+        async with engine.connect() as connection:
+            rows = (await connection.execute(plan.statement)).mappings().all()
+            node_rows = [dict(row) for row in (await connection.execute(select(content._nodes))).mappings()]
+        for row in node_rows:
+            for name in ("id", "created_at", "updated_at"):
+                row.pop(name, None)
+
+        def rehash(_):
+            raise AssertionError("stored node addresses must not be rehashed")
+
+        monkeypatch.setattr(ImmutableSequenceNode, "identity", property(rehash))
+        assert await content.hydrate_ranges((prepared.root,), rows) == (tuple(frozen.encoded_payloads()),)
+        await native.storage_context.run_mutation(
+            lambda session: content._insert_rows(session, content._nodes, node_rows)
+        )
+        malformed = [dict(row) for row in rows]
+        malformed[0]["tree_count"] = 2
+        with pytest.raises(ValueError, match="corrupt"):
+            await content.hydrate_ranges((prepared.root,), malformed)
+    finally:
+        await native.close()
+        await engine.dispose()

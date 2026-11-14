@@ -84,9 +84,10 @@ async def test_model_subscription_fails_closed_before_registering(
                 if denial == "policy":
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
-                async def missing(*args, **kwargs):
-                    return None
-                monkeypatch.setattr(state.execution.executions, "get_view", missing)
+                repository = state.execution.executions
+                await repository.state_store.mutate(
+                    lambda transaction: transaction.delete_record(repository.execution_record_key("execution"))
+                )
 
         def forbidden(*args, **kwargs):
             raise AssertionError("Unauthorized subscription must not be registered")

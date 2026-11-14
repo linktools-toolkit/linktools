@@ -213,7 +213,7 @@ async def test_undeclared_native_owner_fails_closed_without_rejecting_business_j
 
 
 @pytest.mark.asyncio
-async def test_reclaimed_cross_process_cache_rebuilds_same_root_without_resurrecting_replay(tmp_path: Path) -> None:
+async def test_reopened_writer_rebuilds_reclaimed_root_without_resurrecting_replay(tmp_path: Path) -> None:
     url = f"sqlite+aiosqlite:///{tmp_path / 'cache.db'}"
     engines = [create_async_engine(url), create_async_engine(url)]
     stores = [SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1) for engine in engines]
@@ -221,11 +221,16 @@ async def test_reclaimed_cross_process_cache_rebuilds_same_root_without_resurrec
         await stores[0].initialize(local=True)
         old = _snapshot("run", 1, "old")
         await stores[0].save_snapshot(old)
-        await stores[1].save_snapshot(_snapshot("run", 2, "current"))
+        current = _snapshot("run", 2, "current")
+        await stores[1].save_snapshot(current)
+        # Offline collection requires every other adapter to discard its caches.
+        await stores[0].close()
         await stores[1].purge_unreferenced_content(exclusive=_Offline())
         assert await _count(engines[0], "ai_step_messages") == 1
+        stores[0] = SqlStepStore(engines[0], namespace="steps", tenant_id="one", max_snapshots_per_run=1)
         await stores[0].save_snapshot(old)
         assert await _count(engines[0], "ai_step_messages") == 1
+        assert await stores[0].latest_snapshot(run_id="run") == current
         revived = replace(old, run_id="revived")
         await stores[0].save_snapshot(revived)
         assert await stores[1].latest_snapshot(run_id="revived") == revived

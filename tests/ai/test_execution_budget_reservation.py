@@ -98,11 +98,11 @@ async def test_caller_cancelled_reservation_completes_and_snapshot_replays(
         committed_reservations = []
         release = asyncio.Event()
         reservations = []
-        reserve = runtime._state.execution.executions.reserve_start
+        reserve = runtime._state.execution.executions._reserve_start
 
-        async def capture_reservation(value):
+        async def capture_reservation(value, *, started=False, input_context_write=None):
             reservations.append(value)
-            return await reserve(value)
+            return await reserve(value, started=started, input_context_write=input_context_write)
 
         async def pause_after_commit(stores, callback):
             outermost = active_state_transaction(store) is None
@@ -115,7 +115,7 @@ async def test_caller_cancelled_reservation_completes_and_snapshot_replays(
             return value
 
         with monkeypatch.context() as patch:
-            patch.setattr(runtime._state.execution.executions, "reserve_start", capture_reservation)
+            patch.setattr(runtime._state.execution.executions, "_reserve_start", capture_reservation)
             patch.setattr(group, "mutate", pause_after_commit)
             start = asyncio.create_task(runtime.agents.get().start(
                 "hello", budget=budget, idempotency_key="cancelled",

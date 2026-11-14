@@ -28,7 +28,7 @@ async def test_flush_batches_overlapping_roots_and_reuses_live_subset_receipts(m
         validations.append(tuple(roots))
         return (1, 2, 3)
 
-    index.register_publication_targets(session, b"a", ("one", "two", "unused"), receipt)
+    index.register_publication(session, b"a", ("one", "two", "unused"), receipt)
     validations.clear()
 
     def root(store, *ids):
@@ -65,10 +65,10 @@ async def test_flush_rechecks_expired_receipts(monkeypatch, expired_transaction)
     def receipt(session, *, store_key, roots):
         validations.append(tuple(roots))
         if not live:
-            raise index.PublicationTargetsUnavailable()
+            raise index.PublicationUnavailable()
         return (1,)
 
-    index.register_publication_targets(session, b"a", ("one",), receipt)
+    index.register_publication(session, b"a", ("one",), receipt)
     validations.clear()
     live = False
     if expired_transaction:
@@ -109,7 +109,7 @@ async def test_flush_combines_overlapping_receipts_without_reading(monkeypatch):
             assert store_key == b"a" and tuple(roots) == identities
             validations.append(identities)
             return tuple(range(len(identities)))
-        index.register_publication_targets(session, b"a", identities, receipt)
+        index.register_publication(session, b"a", identities, receipt)
 
     register(("one", "two"))
     register(("three", "two"))

@@ -122,3 +122,43 @@ async def test_trace_publication_calls_current_interaction_override(tmp_path: Pa
         assert calls == [tuple(messages)]
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("variant", ("running", "response", "request", "mixed"))
+async def test_interaction_baseline_is_loaded_only_for_request_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str,
+) -> None:
+    from dataclasses import replace
+    state = Persistence(_storage("sqlite", tmp_path))
+    await state.initialize(namespace="prepared-projection", tenant_id="tenant")
+    archive = await _trace_archive(state)
+    run = AgentRunRecord("run")
+    messages = (ModelResponse(parts=[TextPart("reply")], timestamp=run.started_at),)
+    context = StagedContextProjection((StagedContextSpan(0, 1),))
+    staged = StagedModelInteraction(
+        "run", 1, 1, "agent", None, {},
+        context if variant in {"running", "request", "mixed"} else None,
+        hashlib.sha256(b"{}").hexdigest() if variant in {"running", "request", "mixed"} else None,
+        None if variant == "running" else context, "RUNNING" if variant == "running" else "SUCCEEDED",
+        None, None if variant == "running" else 1,
+        None if variant == "running" else UsageMetrics(model_requests=1),
+        run.started_at, None if variant == "running" else run.started_at,
+    )
+    interactions = (replace(staged, request_context=None, request_envelope_digest=None, model_request_seq=2), staged) if variant == "mixed" else (staged,)
+    calls = []
+    load = archive._history.load_projection
+    async def tracked(*args, **kwargs):
+        calls.append(args)
+        return await load(*args, **kwargs)
+    monkeypatch.setattr(archive._history, "load_projection", tracked)
+    try:
+        result = await archive.prepare_interactions(
+            run, interactions, lambda _: b"{}", local_message_count=1,
+            local_messages=messages, prepared=PreparedArchive(),
+        )
+        assert len(result) == len(interactions)
+        assert len(calls) == (1 if variant in {"request", "mixed"} else 0)
+        assert all((value.response_context is not None) == (variant != "running") for value in result)
+        assert (result[-1].request_context is not None) == (variant in {"request", "mixed"})
+    finally:
+        await state.close()

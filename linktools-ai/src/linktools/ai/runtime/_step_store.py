@@ -146,7 +146,10 @@ class RuntimeStepStore:
         SDK hooks may mutate any nested message. This boundary is necessarily
         linear in the mutable history, unlike subsequent frozen storage operations.
         """
-        return replace(snapshot, messages=self._message_archive.snapshot(snapshot.messages))
+        snapshot = replace(snapshot, messages=self._message_archive.snapshot(snapshot.messages))
+        if self._output_retries_used is not None:
+            return NativeCheckpoint.from_snapshot(snapshot, output_retries_used=self._output_retries_used())
+        return snapshot
 
     def _encode_snapshot(self, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
         native = isinstance(self._store, SqlStepStore)
@@ -163,10 +166,12 @@ class RuntimeStepStore:
             # Caller-owned SDK stores serialize the published list contract directly.
             messages = native_checkpoint_messages(snapshot.messages)
         snapshot = replace(snapshot, messages=messages)
-        if self._output_retries_used is None:
+        if self._output_retries_used is None and not isinstance(snapshot, NativeCheckpoint):
             return snapshot
+        retries = (snapshot.output_retries_used if isinstance(snapshot, NativeCheckpoint)
+                   else self._output_retries_used())
         encode = NativeCheckpoint.from_snapshot if native else NativeCheckpoint.encode
-        return encode(snapshot, output_retries_used=self._output_retries_used())
+        return encode(snapshot, output_retries_used=retries)
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         stored_snapshot = self._encode_snapshot(snapshot)
