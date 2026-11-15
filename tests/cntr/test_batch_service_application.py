@@ -109,8 +109,10 @@ def test_maintenance_oneoff_does_not_count_as_a_service_replica():
     assert runner.started_services(context, ("app",), ProjectRuntimeState("test", (maintenance,), "docker")) == set()
 
 
+@pytest.mark.parametrize("action", ["up", "restart"])
 @pytest.mark.parametrize("config_changed", [False, True])
-def test_failed_batch_does_not_commit_or_rerun_an_untouched_previously_completed_job(tmp_path, monkeypatch, config_changed):
+def test_failed_batch_does_not_commit_or_rerun_an_untouched_previously_completed_job(
+        tmp_path, monkeypatch, config_changed, action):
     manager = setup_case(tmp_path, [("job", {"job": {
         "image": "job:current", "environment": {"VERSION": "new"}}})])
     previous = deepcopy(manager.model)
@@ -137,7 +139,7 @@ def test_failed_batch_does_not_commit_or_rerun_an_untouched_previously_completed
 
     monkeypatch.setattr(AppliedServiceModels, "record", record)
     with pytest.raises(ContainerError, match="native failure before job application"):
-        manager.compose_operations.up()
+        getattr(manager.compose_operations, action)(["job"])
     receipts = AppliedServiceModels(manager, manager.model)
     assert receipts.previous_model("job")["services"]["job"]["environment"]["VERSION"] == (
         "old" if config_changed else "new")

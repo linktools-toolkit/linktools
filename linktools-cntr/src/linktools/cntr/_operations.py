@@ -471,7 +471,7 @@ class ComposeOperations:
                         updated, recreated = self._observed_service_changes(actual, observed, selection.services)
                         # An old replica (including an exited one-shot) does not prove
                         # that a failed batch applied the image now behind its tag.
-                        for service in actual.existing_services.intersection(selection.services) - stop_set:
+                        for service in actual.existing_services.intersection(selection.services) - pending_restart:
                             before = actual.service_instances(service)
                             after = observed.service_instances(service)
                             old_ids = {item.container_id for item in before if item.container_id}
