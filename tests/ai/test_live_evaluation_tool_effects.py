@@ -39,7 +39,7 @@ from .test_evaluation_consumers import (
     ("read_only", "mcp"), ("live", "tool"),
 ))
 async def test_evaluation_enforces_effect_limit_against_next_step_declarations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
     policy: Literal["deny", "read_only", "live"], addition: str,
 ) -> None:
     features = RuntimeFeatures(workspace_factory=None)
@@ -72,7 +72,7 @@ async def test_evaluation_enforces_effect_limit_against_next_step_declarations(
     features.model("default", models)
     features.tool(read, effect_policy="none")
     async with (
-        Persistence.open("live-effects", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id=TENANT) as state,
+        Persistence.open("live-effects", storage=PersistenceStorage.in_memory(), tenant_id=TENANT) as state,
         Runtime.attach(persistence=state, context=CONTEXT, features=features) as runtime,
     ):
         target = Task.from_agent("effects.target", runtime.agents.get())
@@ -86,7 +86,7 @@ async def test_evaluation_enforces_effect_limit_against_next_step_declarations(
             )), principal=PRINCIPAL, idempotency_key="dataset")
             request = StartEvaluationRequest(EvaluationSpec(
                 dataset, (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
-                policy=EvaluationPolicy(external_effects=policy, model_fixtures=(models.contract,)),
+                policy=EvaluationPolicy(allow_volatile=True, external_effects=policy, model_fixtures=(models.contract,)),
             ), PRINCIPAL, "evaluate")
             run = await evaluations.start(request)
             await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
