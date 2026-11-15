@@ -304,12 +304,29 @@ async def test_keyed_recovery_observes_cancel_intent_after_many_unfinished_recei
             OperationKind.EXECUTION_RECOVER, OperationStatus.RUNNING,
             "a" * 64, "previous-claim", None, None, False, now, now,
         )
-        for index in range(257):
-            await state.execution.operations.append(replace(candidate, operation_id=f"old-recover-{index}"))
-        await state.execution.operations.append(replace(
-            candidate, operation_id="pending-cancel", operation_kind=OperationKind.EXECUTION_CANCEL,
-            status=OperationStatus.PENDING, result_ref=None,
-        ))
+        operations = state.execution.operations
+
+        async def seed_receipts(transaction):
+            for index in range(257):
+                await operations.append_in_transaction(
+                    transaction, replace(candidate, operation_id=f"old-recover-{index}"),
+                )
+            await operations.append_in_transaction(transaction, replace(
+                candidate, operation_id="pending-cancel", operation_kind=OperationKind.EXECUTION_CANCEL,
+                status=OperationStatus.PENDING, result_ref=None,
+            ))
+
+        # Recovery observes a committed stream, not the intermediate seed commits.
+        await operations.state_store.mutate(seed_receipts)
+        seeded = await operations.list_pending(
+            ResourceKind.EXECUTION, execution_id, tenant_id="default", limit=259,
+        )
+        assert len(seeded) == 258
+        assert [receipt.operation_id for receipt in seeded[:-1]] == [f"old-recover-{index}" for index in range(257)]
+        assert all(receipt.status is OperationStatus.RUNNING for receipt in seeded[:-1])
+        assert all(left.sequence < right.sequence for left, right in zip(seeded, seeded[1:]))
+        assert seeded[-1].operation_id == "pending-cancel"
+        assert seeded[-1].status is OperationStatus.PENDING
         original = await _producer(state, execution_id)
         await _recover(runtime, execution_id, "recovery")
         receipt = await _receipt(state, "recovery")

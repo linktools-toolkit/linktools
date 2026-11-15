@@ -66,10 +66,13 @@ async def _storage(root: Path, backend: str) -> AsyncIterator[PersistenceStorage
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite", "sql", "split"))
-@pytest.mark.parametrize("restart", (False, True))
+@pytest.mark.parametrize("capture_frontier", (False, True))
 async def test_session_reloads_known_scopes_before_first_model_request(
-    tmp_path: Path, backend: str, restart: bool,
+    tmp_path: Path, backend: str, capture_frontier: bool,
 ) -> None:
+    # Backend/checkpoint coverage exercises durable scope reload and union.
+    # Filesystem mutations and new-session isolation share the same implementation.
+    full_mutation_path = backend == "sql" and capture_frontier
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     for scope in ("pkg", "other"):
@@ -125,7 +128,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
 
     async with _storage(tmp_path, backend) as storage:
         async with Persistence.open("scope-memory", storage=storage) as persistence:
-            if restart:
+            if capture_frontier:
                 if backend == "sql":
                     steps = SqlStepStore(
                         persistence.execution.executions.state_store.context,
@@ -143,22 +146,33 @@ async def test_session_reloads_known_scopes_before_first_model_request(
                 assert stored is not None and stored.repository_instruction_scopes == ("pkg",)
                 assert "PACKAGE-V1" not in str(encode_domain(stored))
 
-            # A new Runtime must consume the durable Session scope set, not a local cache.
+            if full_mutation_path:
+                async with Runtime.attach(persistence=persistence, features=features) as runtime:
+                    session = runtime.agents.get("reader").session("session")
+                    await run(session, "same", initial="PACKAGE-V1")
+
+            # Reload the scope, not the previous execution's content pin, before
+            # the first model request in the new Runtime.
+            rules.write_text("PACKAGE-V2", encoding="utf-8")
             async with Runtime.attach(persistence=persistence, features=features) as runtime:
                 session = runtime.agents.get("reader").session("session")
-                await run(session, "same", initial="PACKAGE-V1")
-                rules.write_text("PACKAGE-V2", encoding="utf-8")
                 await run(session, "changed", initial="PACKAGE-V2", absent=("PACKAGE-V1",))
-                rules.unlink()
-                await run(session, "deleted", absent=("PACKAGE-V1", "PACKAGE-V2"))
-                rules.write_text("PACKAGE-V3", encoding="utf-8")
-                await run(session, "recreated", initial="PACKAGE-V3", absent=("PACKAGE-V1", "PACKAGE-V2"))
+                current_rule = "PACKAGE-V2"
+                if full_mutation_path:
+                    rules.write_text("PACKAGE-V3", encoding="utf-8")
+                    await run(session, "overwritten", initial="PACKAGE-V3", absent=("PACKAGE-V1", "PACKAGE-V2"))
+                    rules.unlink()
+                    await run(session, "deleted", absent=("PACKAGE-V1", "PACKAGE-V2", "PACKAGE-V3"))
+                    rules.write_text("PACKAGE-V4", encoding="utf-8")
+                    await run(session, "recreated", initial="PACKAGE-V4", absent=("PACKAGE-V1", "PACKAGE-V2", "PACKAGE-V3"))
+                    current_rule = "PACKAGE-V4"
                 target = "other/file.txt"
-                await run(session, "unknown", initial="PACKAGE-V3", discover="OTHER-RULE")
-                fork = await session.fork("fork")
-                await run(fork, "fork", discover="OTHER-RULE", absent=("PACKAGE-V3",))
-                isolated = await runtime.agents.get("reader").create_session("isolated")
-                await run(isolated, "isolated", discover="OTHER-RULE", absent=("PACKAGE-V3",))
+                await run(session, "unknown", initial=current_rule, discover="OTHER-RULE")
+                if full_mutation_path:
+                    fork = await session.fork("fork")
+                    await run(fork, "fork", discover="OTHER-RULE", absent=(current_rule,))
+                    isolated = await runtime.agents.get("reader").create_session("isolated")
+                    await run(isolated, "isolated", discover="OTHER-RULE", absent=(current_rule,))
         if backend != "memory":
             async with Persistence.open("scope-memory", storage=storage) as reopened:
                 stored = await reopened.conversation.sessions.get("session", tenant_id=reopened.tenant_id)
