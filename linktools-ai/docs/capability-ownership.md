@@ -75,6 +75,47 @@ existing owners and the boundary to retain, rather than prescribing file moves.
 | Compaction / repository instructions | Current rules and explicit compaction policy feed execution | Context projection and model-request hooks remain separate from provider identity and raw history | Execution owns requests, usage, budgets and retained history; Asset owns source rules | Clarify capability projection separately from authoritative model facts; no observation-layer dependency on an SDK producer |
 | Metrics / Evaluation / Task | Metrics is independently usable; Evaluation declares Task targets; Task owns DAG declarations | Evaluation reuses Task; an Agent node calls the original Agent producer | Each producer owns its recorder; Task owns scheduling/graph recovery; Persistence owns shared transactions | Optional metrics cannot change execution truth; ordinary Task and Evaluation must not activate an Agent producer |
 
+## Model request facts are not optional metrics
+
+The model-request capability remains installed when `metrics=None`.
+The execution producer supplies one run-local `ModelRequestJournal`, seeded
+from the retained model-interaction sequence. This allocates request identity
+and timing once; it is not a second durable store. History, request events and
+optional metric observations consume those same facts.
+
+| Responsibility | Existing owner and boundary |
+| --- | --- |
+| Request preparation, provider attempts, usage and budget | Agent execution and its model-request adapter, including the prepared-input publication boundary; not the metric recorder |
+| Logical request identity and completion | The shared request journal; an output retry gets a new request without changing the prior request's completed outcome |
+| Retained interactions and request events | The existing run recorder and execution event sink, under their configured persistence guarantees |
+| Optional `Observation` construction and delivery | The model-metric projection borrows the recorder, preserves request identity and derives measurements without mutating authoritative usage |
+| Externally dispatched compaction requests | Their dispatch owner supplies the request fact and owns budgeting; the reporting callback does not dispatch or budget the request again |
+
+Completion fixes the request fact and hands it to the history/event owners
+before calling the optional recorder. Metric rejection or an ordinary recorder
+exception does not rewrite that fact. Cancellation still propagates: a request
+already completed successfully can be followed by caller cancellation or a
+failed event publication. A successful request fact is therefore not a promise
+that the enclosing execution or cleanup succeeded. Required preparation,
+history and event failures must not be treated as best-effort metric failures.
+
+Disabling automatic metrics omits optional observations and their metric
+metadata, not the request lifecycle, budget handling or configured interaction
+capture. Provider/recorder construction and close remain the existing
+[automatic Metrics ownership contract](storage-caching.md#automatic-metrics-providers);
+there is no second journal, event bus, callback queue or required application API.
+
+Existing contract coverage is in
+[`test_model_metric_projection_boundary.py`](../../tests/ai/test_model_metric_projection_boundary.py)
+(no recorder, acceptance, rejection, projection failure, delivery failure and
+cancellation, for ordinary and externally dispatched requests),
+[`test_model_metric_trace_link.py`](../../tests/ai/test_model_metric_trace_link.py)
+(shared identity and no-metrics retry lineage), and
+[`test_model_request_lifecycle.py`](../../tests/ai/test_model_request_lifecycle.py)
+(prepared-input publication, completion handoff and distinct output retries).
+These obligations concern request truth; they do not turn optional metrics into
+a recovery authority or imply that every backend has been verified.
+
 ## Public calls exercised by the program
 
 | Call | Meaning, defaults and result | Ownership / failure |
