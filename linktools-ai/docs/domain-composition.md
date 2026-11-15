@@ -112,6 +112,25 @@ transferring it to the failing capability. The existing
 inside wrappers, partial initialization and close retry; this table does not add
 a new lifecycle or automatic recovery mechanism.
 
+## Recovery uses the existing owner
+
+These cases have different identities and must not be combined into a generic
+"restore Memory" path:
+
+| Operation | State and resource owner | Existing contract coverage |
+| --- | --- | --- |
+| Retry an ordinary execution after Runtime reopens | Execution retains its admitted Memory scope; current capability declarations determine available tools. A removed Memory declaration stays absent, and a same-named business tool does not become a Memory tool. | `test_memory_capability_scope.py::test_memory_tools_retry_resolves_current_tools_but_retains_admitted_scope` |
+| Retry an imported execution | The new execution gets an isolated scope seeded with the captured content and versions, not later edits in the original execution's scope. | `test_imported_context_retry.py::test_retry_imported_memory_uses_fresh_isolated_scope` |
+| Continue a deferred imported execution | The same execution keeps its scope and intervening mutations; continuation does not reapply the seed over those mutations. | `test_memory_capture_replay.py::test_runtime_imported_memory_resumes_deferred_without_rollback` |
+| Reopen and retry a Memory seed | `PersistentMemoryStore` uses the original seed receipts; Persistence owns their atomic commit with the seeded paths. | `test_memory_capture_replay.py::test_memory_capture_receipt_replays_after_sqlite_reopen` and `test_memory_capture_retry_resolves_committed_partial_seed` |
+| Replace a custom native persistent capability during a run | The SDK selects the effective run instance. New submissions use that instance; already accepted writes retain their original callback owner until commit. | `test_capability_persistence_lifecycle.py::test_native_persistence_replacements_keep_current_and_accepted_write_owners` |
+
+The deferred-continuation case covers one Runtime lifetime. The seed-receipt
+case separately covers SQLite reopen; together they do not prove every
+cold-process continuation scenario. Accepted owner-local Python callbacks are
+not a cross-worker durable callback queue. Extending recovery requires a real
+caller contract, not another registry or a second copy of Memory state.
+
 ## Failure, cancellation, and recovery boundaries
 
 A wait timeout or a cancelled observer is not proof that the producer stopped.
