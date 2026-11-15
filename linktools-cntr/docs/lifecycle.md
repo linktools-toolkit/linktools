@@ -111,7 +111,7 @@ The operation then runs:
 4. Prepare explicit images, then run `on_check` and `CHECK` for actual targets.
    All candidate files exist, but no service has been stopped or replaced.
 5. Apply services through Compose and inspect the resulting runtime state once
-   to verify the intended image, replica count and start/success-exit state.
+   to verify replica count and start/success-exit state. Compose owns image convergence.
    Do not wait for health checks or job completion; record successful models.
    The source paths in those models identify the exact generated files used.
 6. `on_started` and `AFTER_START` run for applied owners. A failure here reports
@@ -246,7 +246,9 @@ prepared configuration. They are not replaced by this file mechanism.
 
 Changed generated-file source paths or other Compose definitions recreate the affected service.
 Unchanged definitions are not force-recreated. Docker Compose can still replace a
-service when its locally selected image changes. Recreating a container does not
+service when its locally selected image changes. After Compose succeeds, ct-cntr
+checks replica count and observed state, not image IDs from different Docker
+objects. Recreating a container does not
 by itself rebuild its image or request a new certificate.
 
 Build identity comes from the final Compose inputs. The image preparer adds the
@@ -286,8 +288,10 @@ health and job outcomes are observed separately through status/logs. The persist
 container does not block later dependents through a framework readiness loop.
 
 The per-service resolved applied model is the sole recovery authority. Recovery
-pins the pre-operation image ID and restores failed or explicitly stopped
-services using their old immutable file paths. Existing recovery for changed
+pins a locally resolvable pre-operation image ID and restores failed or
+explicitly stopped services using their old immutable file paths. A failed batch
+leaves a service alone when all its original replicas remain in place and those
+originally running are still running, unless recovery must rebind a dependency. Existing recovery for changed
 shared bind inputs also applies, including transitive consumers. New services
 without a prior instance are stopped when required by recovery; confirmed
 independent successes remain applied. Initial migration may read old saved

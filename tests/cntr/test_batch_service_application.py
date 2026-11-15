@@ -14,8 +14,8 @@ from linktools.cntr.runtime.inspect import ProjectRuntimeState
 from test_lifecycle_rebuild import setup_case
 
 
-def instance(service, image="sha256:target", state="running", health=None, code=None, config="new"):
-    return SimpleNamespace(service=service, image_id=image, state=state, health=health, exit_code=code,
+def instance(service, image="sha256:target", state="running", health=None, code=None, config="new", container_id=None, started_at=None):
+    return SimpleNamespace(service=service, image_id=image, container_id=container_id, started_at=started_at, state=state, health=health, exit_code=code,
                            labels={"com.docker.compose.config-hash": config})
 
 
@@ -44,12 +44,12 @@ def test_native_batch_keeps_selected_edges_without_python_service_loop():
 
 
 @pytest.mark.parametrize("observed", [[], [instance("app")],
-    [instance("app"), instance("app", image="sha256:old")],
-    [instance("app"), instance("app", image="sha256:old")]])
-def test_batch_rejects_incomplete_replicas_and_wrong_images(observed):
+    [instance("app"), instance("app", state="created")],
+    [instance("app"), instance("app", state="exited", code=1)]])
+def test_batch_rejects_incomplete_or_failed_replicas(observed):
     runner, context, queries = readiness_case({"app": {"deploy": {"replicas": 2}}}, [observed])
     with pytest.raises(ContainerError, match="Service app did not reach"):
-        runner.verify_services_started(context, ("app",), {"app": "sha256:target"})
+        runner.verify_services_started(context, ("app",))
     assert len(queries) == 1
 
 
@@ -59,16 +59,16 @@ def test_completed_success_dependency_does_not_wait_for_job_exit():
     runner, context, queries = readiness_case(
         specs, [[instance("job", state="running"), instance("app")]])
     result = runner.verify_services_started(
-        context, ("job", "app"), {"job": "sha256:target", "app": "sha256:target"})
+        context, ("job", "app"))
     assert result.running_services == {"job", "app"}
     assert queries == [("job", "app")]
 
 
 def test_zero_replicas_requires_observed_removal():
     runner, context, _ = readiness_case({"app": {"scale": 0}}, [[]])
-    assert runner.verify_services_started(context, ("app",), {"app": "sha256:target"}).services == ()
+    assert runner.verify_services_started(context, ("app",)).services == ()
     state = ProjectRuntimeState("test", (instance("app"),), "docker")
-    assert runner.started_services(context, ("app",), state, {"app": "sha256:target"}) == set()
+    assert runner.started_services(context, ("app",), state) == set()
 
 
 def test_partial_batch_failure_preserves_successful_sibling_but_restores_mixed_config_replicas(tmp_path):
@@ -104,19 +104,22 @@ def test_maintenance_oneoff_does_not_count_as_a_service_replica():
     maintenance = instance("app", state="exited", code=0)
     maintenance.labels["com.docker.compose.oneoff"] = "True"
     runner, context, queries = readiness_case({"app": {}}, [[instance("app"), maintenance]])
-    runner.verify_services_started(context, ("app",), {"app": "sha256:target"})
+    runner.verify_services_started(context, ("app",))
     assert len(queries) == 1
-    assert runner.started_services(context, ("app",), ProjectRuntimeState("test", (maintenance,), "docker"),
-                                 {"app": "sha256:target"}) == set()
+    assert runner.started_services(context, ("app",), ProjectRuntimeState("test", (maintenance,), "docker")) == set()
 
 
-def test_failed_batch_does_not_commit_or_rerun_an_untouched_previously_completed_job(tmp_path):
+@pytest.mark.parametrize("config_changed", [False, True])
+def test_failed_batch_does_not_commit_or_rerun_an_untouched_previously_completed_job(tmp_path, monkeypatch, config_changed):
     manager = setup_case(tmp_path, [("job", {"job": {
         "image": "job:current", "environment": {"VERSION": "new"}}})])
     previous = deepcopy(manager.model)
-    previous["services"]["job"]["environment"]["VERSION"] = "old"
+    if config_changed:
+        previous["services"]["job"]["environment"]["VERSION"] = "old"
     AppliedServiceModels(manager, previous).record(("job",))
-    stopped = instance("job", image="sha256:old-job", state="exited", code=0, config="old")
+    manager.image_preparer.image_id = lambda reference: "sha256:platform-index"
+    stopped = instance("job", image="sha256:old-job", state="exited", code=0, config="old",
+                       container_id="old-job")
     manager.docker_inspector.get_project_state = lambda *args, **kwargs: ProjectRuntimeState(
         "test", (stopped,), "docker")
 
@@ -126,9 +129,66 @@ def test_failed_batch_does_not_commit_or_rerun_an_untouched_previously_completed
     runner = manager.compose_runner
     runner.apply_services = fail_before_application
     runner.started_services = ComposeRunner(manager).started_services
+    original_record = AppliedServiceModels.record
+
+    def record(models, services):
+        assert "job" not in services, "old successful exit is not evidence that the job reran"
+        return original_record(models, services)
+
+    monkeypatch.setattr(AppliedServiceModels, "record", record)
     with pytest.raises(ContainerError, match="native failure before job application"):
         manager.compose_operations.up()
     receipts = AppliedServiceModels(manager, manager.model)
-    assert receipts.previous_model("job")["services"]["job"]["environment"]["VERSION"] == "old"
+    assert receipts.previous_model("job")["services"]["job"]["environment"]["VERSION"] == (
+        "old" if config_changed else "new")
     assert not any(event[0] in ("apply", "restore", "restart") for event in manager.events)
     assert manager.running_state.get_persisted() == []
+
+
+@pytest.mark.parametrize("rebuilt", [False, True])
+def test_native_batch_accepts_platform_image_after_compose_converges(tmp_path, rebuilt):
+    manager = setup_case(tmp_path, [("app", {"app": {"image": "app:latest"}})], running=("app",))
+    AppliedServiceModels(manager, manager.model).record(("app",))
+    observed = [instance("app", image="sha256:original-config", container_id="original")]
+    manager.docker_inspector.get_project_state = lambda *args, **kwargs: ProjectRuntimeState(
+        "test", tuple(observed), "docker")
+    manager.image_preparer.image_id = lambda reference: "sha256:platform-index"
+    runner = manager.compose_runner
+    runner.verify_services_started = ComposeRunner(manager).verify_services_started
+
+    def apply(context, services):
+        assert tuple(services) == ("app",)
+        if rebuilt:
+            observed[:] = [instance("app", image="sha256:new-config", container_id="replacement")]
+
+    runner.apply_services = apply
+    manager.compose_operations.up()
+    assert manager.running_state.get_persisted() == ["app"]
+    assert observed[0].container_id == ("replacement" if rebuilt else "original")
+    assert not any(event[0] in ("stop", "restore") for event in manager.events)
+
+
+@pytest.mark.parametrize("remaining_ids,restore", [
+    (("original-1", "original-2"), False),
+    (("original-1", "replacement"), True),
+    (("original-1",), True),
+])
+def test_partial_failure_preserves_only_the_untouched_original_replicas(tmp_path, remaining_ids, restore):
+    manager = setup_case(tmp_path, [("app", {"app": {"image": "app:latest", "scale": 2}})], running=("app",))
+    original = [instance("app", image="sha256:old-config", config="old", container_id=identity)
+                for identity in ("original-1", "original-2")]
+    observed = list(original)
+    manager.docker_inspector.get_project_state = lambda *args, **kwargs: ProjectRuntimeState(
+        "test", tuple(observed), "docker")
+    runner = manager.compose_runner
+    runner.started_services = ComposeRunner(manager).started_services
+
+    def fail(context, services):
+        observed[:] = [instance("app", image="sha256:old-config", config="old", container_id=identity)
+                       for identity in remaining_ids]
+        raise ContainerError("native failure")
+
+    runner.apply_services = fail
+    with pytest.raises(ContainerError, match="^native failure$"):
+        manager.compose_operations.up()
+    assert [event[1] for event in manager.events if event[0] == "restore"] == ([("app",)] if restore else [])

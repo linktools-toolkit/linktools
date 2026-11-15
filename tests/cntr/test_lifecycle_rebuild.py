@@ -138,13 +138,13 @@ class Runner:
             if changed or cascade or service not in initial:
                 updated.add(service)
 
-    def started_services(self, context, services, state, image_ids):
+    def started_services(self, context, services, state):
         return set(self.applied)
 
-    def verify_services_started(self, context, services, image_ids):
-        active = self.started_services(context, services, None, image_ids)
+    def verify_services_started(self, context, services):
+        active = self.started_services(context, services, None)
         return ProjectRuntimeState("test", tuple(SimpleNamespace(
-            service=service, state="running", labels={}) for service in active), "docker")
+            service=service, state="running", labels={}, container_id=service + ":after", started_at=None) for service in active), "docker")
 
     def restart_service(self, context, service, model=None):
         self.manager.events.append(("restart", service))
@@ -188,7 +188,7 @@ def setup_case(tmp_path, groups, running=()):
     manager.resolver = SimpleNamespace(resolve_dependencies=lambda selected: selected)
     manager.model = {"services": {name: spec for owner in owners for name, spec in owner.services.items()}}
     state = ProjectRuntimeState("test", tuple(
-        SimpleNamespace(service=name, state="running", image_id="sha256:old-" + name, labels={}, health=None,
+        SimpleNamespace(service=name, state="running", container_id=None, started_at=None, image_id="sha256:old-" + name, labels={}, health=None,
                         exit_code=None) for name in running), "docker")
     def observed_state(containers, **kwargs):
         applied = set(getattr(manager.compose_runner, "applied", ()))
@@ -196,7 +196,7 @@ def setup_case(tmp_path, groups, running=()):
         previous = tuple(SimpleNamespace(**dict(vars(item), state="exited", exit_code=0))
                          if item.service in stopped else item for item in state.services if item.service not in applied)
         return ProjectRuntimeState("test", previous + tuple(
-            SimpleNamespace(service=name, state="running", health=None, exit_code=None,
+            SimpleNamespace(service=name, state="running", health=None, exit_code=None, container_id=name + ":after", started_at=None,
                             image_id=manager.image_preparer.image_id(manager.model["services"][name]["image"]),
                             labels={"com.docker.compose.config-hash": "new-" + name}) for name in applied), "docker")
     manager.docker_inspector = SimpleNamespace(get_project_state=observed_state)
@@ -338,7 +338,8 @@ def test_completed_job_not_marked_as_running(tmp_path):
     assert "job" in AppliedServiceModels(manager, manager.model).previous
 
 
-def test_restore_pins_original_image_and_does_not_inject_generation_label(tmp_path):
+@pytest.mark.parametrize("image_available", [True, False])
+def test_restore_requires_locally_available_original_image(tmp_path, image_available):
     commands = []
     documents = []
 
@@ -347,13 +348,20 @@ def test_restore_pins_original_image_and_does_not_inject_generation_label(tmp_pa
         documents.append([Path(args[index + 1]).read_text() for index, value in enumerate(args[:-1]) if value == "--file"])
         return SimpleNamespace(check_call=lambda: 0)
 
-    manager = SimpleNamespace(data_path=tmp_path, project_name="test", runtime=SimpleNamespace(create_docker_process=process))
+    manager = SimpleNamespace(data_path=tmp_path, project_name="test", runtime=SimpleNamespace(create_docker_process=process),
+                              image_preparer=SimpleNamespace(inspect_images=lambda refs: dict.fromkeys(refs, object() if image_available else None)))
     runner = ComposeRunner(manager)
     runner._resolved_model = lambda process: {"services": {"app": {"image": "sha256:old"}}}
     ctx = OperationContext(project_containers=[SimpleNamespace(name="app", services={"app": {}})])
     ctx.initial_runtime_state = ProjectRuntimeState("test", (
         SimpleNamespace(service="app", state="running", image_id="sha256:old", labels={}),), "docker")
-    runner.apply_saved_services(ctx, ("app",), {"previous.yml": "services:\n  app:\n    image: mutable:tag\n"})
+    saved = {"previous.yml": "services:\n  app:\n    image: mutable:tag\n"}
+    if not image_available:
+        with pytest.raises(ContainerError, match="Original image is not available locally for service app"):
+            runner.apply_saved_services(ctx, ("app",), saved)
+        assert not commands
+        return
+    runner.apply_saved_services(ctx, ("app",), saved)
     overlay = yaml.safe_load(documents[-1][-1])
     assert overlay == {"services": {"app": {"image": "sha256:old"}}}
     assert "--force-recreate" in commands[-1]

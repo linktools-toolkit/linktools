@@ -221,8 +221,8 @@ def stub_generated_runtime(manager, monkeypatch):
     monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers, **kwargs:
                         ProjectRuntimeState(manager.project_name, (), "docker"))
     monkeypatch.setattr(manager.compose_runner, "verify_services_started",
-                        lambda context, services, image_ids: ProjectRuntimeState(manager.project_name, tuple(
-                            SimpleNamespace(service=name, state="running", labels={}) for name in services), "docker"))
+                        lambda context, services: ProjectRuntimeState(manager.project_name, tuple(
+                            SimpleNamespace(service=name, state="running", labels={}, container_id=name, started_at=None) for name in services), "docker"))
     monkeypatch.setattr(manager.compose_runner, "validate_service", lambda *args, **kwargs:
                         SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0))
     monkeypatch.setattr(manager.image_preparer, "image_id", lambda image: "sha256:local-" + image)

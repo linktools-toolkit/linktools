@@ -61,7 +61,7 @@ def test_started_service_does_not_wait_for_health(state, health):
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
         get_project_state=lambda containers, services=None: calls.append(services) or state)))
     context = SimpleNamespace(project_containers=(), compose_model={"services": {"app": {}}})
-    result = runner.verify_services_started(context, ("app",), {"app": "sha256:app"})
+    result = runner.verify_services_started(context, ("app",))
     assert result is state
     assert calls == [("app",)]
 
@@ -74,7 +74,7 @@ def test_unhealthy_service_does_not_block_start():
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
         get_project_state=lambda containers, services=None: calls.append(services) or state)))
     context = SimpleNamespace(project_containers=(), compose_model={"services": {"app": {}}})
-    assert runner.verify_services_started(context, ("app",), {"app": "sha256:app"}) is state
+    assert runner.verify_services_started(context, ("app",)) is state
     assert calls == [("app",)]
 
 
@@ -86,7 +86,7 @@ def test_successfully_exited_service_does_not_check_health(health):
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
         get_project_state=lambda containers, services=None: state)))
     context = SimpleNamespace(project_containers=(), compose_model={"services": {"job": {}}})
-    assert runner.verify_services_started(context, ("job",), {"job": "sha256:job"}) is state
+    assert runner.verify_services_started(context, ("job",)) is state
 
 
 @pytest.mark.parametrize(("condition", "state", "health", "exit_code"), [

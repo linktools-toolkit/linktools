@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence, Iterable
     from .container import BaseContainer
     from .manager import ContainerManager
-    from .runtime.inspect import ProjectRuntimeState
+    from .runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 
 
 @dataclass(frozen=True)
@@ -423,38 +423,21 @@ class ComposeOperations:
                         self._update_running_state(context, running, stop_targets)
                 for service in selection.services:
                     spec = context.compose_model["services"][service]
-                    existing = context.initial_runtime_state.existing_services
-                    before_image = context.initial_runtime_state.image_ids.get(service)
-                    image_changed = service in existing and before_image != target_image_ids[service]
-                    binds = set(namespace_dependencies(spec))
-                    recreate = (service in model_store.changed_services or image_changed or
-                                bool(binds & recreated))
-                    cascade = any((options.get("restart") and dependency in updated) or
-                                  (dependency in recreated and dependency in existing)
-                                  for dependency, options in service_dependencies(spec).items())
                     if spec.get("scale") == 0 or spec.get("deploy", {}).get("replicas") == 0:
-                        if service in context.initial_runtime_state.existing_services:
+                        if service in actual.existing_services:
                             warn_collateral(service, "remove", "the desired service scale is zero")
-                    elif recreate or service not in initial:
-                        action = "recreate" if service in context.initial_runtime_state.existing_services and recreate else "start"
-                        reason = ("a namespace provider was replaced" if binds & recreated else
-                                  "the selected image changed" if image_changed else
-                                  "the required service configuration changed" if service in initial else
-                                  "the required service is not running")
-                        warn_collateral(service, action, reason)
-                    elif cascade:
-                        warn_collateral(service, "restart", "a declared dependency was updated")
-                    if recreate or service not in existing:
-                        recreated.add(service)
-                    if recreate or cascade or service in stop_set or service not in initial:
-                        updated.add(service)
+                    elif service in model_store.changed_services and service in initial:
+                        warn_collateral(service, "recreate", "the required service configuration changed")
+                    elif service not in initial:
+                        warn_collateral(service, "start", "the required service is not running")
                 failed = set(selection.services)
                 with record_phase(context, "up", logger=manager.logger):
                     batch_attempted = True
                     runner.apply_services(context, selection.services)
-                    observed = runner.verify_services_started(context, selection.services, target_image_ids)
+                    observed = runner.verify_services_started(context, selection.services)
                     model_store.record(selection.services)
                 batch_completed = True
+                updated, recreated = self._observed_service_changes(actual, observed, selection.services)
                 running.difference_update(selection.services)
                 running.update(service for service in selection.services if any(
                     item.state in ("running", "restarting") for item in observed.service_instances(service)))
@@ -481,9 +464,21 @@ class ComposeOperations:
                     failed.clear()
             except (Exception, KeyboardInterrupt) as error:
                 try:
+                    retained = set()
                     if batch_attempted and not batch_completed:
                         observed = manager.docker_inspector.get_project_state(selection.project_containers)
-                        confirmed = runner.started_services(context, selection.services, observed, target_image_ids)
+                        confirmed = runner.started_services(context, selection.services, observed)
+                        updated, recreated = self._observed_service_changes(actual, observed, selection.services)
+                        # An old replica (including an exited one-shot) does not prove
+                        # that a failed batch applied the image now behind its tag.
+                        for service in actual.existing_services.intersection(selection.services) - stop_set:
+                            before = actual.service_instances(service)
+                            after = observed.service_instances(service)
+                            old_ids = {item.container_id for item in before if item.container_id}
+                            if any(item.container_id in old_ids for item in after):
+                                confirmed.discard(service)
+                            if service in initial and self._running_replicas_retained(before, after):
+                                retained.add(service)
                         for service in confirmed & model_store.changed_services & actual.existing_services:
                             previous_hashes = {item.labels.get("com.docker.compose.config-hash")
                                                for item in actual.service_instances(service)}
@@ -520,7 +515,7 @@ class ComposeOperations:
                             if related <= affected:
                                 break
                             affected.update(related)
-                        restore.update(affected & initial)
+                        restore.update((affected & initial) - (failed & retained))
                         cleanup = affected - initial
                         if cleanup:
                             discarded = set(cleanup)
@@ -639,6 +634,29 @@ class ComposeOperations:
             manager.logger.warning("Prepared file cleanup failed: %s", error)
         if report:
             render_report(manager.logger, get_records(context))
+
+    def _observed_service_changes(self, before: "ProjectRuntimeState", after: "ProjectRuntimeState",
+                                  services: "Sequence[str]") -> "tuple[set[str], set[str]]":
+        updated, recreated = set(), set()
+        for service in services:
+            old = {item.container_id: item.started_at for item in before.service_instances(service)}
+            new = {item.container_id: item.started_at for item in after.service_instances(service)}
+            if None in old or None in new:
+                continue
+            if old.keys() != new.keys():
+                recreated.add(service)
+                updated.add(service)
+            elif any(started_at and old[identity] != started_at for identity, started_at in new.items()):
+                updated.add(service)
+        return updated, recreated
+
+    def _running_replicas_retained(self, before: "Sequence[ServiceRuntimeState]",
+                                   after: "Sequence[ServiceRuntimeState]") -> bool:
+        old = {item.container_id: item.state for item in before}
+        new = {item.container_id: item.state for item in after}
+        return None not in old and old.keys() == new.keys() and all(
+            new[identity] in ("running", "restarting") if state in ("running", "restarting")
+            else new[identity] == state for identity, state in old.items())
 
     def _check_build_scope(self, model: dict, services: "Iterable[str]", selection: ComposeSelection) -> None:
         pending, visited, outside = list(services), set(), set()
