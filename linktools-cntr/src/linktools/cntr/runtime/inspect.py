@@ -63,6 +63,8 @@ class ServiceRuntimeState:
     labels: "dict[str, str]"
     image_id: "str | None" = None
     namespace_bindings: "dict[str, str | list[str]] | None" = None
+    container_id: "str | None" = None
+    started_at: "str | None" = None
 
 
 _RUNNING_STATES = ("running", "restarting")
@@ -234,6 +236,8 @@ def _map_inspect_item(
         exit_code=_normalize_exit_code(state_data.get("ExitCode")),
         labels={str(k): str(v) for k, v in labels.items()},
         image_id=item.get("Image"),
+        container_id=item.get("Id"),
+        started_at=state_data.get("StartedAt"),
     )
 
 
@@ -388,7 +392,7 @@ class DockerInspector:
             if mapped is not None:
                 mapped_items.append((item, mapped))
                 if mapped.service and not _is_oneoff(mapped):
-                    for identity in (item.get("Id"), mapped.runtime_name):
+                    for identity in (mapped.container_id, mapped.runtime_name):
                         if identity:
                             identities[identity] = mapped.service
         services = []

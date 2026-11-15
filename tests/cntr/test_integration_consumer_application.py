@@ -255,7 +255,7 @@ def test_collateral_image_comes_only_from_unambiguous_running_replicas(tmp_path,
     from linktools.cntr.runtime.inspect import ProjectRuntimeState
     manager = consumer_case(tmp_path)
     actual = manager.docker_inspector.get_project_state(None)
-    extra = SimpleNamespace(service="consumer", state=other_state, image_id="sha256:other", labels={})
+    extra = SimpleNamespace(service="consumer", container_id=None, started_at=None, state=other_state, image_id="sha256:other", labels={})
     mixed = ProjectRuntimeState("test", actual.services + (extra,), "docker")
     manager.docker_inspector.get_project_state = lambda containers, **kwargs: mixed
     if other_state == "running":

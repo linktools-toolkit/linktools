@@ -389,15 +389,15 @@ class ComposeRunner:
             return self.manager.runtime.create_docker_process(*prefix, *args).check_call()
 
     def started_services(self, context: "OperationContext", services: "Sequence[str]",
-                       state: "ProjectRuntimeState", image_ids: "Mapping[str, str]") -> "set[str]":
-        """Services started with the intended image and replica count."""
+                       state: "ProjectRuntimeState") -> "set[str]":
+        """Services with the requested replica count and start state after Compose."""
         definitions = context.compose_model["services"]
         started = set()
         for service in services:
             spec = definitions[service]
             replicas = spec.get("scale", spec.get("deploy", {}).get("replicas", 1))
             matches = state.service_instances(service)
-            if len(matches) != replicas or any(item.image_id != image_ids[service] for item in matches):
+            if len(matches) != replicas:
                 continue
             valid = all(item.state in ("running", "restarting") or
                         (item.state == "exited" and item.exit_code == 0)
@@ -406,12 +406,11 @@ class ComposeRunner:
                 started.add(service)
         return started
 
-    def verify_services_started(self, context: "OperationContext", services: "Sequence[str]",
-                              image_ids: "Mapping[str, str]") -> "ProjectRuntimeState":
+    def verify_services_started(self, context: "OperationContext", services: "Sequence[str]") -> "ProjectRuntimeState":
         """Validate one observed batch after detached Compose start."""
         from ..errors import ContainerError
         state = self.manager.docker_inspector.get_project_state(context.project_containers, services=services)
-        pending = set(services) - self.started_services(context, services, state, image_ids)
+        pending = set(services) - self.started_services(context, services, state)
         if pending:
             raise ContainerError("Service {} did not reach its desired runtime state".format(
                 ", ".join(sorted(pending))))
@@ -563,6 +562,10 @@ class ComposeRunner:
             if not image:
                 raise ContainerError("No original image ID for service " + service)
             overlay[service] = {"image": image}
+        available = self.manager.image_preparer.inspect_images(tuple(spec["image"] for spec in overlay.values()))
+        for service, spec in overlay.items():
+            if available[spec["image"]] is None:
+                raise ContainerError("Original image is not available locally for service " + service)
         contents = [*files.values(), yaml.safe_dump({"services": overlay})]
         with self._saved_compose_args(context, contents) as args:
             model = self._resolved_model(self.manager.runtime.create_docker_process(

@@ -11,7 +11,7 @@ from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 from types import SimpleNamespace
 from linktools.cntr.runtime.images import ImagePlan
-from linktools.cntr.runtime.inspect import ProjectRuntimeState
+from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
@@ -25,8 +25,10 @@ def _ready_dependencies(manager, monkeypatch) -> None:
     model = {"services": {name: {"image": name + ":current"}
                           for container in manager.containers.values() for name in container.services}}
     actual = ProjectRuntimeState(manager.project_name, tuple(
-        SimpleNamespace(service=name, state="running", health="healthy", exit_code=None, labels={},
-                        image_id="sha256:local-" + name + ":current") for name in sorted(services)), "docker")
+        ServiceRuntimeState(logical_containers=(), service=name, runtime_name=name, state="running",
+                            health="healthy", image=name + ":current", exit_code=None, labels={},
+                            image_id="sha256:local-" + name + ":current", container_id=name,
+                            started_at="2026-01-01T00:00:00Z") for name in sorted(services)), "docker")
     monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers, **kwargs: actual)
     AppliedServiceModels(manager, model).record(services)
 

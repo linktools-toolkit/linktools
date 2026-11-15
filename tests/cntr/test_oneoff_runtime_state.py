@@ -45,7 +45,8 @@ def test_recovery_pins_regular_service_image_instead_of_newer_oneoff(tmp_path):
         return SimpleNamespace(check_call=lambda: 0)
 
     manager = SimpleNamespace(data_path=tmp_path, project_name="test",
-                              runtime=SimpleNamespace(create_docker_process=process))
+                              runtime=SimpleNamespace(create_docker_process=process),
+                              image_preparer=SimpleNamespace(inspect_images=lambda refs: dict.fromkeys(refs, object())))
     runner = ComposeRunner(manager)
     runner._resolved_model = lambda process: {"services": {"app": {"image": "sha256:original"}}}
     context = OperationContext(project_containers=(), target_services=("app",),
