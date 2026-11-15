@@ -1683,6 +1683,7 @@ class StepExecutionHistoryReader:
                     responses, request_steps, replayed_parts = _request_associations(events)
                     tool_metadata = self._tool_call_metadata(events)
                 selected: list[_HistoryOccurrence] = []
+                original_responses: dict[int, ModelResponse] = {}
                 for message_index, message, projected_offset, value in window:
                     replayed_indices = replayed_parts.get(message_index + 1, ())
                     if replayed_indices and (
@@ -1710,12 +1711,17 @@ class StepExecutionHistoryReader:
                         if len(original_sequences) > 1:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         if original_sequences:
-                            original_messages = [original async for original in self._store_for(source.record).iter_message_range(
-                                agent_run_id=agent_run_id, start=original_sequences[0] - 1, end=original_sequences[0],
-                            )]
-                            if len(original_messages) != 1 or not isinstance(original_messages[0], ModelResponse):
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            original_calls = [part for part in original_messages[0].parts
+                            original_sequence = original_sequences[0]
+                            original_response = original_responses.get(original_sequence)
+                            if original_response is None:
+                                original_messages = [original async for original in self._store_for(source.record).iter_message_range(
+                                    agent_run_id=agent_run_id, start=original_sequence - 1, end=original_sequence,
+                                )]
+                                if len(original_messages) != 1 or not isinstance(original_messages[0], ModelResponse):
+                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                                original_response = original_messages[0]
+                                original_responses[original_sequence] = original_response
+                            original_calls = [part for part in original_response.parts
                                               if isinstance(part, ToolCallPart) and part.tool_call_id == value.tool_call_id]
                             if (len(original_calls) != 1 or original_calls[0].tool_name != value.tool_name
                                     or original_calls[0].args_as_dict() != value.content):

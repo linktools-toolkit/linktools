@@ -303,10 +303,13 @@ async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execu
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
 
-    async def release_terminal(execution_id: str, *, tenant_id: str) -> None:
-        del execution_id, tenant_id
+    async def release_terminal(execution_id: str, *, tenant_id: str, terminal_commit: bool = False) -> bool:
+        assert terminal_commit is True
+        current = await execution_storage.execution.executions.get(execution_id, tenant_id=tenant_id)
+        assert current is not None and not current.dependency_hold_ids
         release_started.set()
         await release_finished.wait()
+        return True
 
     service._release_terminal = release_terminal
     await service.acquire_dependency_hold(
@@ -327,9 +330,11 @@ async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execu
             hold_id="task:graph:node",
         )
     )
-    await release_started.wait()
-    release_finished.set()
-    await asyncio.gather(cleanup, release_hold)
+    try:
+        await asyncio.wait_for(release_started.wait(), 5)
+    finally:
+        release_finished.set()
+        await asyncio.wait_for(asyncio.gather(cleanup, release_hold), 5)
 
 
 @pytest.mark.asyncio

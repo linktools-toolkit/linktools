@@ -2229,11 +2229,13 @@ class TaskNodeExecutor(Generic[AppT]):
                     "reconcile_result_type": type(resolution).__name__,
                 },
             )
-        if resolution.kind == "unknown":
+        if resolution.kind in {"unknown", "failed"}:
+            # Accepting partial effects as a terminal failure requires the
+            # authorized graph control request, not automatic reconciliation.
             raise TaskNodeRunError(
                 ErrorCode.TASK_EFFECT_UNKNOWN,
                 execution_id,
-                safe_details={"reconcile_outcome": "unknown"},
+                safe_details={"reconcile_outcome": resolution.kind},
             )
 
         if node.effect_policy == "non_replay_safe":

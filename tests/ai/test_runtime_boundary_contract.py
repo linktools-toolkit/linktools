@@ -251,6 +251,7 @@ async def test_second_stream_close_does_not_close_first_subscription() -> None:
 @pytest.mark.asyncio
 async def test_wait_authorizes_before_abandoning_stream() -> None:
     service = object.__new__(DefaultExecutionService)
+    service._retained_publication = None
     service._runtime_bridge = _ExecutionRuntimeBridge()
 
     async def denied(
@@ -412,6 +413,7 @@ async def test_cancellation_after_worker_installation_retains_reservation(execut
 @pytest.mark.asyncio
 async def test_wait_timeout_includes_initial_authorized_read() -> None:
     service = object.__new__(DefaultExecutionService)
+    service._retained_publication = None
     service._runtime_bridge = _ExecutionRuntimeBridge()
 
     async def slow_authorized(

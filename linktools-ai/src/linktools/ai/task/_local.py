@@ -556,7 +556,7 @@ class LocalTaskGraphLauncher:
                     and state.status is TaskStatus.READY
                 )
                 or (
-                    resolution.kind == "applied"
+                    resolution.kind in {"applied", "failed"}
                     and state.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}
                 )
             )
@@ -569,6 +569,26 @@ class LocalTaskGraphLauncher:
             or state.fence != expected_fence
         ):
             raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+        if resolution.kind == "failed":
+            # A recovery snapshot can be visible while sibling cleanup is
+            # still draining. Do not publish failure before owned work stops.
+            async with self._lock:
+                active = self._graphs.get((tenant_id, graph_id))
+                draining = None if active is None else active.task
+            if draining is not None:
+                await asyncio.shield(draining)
+            siblings = await self._repository.graph_state(graph_id, tenant_id=tenant_id)
+            if siblings is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if node.failure_policy == "propagate" and any(
+                sibling.node_id != node_id and sibling.execution_id is not None
+                and sibling.status not in _TERMINAL | {TaskStatus.RECOVERY_REQUIRED}
+                for sibling in siblings.node_states
+            ):
+                # Cancellation is a separate owner-controlled operation. A
+                # graph snapshot cannot authorize cancelling a newer attempt.
+                raise AIError(ErrorCode.TASK_NOT_READY)
 
         invocation = TaskNodeInvocation(
             node,

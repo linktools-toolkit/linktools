@@ -15,6 +15,7 @@ from ..core import (
     CorrelationData,
     TaskStatus,
     canonical_sha256,
+    canonical_json_bytes,
     normalize_json_value,
     normalize_correlation,
 )
@@ -172,17 +173,35 @@ class TaskArtifactPublisher(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class TaskEffectResolution:
-    """A read-only reconciliation result for an external task effect."""
+    """An observed external Task effect outcome.
+
+    ``failed`` explicitly accepts a stopped Task's partial effects while
+    recording failure. Only the admitted principal through the authorized graph control
+    operation accepts it; automatic reconciliation leaves that decision recovery-required.
+    ``safe_details`` must contain only safe diagnostic JSON, at most 8 KiB.
+    """
 
     kind: str
     value: JsonValue | None = None
+    error_code: ErrorCode | None = None
+    safe_details: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.kind not in {"applied", "not_applied", "unknown"}:
+        if self.kind not in {"applied", "not_applied", "unknown", "failed"}:
             raise ValueError("task effect resolution kind is invalid")
         if self.kind != "applied" and self.value is not None:
             raise ValueError("only an applied effect can carry a value")
         object.__setattr__(self, "value", normalize_json_value(self.value))
+        if self.kind == "failed":
+            if not isinstance(self.error_code, ErrorCode):
+                raise ValueError("a failed effect requires an error code")
+        elif self.error_code is not None or self.safe_details:
+            raise ValueError("only a failed effect can carry error details")
+        details = AIError(self.error_code or ErrorCode.TASK_NODE_FAILED,
+                          safe_details=self.safe_details).safe_details
+        if len(canonical_json_bytes(details)) > 8192:
+            raise ValueError("task effect error details exceed 8192 bytes")
+        object.__setattr__(self, "safe_details", ImmutableJsonMapping(details))
 
 
 @dataclass(frozen=True, slots=True)

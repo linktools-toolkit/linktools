@@ -249,6 +249,13 @@ class _SqlGroupTransaction:
         if sum(map(len, extras.values())) > 32:
             await self.get_records(extras)
             extras = {}
+        else:
+            # Owner rows already use the same transaction's canonical read.
+            # Preserve the large-batch and typed-payload fallback routes.
+            extras = {store: tuple(key for key in requested
+                        if store is not owner_store or key not in keys or owner._is_payload_key(key))
+                      for store, requested in extras.items()}
+            extras = {store: requested for store, requested in extras.items() if requested}
         extra_stores = {self.transaction(store)._store_key: store for store in extras}
         found: dict[StateStore, dict[bytes, StoredRecord]] = {owner_store: {}, content_store: {}}
         found.update({store: {} for store in extras if store not in found})

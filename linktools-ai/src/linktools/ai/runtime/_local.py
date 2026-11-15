@@ -5028,6 +5028,10 @@ class LocalExecutionBackend:
                     agent_run_id,
                 )
         except asyncio.CancelledError as error:
+            # Cancellation can arrive outside the backend's request path. Once
+            # settlement starts, a later control request must only drain it.
+            if self._tasks.get(execution_id) is asyncio.current_task():
+                self._worker_cancel_requests.add(execution_id)
             cleanup_details: dict[str, JsonValue] = {}
             if (
                 isinstance(error.__cause__, AIError)

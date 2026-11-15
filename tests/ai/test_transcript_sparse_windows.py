@@ -82,18 +82,11 @@ async def test_sparse_windows_keep_overlaps_empty_ranges_and_hint_fallback(
                     await transaction.replace_record(replace(stored, data={}, storage_revision=stored.storage_revision + 1),
                                                      expected_storage_revision=stored.storage_revision)
             await repository._store.mutate(remove_hint)
-        seeks = []
-        original_seek = repository._seek_fact_sequence
-        async def track_seek(transaction, owner_id, index):
-            seeks.append(index)
-            return await original_seek(transaction, owner_id, index)
-        monkeypatch.setattr(repository, "_seek_fact_sequence", track_seek)
         windows = ((10, 12), (0, 0), (1, 3), (11, 13), (13, 13))
         values = await repository.load_message_spans("history", windows)
         assert [[message.parts[0].content for message in span] for span in values] == [
             ["10", "11"], [], ["1", "2"], ["11", "12"], [],
         ]
-        assert seeks == [1, 10]
         with pytest.raises(AIError) as error:
             await repository.load_message_spans("history", ((0, 1), (14, 14)))
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

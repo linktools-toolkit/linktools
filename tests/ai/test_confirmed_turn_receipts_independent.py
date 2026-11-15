@@ -3,10 +3,16 @@
 """Confirmed publication receipts preserve live holds and public read boundaries."""
 
 import asyncio
+import json
+import os
+from collections import Counter
+from pathlib import Path
 from dataclasses import replace
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
 from linktools.ai.core import ExecutionStatus, StopReason, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
@@ -187,3 +193,98 @@ async def test_public_wait_receipt_preserves_authorization_and_worker_failure(tm
                 if not task.done():
                     task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("receipt_available", (True, False))
+@pytest.mark.parametrize("blocker", (None, "authorization", "worker_failure", "source_unavailable"))
+async def test_wait_started_after_publication_preserves_read_guards(
+    tmp_path, monkeypatch, receipt_available, blocker,
+):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def respond(messages, info):
+        entered.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("finished")])
+
+    async with Persistence.open(_NAMESPACE, storage=_storage("sqlite", tmp_path)) as state:
+        async with Runtime.attach(persistence=state, features=model_features(
+            _Models(_UsageFunctionModel(respond)), _features(),
+        )) as runtime:
+            session = await runtime.agents.get().create_session("late-receipt-wait")
+            execution = await session.start("question")
+            await asyncio.wait_for(entered.wait(), 5)
+            service = runtime._execution_service
+            backend = service._backend
+            await service.acquire_dependency_hold(
+                execution.execution_id, tenant_id=runtime.tenant_id, hold_id="consumer",
+            )
+            worker = backend._tasks[execution.execution_id]
+            release.set()
+            await asyncio.wait_for(asyncio.shield(worker), 5)
+            publication = state.retention.terminal_publication(
+                execution.execution_id, tenant_id=runtime.tenant_id,
+            )
+            assert publication is not None
+            if not receipt_available:
+                monkeypatch.setattr(service, "_retained_publication", None)
+
+            # A retained result still requires the current authorization decision.
+            authorizations = []
+            original_authorize = service.manager.authorize_loaded_execution
+
+            async def authorize(value, *args, **kwargs):
+                authorizations.append(value)
+                if blocker == "authorization":
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                await original_authorize(value, *args, **kwargs)
+
+            monkeypatch.setattr(service.manager, "authorize_loaded_execution", authorize)
+            if blocker == "worker_failure":
+                failure = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                monkeypatch.setattr(backend, "worker_failure", lambda *args, **kwargs: failure)
+
+            if blocker == "source_unavailable":
+                async def unavailable(*args, **kwargs):
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+                monkeypatch.setattr(state.execution.executions, "get_result_record", unavailable)
+
+            async def wait_result():
+                operation = service.wait(
+                    execution.execution_id, principal=runtime.default_principal, timeout_seconds=5,
+                )
+                output = os.environ.get("RECEIPT_WAIT_IO_OUTPUT")
+                if output is None:
+                    return await operation
+                counts = Counter()
+                def statement(_connection, _cursor, sql, _parameters, _context, _many):
+                    counts[sql.lstrip().split()[0].upper()] += 1
+                def committed(_connection):
+                    counts["COMMIT"] += 1
+                event.listen(Engine, "before_cursor_execute", statement)
+                event.listen(Engine, "commit", committed)
+                try:
+                    return await operation
+                finally:
+                    event.remove(Engine, "before_cursor_execute", statement)
+                    event.remove(Engine, "commit", committed)
+                    with Path(output).open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps({"receipt_available": receipt_available,
+                            "blocker": blocker, "sql": dict(counts)}) + "\n")
+
+            if blocker is None or blocker == "source_unavailable" and receipt_available:
+                result = await wait_result()
+                assert result.status is ExecutionStatus.SUCCEEDED
+                assert result.output == {"text": "finished"}
+            else:
+                with pytest.raises(AIError) as raised:
+                    await wait_result()
+                assert raised.value.code is (
+                    ErrorCode.AUTHORIZATION_DENIED if blocker == "authorization"
+                    else ErrorCode.STORAGE_UNAVAILABLE if blocker == "source_unavailable"
+                    else ErrorCode.STORAGE_INTEGRITY_ERROR
+                )
+            if blocker != "source_unavailable" or receipt_available:
+                assert authorizations and all(value.execution_id == execution.execution_id for value in authorizations)
+            retained = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert not retained.retention_closed and retained.dependency_hold_ids == ("consumer",)

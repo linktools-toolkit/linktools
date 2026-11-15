@@ -215,6 +215,7 @@ async def test_execution_result_before_terminal_is_not_ready() -> None:
 @pytest.mark.asyncio
 async def test_execution_wait_timeout_has_stable_code() -> None:
     service = object.__new__(DefaultExecutionService)
+    service._retained_publication = None
 
     async def inspect(execution_id: str, *, principal: Principal) -> object:
         del execution_id, principal
