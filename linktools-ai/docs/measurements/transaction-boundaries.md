@@ -2,7 +2,8 @@
 
 ## Status and objective
 
-The write-transaction work remains a measured baseline and correctness inventory.
+The write-transaction assessment is a measured baseline and correctness inventory;
+its goal is to identify justified consolidation, not require a lower count.
 The implemented narrow slice below only removes redundant reads when a local
 terminal publication is already confirmed and retained. The source baseline is
 `776caf18b1c11d1e2f2122e79748521863c0c217` (tree
@@ -272,6 +273,36 @@ net improvement. Separating pure body preparation from final metadata resolution
 would affect the transcript, checkpoint and terminal owners plus UNKNOWN handling;
 no such refactor is included merely to remove these two read-only commits.
 
+### Adjacent boundaries: consolidation assessment
+
+The assessment also checks adjacent writes, rather than assuming separate owners
+always need separate transactions:
+
+| Adjacent boundaries | Assessment under the current contract |
+| --- | --- |
+| Attempt activation → first model request | Activation claims producer authority before model/context/capability preparation. Delaying the claim permits duplicate preparation; moving the request earlier changes the accepted dispatch frontier. No transparent consolidation established. |
+| Model response → first tool admission | `AtomicStepPersistence.after_node_run` commits the response snapshot and then emits `SnapshotSavedEvent` before later tool dispatch. Deferral would either announce an uncommitted checkpoint or change the observable callback/cancellation boundary. |
+| Tool settlement → next model request | The known tool result must survive cancellation or producer loss even when no next request occurs. Settlement already includes its Native event. The next dispatch separately prepares its request and verifies producer authority; it cannot be predeclared solely because a tool completed. |
+| Final model response → Native completion | The response checkpoint is confirmed before the later `after_run` terminal event/snapshot. An apparently identical message body does not establish identical snapshot step or outcome, and the confirmation callback is observable. |
+| Native completion → Execution/session terminal | Runtime output validation and context cleanup still intervene and can fail; Native completion is not sufficient evidence of Runtime success. |
+| Execution/session terminal → retention closure | Result visibility does not prove producer drain or absence of late dependent holds. Closing retention at publication would change the lifetime guarantee. |
+
+These are existing protocol obligations, not a claim that a deliberate future
+protocol redesign is impossible. A redesign must specify its new observation,
+cancellation and recovery semantics rather than present their removal as batching.
+
+### Current-master compatibility recheck
+
+On 2026-11-15 the fixed two-turn probe was repeated with Python 3.11.18 against a
+local, uncommitted integration of PR head
+`11e78c31be33124f5fc69cebf6b419d9b7c68a50` and master
+`18165a4a64ff42942248990093c464baddcff415`. It passed: 31 SELECT,
+129 INSERT, 44 UPDATE, 46 commits, including 38 write commits. All transaction
+attribution counters were zero for unattributed/open transactions, and the
+8 model requests, 6 tool effects, 16 history messages and no-duplicate-effects
+replay assertions passed. This is a compatibility recheck of the stated fixture,
+not an exact-head CI result or a database-server benchmark.
+
 ### Necessary boundaries and non-goals
 
 - Do not span a model request, tool execution, user hook or external I/O with a
@@ -294,7 +325,9 @@ A candidate is deliverable only after matched measurement, focused correctness
 checks, independent review and natural CI for its exact commit. A lower count
 without those semantics is not an optimization.
 
-This inventory does not prove 38 is a universal lower bound. It finds no safe
-write-transaction reduction within the examined unchanged contracts. The Draft remains
-open for a concrete candidate with measured benefit; broader workload attribution
-and server/application validation remain independent next steps.
+This inventory does not prove 38 is a universal lower bound. It finds no further
+justified write-transaction consolidation within the examined unchanged contracts.
+An unchanged count is a valid assessment result, not an unfinished numerical
+target. Broader workload attribution and designated server/application validation
+remain separate acceptance items; this conclusion neither completes nor removes
+them. Any new workload or proposed protocol change requires its own evidence.
