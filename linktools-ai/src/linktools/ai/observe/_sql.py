@@ -520,27 +520,32 @@ class SqlMetricStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         await self._initialize()
+        columns = self._observations.c
+        occurred = columns.active_occurred_at
         statement = self._select_observations().where(
-            self._observations.c.namespace == namespace,
-            self._observations.c.kind == kind,
-            self._observations.c.pruned_at.is_(None),
-            self._observations.c.active_occurred_at >= start,
-            self._observations.c.active_occurred_at < end,
+            columns.namespace == namespace,
+            columns.kind == kind,
+            columns.pruned_at.is_(None),
+            occurred >= start,
+            occurred < end,
         )
         if cursor is not None:
             after_time, after_id = _parse_scan_cursor(cursor)
+            # The explicit lower bound lets the active-time index seek past
+            # earlier pages even when the tie-break OR is a residual predicate.
             statement = statement.where(
+                occurred >= after_time,
                 or_(
-                    self._observations.c.occurred_at > after_time,
+                    occurred > after_time,
                     and_(
-                        self._observations.c.occurred_at == after_time,
-                        self._observations.c.observation_id > after_id,
+                        occurred == after_time,
+                        columns.observation_id > after_id,
                     ),
                 )
             )
         statement = statement.order_by(
-            self._observations.c.occurred_at,
-            self._observations.c.observation_id,
+            occurred,
+            columns.observation_id,
         ).limit(limit + 1)
         async with self._context.sessions() as session:
             rows = (await self._context.run_statement(session.execute(statement))).mappings().all()
