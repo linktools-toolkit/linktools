@@ -546,6 +546,79 @@ async def project_session_timeline(
     )
 
 
+async def project_session_turn(
+    conversation: ConversationRepositories,
+    executions: ExecutionRepository,
+    authorization: AuthorizationPolicy,
+    cursor_signer: CursorSigner,
+    transcript_store: SessionTimelineTranscriptStore,
+    session_id: str,
+    execution_id: str,
+    *,
+    principal: Principal,
+) -> SessionTurn:
+    """Read one committed local-session turn without scanning timeline pages.
+
+    This bounded read requires the built-in repositories in one storage group.
+    It does not synthesize pending turns or resolve inherited session history.
+    """
+    sessions = conversation.sessions
+    if (type(sessions) is not SessionRepositoryImpl
+            or type(executions) is not ExecutionRepositoryImpl
+            or sessions.state_store.storage_group is not executions.state_store.storage_group):
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    header = await sessions.get_header(session_id, tenant_id=principal.tenant_id)
+    if header is None:
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+    execution_header = await executions.get_header(execution_id, tenant_id=principal.tenant_id)
+    if execution_header is None:
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    await authorization.authorize(
+        principal, AuthorizationAction.EXECUTION_READ, execution_header,
+    )
+
+    async def capture(group: StateGroupTransaction) -> SessionTimelineCapture:
+        root = await sessions.get(session_id, tenant_id=principal.tenant_id)
+        current_header = await executions.get_header(
+            execution_id, tenant_id=principal.tenant_id,
+        )
+        if (root is None or header.kind is not ResourceKind.SESSION
+                or header.tenant_id != principal.tenant_id or root.session_id != header.id
+                or root.owner_principal_id != header.owner_principal_id
+                or current_header != execution_header):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        records = await executions.get_timeline_many(
+            (execution_id,), tenant_id=principal.tenant_id,
+        )
+        execution = records.get(execution_id)
+        if (execution is None or execution.session_id != session_id
+                or execution.parent_execution_id is not None):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        commit = await sessions.pending_turn_commit_in_transaction(
+            group.transaction(sessions.state_store), session_id=session_id,
+            execution_id=execution_id, allow_unadmitted=True,
+        )
+        if commit is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if execution.completed_at is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        ref = SessionTurnRef(session_id, commit.turn_seq, execution_id)
+        return SessionTimelineCapture(
+            root, ((root, (ref,)),), None, records,
+            {(session_id, commit.turn_seq): commit},
+        )
+
+    state = await executions.read_content(capture, stores=(sessions.state_store,))
+    page = await project_captured_session_timeline(
+        state, transcript_store, cursor_signer, session_id=session_id,
+        tenant_id=principal.tenant_id, transcript_tenant_id=sessions.tenant_id,
+    )
+    if len(page.items) != 1 or page.items[0].execution_id != execution_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return page.items[0]
+
+
 async def project_captured_session_timeline(
     state: SessionTimelineCapture,
     transcript_store: SessionTimelineTranscriptStore,
@@ -721,4 +794,5 @@ __all__ = [
     "capture_session_timeline",
     "project_captured_session_timeline",
     "project_session_timeline",
+    "project_session_turn",
 ]

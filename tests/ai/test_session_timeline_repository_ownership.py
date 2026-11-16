@@ -15,6 +15,7 @@ from linktools.ai.core import (
     Principal,
     TenantAuthorizationPolicy,
 )
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
@@ -232,5 +233,42 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(
         assert not any("ai_object_chunks" in sql for sql in selects)
         # ai_step_messages also owns typed execution templates/input. The SQL
         # hook above requires their exact partition; Native hydration stays forbidden.
+    finally:
+        await state.close()
+
+
+async def test_exact_committed_turn_remains_stable_after_a_newer_turn(tmp_path: Path) -> None:
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "exact-turn.db"))
+    try:
+        await _populate(state)
+        sessions = state.conversation.sessions
+        await sessions.release_execution("session", tenant_id="tenant", execution_id="active")
+        newer = _execution("newer", status=ExecutionStatus.SUCCEEDED, prompt="newer prompt")
+        await state.execution.executions.create(newer)
+        await sessions.admit_execution(
+            "session", tenant_id="tenant", execution_id="newer", expected=None,
+        )
+        await _commit_empty_turn(state, newer)
+        await sessions.release_execution("session", tenant_id="tenant", execution_id="newer")
+        await sessions.create(replace(_session(), session_id="other-session"))
+        principal = Principal("owner", "tenant")
+        history = _history(state)
+        timeline = await history.session_timeline("session", principal=principal)
+        older = next(turn for turn in timeline.items if turn.execution_id == "failed")
+        latest = await history.session_timeline("session", principal=principal, limit=1)
+        assert older.conversation_committed is True
+        assert latest.items[0].conversation_committed is True
+        assert latest.items[0].execution_id == "newer"
+        assert latest.items[0] != older
+        assert await history.session_turn("session", "failed", principal=principal) == older
+        assert await history.session_turn("session", "newer", principal=principal) == latest.items[0]
+
+        for session_id, execution_id, error_code in (
+            ("session", "active", ErrorCode.STORAGE_RECOVERY_REQUIRED),
+            ("other-session", "failed", ErrorCode.AUTHORIZATION_DENIED),
+        ):
+            with pytest.raises(AIError) as captured:
+                await history.session_turn(session_id, execution_id, principal=principal)
+            assert captured.value.code is error_code
     finally:
         await state.close()
