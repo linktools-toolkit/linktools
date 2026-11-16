@@ -292,7 +292,34 @@ class SqlTraceEventStore:
         statement = statement.order_by(t.order_key)
         if limit is not None:
             statement = statement.limit(limit)
-        return tuple(self.row_to_fact(row) for row in await self._rows(transaction, statement))
+        # Keep the bounded page in a derived table so the sentinel validates
+        # the captured high water even when filters or a cursor yield no rows.
+        from hashlib import sha256
+        from sqlalchemy import literal, true
+
+        counters = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_step_run_admissions"]
+        owner = record_key(self.namespace, self.tenant_id, "trace", "agent_run", (run_id,))
+        locator = sha256(owner).hexdigest()
+        page = statement.subquery("trace_page")
+        anchor = select(literal(1).label("present")).subquery("anchor")
+        source = anchor.outerjoin(counters, and_(counters.c.store_key == self.state.store_key,
+            counters.c.key_locator == locator)).outerjoin(page, true())
+        statement = select(counters.c.key.label("counter_owner"),
+            counters.c.key_locator.label("counter_locator"), counters.c.event_high_water.label("counter_value"),
+            *page.c).select_from(source).order_by(page.c.order_key)
+        facts = []
+        for row in await self._rows(transaction, statement):
+            if row["counter_owner"] is not None and (row["counter_owner"] != owner
+                    or row["counter_locator"] != locator):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = row["counter_value"]
+            if value is None:
+                value = 0
+            if isinstance(value, bool) or not isinstance(value, int) or value < high_water or value < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if row["sequence"] is not None:
+                facts.append(self.row_to_fact(row))
+        return tuple(facts)
 
     async def history_associations(
         self, transaction: StateTransaction, run_id: str, *, event_stream: bytes,
