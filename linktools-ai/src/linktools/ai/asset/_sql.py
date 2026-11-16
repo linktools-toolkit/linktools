@@ -271,17 +271,26 @@ class SqlAssetBackend:
         try:
             from sqlalchemy import null, select
 
-            # One statement binds the head and entries to the same database
-            # snapshot. Mutually exclusive branches avoid scanning entries when
-            # the head is unchanged, including on SQLite's nested-loop join.
+            # Current entries retain DELETE and RESET statuses, so a changed
+            # entry's latest revision is sufficient even across skipped heads.
+            # Mutually exclusive branches bind rows and head to one snapshot;
+            # an unchanged head does not visit entries.
             statement = (
                 select(heads.c.store_revision, entries.c.id, entries.c.kind, entries.c.asset_id,
                        entries.c.asset_locator, entries.c.payload_json)
                 .select_from(heads.outerjoin(entries, heads.c.namespace == entries.c.namespace))
                 .where(heads.c.namespace == self._namespace)
             )
-            if after is not None:
-                statement = statement.where(heads.c.store_revision != after).union_all(
+            if after is not None and after >= 0:
+                changed = (
+                    select(heads.c.store_revision, entries.c.id, entries.c.kind, entries.c.asset_id,
+                           entries.c.asset_locator, entries.c.payload_json)
+                    .select_from(heads.outerjoin(entries,
+                        (heads.c.namespace == entries.c.namespace) & (entries.c.store_revision > after)))
+                    .where(heads.c.namespace == self._namespace, heads.c.store_revision > after)
+                )
+                statement = statement.where(heads.c.store_revision < after).union_all(
+                    changed,
                     select(heads.c.store_revision, null(), null(), null(), null(), null()).where(
                         heads.c.namespace == self._namespace,
                         heads.c.store_revision == after,
@@ -308,7 +317,7 @@ class SqlAssetBackend:
                         or row["asset_locator"] != _asset_locator(key.id)):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return MetadataLoad(
-            MetadataLoadMode.REPLACE,
+            MetadataLoadMode.PATCH if after is not None and 0 <= after < current else MetadataLoadMode.REPLACE,
             StorageRevision(str(current)),
             tuple(
                 MetadataChange(_key_from_data(row["payload_json"]), _info_from_data(row["payload_json"]))
