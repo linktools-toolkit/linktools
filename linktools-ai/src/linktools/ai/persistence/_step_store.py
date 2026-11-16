@@ -29,7 +29,7 @@ from linktools.core import environ
 
 from ..core import validate_resource_id
 from ..errors import AIError, ErrorCode
-from ..storage import SqlStorageContext, create_sql_storage_context
+from ..storage import SqlStorageContext, create_sql_storage_context, sql_audit_now
 from ._archive import ContentArchive, ContentRecord, PreparedArchive
 from ..model.attachments import read_attachment_payload
 from ._archive_closure import NativeMessageClosure, validate_native_message_content
@@ -316,7 +316,7 @@ class SqlStepStore:
                             changed = await session.execute(update(table).where(
                                 *self._run_predicates(table, record.run_id),
                                 table.c.managed_start_key.is_(None),
-                            ).values(managed_start_key=start_key))
+                            ).values(managed_start_key=start_key, updated_at=sql_audit_now()))
                             if changed.rowcount == 1:
                                 return source
                             # RR cannot see the winner in this snapshot. The
@@ -1140,7 +1140,7 @@ class SqlStepStore:
                         changed = await session.execute(update(table).where(
                             *self._run_predicates(table, row["run_id"]),
                             table.c.managed_start_key.is_(None),
-                        ).values(managed_start_key=row["managed_start_key"]))
+                        ).values(managed_start_key=row["managed_start_key"], updated_at=sql_audit_now()))
                         if changed.rowcount != 1:
                             raise ValueError("native restore registration changed concurrently")
                     continue
@@ -1766,7 +1766,7 @@ class SqlStepStore:
             ids = tuple(row.id for row in retired)
             await session.execute(table.update().where(
                 *self._run_predicates(table, run_id), table.c.id.in_(ids),
-            ).values(pruned=True, messages="{}", sequence_root=None))
+            ).values(pruned=True, messages="{}", sequence_root=None, updated_at=sql_audit_now()))
             after = retired[-1].id
             if len(retired) < 128:
                 break

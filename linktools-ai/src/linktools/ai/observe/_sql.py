@@ -13,6 +13,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import (
     create_sql_storage_context,
     sql_audit_columns,
+    sql_audit_now,
     sql_audit_indexes,
     sql_id_column,
     sql_query_index,
@@ -602,7 +603,7 @@ class SqlMetricStore:
                         columns.pruned_at.is_(None),
                     ).values(
                         pruned_at=pruned_at, payload_json=None,
-                        active_occurred_at=None,
+                        active_occurred_at=None, updated_at=sql_audit_now(),
                     )
                 ))
                 count += int(result.rowcount or 0)

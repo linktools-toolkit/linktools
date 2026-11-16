@@ -28,6 +28,8 @@ from linktools.ai.persistence._step_message_content import (
 from linktools.ai.persistence._transcript_staging import MessageArchive
 from linktools.ai.storage import ObjectRef, SqlStorageContext, StoredPayload
 
+from ._sqlite_insert_measurement import bound_insert_rows
+
 
 _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -61,8 +63,9 @@ class _Traffic:
                                 if isinstance(value, (str, bytes)))
         for table in ("ai_step_messages", "ai_step_sequences"):
             if statement.startswith("INSERT INTO " + table):
-                width = len(statement.partition("(")[2].partition(")")[0].split(","))
-                self.submitted_rows[table] += sum(len(batch) // width for batch in batches)
+                self.submitted_rows[table] += sum(
+                    1 for _ in bound_insert_rows(statement, parameters, many)
+                )
 
 
 async def _inline(raw: bytes) -> PreparedMessagePayload:
