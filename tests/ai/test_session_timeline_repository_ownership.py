@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.core import (
+    AuthorizationAction,
+    ResourceRef,
     ExecutionStatus,
     HmacCursorSigner,
     Principal,
@@ -276,6 +278,15 @@ async def test_exact_committed_turn_remains_stable_after_a_newer_turn(tmp_path: 
         await state.close()
 
 
+class SessionOnlyReaderPolicy(SharedSessionPolicy):
+    async def authorize(
+        self, principal: Principal, action: AuthorizationAction, resource: ResourceRef,
+    ) -> None:
+        if principal.principal_id == "peer" and action is AuthorizationAction.EXECUTION_READ:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await super().authorize(principal, action, resource)
+
+
 async def test_exact_turn_uses_session_visibility_for_committed_tool_content(tmp_path: Path) -> None:
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "shared-exact-turn.db"))
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
@@ -312,7 +323,7 @@ async def test_exact_turn_uses_session_visibility_for_committed_tool_content(tmp
 
         await sessions.state_store.mutate(commit)
         peer = Principal("peer", "tenant")
-        async with History.open(persistence=state, authorization=SharedSessionPolicy()) as history:
+        async with History.open(persistence=state, authorization=SessionOnlyReaderPolicy()) as history:
             with pytest.raises(AIError) as denied:
                 await history.execution_detail("success", session_id="shared", principal=peer)
             assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
