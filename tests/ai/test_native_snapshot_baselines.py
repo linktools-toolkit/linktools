@@ -21,6 +21,7 @@ from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+from ._sqlite_insert_measurement import bound_insert_rows
 
 
 _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -33,11 +34,9 @@ class _NativeWrites:
     def capture(self, _connection, _cursor, statement, parameters, _context, many) -> None:
         for table in ("ai_step_messages", "ai_step_sequences"):
             if statement.startswith("INSERT INTO " + table + " "):
-                columns = [column.strip() for column in statement.split("(", 1)[1].split(")", 1)[0].split(",")]
-                identity = columns.index("sha256")
-                for values in parameters if many else (parameters,):
-                    assert len(values) % len(columns) == 0
-                    self.identities[table].extend(values[identity::len(columns)])
+                self.identities[table].extend(
+                    row["sha256"] for row in bound_insert_rows(statement, parameters, many)
+                )
 
 
 async def _identities(engine) -> dict[str, set[str]]:

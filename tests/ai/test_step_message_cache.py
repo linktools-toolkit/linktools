@@ -17,6 +17,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.storage import create_sql_storage_context
 
+from ._sqlite_insert_measurement import bound_insert_rows
+
 
 class _SqlTraffic:
     def __init__(self) -> None:
@@ -36,15 +38,9 @@ class _SqlTraffic:
             self.statements["message_insert"] += 1
             # Codec, size, and manifest columns are bound alongside message
             # bodies; only the body column contributes to message_bytes.
-            insert_columns = statement.split("(", 1)[1].split(")", 1)[0]
-            columns = [column.strip().strip('"`') for column in insert_columns.split(",")]
-            width = len(columns)
-            body_index = columns.index("message")
-            batches = parameters if many else (parameters,)
-            for batch in batches:
-                assert len(batch) % width == 0
-                self.message_rows += len(batch) // width
-                self.message_bytes += sum(self._bytes(value) for value in batch[body_index::width])
+            for row in bound_insert_rows(statement, parameters, many):
+                self.message_rows += 1
+                self.message_bytes += self._bytes(row["message"])
         elif statement.startswith("INSERT INTO ai_step_snapshots "):
             self.statements["snapshot_insert"] += 1
         elif statement.startswith("INSERT INTO ai_step_sequences "):

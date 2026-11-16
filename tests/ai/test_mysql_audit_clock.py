@@ -10,7 +10,8 @@ import pytest
 from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 
-from linktools.ai.storage import MySQLDialect, column_type_matches, sql_audit_columns, sql_audit_now
+from linktools.ai.storage import MySQLDialect, sql_audit_columns, sql_audit_now
+from linktools.ai.storage._dialects import column_type_matches
 
 
 @pytest.mark.parametrize("dialect,expected", [
