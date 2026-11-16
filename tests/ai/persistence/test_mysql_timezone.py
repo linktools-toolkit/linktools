@@ -3,17 +3,21 @@
 """Opt-in real MySQL clock, lease and native-checkpoint round trips."""
 
 import os
+import shutil
+import subprocess
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Iterator
+from zoneinfo import TZPATH
 
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 from sqlalchemy import text
 from sqlalchemy.engine import URL
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from linktools.ai.migrate import provision_database
@@ -22,6 +26,7 @@ from linktools.ai.persistence.runs import NativeCheckpoint, OfficialStepReader
 from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.persistence.state import RecordLeaseTransition
 from tests.ai.test_state_batch_delete_backends import _record
+from tests.ai._metrics_server_test_helpers import _server_database, _server_process
 
 
 pytestmark = [
@@ -30,6 +35,28 @@ pytestmark = [
                        reason="opt in to the disposable local MySQL timezone regression"),
     pytest.mark.skipif(not hasattr(time, "tzset"), reason="requires process TZ switching"),
 ]
+
+
+@pytest.fixture(scope="module")
+def _timezone_server() -> Iterator[tuple[str, list[str]]]:
+    # A separate process: never populate timezone tables on the shared fixture.
+    if os.environ.get("LINKTOOLS_TEST_MYSQL_TIMEZONE") != "1":
+        pytest.skip("opt in to the disposable local MySQL timezone regression")
+    loader = shutil.which("mysql_tzinfo_to_sql")
+    zonefile = next((Path(root) / "Asia" / "Shanghai" for root in TZPATH
+                     if (Path(root) / "Asia" / "Shanghai").is_file()), None)
+    if loader is None or zonefile is None:
+        pytest.skip("named timezone regression requires mysql_tzinfo_to_sql and system Asia/Shanghai tzdata")
+    sql = subprocess.run([loader, str(zonefile), "Asia/Shanghai"], check=True,
+                         capture_output=True, text=True, timeout=10).stdout
+    assert sql.strip(), "mysql_tzinfo_to_sql returned no Asia/Shanghai definitions"
+    with contextmanager(_server_process)("mysql") as server:
+        _, command = server
+        # command targets mysql on this newly initialized disposable server.
+        subprocess.run(command, input=sql, check=True,
+                       capture_output=True, text=True, timeout=10)
+        with _server_database(server) as database:
+            yield database
 
 
 @contextmanager
@@ -74,7 +101,6 @@ async def _physical_record(engine: AsyncEngine, store_key: bytes, key: bytes) ->
         ), {"store_key": store_key, "key": key})).one())
 
 
-@pytest.mark.parametrize("_server", ("mysql",), indirect=True)
 @pytest.mark.parametrize("write_process,write_zone,read_process,read_zone", (
     ("Asia/Shanghai", "+08:00", "UTC", "+00:00"),
     ("UTC", "+00:00", "Asia/Shanghai", "+08:00"),
@@ -83,10 +109,10 @@ async def _physical_record(engine: AsyncEngine, store_key: bytes, key: bytes) ->
 ), ids=("offset-shanghai-to-utc", "offset-utc-to-shanghai",
         "named-shanghai-to-utc", "named-utc-to-shanghai"))
 async def test_mysql_real_clock_lease_checkpoint_reopen_across_timezones(
-    _server: tuple[str, list[str]], write_process: str, write_zone: str,
+    _timezone_server: tuple[str, list[str]], write_process: str, write_zone: str,
     read_process: str, read_zone: str,
 ) -> None:
-    _, command = _server
+    _, command = _timezone_server
     socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
     url = URL.create("mysql+asyncmy", username="root", database=command[-1],
                      query={"unix_socket": socket, "charset": "utf8mb4"})
@@ -101,13 +127,9 @@ async def test_mysql_real_clock_lease_checkpoint_reopen_across_timezones(
     reopened = None
     reopened_steps = None
     try:
-        try:
-            await _utc_now(writer, write_zone)
-            await _utc_now(reader, read_zone)
-        except DBAPIError as error:
-            if named and error.orig.args and error.orig.args[0] == 1298:
-                pytest.skip("MySQL Asia/Shanghai named timezone is not installed; offset cases are separate")
-            raise
+        # A supported fixture must exercise named sessions, not silently skip 1298.
+        await _utc_now(writer, write_zone)
+        await _utc_now(reader, read_zone)
         with _process_timezone(write_process):
             assert datetime.now().astimezone().utcoffset() == (
                 timedelta(hours=8) if write_process == "Asia/Shanghai" else timedelta())
@@ -131,6 +153,41 @@ async def test_mysql_real_clock_lease_checkpoint_reopen_across_timezones(
             assert before - timedelta(seconds=1) <= physical[1].replace(tzinfo=timezone.utc) <= after + timedelta(seconds=1)
             assert physical[0] <= physical[1]
             assert physical[2].replace(tzinfo=timezone.utc) == acquired.lease_expires_at
+
+            first_counter = f"{identity}-first".encode()
+            second_counter = f"{identity}-second".encode()
+            assert await state.mutate(lambda tx: tx.reserve_sequence(first_counter, 2)) == 2
+            async with writer.connect() as connection:
+                first_created = await connection.scalar(text(
+                    "SELECT created_at FROM ai_state_counters WHERE store_key=:store AND stream_key=:key"
+                ), {"store": state.store_key, "key": first_counter})
+            assert await state.mutate(lambda tx: tx.reserve_sequence(first_counter, 1)) == 3
+            single_done = await _utc_now(writer, write_zone)
+            async with writer.connect() as connection:
+                single_created, single_updated = (await connection.execute(text(
+                    "SELECT created_at, updated_at FROM ai_state_counters WHERE store_key=:store AND stream_key=:key"
+                ), {"store": state.store_key, "key": first_counter})).one()
+            assert single_created == first_created
+            assert before - timedelta(seconds=1) <= single_updated.replace(tzinfo=timezone.utc) <= single_done + timedelta(seconds=1)
+            batch = {first_counter: 3, second_counter: 4}
+            assert await state.mutate(lambda tx: tx.reserve_sequences(batch)) == {
+                first_counter: 6, second_counter: 4,
+            }
+            counters_done = await _utc_now(writer, write_zone)
+            async with writer.connect() as connection:
+                counter_rows = (await connection.execute(text(
+                    "SELECT stream_key, value, created_at, updated_at FROM ai_state_counters "
+                    "WHERE store_key=:store AND stream_key IN (:first, :second)"
+                ), {"store": state.store_key, "first": first_counter, "second": second_counter})).all()
+            assert {bytes(key): value for key, value, _, _ in counter_rows} == {
+                first_counter: 6, second_counter: 4,
+            }
+            for key, _, created, updated in counter_rows:
+                if bytes(key) == first_counter:
+                    assert created == first_created
+                assert before - timedelta(seconds=1) <= created.replace(tzinfo=timezone.utc)
+                assert created <= updated
+                assert updated.replace(tzinfo=timezone.utc) <= counters_done + timedelta(seconds=1)
             snapshot = ContinuableSnapshot(run_id=identity, step_index=1,
                 idempotency_key="checkpoint-1", messages=[ModelRequest(parts=[UserPromptPart("clock probe")])])
             await steps.register_run(RunRecord(run_id=identity))
@@ -174,6 +231,23 @@ async def test_mysql_real_clock_lease_checkpoint_reopen_across_timezones(
             assert renewed_physical[0] == physical[0]
             assert renewed_before - timedelta(seconds=1) <= renewed_physical[1].replace(tzinfo=timezone.utc) <= renewed_after + timedelta(seconds=1)
             assert renewed_physical[2].replace(tzinfo=timezone.utc) == renewed.lease_expires_at
+            # Seed an already expired lease without sleeping or altering server time.
+            expired = replace(_record(910 + (10 if named else 0)
+                                      + (0 if write_process == "Asia/Shanghai" else 1)),
+                              lease_owner="expired", lease_fence=7,
+                              lease_expires_at=renewed_before - timedelta(seconds=60))
+            await reopened.mutate(lambda transaction: transaction.insert_record(expired))
+            for operation, seconds in (("renew", 60), ("release", None)):
+                assert await reopened.mutate(lambda transaction: transaction.transition_record_lease(
+                    expired.key, expected_storage_revision=expired.storage_revision,
+                    transition=RecordLeaseTransition(operation, "expired", 7, seconds),
+                )) is None
+            taken = await reopened.mutate(lambda transaction: transaction.transition_record_lease(
+                expired.key, expected_storage_revision=expired.storage_revision,
+                transition=RecordLeaseTransition("acquire", "successor", 7, 60),
+            ))
+            assert taken is not None and taken.lease_fence == 8
+            assert taken.lease_owner == "successor"
     finally:
         if reopened_steps is not None:
             await reopened_steps.close()
