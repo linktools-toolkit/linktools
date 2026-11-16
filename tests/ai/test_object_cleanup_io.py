@@ -320,7 +320,8 @@ async def test_cleanup_reuses_capture_metadata_only_within_exclusive_operation(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_expiry_metadata_does_not_cross_state_instances() -> None:
+@pytest.mark.parametrize("expired", ((), (0,), (1,), (0, 1)))
+async def test_cleanup_shared_capture_survives_while_any_physical_owner_is_live(expired: tuple[int, ...]) -> None:
     from linktools.ai.persistence.captures import input_capture_expiry_key
 
     first, second = InMemoryStateStore(), InMemoryStateStore()
@@ -333,15 +334,23 @@ async def test_cleanup_expiry_metadata_does_not_cross_state_instances() -> None:
         for state in (first, second):
             await _publish_attachment_capture(state, objects, target,
                 namespace="cleanup", tenant_id="tenant", key=key)
-        await publish_capture_record(first, namespace="cleanup", tenant_id="tenant",
-            key=input_capture_expiry_key(key), value={
-                "namespace": "cleanup", "tenant_id": "tenant", "capture_key": key, "expired_at": NOW.isoformat(),
-            })
+        for index in expired:
+            await publish_capture_record((first, second)[index], namespace="cleanup", tenant_id="tenant",
+                key=input_capture_expiry_key(key), value={
+                    "namespace": "cleanup", "tenant_id": "tenant", "capture_key": key, "expired_at": NOW.isoformat(),
+                })
         candidate = ((PersistenceDomain.ARTIFACT, target),)
         result = await purge_unreferenced_objects(candidate, namespace="cleanup", tenant_id="tenant",
             stores={PersistenceDomain.TASK: first, PersistenceDomain.ARTIFACT: second},
             object_stores={domain: objects for domain in PersistenceDomain}, exclusive=Offline())
-        assert result.retained == candidate
+        if len(expired) == 2:
+            assert result.deleted == candidate
+            assert not result.retained
+            assert await objects.stat(target.key) is None
+        else:
+            assert result.retained == candidate
+            assert not result.deleted
+            assert await objects.stat(target.key) is not None
     finally:
         await first.close()
         await second.close()

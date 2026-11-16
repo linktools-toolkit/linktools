@@ -3,6 +3,7 @@
 """Offline deletion of unreferenced Runtime-owned object candidates."""
 
 import hashlib
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -122,8 +123,8 @@ def _capture_closure(records: list[tuple[StateStore, StoredRecord]], values: lis
                     or capture_record_value(record)["capture_key"] not in live)
     # Identical logical keys may live in isolated physical sources. A marker in
     # one source cannot revoke the other source's independently retained body.
-    duplicates = {key for key in live if sum(capture_record_key(record) == key for _store, record in records
-                                               if record.kind in CAPTURE_RECORD_KINDS) > 1}
+    counts = Counter(capture_record_key(record) for _store, record in records if record.kind in CAPTURE_RECORD_KINDS)
+    duplicates = {key for key in live if counts[key] > 1}
     roots = (*values, *(capture_retention_value(record) for _store, record in records
                        if record.kind in CAPTURE_RECORD_KINDS and capture_record_key(record) in duplicates))
     return capture_state_closure(visible, values=roots, excluded_keys=excluded_keys,
