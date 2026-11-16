@@ -522,19 +522,20 @@ class SqlMetricStore:
         await self._initialize()
         columns = self._observations.c
         occurred = columns.active_occurred_at
+        after = None if cursor is None else _parse_scan_cursor(cursor)
+        # Keep one index lower bound; otherwise the planner can use the
+        # original window start and apply the cursor as a residual filter.
+        lower_bound = start if after is None else max(start, after[0])
         statement = self._select_observations().where(
             columns.namespace == namespace,
             columns.kind == kind,
             columns.pruned_at.is_(None),
-            occurred >= start,
+            occurred >= lower_bound,
             occurred < end,
         )
-        if cursor is not None:
-            after_time, after_id = _parse_scan_cursor(cursor)
-            # The explicit lower bound lets the active-time index seek past
-            # earlier pages even when the tie-break OR is a residual predicate.
+        if after is not None:
+            after_time, after_id = after
             statement = statement.where(
-                occurred >= after_time,
                 or_(
                     occurred > after_time,
                     and_(
