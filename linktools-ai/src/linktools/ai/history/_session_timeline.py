@@ -571,23 +571,15 @@ async def project_session_turn(
     if header is None:
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
-    execution_header = await executions.get_header(execution_id, tenant_id=principal.tenant_id)
-    if execution_header is None:
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-    await authorization.authorize(
-        principal, AuthorizationAction.EXECUTION_READ, execution_header,
-    )
 
     async def capture(group: StateGroupTransaction) -> SessionTimelineCapture:
         root = await sessions.get(session_id, tenant_id=principal.tenant_id)
-        current_header = await executions.get_header(
-            execution_id, tenant_id=principal.tenant_id,
-        )
         if (root is None or header.kind is not ResourceKind.SESSION
                 or header.tenant_id != principal.tenant_id or root.session_id != header.id
-                or root.owner_principal_id != header.owner_principal_id
-                or current_header != execution_header):
+                or root.owner_principal_id != header.owner_principal_id):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        # As for session_timeline, session policy authorizes the reader, not the
+        # actor who admitted the execution. Validate durable membership below.
         records = await executions.get_timeline_many(
             (execution_id,), tenant_id=principal.tenant_id,
         )
@@ -796,3 +788,4 @@ __all__ = [
     "project_session_timeline",
     "project_session_turn",
 ]
+

@@ -17,9 +17,10 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
-from linktools.ai.persistence import PersistenceStorage, PersistencePlan
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan, PersistenceDomain
 from linktools.ai.storage import StorageRoute
 from linktools.ai.persistence.contracts import (
+    ConversationCursor,
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
@@ -30,7 +31,8 @@ from linktools.ai.persistence._conversation_repositories import SessionRepositor
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from sqlalchemy import event
 
-from .test_session_timeline import _commit_empty_turn, _execution, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _materialize_conversation, _session
+from .test_session_actor_identity import SharedSessionPolicy
 
 pytestmark = pytest.mark.asyncio
 
@@ -270,5 +272,54 @@ async def test_exact_committed_turn_remains_stable_after_a_newer_turn(tmp_path: 
             with pytest.raises(AIError) as captured:
                 await history.session_turn(session_id, execution_id, principal=principal)
             assert captured.value.code is error_code
+    finally:
+        await state.close()
+
+
+async def test_exact_turn_uses_session_visibility_for_committed_tool_content(tmp_path: Path) -> None:
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "shared-exact-turn.db"))
+    await state.initialize(namespace="session-timeline", tenant_id="tenant")
+    try:
+        sessions = state.conversation.sessions
+        created = await sessions.create(replace(_session(), session_id="shared"))
+        execution = replace(_execution(
+            "success", status=ExecutionStatus.SUCCEEDED, prompt="original prompt",
+        ), session_id="shared")
+        await state.execution.executions.create(execution)
+        await sessions.admit_execution(
+            "shared", tenant_id="tenant", execution_id="success", expected=None,
+        )
+        assert created.history_id is not None
+        agent_run_id, message_count = await _materialize_conversation(state, created.history_id)
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
+        checkpoint_sequence = await archive.latest_checkpoint_sequence(agent_run_id=agent_run_id)
+        checkpoint = await archive.checkpoint_at_sequence(
+            agent_run_id=agent_run_id, checkpoint_sequence=checkpoint_sequence,
+        )
+
+        async def commit(transaction) -> None:
+            await sessions.commit_timeline_turn_in_transaction(
+                transaction, "shared", tenant_id="tenant", execution_id="success",
+                start_message_index=0, end_message_index=message_count,
+            )
+            await sessions.advance_continuation_in_transaction(
+                transaction, "shared", tenant_id="tenant", execution_id="success", expected=None,
+                next_cursor=ConversationCursor(
+                    agent_run_id, history_id=created.history_id, message_count=message_count,
+                    checkpoint_sequence=checkpoint_sequence, projection_digest=checkpoint.projection_digest,
+                ), release_execution=True, history_quality="complete",
+            )
+
+        await sessions.state_store.mutate(commit)
+        peer = Principal("peer", "tenant")
+        async with History.open(persistence=state, authorization=SharedSessionPolicy()) as history:
+            with pytest.raises(AIError) as denied:
+                await history.execution_detail("success", session_id="shared", principal=peer)
+            assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            canonical = (await history.session_timeline("shared", principal=peer)).items[0]
+            assert canonical.conversation_committed is True
+            assert [item.item_kind for item in canonical.items] == ["tool_result", "assistant"]
+            assert canonical.items[-1].content == "visible answer"
+            assert await history.session_turn("shared", "success", principal=peer) == canonical
     finally:
         await state.close()

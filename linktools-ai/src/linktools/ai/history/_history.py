@@ -1342,7 +1342,8 @@ class History:
 
         This is not a page of session history and does not consult the active or
         latest execution. Pending, uncommitted and inherited turns are not
-        substituted for the requested execution.
+        substituted for the requested execution. The built-in session and
+        execution repositories must share a storage group.
         """
         if self._conversation is None or self._session_transcript_store is None or self._session_cursor_signer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
