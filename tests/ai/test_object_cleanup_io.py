@@ -223,6 +223,47 @@ async def test_cleanup_preserves_implicit_and_explicit_domain_dependencies() -> 
 
 
 @pytest.mark.asyncio
+async def test_cleanup_reads_each_physical_record_page_once_and_keeps_partition_owners(tmp_path: Path) -> None:
+    from .test_state_group_record_batch import _database, _record
+
+    async with _database(tmp_path / "cleanup-pages.sqlite") as (engine, first, second):
+        objects = InMemoryObjectStore()
+        one = await put(objects, "first-owned", "first partition")
+        two = await put(objects, "second-owned", "second partition")
+        orphan = await put(objects, "unowned", "no retaining record")
+        for store, reference in ((first, one), (second, two)):
+            await store.mutate(lambda tx: tx.insert_record(replace(_record("same-key"),
+                data={"payload": encode_domain(RuntimePayloadRef(StoredPayload.object(reference)),
+                                               PersistenceDomain.ARTIFACT)})))
+        scans = []
+
+        def capture(_connection: object, _cursor: object, sql: str, parameters: object,
+                    _context: object, _many: bool) -> None:
+            if sql.startswith("SELECT") and "FROM ai_state_records" in sql and "ORDER BY" in sql:
+                scans.append((sql, parameters))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            for store in (first, second):
+                await store.read(lambda tx: tx.scan_records_page(after=None, limit=1000))
+            physical_pages = tuple(scans)
+            assert len(physical_pages) == 2 and physical_pages[0] != physical_pages[1]
+            scans.clear()
+            candidates = tuple((PersistenceDomain.ARTIFACT, ref) for ref in (one, two, orphan))
+            result = await purge_unreferenced_objects(candidates, namespace="cleanup", tenant_id="tenant",
+                stores={PersistenceDomain.TASK: first, PersistenceDomain.ARTIFACT: second},
+                object_stores={domain: objects for domain in PersistenceDomain}, exclusive=Offline())
+            assert result.retained == candidates[:2]
+            assert result.deleted == candidates[2:]
+            assert all(scans.count(page) == 1 for page in physical_pages)
+            assert await objects.stat(one.key) is not None
+            assert await objects.stat(two.key) is not None
+            assert await objects.stat(orphan.key) is None
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+
+@pytest.mark.asyncio
 async def test_cleanup_shared_manifest_still_validates_each_reference_size() -> None:
     objects = InMemoryObjectStore()
     reference = await put(objects, "v1/asset-snapshot/root", {

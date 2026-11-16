@@ -428,46 +428,43 @@ async def _purge_unreferenced_objects(
     binding_contents = {key: content for closure in archive_closures.values()
                         for key, content in closure.binding_contents().items()}
 
+    records_by_store: dict[StateStore, list[StoredRecord]] = {store: [] for store in partitions}
+    for store, record in capture_records:
+        records_by_store[store].append(record)
     for store, domain in partitions.items():
-        record_cursor = None
-        while True:
-            records = await store.read(lambda tx: tx.scan_records_page(after=record_cursor, limit=1000))
-            for record in records:
-                require_known_retention(None if record.kind == "archive_content" else
-                                        capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
-                                        else record.data, state=record.state)
-                if record.kind in CAPTURE_RECORD_KINDS:
-                    if capture_record_key(record) in retained_captures:
-                        scope_namespace, scope_tenant = capture_record_scope(record)
-                        semantic = expand_snapshot_capture(record, binding_contents,
-                            namespace=scope_namespace, tenant_id=scope_tenant)
-                        await collect(capture_retention_value(record), domain, owner_group=store.storage_group)
-                        await collect(capture_retention_value(semantic), PersistenceDomain.TASK, archive_owner=False)
-                elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
-                    await collect(dict(record.data), domain, owner_group=store.storage_group)
-                    if record.kind in {"execution", "tool_operation"}:
-                        native_expanded = await expand_native_templates(record, store)
-                        from .codec import pending_operation_reference
-                        from .state import record_key
-                        parts = decode_key_components(record.key, maximum=RECORD_KEY_MAX_BYTES)
-                        identities = tuple(identity for _, payload in execution_payload_slots(
-                            decode_envelope(record.data).value.get("payload"))
-                            if (identity := pending_operation_reference(payload)) is not None)
-                        keys = tuple(record_key(parts[1], parts[2], "checkpoint", "tool_operation", (identity,)) for identity in identities)
-                        checkpoint_store = stores[PersistenceDomain.CHECKPOINT]
-                        if keys and checkpoint_store.storage_group is not store.storage_group:
-                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                        rows = await checkpoint_store.read(lambda tx: tx.get_records(keys)) if keys else {}
-                        owners = {}
-                        for key, row in rows.items():
-                            owners[key] = expand_tool_content(await expand_native_templates(row, checkpoint_store), binding_contents)
-                        operations = pending_operation_values(record, owners, namespace=parts[1], tenant_id=parts[2])
-                        semantic = expand_tool_content(expand_retained_execution_content(native_expanded, binding_contents,
-                            operations=operations), binding_contents)
-                        await collect(dict(semantic.data), domain, archive_owner=False)
-            if len(records) < 1000:
-                break
-            record_cursor = RecordScanCursor(records[-1].kind, records[-1].key)
+        for record in records_by_store[store]:
+            require_known_retention(None if record.kind == "archive_content" else
+                                    capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
+                                    else record.data, state=record.state)
+            if record.kind in CAPTURE_RECORD_KINDS:
+                if capture_record_key(record) in retained_captures:
+                    scope_namespace, scope_tenant = capture_record_scope(record)
+                    semantic = expand_snapshot_capture(record, binding_contents,
+                        namespace=scope_namespace, tenant_id=scope_tenant)
+                    await collect(capture_retention_value(record), domain, owner_group=store.storage_group)
+                    await collect(capture_retention_value(semantic), PersistenceDomain.TASK, archive_owner=False)
+            elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
+                await collect(dict(record.data), domain, owner_group=store.storage_group)
+                if record.kind in {"execution", "tool_operation"}:
+                    native_expanded = await expand_native_templates(record, store)
+                    from .codec import pending_operation_reference
+                    from .state import record_key
+                    parts = decode_key_components(record.key, maximum=RECORD_KEY_MAX_BYTES)
+                    identities = tuple(identity for _, payload in execution_payload_slots(
+                        decode_envelope(record.data).value.get("payload"))
+                        if (identity := pending_operation_reference(payload)) is not None)
+                    keys = tuple(record_key(parts[1], parts[2], "checkpoint", "tool_operation", (identity,)) for identity in identities)
+                    checkpoint_store = stores[PersistenceDomain.CHECKPOINT]
+                    if keys and checkpoint_store.storage_group is not store.storage_group:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    rows = await checkpoint_store.read(lambda tx: tx.get_records(keys)) if keys else {}
+                    owners = {}
+                    for key, row in rows.items():
+                        owners[key] = expand_tool_content(await expand_native_templates(row, checkpoint_store), binding_contents)
+                    operations = pending_operation_values(record, owners, namespace=parts[1], tenant_id=parts[2])
+                    semantic = expand_tool_content(expand_retained_execution_content(native_expanded, binding_contents,
+                        operations=operations), binding_contents)
+                    await collect(dict(semantic.data), domain, archive_owner=False)
         fact_cursor = None
         while True:
             facts = await store.read(lambda tx: tx.scan_facts_page(after=fact_cursor, limit=1000))
