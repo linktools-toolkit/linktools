@@ -261,6 +261,24 @@ class SessionTimelineCapture:
     histories: Mapping[str, tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord]] = field(default_factory=dict)
 
 
+
+def _timeline_history_capture_repository(
+    conversation: ConversationRepositories,
+    transcript_store: SessionTimelineTranscriptStore | None,
+) -> ConversationHistoryRepositoryImpl | None:
+    """Select only the existing same-owner transcript capture route."""
+    histories = conversation.histories
+    session_store = conversation.sessions.state_store
+    if (type(histories) is ConversationHistoryRepositoryImpl
+            and histories.state_store is session_store
+            and type(transcript_store) is ConversationPersistence
+            and type(transcript_store.archive) in (StateStepArchive, ModelInteractionStateStepArchive)
+            and transcript_store.archive.state_store is session_store
+            and transcript_store.archive.transcript_repository.accepts_history_capture(histories)):
+        return histories
+    return None
+
+
 class _ActiveSessionAdmission(Exception):
     def __init__(self, record: SessionRecord) -> None:
         self.record = record
@@ -404,15 +422,8 @@ async def capture_session_timeline(
             pending_execution = initial_pending
             admitted_records.clear()
             root, blocks, next_coordinate = await read_blocks()
-            histories = conversation.histories
-            capture_histories = (
-                type(histories) is ConversationHistoryRepositoryImpl
-                and histories.state_store is session_store
-                and type(transcript_store) is ConversationPersistence
-                and type(transcript_store.archive) in (StateStepArchive, ModelInteractionStateStepArchive)
-                and transcript_store.archive.state_store is session_store
-                and transcript_store.archive.transcript_repository.accepts_history_capture(histories)
-            )
+            histories = _timeline_history_capture_repository(conversation, transcript_store)
+            capture_histories = histories is not None
             transaction = _group.transaction(session_store)
             if capture_histories:
                 keys: list[bytes] = []
@@ -544,6 +555,90 @@ async def project_session_timeline(
         state, transcript_store, cursor_signer, session_id=session_id,
         tenant_id=principal.tenant_id, transcript_tenant_id=conversation.sessions.tenant_id,
     )
+
+
+async def project_session_turn(
+    conversation: ConversationRepositories,
+    executions: ExecutionRepository,
+    authorization: AuthorizationPolicy,
+    cursor_signer: CursorSigner,
+    transcript_store: SessionTimelineTranscriptStore,
+    session_id: str,
+    execution_id: str,
+    *,
+    principal: Principal,
+) -> SessionTurn:
+    """Read one committed local-session turn without scanning timeline pages.
+
+    This bounded read requires the built-in repositories in one storage group.
+    It does not synthesize pending turns or resolve inherited session history.
+    """
+    sessions = conversation.sessions
+    if (type(sessions) is not SessionRepositoryImpl
+            or type(executions) is not ExecutionRepositoryImpl
+            or sessions.state_store.storage_group is not executions.state_store.storage_group):
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    header = await sessions.get_header(session_id, tenant_id=principal.tenant_id)
+    if header is None:
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+
+    async def capture(group: StateGroupTransaction) -> SessionTimelineCapture:
+        root = await sessions.get(session_id, tenant_id=principal.tenant_id)
+        if (root is None or header.kind is not ResourceKind.SESSION
+                or header.tenant_id != principal.tenant_id or root.session_id != header.id
+                or root.owner_principal_id != header.owner_principal_id):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        histories = _timeline_history_capture_repository(conversation, transcript_store)
+        if histories is not None and root.history_id is not None and root.continuation is not None:
+            # Reuse the execution projection's owner read for history and head,
+            # as the page capture does, rather than reopen metadata for bodies.
+            await executions.prefetch_timeline_records(
+                (execution_id,),
+                additional_records={
+                    sessions.state_store: histories.history_record_keys(root.history_id),
+                },
+            )
+        # As for session_timeline, session policy authorizes the reader, not the
+        # actor who admitted the execution. Validate durable membership below.
+        records = await executions.get_timeline_many(
+            (execution_id,), tenant_id=principal.tenant_id,
+        )
+        execution = records.get(execution_id)
+        if (execution is None or execution.session_id != session_id
+                or execution.parent_execution_id is not None):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        commit = await sessions.pending_turn_commit_in_transaction(
+            group.transaction(sessions.state_store), session_id=session_id,
+            execution_id=execution_id, allow_unadmitted=True,
+        )
+        if commit is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if execution.completed_at is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        history_captures: dict[str, tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord]] = {}
+        if (histories is not None and root.history_id is not None and root.continuation is not None
+                and commit.end_message_index > commit.start_message_index):
+            captured = await histories.get_with_head_in_transaction(
+                group.transaction(sessions.state_store), root.history_id, tenant_id=histories.tenant_id,
+            )
+            if captured is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            history_captures[root.history_id] = histories, *captured
+        ref = SessionTurnRef(session_id, commit.turn_seq, execution_id)
+        return SessionTimelineCapture(
+            root, ((root, (ref,)),), None, records,
+            {(session_id, commit.turn_seq): commit}, histories=history_captures,
+        )
+
+    state = await executions.read_content(capture, stores=(sessions.state_store,))
+    page = await project_captured_session_timeline(
+        state, transcript_store, cursor_signer, session_id=session_id,
+        tenant_id=principal.tenant_id, transcript_tenant_id=sessions.tenant_id,
+    )
+    if len(page.items) != 1 or page.items[0].execution_id != execution_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return page.items[0]
 
 
 async def project_captured_session_timeline(
@@ -721,4 +816,6 @@ __all__ = [
     "capture_session_timeline",
     "project_captured_session_timeline",
     "project_session_timeline",
+    "project_session_turn",
 ]
+

@@ -66,6 +66,7 @@ from ._session_timeline import (
     SessionTimelineTranscriptStore,
     capture_session_timeline,
     project_captured_session_timeline,
+    project_session_turn,
 )
 from ..execution import (
     AttachmentFact,
@@ -1329,6 +1330,28 @@ class History:
         return (await self.session_detail(
             session_id, principal=principal, cursor=cursor, limit=limit,
         )).timeline
+
+    async def session_turn(
+        self,
+        session_id: str,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> SessionTurn:
+        """Read an exact committed turn belonging to the authorized session.
+
+        This is not a page of session history and does not consult the active or
+        latest execution. Pending, uncommitted and inherited turns are not
+        substituted for the requested execution. The built-in session and
+        execution repositories must share a storage group.
+        """
+        if self._conversation is None or self._session_transcript_store is None or self._session_cursor_signer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        executions, authorization = self._require_direct_reader()
+        return await project_session_turn(
+            self._conversation, executions, authorization, self._session_cursor_signer,
+            self._session_transcript_store, session_id, execution_id, principal=principal,
+        )
 
     async def inspect_session(
         self,
