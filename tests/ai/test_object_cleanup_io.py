@@ -233,8 +233,8 @@ async def test_cleanup_reads_each_physical_record_page_once_and_keeps_partition_
         orphan = await put(objects, "unowned", "no retaining record")
         for store, reference in ((first, one), (second, two)):
             await store.mutate(lambda tx: tx.insert_record(replace(_record("same-key"),
-                data={"payload": encode_domain(RuntimePayloadRef(StoredPayload.object(reference)),
-                                               PersistenceDomain.ARTIFACT)})))
+                data={"payload": encode_domain(RuntimePayloadRef(StoredPayload.object(reference),
+                                               PersistenceDomain.ARTIFACT))})))
         scans = []
 
         def capture(_connection: object, _cursor: object, sql: str, parameters: object,
