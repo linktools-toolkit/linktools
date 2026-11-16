@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from ..errors import AIError, ErrorCode
+from ..storage import sql_audit_now
 from ._step_payload_owner import payload_address, payload_record_from_row, payload_record_values, payload_store_locator
 from .state import RecordQuery, StoredRecord
 
@@ -124,14 +125,14 @@ class StepPayloadSql:
     async def guard(self, key: bytes, revision: int) -> bool:
         from sqlalchemy import update
         result = await self.execute(update(self.table).where(self.condition(key),
-            self.table.c.gc_revision == revision).values(gc_revision=revision + 1))
+            self.table.c.gc_revision == revision).values(gc_revision=revision + 1, updated_at=sql_audit_now()))
         return result.rowcount == 1
 
     async def replace(self, record: StoredRecord, revision: int) -> bool:
         from sqlalchemy import update
         values = payload_record_values(record)
         result = await self.execute(update(self.table).where(self.condition(record.key),
-            self.table.c.gc_revision == revision).values(**values))
+            self.table.c.gc_revision == revision).values(**values, updated_at=sql_audit_now()))
         return result.rowcount == 1
 
     async def delete(self, key: bytes, revision: int) -> bool:

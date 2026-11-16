@@ -100,7 +100,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         ),
         Column(
             "lease_expires_at",
-            TIMESTAMP(timezone=True).with_variant(mysql.TIMESTAMP(fsp=6), "mysql"),
+            TIMESTAMP(timezone=True).with_variant(mysql.DATETIME(fsp=6), "mysql"),
             nullable=True,
             comment="Database-authoritative expiry time of the current durable lease.",
         ),

@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import lru_cache
 from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
 from linktools.core import environ
@@ -711,15 +712,18 @@ class MySQLDialect(SQLiteDialect):
         value_column = table.c[column]
         insert_values = dict(values)
         insert_values[column] = step
-        insert_statement = insert(table).values(insert_values)
+        insert_statement = insert(table).values({
+            **{name: sql_audit_now() for name in ("updated_at", "created_at") if name in table.c},
+            **insert_values,
+        })
         matches = (self._immutable_match(table, insert_statement.inserted, identity_columns)
                    if identity_columns else true())
         increment = value_column + step
         set_values = {column: (case((matches, increment), else_=value_column)
                                if identity_columns else func.last_insert_id(increment))}
         if "updated_at" in table.c:
-            set_values["updated_at"] = (case((matches, func.current_timestamp()), else_=table.c.updated_at)
-                                        if identity_columns else func.current_timestamp())
+            set_values["updated_at"] = (case((matches, sql_audit_now()), else_=table.c.updated_at)
+                                        if identity_columns else sql_audit_now())
         statement = (
             insert_statement.on_duplicate_key_update(**set_values)
         )
@@ -781,10 +785,8 @@ class MySQLDialect(SQLiteDialect):
         set_values = {column: (case((matches, increment), else_=value_column)
                                if identity_columns else increment)}
         if "updated_at" in table.c:
-            from sqlalchemy import func
-
-            set_values["updated_at"] = (case((matches, func.current_timestamp()), else_=table.c.updated_at)
-                                        if identity_columns else func.current_timestamp())
+            set_values["updated_at"] = (case((matches, sql_audit_now()), else_=table.c.updated_at)
+                                        if identity_columns else sql_audit_now())
         await session.execute(
             insert_statement.on_duplicate_key_update(**set_values),
             [dict(row) for row in rows],
@@ -978,6 +980,28 @@ def sql_table_options() -> "Mapping[str, str]":
     }
 
 
+@lru_cache(maxsize=1)
+def sql_audit_now() -> "ColumnElement[datetime]":
+    """Database-clock audit time, independent of the MySQL session timezone."""
+    from sqlalchemy import DateTime
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy.sql.functions import FunctionElement
+
+    class AuditNow(FunctionElement):
+        type = DateTime(timezone=True)
+        inherit_cache = True
+
+    @compiles(AuditNow)
+    def compile_audit_now(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP"
+
+    @compiles(AuditNow, "mysql")
+    def compile_mysql_audit_now(element: object, compiler: object, **kwargs: object) -> str:
+        return "UTC_TIMESTAMP(6)"
+
+    return AuditNow()
+
+
 def sql_audit_columns() -> "tuple[Column, Column]":
     from sqlalchemy import Column, DateTime, DefaultClause
     from sqlalchemy.dialects import mysql
@@ -1023,6 +1047,7 @@ def sql_audit_columns() -> "tuple[Column, Column]":
             "updated_at",
             timestamp_type,
             nullable=False,
+            default=sql_audit_now(),
             server_default=DefaultClause(AuditCurrentTimestamp()),
             comment="Update timestamp",
         ),
@@ -1030,6 +1055,7 @@ def sql_audit_columns() -> "tuple[Column, Column]":
             "created_at",
             timestamp_type,
             nullable=False,
+            default=sql_audit_now(),
             server_default=DefaultClause(AuditCreatedTimestamp()),
             comment="Creation timestamp",
         ),
@@ -1155,6 +1181,14 @@ def column_type_matches(
     expected_type = expected.type.dialect_impl(connection.dialect)
     actual_type = actual.get("type")
     dialect_name = connection.dialect.name
+    if dialect_name == "mysql" and expected.name == "lease_expires_at":
+        from sqlalchemy.dialects.mysql import DATETIME
+
+        if isinstance(expected_type, DATETIME) and (
+            not isinstance(actual_type, DATETIME)
+            or (actual_type.fsp or 0) != (expected_type.fsp or 0)
+        ):
+            return False
     if _type_family(expected_type) != _type_family(
         actual_type
     ) and not _boolean_compatible(dialect_name, expected_type, actual_type):
@@ -1396,6 +1430,7 @@ __all__ = [
     "is_retryable_sql_transaction",
     "resolve_dialect",
     "sql_audit_columns",
+    "sql_audit_now",
     "sql_audit_indexes",
     "sql_blob",
     "sql_digest",

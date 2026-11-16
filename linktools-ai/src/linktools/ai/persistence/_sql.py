@@ -22,6 +22,7 @@ from ..storage import (
     IntegrityViolationKind,
     SqlStorageContext,
     create_sql_storage_context,
+    sql_audit_now,
 )
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
@@ -1804,7 +1805,7 @@ class _SqlTransaction:
                 table.c.store_key == self._store_key,
                 _key_matches(table.c.key, validate_record_key(key)),
                 table.c.storage_revision == expected_storage_revision,
-            ).values(storage_revision=expected_storage_revision + 1)
+            ).values(storage_revision=expected_storage_revision + 1, updated_at=sql_audit_now())
         )
         if result.rowcount != 1:
             self._record_cache.pop(key, None)
@@ -1875,7 +1876,7 @@ class _SqlTransaction:
                 raise ValueError(
                     "replacement must increment storage_revision exactly once"
                 )
-        from sqlalchemy import and_, bindparam, case, func, literal, or_, update
+        from sqlalchemy import and_, bindparam, case, literal, or_, update
 
         table = self._table(owners[0])
         prepared = tuple(record_owner_values(owners[0], _record_values(value.record)) for value in ordered)
@@ -1899,7 +1900,7 @@ class _SqlTransaction:
                         column: bindparam(f"_identity_{column}") for column in identity_columns
                     }),
                 ).values(**{column: bindparam(f"_replacement_{column}") for column in columns},
-                         updated_at=func.current_timestamp())
+                         updated_at=sql_audit_now())
                 parameters = [
                     {"_replacement_key": row["key"], "_replacement_locator": row["key_locator"],
                      "_replacement_expected_storage_revision": value.expected_storage_revision,
@@ -1926,7 +1927,7 @@ class _SqlTransaction:
                     table.c.store_key == self._store_key,
                     _keys_match(table.c.key, [row["key"] for row in rows]),
                     or_(*cas_conditions),
-                ).values(**updates, updated_at=func.current_timestamp())
+                ).values(**updates, updated_at=sql_audit_now())
             try:
                 result = await self._execute(statement, parameters)
             except BaseException as error:
@@ -2014,7 +2015,7 @@ class _SqlTransaction:
         lease_fence: int,
         lease_expires_at: datetime | None,
     ) -> bool:
-        from sqlalchemy import func, update
+        from sqlalchemy import update
 
         if (
             isinstance(expected_storage_revision, bool)
@@ -2025,8 +2026,10 @@ class _SqlTransaction:
             or lease_fence < 0
         ):
             raise ValueError("record lease integer fields are invalid")
-        if lease_expires_at is not None and lease_expires_at.tzinfo is None:
-            raise ValueError("record lease is invalid")
+        if lease_expires_at is not None:
+            if lease_expires_at.tzinfo is None:
+                raise ValueError("record lease is invalid")
+            lease_expires_at = lease_expires_at.astimezone(timezone.utc)
         if self._is_payload_key(key):
             if lease_owner is not None or lease_fence != 0 or lease_expires_at is not None:
                 raise ValueError("immutable payload content cannot acquire a lease")
@@ -2047,7 +2050,7 @@ class _SqlTransaction:
                 "lease_owner": lease_owner, "lease_fence": lease_fence,
                 "lease_expires_at": lease_expires_at,
                 "storage_revision": expected_storage_revision + 1,
-                "updated_at": func.current_timestamp(),
+                "updated_at": sql_audit_now(),
             }))
         )
         if result.rowcount == 1:
@@ -2105,7 +2108,7 @@ class _SqlTransaction:
                     table.c.store_key == self._store_key,
                     _keys_match(table.c.key, record_keys),
                     tuple_(table.c.key, table.c.storage_revision).in_(cas_conditions),
-                ).values(storage_revision=table.c.storage_revision + 1))
+                ).values(storage_revision=table.c.storage_revision + 1, updated_at=sql_audit_now()))
                 if guarded.rowcount != len(current):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 cas_conditions = tuple((key, revision + 1) for key, revision in cas_conditions)
@@ -2156,7 +2159,7 @@ class _SqlTransaction:
                 # Fence fact writers before removing either the owners or their facts.
                 guarded = await self._execute(update(table).where(or_(
                     *(and_(condition, table.c.gc_revision == revision) for condition, revision in conditions)
-                )).values(gc_revision=table.c.gc_revision + 1))
+                )).values(gc_revision=table.c.gc_revision + 1, updated_at=sql_audit_now()))
                 if guarded.rowcount != len(current):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await self._execute(delete(facts).where(
@@ -2475,7 +2478,7 @@ class _SqlTransaction:
             for owner, values in sorted(owners.items()):
                 statement = update(table).where(
                     table.c.store_key == self._store_key, _key_matches(table.c.key, owner),
-                ).values(**values, updated_at=func.current_timestamp())
+                ).values(**values, updated_at=sql_audit_now())
                 if returning:
                     changed = await self._execute(statement.returning(
                         table.c.key, table.c.key_locator, *(table.c[column] for column in values),
@@ -2549,7 +2552,7 @@ class _SqlTransaction:
     async def advance_sequence(self, key: bytes, expected: int) -> int:
         if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
             raise ValueError("expected sequence must be a non-negative integer")
-        from sqlalchemy import func, update
+        from sqlalchemy import update
 
         address = run_counter_address(validate_stream_key(key), store_key=self._store_key)
         if address is not None:
@@ -2558,7 +2561,7 @@ class _SqlTransaction:
             result = await self._execute(update(table).where(
                 table.c.store_key == self._store_key, _key_matches(table.c.key, owner),
                 table.c[column] == expected,
-            ).values({column: expected + 1, "updated_at": func.current_timestamp()}))
+            ).values({column: expected + 1, "updated_at": sql_audit_now()}))
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._sequence_cache[key] = expected + 1
@@ -2571,7 +2574,7 @@ class _SqlTransaction:
                 _key_matches(table.c.stream_key, validate_stream_key(key)),
                 table.c.value == expected,
             )
-            .values(value=expected + 1, updated_at=func.current_timestamp())
+            .values(value=expected + 1, updated_at=sql_audit_now())
         )
         if result.rowcount != 1:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -2587,7 +2590,7 @@ class _SqlTransaction:
             return
         from sqlalchemy import delete
 
-        from sqlalchemy import func, update
+        from sqlalchemy import update
         run_keys = tuple(key for key in values if run_counter_address(key, store_key=self._store_key) is not None)
         if run_keys:
             table = self._table("ai_step_run_admissions")
@@ -2598,7 +2601,7 @@ class _SqlTransaction:
             for owner, columns in sorted(owners.items()):
                 await self._execute(update(table).where(
                     table.c.store_key == self._store_key, _key_matches(table.c.key, owner),
-                ).values(**columns, updated_at=func.current_timestamp()))
+                ).values(**columns, updated_at=sql_audit_now()))
             self._sequence_cache.update({key: 0 for key in run_keys})
             values = tuple(key for key in values if key not in run_keys)
             if not values:
@@ -2807,7 +2810,7 @@ class _SqlTransaction:
                 _key_matches(table.c.operation_key, value.key),
                 table.c.state == expected_state,
             )
-            .values(_operation_values(value, updating=True))
+            .values({**_operation_values(value), "updated_at": sql_audit_now()})
         )
         if result.rowcount == 1:
             self._stage_native_owner("operation", (value.key,), value.data, state=value.state)
@@ -2937,9 +2940,7 @@ class _SqlTransaction:
         )
 
 
-def _record_values(
-    record: StoredRecord, *, updating: bool = False
-) -> dict[str, object]:
+def _record_values(record: StoredRecord) -> dict[str, object]:
     values: dict[str, object] = {
         "key": validate_record_key(record.key),
         "key_locator": _key_locator(record.key),
@@ -2957,14 +2958,11 @@ def _record_values(
         "storage_revision": record.storage_revision,
         "lease_owner": record.lease_owner,
         "lease_fence": record.lease_fence,
-        "lease_expires_at": record.lease_expires_at,
+        "lease_expires_at": (None if record.lease_expires_at is None
+                             else record.lease_expires_at.astimezone(timezone.utc)),
         "payload_json": canonical_json_bytes(dict(record.data)).decode("utf-8"),
         "payload_bytes": record.payload_bytes,
     }
-    if updating:
-        from sqlalchemy import func
-
-        values["updated_at"] = func.current_timestamp()
     return values
 
 
@@ -3031,9 +3029,7 @@ def _fact_from_row(row: Mapping[str, object]) -> StoredFact:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _operation_values(
-    value: StoredOperation, *, updating: bool = False
-) -> dict[str, object]:
+def _operation_values(value: StoredOperation) -> dict[str, object]:
     values: dict[str, object] = {
         "operation_key": value.key,
         "operation_locator": _key_locator(value.key),
@@ -3044,10 +3040,6 @@ def _operation_values(
         "compactable": value.compactable,
         "payload_json": canonical_json_bytes(dict(value.data)).decode("utf-8"),
     }
-    if updating:
-        from sqlalchemy import func
-
-        values["updated_at"] = func.current_timestamp()
     return values
 
 
@@ -3179,7 +3171,8 @@ def _datetime_or_none(value: object) -> datetime | None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(value, datetime):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return (value.astimezone(timezone.utc) if value.tzinfo is not None
+            else value.replace(tzinfo=timezone.utc))
 
 
 def _require_scan_limit(limit: int) -> None:

@@ -34,6 +34,7 @@ from ..storage import (
     create_sql_storage_context,
     dialect_for_name,
     sql_audit_columns,
+    sql_audit_now,
     sql_audit_indexes,
     sql_id_column,
     sql_query_index,
@@ -531,7 +532,7 @@ class SqlAssetBackend:
         receipts = self._metadata.tables["ai_asset_batch_receipts"]
 
         async def execute(session) -> StorageBatchResult[AssetInfo, AssetKey] | None:
-            from sqlalchemy import func, select, update
+            from sqlalchemy import select, update
 
             if idempotency_key is not None:
                 existing_payload = (
@@ -558,7 +559,7 @@ class SqlAssetBackend:
                 )
                 .values(
                     store_revision=next_revision,
-                    updated_at=func.current_timestamp(),
+                    updated_at=sql_audit_now(),
                 )
             ))
             if head_result.rowcount != 1:
@@ -593,7 +594,7 @@ class SqlAssetBackend:
                     entry_id = entry[0]
                     await self._context.run_statement(session.execute(
                         entries.update().where(entries.c.id == entry_id).values(
-                            **entry_values, updated_at=func.current_timestamp(),
+                            **entry_values, updated_at=sql_audit_now(),
                         )
                     ))
                 await self._context.run_statement(session.execute(
