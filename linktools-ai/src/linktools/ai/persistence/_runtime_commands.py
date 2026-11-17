@@ -227,6 +227,32 @@ class StateCommands:
             return await stores[0].storage_group.read_many(stores, read)
         return await read(None)
 
+    @staticmethod
+    async def read_pending_admission(
+        identities: IdempotencyRepository, scope: str, idempotency_key: str, *,
+        tenant_id: str, sessions: SessionRepository | None = None,
+        session_id: str | None = None,
+    ) -> tuple[IdempotencyRecord | None, SessionRecord | None]:
+        """Recheck durable owners after the ephemeral claim in one fresh transaction."""
+        stores = _dedupe_stores((identities.state_store,) if sessions is None
+                                else (identities.state_store, sessions.state_store))
+
+        async def read(_group: StateGroupTransaction | None):
+            existing = await identities.state_store.read(
+                lambda _transaction: identities.get(scope, idempotency_key, tenant_id=tenant_id)
+            )
+            # Replay/conflict takes precedence; do not decode a session it will not use.
+            if existing is not None or sessions is None or session_id is None:
+                return existing, None
+            current = await sessions.state_store.read(
+                lambda _transaction: sessions.get(session_id, tenant_id=tenant_id)
+            )
+            return None, current
+
+        if _same_group(stores):
+            return await stores[0].storage_group.read_many(stores, read)
+        return await read(None)
+
     async def _load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self._execution.state_store.read(
             lambda _transaction: self._execution.get(execution_id, tenant_id=tenant_id)

@@ -1096,9 +1096,11 @@ class LocalExecutionBackend:
             # service's idempotency read. Confirm the source after winning a new
             # ephemeral claim, before starting any model work.
             repository = self._execution.idempotency
-            existing = await repository.state_store.read(lambda _transaction: repository.get(
-                identity.scope, identity.idempotency_key, tenant_id=self._tenant_id,
-            ))
+            existing, current_session = await StateCommands.read_pending_admission(
+                repository, identity.scope, identity.idempotency_key, tenant_id=self._tenant_id,
+                sessions=self._conversation.sessions if session is not None else None,
+                session_id=session.session_id if session is not None else None,
+            )
             if existing is not None:
                 if (existing.request_digest != identity.request_digest
                         or existing.request_identity_version != identity.request_identity_version):
@@ -1108,10 +1110,6 @@ class LocalExecutionBackend:
                 # Let the canonical reservation owner apply terminal replay semantics.
                 return None
             if session is not None:
-                sessions = self._conversation.sessions
-                current_session = await sessions.state_store.read(
-                    lambda _transaction: sessions.get(session.session_id, tenant_id=self._tenant_id)
-                )
                 if current_session is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 if current_session.owner_principal_id != session.owner_principal_id:
