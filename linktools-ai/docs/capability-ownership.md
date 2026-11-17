@@ -11,11 +11,10 @@ python manage.py install --editable
 python linktools-ai/examples/capability_composition.py
 ```
 
-The application code is also the retained call shape for internal ownership
-changes: no extra manager, producer, adapter, parameter or context is proposed
-for these ordinary paths. This is not a claim that all internal ownership work
-is complete. The Task-to-Agent operation boundary is described below; broader
-Capability and Runtime ownership work remains separate.
+Ordinary application calls do not need a separate manager, producer, adapter,
+or context per capability. Runtime injects the resources; each capability owns
+its SDK hooks and the original execution and persistence owners retain their
+authority. The Task-to-Agent operation boundary is described below.
 
 ## Declaration to execution
 

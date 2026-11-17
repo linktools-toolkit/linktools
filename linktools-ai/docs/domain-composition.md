@@ -31,12 +31,10 @@ python linktools-ai/examples/domain_composition.py
 | One-context composition | `Runtime.open`, `runtime.tasks.bind`, `runtime.evaluations.bind` | One host `async with`; no extra mandatory contexts | Runtime closes composed Evaluation, Task, Agent, then owned Persistence |
 | Shared independent domains | `Persistence.open`, `Runtime.open(persistence=...)`, `TaskEngine.open` | Explicit sharing is optional advanced composition | Attached Runtime and TaskEngine borrow the already-open Persistence |
 
-These paths are not claimed to be a completed internal refactor. The example
-verifies the call shapes that internal changes must preserve. In particular,
-`AgentExecutionPort` is publicly reachable through `Agent.execution_port` and
-exported from `runtime.agent_execution`; it is not a disposable private class.
-A narrower Task integration should not copy every producer method into a new
-forwarding facade just to reduce the number of `service` references.
+The program exercises each composition and ownership boundary through the
+public APIs. TaskEngine uses the existing `AgentExecutionPort`, exposed by
+`Agent.execution_port` and `runtime.agent_execution`, for Agent-backed nodes.
+That port preserves the Agent producer's execution authority.
 
 ## Important signatures and semantics
 

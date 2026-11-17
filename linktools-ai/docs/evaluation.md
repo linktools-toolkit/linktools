@@ -1,11 +1,12 @@
 # Evaluation
 
-`await runtime.evaluations.bind(engine)` evaluates existing Tasks, Agent-backed
-Tasks, and native TaskGraphs through a Runtime-bound TaskEngine. Runtime owns
-both domain lifecycles. Advanced callers can use `Evaluations.open(engine)` with
-an independently managed TaskEngine. Dataset, scoring, evidence and
-report values live in `linktools.ai.evaluation`; orchestration lives in
-`linktools.ai.evaluation.engine`. Function-only evaluations need no Agent Runtime.
+Evaluation runs existing Tasks, Agent-backed Tasks, and native TaskGraphs.
+For standalone use, `Evaluations.open(namespace=..., storage=..., definitions=...)`
+opens and closes its own TaskEngine and storage. `Evaluations.open(engine)`
+borrows an existing engine. To compose with an open Runtime, use
+`await runtime.evaluations.bind(engine)`; Runtime closes the evaluation and
+any engine it owns. Dataset, scoring, evidence and report values live in
+`linktools.ai.evaluation`; orchestration lives in `linktools.ai.evaluation.engine`.
 
 ## An offline evaluation, end to end
 
@@ -26,8 +27,8 @@ from linktools.ai.evaluation import (
     DimensionContract, EvaluationSpec, ScorerSpec, ScoringInput,
     ScoreBundle, StartEvaluationRequest, export_report,
 )
+from linktools.ai.evaluation.engine import Evaluations
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.runtime import Runtime
 from linktools.ai.task import Task, TaskNodeContext
 
 
@@ -51,13 +52,12 @@ async def main() -> None:
     dimension = DimensionContract("exact_match", "boolean", "higher", 0, 1)
     scorer = ScorerSpec("exact", judge.ref, (dimension,))
 
-    async with Runtime.open(
-        "evaluation-guide",
+    async with Evaluations.open(
+        namespace="evaluation-guide",
         storage=PersistenceStorage.from_root(Path("evaluation-state")),
         tenant_id="example",
-    ) as runtime:
-        engine = await runtime.tasks.bind(target, judge)
-        evaluations = await runtime.evaluations.bind(engine)
+        definitions=(target, judge),
+    ) as evaluations:
         dataset = await evaluations.publish_dataset(
             DatasetSpec(DatasetRef("echo-cases", 1), cases=(
                 CaseSpec.task(CaseRef("echo-cases", "text", 1),
