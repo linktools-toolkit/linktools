@@ -128,6 +128,7 @@ class ExecutionDeltaType(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
 
+    ASSISTANT_OUTPUT_PREVIEW = "ASSISTANT_OUTPUT_PREVIEW"
     ASSISTANT_TEXT_DELTA = "ASSISTANT_TEXT_DELTA"
     ASSISTANT_THINKING_DELTA = "ASSISTANT_THINKING_DELTA"
 

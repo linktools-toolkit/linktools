@@ -262,15 +262,17 @@ class ExecutionTreeStreamer:
         principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
+        include_output_preview: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        if not isinstance(include_content, bool):
+        if not isinstance(include_content, bool) or not isinstance(include_output_preview, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return self._stream(
             execution_id,
             principal=principal,
             after_event_seqs=_normalize_after_event_seqs(after_event_seqs),
             include_content=include_content,
+            include_output_preview=include_output_preview,
             ready=ready,
         )
 
@@ -281,6 +283,7 @@ class ExecutionTreeStreamer:
         principal: Principal,
         after_event_seqs: Mapping[str, int],
         include_content: bool,
+        include_output_preview: bool,
         ready: asyncio.Event | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         root = await self._executions.inspect(execution_id, principal=principal)
@@ -531,7 +534,7 @@ class ExecutionTreeStreamer:
                         view.root_execution_id,
                         view.parent_invocation_id,
                         depths[key],
-                        _project_stream_event(event, include_content),
+                        _project_stream_event(event, include_content, include_output_preview=include_output_preview),
                     )
                     pending[key] = _next_event_task(streams[key], key, after_event_seqs)
         finally:
@@ -639,10 +642,10 @@ def _validate_child(root: ExecutionView, child: ExecutionView) -> None:
 
 def _project_stream_event(
     event: ExecutionStreamEvent,
-    include_content: bool,
+    include_content: bool, *, include_output_preview: bool = False,
 ) -> ExecutionStreamEvent:
     return replace(event, payload=project_event_payload(
-        event.event_type, event.payload, include_content=include_content,
+        event.event_type, event.payload, include_content=include_content, include_output_preview=include_output_preview,
     ))
 
 

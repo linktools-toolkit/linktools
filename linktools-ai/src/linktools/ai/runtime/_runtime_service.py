@@ -489,6 +489,7 @@ class Runtime(Generic[AppT]):
         principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
+        include_output_preview: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         if self._tree_streamer is None:
@@ -497,7 +498,7 @@ class Runtime(Generic[AppT]):
             execution_id,
             principal=principal,
             after_event_seqs=after_event_seqs,
-            include_content=include_content, ready=ready,
+            include_content=include_content, include_output_preview=include_output_preview, ready=ready,
         )
 
     async def _capture_execution_tree(
