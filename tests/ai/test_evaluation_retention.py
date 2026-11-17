@@ -220,6 +220,11 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
             run = await evaluations.start(request)
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             report = await run.create_report()
+            repository = persistence_179.evaluation.records
+            unrelated = replace(report, report_id="unrelated-report", experiment_id="unrelated-experiment",
+                                candidates=(), scores=(), failures=(), trials=(), score_attempts=(),
+                                cutoff=replace(report.cutoff, experiment_id="unrelated-experiment"))
+            await repository.publish_report(unrelated)
             trial = (await run.trials()).items[0]
             evidence = await evaluations.read_evidence(trial.evidence_ref, principal=principal)
             record = await persistence_179.evaluation.records.get(run.experiment_id, tenant_id="tenant")
@@ -260,7 +265,19 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
             with pytest.raises(AIError) as unavailable:
                 await evaluations.reconcile(run.experiment_id, principal=principal, idempotency_key="expired-resume")
             assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
-            result = await evaluations.purge_expired(principal=principal, now=future, exclusive=guard)
+            decoded_reports = []
+            decode = repository._decode
+
+            async def decode_selected_report(row, target):
+                if row.kind == "evaluation_report":
+                    decoded_reports.append(row.key)
+                return await decode(row, target)
+
+            with monkeypatch.context() as scoped:
+                scoped.setattr(repository, "_decode", decode_selected_report)
+                result = await evaluations.purge_expired(principal=principal, now=future, exclusive=guard)
+            assert decoded_reports == [repository._key("evaluation_report", (report.report_id,))]
+            assert await repository.get_report(unrelated.report_id) == unrelated
             assert run.experiment_id in result.evaluations
             assert await persistence_179.object_store(PersistenceDomain.EVALUATION).stat(own.key) is None
             content_rows = await persistence_179._stores[PersistenceDomain.EVALUATION].read(lambda tx: tx.scan_records())

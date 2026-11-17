@@ -71,6 +71,7 @@ from .state import (
     StateStore,
     StateTransaction,
     SqlStateRowReader,
+    SqlStateFactReader,
     SqlStateTransaction,
     StoredFact,
     StoredOperation,
@@ -183,6 +184,46 @@ class _StateSnapshotReader:
     ) -> tuple[StoredFact, ...]:
         return await self._store.read(lambda tx: tx.scan_facts_page(after=after, limit=limit))
 
+    async def capture_facts(
+        self, *, budget: "_SnapshotCaptureBudget", page_size: int,
+    ) -> tuple[StoredFact, ...] | None:
+        if type(self._store) is not SqlStateStore:
+            return None
+        from sqlalchemy import and_, or_, select
+
+        table = self._store.storage_group.metadata.tables["ai_state_facts"]
+        facts: list[StoredFact] = []
+        after = None
+        while True:
+            limit = budget.page_size(page_size)
+            statement = select(table).where(table.c.store_key == self._store.store_key)
+            if after is not None:
+                locator, sequence = after
+                statement = statement.where(
+                    table.c.stream_locator >= locator,
+                    or_(table.c.stream_locator > locator,
+                        and_(table.c.stream_locator == locator, table.c.sequence > sequence)),
+                )
+            statement = statement.order_by(table.c.stream_locator, table.c.sequence).limit(limit)
+
+            async def read(transaction: StateTransaction):
+                if not isinstance(transaction, SqlStateFactReader):
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                return await transaction.read_joined_facts(self._store.context, statement)
+
+            page = await self._store.read(read)
+            for fact, _ in page:
+                budget.accept(encode_fact(fact))
+                facts.append(fact)
+            if len(page) < limit:
+                break
+            fact, row = page[-1]
+            after = row["stream_locator"], fact.sequence
+        # Capture is bounded and detached inside the group's read snapshot.
+        # Preserve sequence order per stream for trace validation; the captured
+        # reader performs the sole canonical raw-key sort before archive export.
+        return tuple(facts)
+
     async def scan_trace_events_page(
         self, *, after: tuple[bytes, int] | None, limit: int,
     ) -> tuple[tuple[bytes, int], tuple[StoredFact, ...]] | None:
@@ -286,16 +327,21 @@ async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _Snapshot
         cursor = RecordScanCursor(page[-1].kind, page[-1].key)
     if records_only:
         return _CapturedSnapshotReader(tuple(records), (), ())
-    cursor = None
-    while True:
-        limit = budget.page_size(page_size)
-        page = await reader.scan_facts_page(after=cursor, limit=limit)
-        for value in page:
-            budget.accept(encode_fact(value))
-            facts.append(value)
-        if len(page) < limit:
-            break
-        cursor = FactScanCursor(page[-1].stream_key, page[-1].sequence)
+    captured_facts = (await reader.capture_facts(budget=budget, page_size=page_size)
+                      if type(reader) is _StateSnapshotReader else None)
+    if captured_facts is not None:
+        facts.extend(captured_facts)
+    else:
+        cursor = None
+        while True:
+            limit = budget.page_size(page_size)
+            page = await reader.scan_facts_page(after=cursor, limit=limit)
+            for value in page:
+                budget.accept(encode_fact(value))
+                facts.append(value)
+            if len(page) < limit:
+                break
+            cursor = FactScanCursor(page[-1].stream_key, page[-1].sequence)
     trace_cursor = None
     while True:
         limit = budget.page_size(page_size)

@@ -266,27 +266,31 @@ class SqlObjectStore:
         from sqlalchemy import select
 
         table = self._metadata.tables["ai_objects"]
-        session = self._context.sessions()
-        try:
-            rows = (
-                (
-                    await self._context.run_statement(session.execute(
-                        select(table).where(table.c.store_id == self.store_id)
-                    ))
-                )
-                .mappings()
-                .all()
+        after: str | None = None
+        while True:
+            statement = (
+                select(table.c.object_key, table.c.object_locator, table.c.content_digest, table.c.size)
+                .where(table.c.store_id == self.store_id)
+                .order_by(table.c.object_locator)
+                .limit(128)
             )
-        finally:
-            await session.close()
-        for row in rows:
-            if row["object_locator"] != _object_locator(bytes(row["object_key"]).decode("utf-8")):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            yield ObjectStat(
-                bytes(row["object_key"]).decode("utf-8"),
-                str(row["content_digest"]),
-                int(row["size"]),
-            )
+            if after is not None:
+                statement = statement.where(table.c.object_locator > after)
+            session = self._context.sessions()
+            try:
+                rows = (await self._context.run_statement(session.execute(statement))).mappings().all()
+            finally:
+                # Inspection consumers may open manifest bodies using this same
+                # pool, so no SQL connection may remain checked out at a yield.
+                await session.close()
+            for row in rows:
+                key = bytes(row["object_key"]).decode("utf-8")
+                if row["object_locator"] != _object_locator(key):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                yield ObjectStat(key, str(row["content_digest"]), int(row["size"]))
+            if len(rows) < 128:
+                return
+            after = rows[-1]["object_locator"]
 
     def list_objects(self) -> AsyncIterator[ObjectStat]:
         return self._list_objects()

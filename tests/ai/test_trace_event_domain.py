@@ -346,3 +346,49 @@ async def test_sql_trace_metadata_retains_extensions_without_domain_wrapper(tmp_
         assert len(json.dumps(body, ensure_ascii=False).encode()) < len(
             json.dumps(_encode_step_envelope(event), ensure_ascii=False).encode()
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected", (False, True))
+async def test_sql_trace_page_reads_its_capture_bound_with_the_filtered_page(
+    tmp_path: Path, selected: bool,
+) -> None:
+    from sqlalchemy import event as sql_event
+
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        first = _event(run_id, "TOOL_CALL_STARTED", tool="call", second=0)
+        future = _event(run_id, "TOOL_CALL_SUCCEEDED", tool="call", second=-1)
+        await _append(archive, first, future)
+        engine = archive.state_store.storage_group.context.engine.sync_engine
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _many):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                statements.append(statement)
+
+        sql_event.listen(engine, "before_cursor_execute", capture)
+        try:
+            page = await archive.list_trace_events(
+                agent_run_id=run_id, event_high_water=1, after_timestamp=None,
+                after_sequence=0, limit=1, tool_call_id="call" if selected else "absent",
+            )
+        finally:
+            sql_event.remove(engine, "before_cursor_execute", capture)
+        assert page == ([(1, first)] if selected else [])
+        assert len(statements) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_run", (False, True))
+async def test_sql_trace_empty_filter_still_checks_the_captured_high_water(
+    tmp_path: Path, missing_run: bool,
+) -> None:
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        await _append(archive, _event(run_id, "TOOL_CALL_STARTED", tool="call"))
+        with pytest.raises(AIError) as caught:
+            await archive.list_trace_events(
+                agent_run_id="missing-run" if missing_run else run_id,
+                event_high_water=2, after_timestamp=None, after_sequence=0,
+                limit=1, tool_call_id="absent",
+            )
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

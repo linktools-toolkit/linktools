@@ -796,15 +796,16 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                         raise asyncio.CancelledError from error
                     raise
                 except Exception as error:
+                    cancelled = _model_error_cancelled(error)
                     interrupted = await self._complete_request(
                         fact,
                         run_context,
                         selected_model,
-                        status="FAILED",
+                        status="CANCELLED" if cancelled else "FAILED",
                         response=None,
                         error_code=_model_error_code(error),
                         usage=None,
-                        phase="failed",
+                        phase="cancelled" if cancelled else "failed",
                     )
                     if interrupted:
                         raise asyncio.CancelledError from error
@@ -871,7 +872,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     )
                 except asyncio.CancelledError:
                     provider_error = self._provider_errors.get(model_request_seq)
-                    failed = provider_error is not None and not isinstance(provider_error, RunCancelled)
+                    failed = provider_error is not None and not _model_error_cancelled(provider_error)
                     prepared_model = self._prepared_models.get(model_request_seq)
                     observed_response = prepared_model is not None and prepared_model.response_observed
                     if failed and (_fallback_error(provider_error) is not None or observed_response):
@@ -907,13 +908,14 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     raise
                 except Exception as error:
                     provider_error = self._provider_errors.get(model_request_seq, error)
+                    cancelled = _model_error_cancelled(provider_error)
                     prepared_model = self._prepared_models.get(model_request_seq)
                     observed_response = prepared_model is not None and prepared_model.response_observed
                     safe_error = model_request_error(
                         provider_error, content_omission_reason=client_recorder.body_omission_reason, fact=fact,
                         stream_attempts=client_recorder.stream_attempts,
                     )
-                    if _fallback_error(provider_error) is not None or observed_response:
+                    if not cancelled and (_fallback_error(provider_error) is not None or observed_response):
                         # SDK priming may propagate the provider error directly instead
                         # of cancelling this wrapper. History is still finalized at the node boundary.
                         defer_failed_request(provider_error)
@@ -923,11 +925,11 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                         fact,
                         run_context,
                         selected_model,
-                        status="FAILED",
+                        status="CANCELLED" if cancelled else "FAILED",
                         response=None,
                         error_code=_model_error_code(safe_error),
                         usage=_failed_attempt_usage(error),
-                        phase="failed",
+                        phase="cancelled" if cancelled else "failed",
                     )
                     if interrupted:
                         raise asyncio.CancelledError from error
@@ -1062,15 +1064,16 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     raise asyncio.CancelledError from error
                 raise
             except Exception as error:
+                cancelled = _model_error_cancelled(error)
                 interrupted = await self._complete_request(
                     fact,
                     ctx.deps,
                     model,
-                    status="FAILED",
+                    status="CANCELLED" if cancelled else "FAILED",
                     response=None,
                     error_code=_model_error_code(error),
                     usage=None,
-                    phase="failed",
+                    phase="cancelled" if cancelled else "failed",
                     client_requests=client_requests,
                 )
                 if interrupted:
@@ -1417,6 +1420,12 @@ def _fallback_provider_only(error: BaseException) -> bool:
     return isinstance(error, Exception) and model_binding_error(
         error, diagnostics=ErrorDiagnostics.from_exception(error, content_omission_reason="classification_only"),
     ) is not None
+
+
+def _model_error_cancelled(error: BaseException) -> bool:
+    return isinstance(error, (asyncio.CancelledError, RunCancelled)) or (
+        isinstance(error, AIError) and error.code is ErrorCode.EXECUTION_CANCELLED
+    )
 
 
 def _model_error_code(error: Exception) -> str:

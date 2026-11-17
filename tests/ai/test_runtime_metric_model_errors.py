@@ -128,13 +128,15 @@ def test_model_metric_unknown_error_matches_runtime_internal_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_cancellation_records_cancelled_observation() -> None:
-    observation = await _observe_failure(RunCancelled("cancelled by application"))
+@pytest.mark.parametrize("error", (RunCancelled("cancelled by application"), AIError(ErrorCode.EXECUTION_CANCELLED)))
+@pytest.mark.parametrize("phase", ("handler", "record", "publish"))
+async def test_model_cancellation_records_cancelled_observation(error: Exception, phase: str) -> None:
+    observation = await _observe_failure(error, phase=phase)
     assert observation.status == "CANCELLED"
     assert observation.error_code == ErrorCode.EXECUTION_CANCELLED.value
 
 
-async def _observe_failure(error: Exception) -> Observation:
+async def _observe_failure(error: Exception, *, phase: str = "handler") -> Observation:
     recorder = _Recorder()
     capability = ModelObservationCapability(
         recorder,
@@ -147,7 +149,17 @@ async def _observe_failure(error: Exception) -> Observation:
     )
 
     async def handler(_request: object) -> object:
+        assert phase == "handler"
         raise error
+
+    if phase != "handler":
+        async def fail_started(_fact: object, *, phase: str, **kwargs: object) -> None:
+            if phase == "started":
+                raise error
+        if phase == "record":
+            capability._record_request_event = fail_started
+        else:
+            capability._publish_request_event = fail_started
 
     model = TestModel()
     context = RunContext(

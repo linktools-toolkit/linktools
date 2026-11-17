@@ -611,6 +611,10 @@ class _MemoryTransaction:
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return self.operations.get(key)
 
+    async def get_operations(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredOperation]:
+        return {key: value for key in dict.fromkeys(keys)
+                if (value := self.operations.get(key)) is not None}
+
     async def replace_operation(
         self,
         value: StoredOperation,

@@ -541,7 +541,8 @@ class EvaluationRepositoryImpl(RepositoryBase):
             objects.update(iter_runtime_object_refs(encode_domain(record), default_domain=PersistenceDomain.EVALUATION))
             for kind, target in (("evaluation_evidence", EvidenceBundle), ("evaluation_report", EvaluationReport),
                                  ("evaluation_comparison", ComparisonReport)):
-                rows = await transaction.list_records(RecordQuery(kind=kind))
+                scope = self._scope(kind, "experiment", (experiment_id,)) if kind == "evaluation_report" else None
+                rows = await transaction.list_records(RecordQuery(kind=kind, scope_key=scope))
                 for row in rows:
                     value = await self._decode(row, target)
                     belongs = (value.trial.target_experiment_id == experiment_id if isinstance(value, EvidenceBundle)
