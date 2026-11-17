@@ -49,6 +49,16 @@ def test_partial_string_unicode_replacement_and_bounded_snapshot():
     assert current.new_stream().selected is None
 
 
+@pytest.mark.parametrize("maximum, expected", [(None, 300), (500, 300), (40, 40)])
+def test_preview_honors_sdk_cap_and_smaller_schema_limit(maximum, expected):
+    class Result(BaseModel):
+        message: str = Field(max_length=maximum)
+
+    current = OutputPreview.from_binding(bind_output(Result), ExecutionCapability(output_preview_field="message"))
+    current.observe(PartStartEvent(index=0, part=ToolCallPart("output", {"message": "x" * 500}, "call")))
+    assert current.observe(FinalResultEvent(tool_name="output", tool_call_id="call"))[0] == "x" * expected
+
+
 def test_observation_requires_independent_opt_in_and_keeps_other_content_redacted():
     payload = {"text": "safe", "preview_field": "message", "preview_seq": 1,
                "agent_run_seq": 1, "model_request_seq": 1, "stream_attempt_seq": 1,
@@ -93,7 +103,7 @@ async def test_real_sdk_output_stream_is_visible_before_completion_and_final_val
 
 def test_preview_configuration_is_not_durable_capability_identity():
     plain = ExecutionCapability()
-    opted = ExecutionCapability(output_preview_field="message", output_preview_max_chars=100)
+    opted = ExecutionCapability(output_preview_field="message")
     assert CapabilityContribution.from_opaque("capability", plain.id, plain).contract == CapabilityContribution.from_opaque("capability", opted.id, opted).contract
 
 

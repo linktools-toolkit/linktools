@@ -308,6 +308,7 @@ class _ACPExecution:
         principal: Principal,
         after_event_seqs: object = None,
         include_content: bool = False,
+        include_output_preview: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         assert include_content is True

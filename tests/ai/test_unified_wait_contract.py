@@ -66,7 +66,7 @@ class _Tree:
 
     def stream(
         self, execution_id: str, *, principal: Principal, after_event_seqs=None,
-        include_content: bool = False, ready: asyncio.Event | None = None,
+        include_content: bool = False, include_output_preview: bool = False, ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         self.calls += 1
 

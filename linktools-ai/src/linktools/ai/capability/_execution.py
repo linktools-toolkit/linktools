@@ -34,7 +34,7 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
     def __init__(
         self, *, commit: CommitPolicy = CommitPolicy.sync(),
         retain_history: bool = False,
-        output_preview_field: str | None = None, output_preview_max_chars: int = 300,
+        output_preview_field: str | None = None,
     ) -> None:
         if not isinstance(retain_history, bool):
             raise TypeError("retain_history must be bool")
@@ -45,10 +45,7 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
             raise ValueError("Execution requires sync or terminal commit")
         if output_preview_field is not None and (not isinstance(output_preview_field, str) or not output_preview_field):
             raise ValueError("output_preview_field must be a non-empty field name")
-        if type(output_preview_max_chars) is not int or not 1 <= output_preview_max_chars <= 4096:
-            raise ValueError("output_preview_max_chars must be between 1 and 4096")
         self.output_preview_field = output_preview_field
-        self.output_preview_max_chars = output_preview_max_chars
         self._commit = commit
         self._retain_history = retain_history
 

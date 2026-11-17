@@ -270,6 +270,7 @@ def _watch_tree(
     principal,
     after_event_seqs=None,
     include_content=False,
+    include_output_preview: bool = False,
     ready: asyncio.Event | None = None,
 ):
     if ready is not None:

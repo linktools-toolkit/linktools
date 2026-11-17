@@ -68,7 +68,7 @@ class _Owner:
 
 async def _tree(
     execution_id: str, *, principal: Principal, after_event_seqs: Mapping[str, int] | None = None,
-    include_content: bool = False, ready: asyncio.Event | None = None,
+    include_content: bool = False, include_output_preview: bool = False, ready: asyncio.Event | None = None,
 ) -> AsyncIterator[ExecutionTreeEvent]:
     if ready is not None:
         ready.set()

@@ -13,6 +13,9 @@ from ..capability import ExecutionCapability
 from ..core import JsonValue
 
 
+_MAX_PREVIEW_CHARS = 300
+
+
 @dataclass
 class OutputPreview:
     field_name: str
@@ -32,10 +35,10 @@ class OutputPreview:
         definition = properties.get(name) if isinstance(properties, Mapping) else None
         if binding.mode != "structured" or not isinstance(definition, Mapping) or definition.get("type") != "string":
             return None
-        maximum = definition.get("maxLength", capability.output_preview_max_chars)
+        maximum = definition.get("maxLength", _MAX_PREVIEW_CHARS)
         if type(maximum) is not int or maximum < 1:
             return None
-        return cls(name, min(maximum, capability.output_preview_max_chars))
+        return cls(name, min(maximum, _MAX_PREVIEW_CHARS))
 
     def new_stream(self) -> "OutputPreview":
         return type(self)(self.field_name, self.max_chars)

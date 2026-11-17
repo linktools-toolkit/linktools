@@ -246,7 +246,7 @@ class Execution(Generic[AppT]):
         stream = self._watch_tree(
             self.execution_id, principal=self._principal, after_event_seqs=sequences,
             include_content=include_content, ready=ready,
-            **({"include_output_preview": True} if include_output_preview else {}),
+            include_output_preview=include_output_preview,
         )
         return self._watch_with_cursor(stream, sequences, include_content, cursor)
 

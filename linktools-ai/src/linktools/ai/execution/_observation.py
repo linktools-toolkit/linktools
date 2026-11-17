@@ -113,7 +113,7 @@ class _ExecutionModelObservation:
         stream = self.watch_tree(
             self.execution_id, principal=self.principal, after_event_seqs=self.sequences,
             include_content=self.include_content, ready=tree_ready,
-            **({"include_output_preview": True} if self.include_output_preview else {}),
+            include_output_preview=self.include_output_preview,
         )
         pending = asyncio.create_task(stream.__anext__())
         prepared = asyncio.create_task(tree_ready.wait())
