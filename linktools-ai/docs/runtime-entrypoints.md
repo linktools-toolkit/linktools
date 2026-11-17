@@ -19,7 +19,7 @@ manager for ordinary Agent calls.
 
 | Entry | Previous return | Current return and responsibility |
 | --- | --- | --- |
-| `Runtime.open(...)`, `Runtime.attach(...)` | `Runtime` | Unchanged: owned or borrowed composition and lifecycle |
+| `Runtime.open(namespace, storage=...)`, `Runtime.open(persistence=...)` | `Runtime` | Owned or borrowed composition through one entry point |
 | `runtime.agents.get(agent_id="default")`, `.restore(binding)` | `Agent` | Unchanged: live or captured definition handle |
 | `agent.start(prompt, ...)`, `session.start(prompt, ...)` | `Execution` | Unchanged: accepted execution handle |
 | `agent.run(...)`, `session.run(...)` | `WaitResult[ExecutionResult]` | Unchanged: start and wait, with optional observation |

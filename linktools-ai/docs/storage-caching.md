@@ -789,7 +789,7 @@ requires a host-owned object implementing both `CacheBackend` and
 `TurnCoordinationBackend`. Compose those interfaces with explicit delegation:
 create the host object, pass it to `PersistenceStorage(..., coordination=...)`,
 open that single Persistence, bind its ready source backend exactly once, then
-use `Runtime.attach(persistence=...)`. Unbound calls must fail, not fall back to
+use `Runtime.open(persistence=...)`. Unbound calls must fail, not fall back to
 another authority. Carry the Persistence's read-only and ready/closed guards;
 never rebind an existing host object to another source or namespace. Runtime
 closes before its Persistence; the host retains ownership of the borrowed cache.

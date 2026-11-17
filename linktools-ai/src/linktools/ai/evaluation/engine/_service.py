@@ -266,6 +266,7 @@ class Evaluations:
         self._controls_idle = asyncio.Event()
         self._controls_idle.set()
         self._close_task: asyncio.Task[None] | None = None
+        self._terminal_cleanup_error: BaseException | None = None
         self._history_context: AbstractAsyncContextManager[History] | None = None
         self._engine_context: AbstractAsyncContextManager[TaskEngine[AppT]] | None = None
         self._release_engine: Callable[[], None] | None = None
@@ -347,11 +348,20 @@ class Evaluations:
         finally:
             self._notifying_closed = False
 
+    @property
+    def closed(self) -> bool:
+        """Whether owned resources are drained and close notifications completed."""
+        return self._closed and not self._close_callbacks
+
     async def close(self) -> None:
         """Settle admitted producer controls, then stop owned coordination and resource scopes."""
         self.stop_admission()
         if self._closed:
             self._notify_closed()
+            if self._terminal_cleanup_error is not None:
+                # Keep a consumed scope's failure observable, independently of
+                # close callbacks whose notification can genuinely be retried.
+                raise self._terminal_cleanup_error
             return
         if self._close_task is None or self._close_task.done():
             self._close_task = asyncio.create_task(self._cleanup(), name="evaluation-close")
@@ -381,31 +391,59 @@ class Evaluations:
         errors = [result for result in observation_results if isinstance(result, BaseException)]
         errors.extend(result for result in watcher_results
                       if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError))
+        # Observation close can still own resources; joined watcher tasks are
+        # already terminal even when their one-shot scope exit failed.
+        retryable = any(isinstance(result, BaseException) for result in observation_results)
         try:
             await self._close_trial_scopes()
         except BaseException as error:
             if all(error is not previous for previous in errors):
                 errors.append(error)
-        if len(errors) == 1:
-            raise errors[0]
-        if errors:
-            raise BaseExceptionGroup("Evaluation cleanup failed", errors)
-        if self._history_context is not None:
-            # Retry the owned reader directly: a failed context exit is not reentrant.
-            await self._history.close()
-            await self._history_context.__aexit__(None, None, None)
-            self._history_context = None
-        if self._release_engine is not None:
-            self._release_engine()
-            self._release_engine = None
-        if self._engine_context is not None:
-            # Keep the owned engine available for retry if cleanup fails. Do not
-            # consume its one-shot context until direct close has succeeded.
-            await self._engine_owner.close()
-            await self._engine_context.__aexit__(None, None, None)
-            self._engine_context = None
+
+        def raise_errors() -> None:
+            if len(errors) == 1:
+                raise errors[0]
+            if errors:
+                raise BaseExceptionGroup("Evaluation cleanup failed", errors)
+
+        if retryable or any(not scope.drained for scope in self._trial_scopes.values()):
+            if not errors:
+                errors.append(AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                                      "Evaluation scope cleanup is still active"))
+            raise_errors()
+        try:
+            if self._history_context is not None:
+                # Retry the owned reader directly: a failed context exit is not reentrant.
+                await self._history.close()
+                await self._history_context.__aexit__(None, None, None)
+                self._history_context = None
+            if self._release_engine is not None:
+                self._release_engine()
+                self._release_engine = None
+            if self._engine_context is not None:
+                # Keep the owned engine available for retry if cleanup fails. Do not
+                # consume its one-shot context until direct close has succeeded.
+                await self._engine_owner.close()
+                await self._engine_context.__aexit__(None, None, None)
+                self._engine_context = None
+        except BaseException as error:
+            if all(error is not previous for previous in errors):
+                errors.append(error)
+            raise_errors()
         self._closed = True
-        self._notify_closed()
+        if errors:
+            self._terminal_cleanup_error = (errors[0] if len(errors) == 1 else
+                BaseExceptionGroup("Evaluation cleanup failed", errors))
+        self._trial_scopes.clear()
+        try:
+            self._notify_closed()
+        except BaseException as error:
+            if self._terminal_cleanup_error is not None:
+                raise BaseExceptionGroup("Evaluation cleanup and notification failed",
+                                         [self._terminal_cleanup_error, error])
+            raise
+        if self._terminal_cleanup_error is not None:
+            raise self._terminal_cleanup_error
 
     def _ensure_accepting(self) -> None:
         self._ensure_open()

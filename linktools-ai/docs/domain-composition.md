@@ -29,7 +29,7 @@ python linktools-ai/examples/domain_composition.py
 | Metrics alone | `Metrics.in_memory`, `define`, `record`, `query` | No execution engine or automatic recorder required | Metrics borrows its store and has no producer close; externally owned SQL engines stay host-owned |
 | Metrics in Agent/Task | Existing `metrics=provider` argument | Pass the same provider to both domains | Each producer closes only its own recorder, not its peer's recorder or the shared provider |
 | One-context composition | `Runtime.open`, `runtime.tasks.bind`, `runtime.evaluations.bind` | One host `async with`; no extra mandatory contexts | Runtime closes composed Evaluation, Task, Agent, then owned Persistence |
-| Shared independent domains | `Persistence.open`, `Runtime.attach`, `TaskEngine.open` | Explicit sharing is optional advanced composition | Attached Runtime and TaskEngine borrow the already-open Persistence |
+| Shared independent domains | `Persistence.open`, `Runtime.open(persistence=...)`, `TaskEngine.open` | Explicit sharing is optional advanced composition | Attached Runtime and TaskEngine borrow the already-open Persistence |
 
 These paths are not claimed to be a completed internal refactor. The example
 verifies the call shapes that internal changes must preserve. In particular,
@@ -43,9 +43,11 @@ forwarding facade just to reduce the number of `service` references.
 - `Runtime.open(namespace, *, storage, tenant_id="default", context=None,
   features=None, metrics=None, authorization=None, auto_recover=True)` returns
   the context-managed Runtime. Omitting features does not start an Agent
-  producer. `Runtime.attach(*, persistence, ...)` borrows an already-open,
-  writable Persistence instead. Retain the returned object when the host needs
-  to retry cleanup after partial initialization failure.
+  producer. `Runtime.open(persistence=..., ...)` borrows an already-open,
+  writable Persistence and inherits its namespace and tenant. Do not pass a
+  namespace, tenant, or storage configuration in borrowing mode. The legacy
+  `Runtime.attach(persistence=...)` forwards to this same entry. Retain the
+  returned object when retrying cleanup after partial initialization failure.
 - `RuntimeFeatures.model(name, binding)` accepts a public `ModelBinding` or a
   synchronous loader. A binding describes logical model behavior and
   materializes the actual SDK model. The offline binding in the example is
@@ -116,13 +118,13 @@ then Persistence. For an Agent-backed task, use `Task.from_agent` with an
 explicit Agent and open the TaskEngine over that Agent's Persistence; neither
 independent entry point starts an Agent Runtime implicitly.
 
-`Runtime.attach` borrows Persistence, not every object in `features`. Resource
+`Runtime.open(persistence=...)` borrows Persistence, not every object in `features`. Resource
 declarations still determine who initializes and closes each dependency:
 
 | Resource supplied to Runtime | Initialization and close owner | Existing public call shape |
 | --- | --- | --- |
 | Persistence opened by `Runtime.open` | Runtime | One Runtime context |
-| Persistence supplied to `Runtime.attach` | Host; it must already be open and writable | Outer Persistence context, inner Runtime context |
+| Persistence supplied to `Runtime.open` | Host; it must already be open and writable | Outer Persistence context, inner Runtime context |
 | `AssetCapability(store)` in `RuntimeFeatures` | Runtime, even with `attach` or an already initialized store | Pass the declaration directly for ownership transfer |
 | Asset source in `features.borrow()` | Host; initialize before borrowers and close after all borrowers finish | Pass the live borrowed source, not an inspection resolution |
 | Default `StepPersistenceCapability()` adapter | Runtime creates/closes the adapter over Execution storage; its external SQL engine remains host-owned | No extra store context; requires an Execution SQL route |
@@ -215,7 +217,7 @@ Reattachment uses the graph's admitted principal. The recovery operation's
 request identity instead records the authorized recovery actor. No new
 application call, port method, persisted contract or lifecycle is required.
 
-## Remaining internal design work
+## Retained ownership and verification
 
 - MCP protocol/client ownership is separate from executable tool Boundary,
   effect facts and recorded response fixtures. Fixture playback creates no live
@@ -223,15 +225,35 @@ application call, port method, persisted contract or lifecycle is required.
   with Asset/Workspace; do not move fixture authority into the protocol client.
 - Task's Agent execution port now covers admission/capture, observation/history,
   retention and cancellation through public operations. Preserve these complete
-  operation and lifetime contracts when changing the remaining domain boundaries.
+  operation and lifetime contracts when changing domain boundaries.
 - `memory.PersistentMemoryStore` owns persistent Memory operations, mutation
   receipts and capture/seed. Runtime selects the admitted scope and resources,
   then delegates capture and restore to that adapter. Persistence retains
   transaction authority, and the adapter borrows its resources. Planning owns
   its store and native projection; Runtime selects the run owner. Model plan
   tools, execution plan mode and Task scheduling remain three different concepts.
-- The capability program covers resource capture and admitted Memory reuse;
-  crash recovery, custom persistent callbacks and the remaining extension
-  paths still require their own evidence. The [complete current Task port
-  surface](capability-ownership.md#task-to-agent-complete-current-integration-surface)
-  records the contracts that must be preserved before its public design changes.
+- The Step capability owns native SDK adaptation and attempt binding, including
+  preserving custom SDK hooks. The execution adapter chooses the attempt
+  metadata, transaction boundary and store. This does not add a checkpoint
+  writer or change the recovery authority.
+- A consumed, failed Evaluation trial-context exit is still reported. When
+  all actual borrowers and observations have drained, it no longer prevents
+  closing independent readers, TaskEngine and owned Persistence. A close
+  that still has pending work or has failed a retryable cleanup retains the
+  resources needed for that cleanup.
+
+The runnable examples and regression tests cover different parts of the contract:
+
+| Boundary | Runnable example or focused regression (under `tests/ai`) |
+| --- | --- |
+| Independent and composed use, same storage and ownership | [domain_composition.py](../examples/domain_composition.py), `test_runtime_open_persistence.py`, `test_domain_composition_ownership.py` |
+| Scope exit errors, partial cleanup retry and close order | `test_evaluation_trial_scopes.py`, `test_evaluation_lifecycle.py`, `test_runtime_owner_release.py` |
+| Capability/Agent declarations, dynamic discovery and retained resources | [capability_composition.py](../examples/capability_composition.py), `test_current_runtime_features.py`, `test_runtime_capability_scope.py` |
+| Memory/Planning, MCP and Subagent recovery boundaries | `test_memory_capture_replay.py`, `test_planning_store_binding.py`, `test_mcp_lifecycle.py`, `test_subagent_parent_recovery.py` |
+| Checkpoint, custom effective run instance and atomic commits | `test_step_attempt_binding.py`, `test_official_runtime_recovery.py`, `test_capability_persistence_lifecycle.py`, `test_capability_atomic_writes.py` |
+| Task-to-Agent port, handoff and independent Metrics | `test_agent_task_binding_owner.py`, `test_task_execution_hold_settlement.py`, `test_model_metric_projection_boundary.py` |
+
+The examples are not live provider or production SQL validation. Custom Python
+callbacks are not transferable worker state. A configured Metrics recorder
+must not alter execution truth, and moving a responsibility does not by itself
+change SQL, commits or storage bytes.

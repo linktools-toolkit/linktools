@@ -163,6 +163,7 @@ class _Evaluations(Evaluations):
         self._controls_idle = asyncio.Event()
         self._controls_idle.set()
         self._close_task = None
+        self._terminal_cleanup_error = None
         self._history_context = None
         self._engine_context = None
         self._release_engine = None

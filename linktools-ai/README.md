@@ -18,7 +18,7 @@ table ownership and the remaining cost boundaries.
 
 The main ownership rules are:
 
-- `Runtime.open` owns application composition and closes its bound domains before its Persistence. Advanced callers can use `Runtime.attach(persistence=...)` to borrow an independently opened Persistence without closing it. Neither requires a filesystem Workspace.
+- `Runtime.open` owns application composition and closes its bound domains before its Persistence. Advanced callers can use `Runtime.open(persistence=...)` to borrow an independently opened Persistence without closing it. Neither requires a filesystem Workspace.
 - `Workspace` owns paths and policy; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
 - `RuntimeFeatures` is the only public registration/discovery composition unit. It supplies a live declaration source for direct registrations and every Asset loader kind, and can provide Workspace configuration or an execution workspace factory independently. Each resolution validates its Asset versions without freezing later discovery.
@@ -809,7 +809,7 @@ does not fall back from one remote transport to another.
 `RuntimeFeatures.resolve()` returns a `RuntimeFeaturesResolution` for one
 inspection: group id, contributions, Rule instructions, source revision,
 Workspace association, model routes and a read-only Asset reader. It is not an
-input to `Runtime.open()` or `Runtime.attach()`. Pass the original declaration
+input to `Runtime.open()`. Pass the original declaration
 for Runtime-owned Assets or `features.borrow()` for externally owned Assets.
 A later call reads current registrations, loader slots and Asset declarations.
 Registering the same kind and id replaces that direct registration. Independent
@@ -1680,7 +1680,7 @@ async with Runtime.open("service-runtime", storage=storage,
     ...
 ```
 
-`PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Advanced callers can open Persistence independently, use `Runtime.attach(persistence=...)`, and pass the same Persistence to TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Retained Rule, Skill and MCP resource bytes remain Asset-owned and are not copied into Persistence snapshots. Reopened executions resolve current declarations through the supplied AssetStore; retained tool results and effect receipts remain original. Keep the corresponding AssetStore available for resource reads.
+`PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Advanced callers can open Persistence independently, use `Runtime.open(persistence=...)`, and pass the same Persistence to TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Retained Rule, Skill and MCP resource bytes remain Asset-owned and are not copied into Persistence snapshots. Reopened executions resolve current declarations through the supplied AssetStore; retained tool results and effect receipts remain original. Keep the corresponding AssetStore available for resource reads.
 
 For native checkpoints in the same SQL resource as Runtime control state,
 register the project capability. Runtime creates and owns the adapter for both

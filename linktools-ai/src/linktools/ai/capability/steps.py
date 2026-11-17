@@ -52,6 +52,7 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai_harness.step_persistence import (
     StepPersistence,
+    StepStore,
     ContinuableSnapshot,
     EventKind,
     RunRecord,
@@ -326,6 +327,18 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
     _atomic_live_history: tuple[list[ModelMessage], int] | None = field(
         default=None, init=False, repr=False
     )
+
+    @classmethod
+    def adapt(cls, capability: StepPersistence[AgentDepsT]) -> StepPersistence[AgentDepsT]:
+        """Adapt only the native declaration, preserving custom hook implementations."""
+        if type(capability) is not StepPersistence:
+            return capability
+        return cls(
+            id=capability.id, description=capability.description, defer_loading=capability.defer_loading,
+            store=capability.store, agent_name=capability.agent_name,
+            run_id=capability.run_id, parent_run_id=capability.parent_run_id,
+            metadata=capability.metadata, capture_frontier=capability.capture_frontier,
+        )
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AtomicStepPersistence[AgentDepsT]:
         bound = await super().for_run(ctx)
@@ -710,6 +723,22 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         self._atomic_pending_events.append(self._atomic_prepare_event(ctx, kind="run_started"))
 
 
+def bind_step_persistence(
+    capability: StepPersistence[AgentDepsT], *, store: StepStore,
+    run_id: str, parent_run_id: str | None, agent_name: str,
+    metadata: dict[str, str], run_registration: StepRunRegistration | None = None,
+) -> StepPersistence[AgentDepsT]:
+    """Bind an attempt to borrowed storage without replacing custom SDK hooks."""
+    if run_registration is not None:
+        if type(capability) is not AtomicStepPersistence:
+            raise TypeError("shared registration requires the atomic step capability")
+        capability = replace(capability, run_registration=run_registration)
+    return replace(
+        capability, store=store, run_id=run_id, parent_run_id=parent_run_id,
+        agent_name=agent_name, metadata=metadata,
+    )
+
+
 class StepBoundaryCapabilities(CombinedCapability[AgentDepsT]):
     """Resolve native run capabilities before placing the model publication leaf."""
 
@@ -737,4 +766,4 @@ class StepBoundaryCapabilities(CombinedCapability[AgentDepsT]):
         return rebound
 
 
-__all__ = ["CapturingStepStore", "AtomicStepPersistence", "AtomicStepStore", "RuntimeStepBoundaryStore", "StepBoundaryCapabilities", "StepRunRegistration"]
+__all__ = ["CapturingStepStore", "AtomicStepPersistence", "AtomicStepStore", "RuntimeStepBoundaryStore", "StepBoundaryCapabilities", "StepRunRegistration", "bind_step_persistence"]

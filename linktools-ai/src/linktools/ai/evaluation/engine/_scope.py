@@ -75,6 +75,11 @@ class _EnteredTrialScope:
             raise
 
     @property
+    def drained(self) -> bool:
+        """The one-shot lifetime ended and no borrower can still use its engine."""
+        return self._lifetime.done() and self._borrowers == 0
+
+    @property
     def closing(self) -> bool:
         return self._exit_requested.is_set()
 
