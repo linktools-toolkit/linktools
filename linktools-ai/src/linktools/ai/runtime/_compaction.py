@@ -513,6 +513,7 @@ class CompactionCapability(AbstractCapability[None]):
                     ),
                 ),
                 target_tokens=target_tokens,
+                skip_on=(),
             )
             try:
                 projected_context = await tiered.before_model_request(

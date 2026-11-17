@@ -3964,8 +3964,6 @@ class StateStepArchive(AgentRunStore):
         if self._trace_events is None:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         async def read(transaction: StateTransaction) -> list[tuple[int, StepEvent]]:
-            if await transaction.get_sequence(self._stream(agent_run_id, "event")) < event_high_water:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             facts = await self._trace_events.select(transaction, agent_run_id, high_water=event_high_water,
                 after_timestamp=after_timestamp, after_sequence=after_sequence, limit=limit,
                 model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id)

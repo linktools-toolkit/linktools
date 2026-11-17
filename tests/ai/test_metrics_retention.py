@@ -466,3 +466,28 @@ async def test_observation_ids_order_ties_and_remain_namespace_scoped(
     assert scanned == sorted(identities)
     assert await retention_store.prune_observations("first", before=_BEFORE) == len(identities)
     assert (await retention_store.get_observation("second", "é")).status == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_observation_pages_keep_timestamp_ties_across_cursor(retention_store: MetricStore) -> None:
+    metrics = Metrics.from_store(retention_store, namespace="ordered")
+    tie = _START + timedelta(microseconds=2)
+    await metrics.record_observations((
+        _observation("same-z", occurred_at=tie),
+        _observation("end-exclusive", occurred_at=_END),
+        _observation("old", occurred_at=_START),
+        _observation("new", occurred_at=tie + timedelta(microseconds=1)),
+        _observation("same-a", occurred_at=tie),
+        _observation("same-m", occurred_at=tie),
+    ))
+    await metrics.prune(before=tie)
+    first = await retention_store.scan_observations(
+        "ordered", "app.retention", _START, _END, cursor=None, limit=2,
+    )
+    assert [item.observation_id for item in first.items] == ["same-a", "same-m"]
+    assert first.next_cursor is not None
+    second = await retention_store.scan_observations(
+        "ordered", "app.retention", _START, _END, cursor=first.next_cursor, limit=2,
+    )
+    assert [item.observation_id for item in second.items] == ["same-z", "new"]
+    assert second.next_cursor is None

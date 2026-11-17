@@ -520,27 +520,33 @@ class SqlMetricStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         await self._initialize()
+        columns = self._observations.c
+        occurred = columns.active_occurred_at
+        after = None if cursor is None else _parse_scan_cursor(cursor)
+        # Keep one index lower bound; otherwise the planner can use the
+        # original window start and apply the cursor as a residual filter.
+        lower_bound = start if after is None else max(start, after[0])
         statement = self._select_observations().where(
-            self._observations.c.namespace == namespace,
-            self._observations.c.kind == kind,
-            self._observations.c.pruned_at.is_(None),
-            self._observations.c.active_occurred_at >= start,
-            self._observations.c.active_occurred_at < end,
+            columns.namespace == namespace,
+            columns.kind == kind,
+            columns.pruned_at.is_(None),
+            occurred >= lower_bound,
+            occurred < end,
         )
-        if cursor is not None:
-            after_time, after_id = _parse_scan_cursor(cursor)
+        if after is not None:
+            after_time, after_id = after
             statement = statement.where(
                 or_(
-                    self._observations.c.occurred_at > after_time,
+                    occurred > after_time,
                     and_(
-                        self._observations.c.occurred_at == after_time,
-                        self._observations.c.observation_id > after_id,
+                        occurred == after_time,
+                        columns.observation_id > after_id,
                     ),
                 )
             )
         statement = statement.order_by(
-            self._observations.c.occurred_at,
-            self._observations.c.observation_id,
+            occurred,
+            columns.observation_id,
         ).limit(limit + 1)
         async with self._context.sessions() as session:
             rows = (await self._context.run_statement(session.execute(statement))).mappings().all()

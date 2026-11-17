@@ -484,18 +484,21 @@ class RuntimeCapabilityWrites:
         writer = _BoundWriter(scope, store, (capability_id, revision, run_id), self.namespace, self.tenant_id,
                               durable=capability_id in self._durable_capability_ids)
         bound = capability.bind_persistence(writer)
-        if bound is capability or id(bound) in self._bound:
-            raise ValueError("bind_persistence must return an independent run-local capability")
+        owners: WeakValueDictionary[int, CapabilityPersistence] = WeakValueDictionary()
+
         def replace_owner(effective: CapabilityPersistence) -> None:
+            if effective is capability or (id(effective) in self._bound and id(effective) not in owners):
+                raise ValueError("persistence binding must retain an independent run-local capability")
             if not isinstance(effective, CapabilityPersistence) or not callable(effective.persist_in_transaction):
                 raise TypeError("bound capability must implement CapabilityPersistence")
             if effective.commit != scope.policy or effective.commit.buffer is not scope.policy.buffer:
                 raise ValueError("binding cannot change capability commit policy")
             # Each accepted write already holds the callback selected at submission.
             writer.persist = effective.persist_in_transaction
+            owners[id(effective)] = effective
+            self._bound[id(effective)] = effective
 
         replace_owner(bound)
-        self._bound[id(bound)] = bound
         return bound if adapt is None else adapt(bound, replace_owner)
 
     def is_buffer_rejection(

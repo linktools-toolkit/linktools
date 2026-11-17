@@ -564,6 +564,40 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         return await self._retry_storage_conflict(attempt)
 
+    async def reserve_many_in_transaction(
+        self, transaction: StateTransaction, records: Sequence[ToolOperationRecord],
+    ) -> tuple[ToolOperationRecord, ...]:
+        """Materialize pending tool receipts in their existing terminal transaction."""
+        values = tuple(records)
+        keys = tuple(self._tool_key(record.tool_operation_id) for record in values)
+        if len(set(keys)) != len(keys):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        results: list[ToolOperationRecord] = []
+        inserts: list[StoredRecord] = []
+        for key, record in zip(keys, values, strict=True):
+            if record.status is ToolOperationStatus.FAILED:
+                decode_tool_operation_failure(record.error_code, record.error_payload)
+            _require_tenant(record, self._tenant_id)
+            previous = await transaction.get_record(key)
+            if previous is not None:
+                existing = await self._decode(previous, ToolOperationRecord)
+                if not _tool_replay_matches(existing, record):
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                results.append(existing)
+                continue
+            stored = self._stored(
+                "tool_operation", (record.tool_operation_id,), record,
+                scope=self._scope("tool_operation", "agent_run", (record.agent_run_id,)),
+                state=record.status.value,
+            )
+            inserts.append(await self._tool_content.encode(stored))
+            results.append(record)
+        # Keep even large pending turns below the portable SQL bind budget.
+        # A native tool receipt has 16 bound columns; 32 rows use 512 binds.
+        for offset in range(0, len(inserts), 32):
+            await transaction.insert_records(tuple(inserts[offset:offset + 32]))
+        return tuple(results)
+
     async def get_operation(
         self, tool_operation_id: str, *, tenant_id: str
     ) -> ToolOperationRecord | None:

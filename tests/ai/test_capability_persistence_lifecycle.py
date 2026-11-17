@@ -131,3 +131,57 @@ async def test_native_persistence_replacements_keep_current_and_accepted_write_o
     finally:
         await writes.close()
         await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ("agent", "run"))
+@pytest.mark.parametrize("reuse", ("template", "other_run", "other_replacement"))
+async def test_native_replacement_cannot_reuse_another_persistence_owner(
+    phase: str, reuse: str,
+) -> None:
+    class ReusingPersistence(_ReplacementPersistence):
+        replacement: _ReplacementPersistence | None = None
+
+        def for_agent(self, agent: AbstractAgent[AgentContext[None], Any]) -> _ReplacementPersistence:
+            assert self.replacement is not None
+            return self.replacement if phase == "agent" else self
+
+        async def for_run(self, ctx: RunContext[AgentContext[None]]) -> _ReplacementPersistence:
+            assert self.replacement is not None
+            return self.replacement if phase == "run" else self
+
+    template = ReusingPersistence(replace_agent=False, replace_run=False)
+    store = InMemoryStateStore()
+    await store.initialize()
+    writes = RuntimeCapabilityWrites(
+        {"probe": store}, namespace="persistence-lifecycle", tenant_id="tenant",
+        durable_capability_ids=frozenset(), require_active_run=lambda run_id, execution_id: None,
+        has_active_execution=lambda execution_id: True,
+    )
+    first = writes.bind("probe", "one", "one", template, adapt=_PersistenceCapability)
+    # Exercise SDK replacement callbacks directly so a rejected owner cannot
+    # submit work through a different run's writer before the assertion.
+    replacement = template if reuse == "template" else first.wrapped
+    if reuse == "other_replacement":
+        replacement = copy(first.wrapped)
+        first.wrapped.replacement = replacement
+        if phase == "agent":
+            first.for_agent(Agent())
+        else:
+            await first.for_run(SimpleNamespace())
+    template.replacement = replacement
+    second = writes.bind("probe", "two", "two", template, adapt=_PersistenceCapability)
+    second.wrapped.owner = "second"
+    try:
+        with pytest.raises(ValueError, match="independent run-local capability"):
+            if phase == "agent":
+                second.for_agent(Agent())
+            else:
+                await second.for_run(SimpleNamespace())
+        await second.wrapped.writer.submit(key="retained-owner", payload={"key": "retained-owner"})
+        await writes.close()
+        rows = await store.read(lambda transaction: transaction.scan_records())
+        assert len(rows) == 1 and rows[0].data["actual_owner"] == "second"
+    finally:
+        await writes.close()
+        await store.close()
