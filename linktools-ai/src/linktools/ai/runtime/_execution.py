@@ -444,7 +444,7 @@ class DefaultExecutionService(TaskExecutionService):
         instruction_resolver: "RepositoryInstructionResolver | None" = None,
         object_key_factory: "ObjectKeyFactory | None" = None,
         input_materializer: "ExecutionInputMaterializer | None" = None,
-        task_admissions: TaskAdmissionRepository | None = None,
+        resolve_task_admissions: Callable[[], TaskAdmissionRepository] | None = None,
         object_reader: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bytes]] | None" = None,
         context_archive: ExecutionContextArchive | None = None,
         retained_turn_confirmed: Callable[[ExecutionRecord], bool] | None = None,
@@ -457,11 +457,11 @@ class DefaultExecutionService(TaskExecutionService):
         self._object_key_factory = object_key_factory
         self._object_reader = object_reader
         self._sessions = sessions
-        self._task_admissions = task_admissions
+        self._resolve_task_admissions = resolve_task_admissions
         self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
         super().__init__(
             state, authorization, port=_ExecutionManagementAdapter(self), sessions=sessions,
-            task_admissions=task_admissions, operation_ids=operation_ids,
+            operation_ids=operation_ids,
             release_terminal=release_terminal,
             retained_turn_confirmed=retained_turn_confirmed,
         )
@@ -486,6 +486,10 @@ class DefaultExecutionService(TaskExecutionService):
         )
         self._detached_cancel_failure: AIError | None = None
         self._management = self.manager
+
+    def _task_admission_repository(self) -> TaskAdmissionRepository | None:
+        resolve = self._resolve_task_admissions
+        return None if resolve is None else resolve()
 
     @property
     def _backend(self) -> _ExecutionRuntimePort | None:
@@ -792,7 +796,10 @@ class DefaultExecutionService(TaskExecutionService):
             requires_task_invocation_capture=requires_task_invocation_capture, budget_scope_id=budget_scope_id,
         )
         if execution.lineage_kind is ExecutionLineageKind.SESSION_RESUME:
-            await self._authorize_start_execution(request, execution.execution_id)
+            await self._management.authorize_loaded_execution(
+                execution, request.principal, AuthorizationAction.EXECUTION_RUN,
+                owner_principal_id=None,
+            )
 
     async def _authorize_start_execution(self, request: ExecutionRequest, execution_id: str) -> None:
         await self._authorization.authorize(
@@ -1751,7 +1758,15 @@ class DefaultExecutionService(TaskExecutionService):
                 if pending_id is not None:
                     if (execution.lineage_kind is ExecutionLineageKind.SESSION_RESUME
                             and pending_id != execution.execution_id):
-                        await self._authorize_start_execution(request, pending_id)
+                        winner = await self.load_execution(
+                            pending_id, tenant_id=request.principal.tenant_id,
+                        )
+                        if winner is None:
+                            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+                        await self._management.authorize_loaded_execution(
+                            winner, request.principal, AuthorizationAction.EXECUTION_RUN,
+                            owner_principal_id=None,
+                        )
                     return ExecutionHandle(pending_id)
             return await self._reserve_and_launch_start(
                 request, proposed_reservation, binding, session,

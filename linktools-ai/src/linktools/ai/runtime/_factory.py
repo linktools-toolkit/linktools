@@ -681,7 +681,7 @@ async def _build_local_components(
             state.object_store(PersistenceDomain.EXECUTION),
             authorization,
             sessions=state.conversation.sessions,
-            task_admissions=state.task.admissions,
+            resolve_task_admissions=lambda: state.task.admissions,
             catalog=catalog,
             compiler=compiler,
             restore_binding=binding_resolver.restore,
@@ -858,21 +858,9 @@ async def _build_local_components(
             await execution.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
             await backend.promote_pending_execution(execution_id)
 
-        input_captures = InputCaptures(
-            namespace, authorization, execution, input_materializer,
-            tenant_id=tenant_id,
-            execution_repositories=state.execution,
-            task_repositories=state.task,
-            object_stores={domain: state.object_store(domain) for domain in PersistenceDomain},
-            execution_retention=state.plan.route(PersistenceDomain.EXECUTION).retention,
-            task_retention=state.plan.route(PersistenceDomain.TASK).retention,
-            context_archive=ExecutionContextArchive(
-                state.execution.executions.state_store,
-                state.archive_object_store(PersistenceDomain.EXECUTION),
-                namespace=namespace, tenant_id=tenant_id,
-                asset_sources=asset_sources,
-                object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
-            ),
+        input_captures = InputCaptures.from_persistence(
+            state, authorization=authorization, execution=execution,
+            materializer=input_materializer, asset_sources=asset_sources,
             prepare_pending_capture=prepare_pending_capture,
         )
         backend.bind_recovery_relaunch_guard(TaskRecoveryGuard(state, input_captures))
@@ -990,11 +978,10 @@ def _borrowed_runtime_history(
             state.plan.route(domain).retention is StorageRetentionMode.DURABLE
             for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
         ) else None),
-        tasks=state.task.tasks,
+        _task_source=lambda: state.task.tasks,
         authorization=authorization,
         namespace=state.namespace,
         execution_objects=state.object_store(PersistenceDomain.EXECUTION),
-        task_objects=state.object_store(PersistenceDomain.TASK),
         object_reader=state.read_object,
         artifacts=artifact,
         cursor_signer=HmacCursorSigner(

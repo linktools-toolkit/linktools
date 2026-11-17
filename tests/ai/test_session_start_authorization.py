@@ -28,10 +28,14 @@ class ExecutionResourcePolicy(SharedSessionPolicy):
         self.execution_resources: list[str] = []
         self.denied: set[str] = set()
         self.deny_new = False
+        self.existing_owners: dict[str, str] = {}
 
     async def authorize(self, principal: Principal, action: AuthorizationAction, resource: ResourceRef) -> None:
         if action is AuthorizationAction.EXECUTION_RUN:
             self.execution_resources.append(resource.id)
+            if (resource.id in self.existing_owners
+                    and resource.owner_principal_id != self.existing_owners[resource.id]):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if (resource.kind is not ResourceKind.EXECUTION or resource.id == "shared"
                     or self.deny_new or resource.id in self.denied):
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -72,6 +76,7 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
         policy.deny_new = False
         policy.execution_resources.clear()
         execution = await session.start("peer turn", principal=peer, idempotency_key="peer-turn")
+        policy.existing_owners[execution.execution_id] = "peer"
         try:
             await asyncio.wait_for(entered.wait(), 5)
             replay = await session.start("peer turn", principal=peer, idempotency_key="peer-turn")

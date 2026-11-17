@@ -315,6 +315,7 @@ class History:
         events: "EventRepository | None" = None,
         sessions: "SessionRepository | None" = None,
         tasks: "TaskRepository | None" = None,
+        _task_source: "Callable[[], TaskRepository] | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
         cursor_signer: "CursorSigner | None" = None,
         namespace: "str | None" = None,
@@ -336,6 +337,7 @@ class History:
         self._events = events
         self._sessions = sessions
         self._tasks = tasks
+        self._task_source = _task_source
         self._authorization = authorization
         self._cursor_signer = cursor_signer
         self._namespace = (
@@ -1558,9 +1560,14 @@ class History:
     def _require_task_reader(
         self,
     ) -> tuple[TaskRepository, AuthorizationPolicy]:
-        if self._tasks is None or self._authorization is None:
+        if self._authorization is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return self._tasks, self._authorization
+        tasks = self._tasks
+        if tasks is None and self._task_source is not None:
+            tasks = self._task_source()
+        if tasks is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return tasks, self._authorization
 
     async def _task_result_record(
         self,
@@ -1756,11 +1763,10 @@ async def _open_runtime_history(
         executions=selected_state.execution.executions,
         events=selected_state.execution.events,
         sessions=selected_state.conversation.sessions,
-        tasks=selected_state.task.tasks,
+        _task_source=lambda: selected_state.task.tasks,
         authorization=effective_authorization,
         namespace=resolved_namespace,
         execution_objects=selected_state.object_store(PersistenceDomain.EXECUTION),
-        task_objects=selected_state.object_store(PersistenceDomain.TASK),
         object_reader=selected_state.read_object,
         artifacts=artifacts,
         cursor_signer=HmacCursorSigner(
