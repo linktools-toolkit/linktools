@@ -5,6 +5,7 @@
 import asyncio
 import math
 import secrets
+from builtins import ExceptionGroup
 from dataclasses import replace
 from functools import partial
 from types import MappingProxyType
