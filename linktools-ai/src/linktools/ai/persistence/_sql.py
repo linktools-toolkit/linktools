@@ -26,7 +26,7 @@ from ..storage import (
 )
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
-from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_rows, record_owner_values
+from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
 from .state import state_content_members
@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     from ..storage import SqlValue
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Result
-    from sqlalchemy.sql import ColumnElement, CompoundSelect, Executable, Select
+    from sqlalchemy.sql import ColumnElement, CompoundSelect, Executable, FromClause, Select
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 ValueT = TypeVar("ValueT")
@@ -3207,9 +3207,30 @@ def _require_scan_limit(limit: int) -> None:
         raise ValueError("scan page limit must be positive")
 
 def _record_query_statement(metadata: "MetaData", store_key: bytes, query: RecordQuery) -> "Select":
+    from sqlalchemy import select, union_all
+
+    if (query.kind == "task_graph" and query.limit is not None and query.states
+            and len(query.states) <= 2):
+        # Bound each physical owner's equality range before the global merge.
+        # A range's first N records contain every possible global first-N member.
+        branches = [
+            select(_record_page_statement(
+                record_owner_rows(metadata, owner=owner), store_key,
+                replace(query, states=frozenset((state,))),
+            ).subquery())
+            for owner in record_owner_names(kind=query.kind)
+            for state in sorted(query.states)
+        ]
+        candidates = union_all(*branches).subquery()
+        return select(candidates).order_by(
+            candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
+        ).limit(query.limit)
+    return _record_page_statement(record_owner_rows(metadata, kind=query.kind), store_key, query)
+
+
+def _record_page_statement(table: "FromClause", store_key: bytes, query: RecordQuery) -> "Select":
     from sqlalchemy import and_, or_, select
 
-    table = record_owner_rows(metadata, kind=query.kind)
     conditions = [table.c.store_key == store_key]
     if query.scope_key is not None:
         conditions.append(_key_matches(table.c.scope_key, query.scope_key))
@@ -3218,7 +3239,8 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
     if query.kind is not None:
         conditions.append(table.c.kind == query.kind)
     if query.states is not None:
-        conditions.append(table.c.state.in_(tuple(query.states)))
+        conditions.append(table.c.state == next(iter(query.states)) if len(query.states) == 1
+                          else table.c.state.in_(tuple(query.states)))
     if query.sort_key_prefix is not None:
         conditions.append(table.c.sort_prefix >= query.sort_key_prefix[:128])
         conditions.append(table.c.sort_key >= query.sort_key_prefix)

@@ -157,6 +157,7 @@ async def purge_step_content(
     from sqlalchemy import delete, inspect, select
 
     from ._sql import SqlStateStorageGroup
+    from ._record_owner import RECORD_OWNER_TABLES
 
     if group is not None and (not isinstance(group, SqlStateStorageGroup)
                               or group.context.engine is not context.engine):
@@ -167,7 +168,7 @@ async def purge_step_content(
         async with context.engine.connect() as connection:
             has_state = await connection.run_sync(lambda connection: any(
                 inspect(connection).has_table(name)
-                for name in ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_state_facts", "ai_state_operations")
+                for name in (*RECORD_OWNER_TABLES, "ai_state_facts", "ai_state_operations")
             ))
         if has_state:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,

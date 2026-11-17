@@ -35,6 +35,34 @@ CREATE TABLE ai_state_records (
 	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
 )ENGINE=InnoDB COMMENT='Current durable state for runtime and step resources persisted as versioned records.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
+CREATE TABLE ai_task_graphs (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
+	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
+	parent_key VARBINARY(768) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
+	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
+	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
+	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
+	lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
+	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
+	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
+	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON encoded as a JSON string preserving numeric representations.',
+	payload_bytes LONGBLOB NULL COMMENT 'Optional binary content body owned by this record; ordinary domain state remains JSON.',
+	key_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete key; raw identity must also match.',
+	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete scope_key; raw identity must also match.',
+	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete parent_key; raw identity must also match.',
+	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	KEY ix_created_at (created_at),
+	KEY ix_store_key_state_sort_prefix (store_key, state, sort_prefix),
+	KEY ix_updated_at (updated_at),
+	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
+)ENGINE=InnoDB COMMENT='Authoritative TaskGraph state and recovery ordering.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_state_facts (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',

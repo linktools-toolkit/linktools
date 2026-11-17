@@ -13,14 +13,15 @@ if TYPE_CHECKING:
 
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
-RECORD_OWNER_TABLES = ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions")
-_KIND_OWNERS = {"tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
+RECORD_OWNER_TABLES = ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
+_KIND_OWNERS = {"task_graph": "ai_task_graphs", "tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
 _CONSTANTS = {
+    "ai_task_graphs": {"kind": "task_graph"},
     "ai_step_tool_operations": {"kind": "tool_operation", "payload_bytes": None},
     "ai_step_run_admissions": {"kind": "agent_run", "subject_id": None, "state": None,
         "lease_owner": None, "lease_fence": 0, "lease_expires_at": None, "payload_bytes": None},
 }
-_EDGE_OWNERS = {"ai_state_records": "record", "ai_step_tool_operations": "tool_record",
+_EDGE_OWNERS = {"ai_task_graphs": "task_graph", "ai_state_records": "record", "ai_step_tool_operations": "tool_record",
                 "ai_step_run_admissions": "run_admission"}
 
 

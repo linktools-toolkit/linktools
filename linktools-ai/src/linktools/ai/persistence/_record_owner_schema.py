@@ -123,9 +123,15 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         *sql_audit_columns(),
     ]
     omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
+    if name == "ai_task_graphs":
+        omitted = {"kind"}
     records = Table(name, metadata, *(column for column in columns if column.name not in omitted),
                     comment=comment, **sql_table_options())
     sql_unique(records, "store_key", "key_locator")
+    if name == "ai_task_graphs":
+        sql_query_index(records, "store_key", "state", "sort_prefix")
+        sql_audit_indexes(records)
+        return
     if "kind" in records.c:
         sql_query_index(records, "store_key", "kind", "sort_prefix")
     if name != "ai_step_tool_operations":
