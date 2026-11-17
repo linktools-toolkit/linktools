@@ -138,10 +138,13 @@ class InputCaptures:
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._execution_repositories = execution_repositories
-        if task_repositories is None and _persistence is None:
+        if task_repositories is not None:
+            self._resolve_tasks: Callable[[], TaskRepositories] = lambda: task_repositories
+        elif _persistence is not None:
+            self._resolve_tasks = lambda: _persistence.task
+        else:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         self._persistence = _persistence
-        self._task_repositories = task_repositories
         self._object_stores = object_stores
         self._context_archive = context_archive
         self._execution_retention = execution_retention
@@ -191,11 +194,7 @@ class InputCaptures:
 
     @property
     def _tasks(self) -> TaskRepositories:
-        if self._task_repositories is None:
-            if self._persistence is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            return self._persistence.task
-        return self._task_repositories
+        return self._resolve_tasks()
 
     @property
     def _state_store(self) -> StateStore:
