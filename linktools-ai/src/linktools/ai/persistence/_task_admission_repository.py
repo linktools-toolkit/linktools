@@ -43,6 +43,7 @@ from .repositories import (
 )
 from .state import (
     active_state_scope,
+    OperationReader,
     RecordQuery,
     StateStore,
     StateTransaction,
@@ -705,7 +706,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 if admission_keys
                 else {}
             )
-            launches: list[TaskGraphLaunch] = []
+            admissions: list[TaskGraphAdmission] = []
             for header, admission_key in zip(headers, admission_keys, strict=True):
                 admission_record = admission_records.get(admission_key)
                 if admission_record is None:
@@ -717,9 +718,18 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     or admission.principal.tenant_id != self._tenant_id
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                stored_operation = await transaction.get_operation(
-                    operation_key(self._namespace, self._tenant_id, self._domain.value, admission.operation_id)
-                )
+                admissions.append(admission)
+            operation_keys = tuple(operation_key(
+                self._namespace, self._tenant_id, self._domain.value, admission.operation_id,
+            ) for admission in admissions)
+            if isinstance(transaction, OperationReader):
+                stored_operations = await transaction.get_operations(operation_keys)
+            else:
+                stored_operations = {key: value for key in operation_keys
+                                     if (value := await transaction.get_operation(key)) is not None}
+            launches: list[TaskGraphLaunch] = []
+            for admission, key in zip(admissions, operation_keys, strict=True):
+                stored_operation = stored_operations.get(key)
                 if stored_operation is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 operation = decode_operation(stored_operation, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)

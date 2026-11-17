@@ -2793,6 +2793,24 @@ class _SqlTransaction:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return None if row is None else _operation_from_row(row)
 
+    async def get_operations(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredOperation]:
+        from sqlalchemy import select
+
+        unique_keys = tuple(dict.fromkeys(keys))
+        table = self._table("ai_state_operations")
+        values: dict[bytes, StoredOperation] = {}
+        # Bound bind parameters even for recovery pages at their maximum size.
+        for offset in range(0, len(unique_keys), 128):
+            batch = unique_keys[offset:offset + 128]
+            rows = (await self._execute(select(table).where(
+                table.c.store_key == self._store_key,
+                _locator_column(table.c.operation_key).in_(tuple(_key_locator(key) for key in batch)),
+            ))).mappings().all()
+            if any(row["operation_key"] not in batch for row in rows):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values.update((row["operation_key"], _operation_from_row(row)) for row in rows)
+        return values
+
     async def replace_operation(
         self, value: StoredOperation, *, expected_state: str
     ) -> bool:
