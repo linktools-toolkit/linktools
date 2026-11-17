@@ -783,6 +783,23 @@ class DefaultExecutionService(TaskExecutionService):
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    async def _validate_start_replay(
+        self, execution: ExecutionRecord, binding: AgentBinding, request: ExecutionRequest, *,
+        requires_task_invocation_capture: bool = False, budget_scope_id: str | None = None,
+    ) -> None:
+        self._validate_replayed_execution(
+            execution, binding, request,
+            requires_task_invocation_capture=requires_task_invocation_capture, budget_scope_id=budget_scope_id,
+        )
+        if execution.lineage_kind is ExecutionLineageKind.SESSION_RESUME:
+            await self._authorize_start_execution(request, execution.execution_id)
+
+    async def _authorize_start_execution(self, request: ExecutionRequest, execution_id: str) -> None:
+        await self._authorization.authorize(
+            request.principal, AuthorizationAction.EXECUTION_RUN,
+            ResourceRef(ResourceKind.EXECUTION, execution_id, request.principal.tenant_id),
+        )
+
 
     async def start(
         self,
@@ -1301,12 +1318,8 @@ class DefaultExecutionService(TaskExecutionService):
             fork_base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
         execution_id = self._operation_ids()
-        resource = ResourceRef(
-            ResourceKind.EXECUTION, execution_id, request.principal.tenant_id
-        )
-        await self._authorization.authorize(
-            request.principal, AuthorizationAction.EXECUTION_RUN, resource
-        )
+        if lineage_kind is not ExecutionLineageKind.SESSION_RESUME:
+            await self._authorize_start_execution(request, execution_id)
         if request.session_context != "all" and session_id is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         self._validate_tool_response_mode(request.tool_response_ref, session_id=session_id, fixture=fixture)
@@ -1347,7 +1360,7 @@ class DefaultExecutionService(TaskExecutionService):
             idempotency_key=idempotency_key, request_digest=request_digest,
         )
         if pending_turn is not None:
-            self._validate_replayed_execution(
+            await self._validate_start_replay(
                 pending_turn.execution, binding, request,
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 budget_scope_id=budget_scope_id,
@@ -1382,7 +1395,7 @@ class DefaultExecutionService(TaskExecutionService):
                     existing.resource_id, tenant_id=request.principal.tenant_id
                 )
                 if pending is not None:
-                    self._validate_replayed_execution(
+                    await self._validate_start_replay(
                         pending, binding, request,
                         requires_task_invocation_capture=requires_task_invocation_capture,
                         budget_scope_id=budget_scope_id,
@@ -1423,7 +1436,7 @@ class DefaultExecutionService(TaskExecutionService):
                 existing.resource_id, tenant_id=request.principal.tenant_id
             )
             if started is not None:
-                self._validate_replayed_execution(
+                await self._validate_start_replay(
                     started, binding, request,
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
@@ -1465,6 +1478,9 @@ class DefaultExecutionService(TaskExecutionService):
                 parent_producer_generation=parent_producer_generation,
             )
             return ExecutionHandle(existing.resource_id)
+
+        if lineage_kind is ExecutionLineageKind.SESSION_RESUME:
+            await self._authorize_start_execution(request, execution_id)
 
         if session_id is not None and not policy.session.enabled:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1733,6 +1749,9 @@ class DefaultExecutionService(TaskExecutionService):
                     dependency_hold_id=dependency_hold_id,
                 )
                 if pending_id is not None:
+                    if (execution.lineage_kind is ExecutionLineageKind.SESSION_RESUME
+                            and pending_id != execution.execution_id):
+                        await self._authorize_start_execution(request, pending_id)
                     return ExecutionHandle(pending_id)
             return await self._reserve_and_launch_start(
                 request, proposed_reservation, binding, session,
@@ -1790,7 +1809,7 @@ class DefaultExecutionService(TaskExecutionService):
                 coordination.execution_id, tenant_id=request.principal.tenant_id,
             )
             if record is not None:
-                self._validate_replayed_execution(
+                await self._validate_start_replay(
                     record, binding, request,
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
@@ -1804,7 +1823,7 @@ class DefaultExecutionService(TaskExecutionService):
                     coordination.execution_id, tenant_id=request.principal.tenant_id,
                 )
                 if record is not None:
-                    self._validate_replayed_execution(
+                    await self._validate_start_replay(
                         record, binding, request,
                         requires_task_invocation_capture=requires_task_invocation_capture,
                         budget_scope_id=budget_scope_id,
@@ -1863,7 +1882,7 @@ class DefaultExecutionService(TaskExecutionService):
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            self._validate_replayed_execution(
+            await self._validate_start_replay(
                 reservation.execution, binding, request,
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 budget_scope_id=budget_scope_id,

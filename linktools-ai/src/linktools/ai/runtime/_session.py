@@ -162,6 +162,13 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         elif not (await self._current_policy()).session.enabled:
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
 
+    async def _authorize_resume_execution(self, session_id: str, principal: Principal) -> None:
+        # The built-in execution owner authorizes the actual new or replayed
+        # execution before dispatch. A session ID is not an execution resource.
+        # Custom services retain the generic manager's admission contract.
+        if type(self._admission_execution) is not DefaultExecutionService:
+            await super()._authorize_resume_execution(session_id, principal)
+
     async def _resume(self, agent_id: str, binding_digest: str, session_id: str,
                       request: ResumeSessionRequest, **kwargs) -> ExecutionHandle:
         execution = self._admission_execution
