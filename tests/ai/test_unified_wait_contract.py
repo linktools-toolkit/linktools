@@ -164,6 +164,8 @@ class _Evaluations(Evaluations):
         self._controls_idle.set()
         self._close_task = None
         self._history_context = None
+        self._engine_context = None
+        self._release_engine = None
         self._observation_sessions = set()
         self._watchers = {}
         self._trial_scopes = {}
@@ -220,6 +222,8 @@ class _Bundle:
         self.engine._model_refresh_interval_seconds = 1.0
         self.engine._release_persistence = persistence.bind_task_engine()
         self.engine._owner = self.engine
+        self.engine._evaluation_borrowers = {}
+        self.engine._owned_persistence = None
         self.engine._closed = False
         self.engine._notifying_closed = False
         self.engine._close_callbacks = deque()

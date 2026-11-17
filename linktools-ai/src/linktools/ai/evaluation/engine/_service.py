@@ -26,7 +26,7 @@ from ...agent import AgentInputCaptureRef
 from ...asset import AssetStoreReader, AssetVersionRef
 from ...core import (
     AuthorizationAction, AuthorizationPolicy, CursorPayload, CursorSigner, HmacCursorSigner,
-    ExecutionStatus, IdempotencyStatus, JsonValue, Page, Principal,
+    ExecutionContext, ExecutionStatus, IdempotencyStatus, JsonValue, Page, Principal,
     ResourceKind, ResourceRef, TaskStatus, UsageMetrics, canonical_json_bytes, canonical_sha256, deterministic_id,
     normalize_json_value, principal_identity_payload, validate_idempotency_key,
     validate_page_limit,
@@ -47,7 +47,7 @@ from ...evaluation import (
     build_evaluation_report, capture_mapping, evaluation_completion,
 )
 from ...task import (
-    Task, TaskGraph, TaskGraphState, TaskInputSupplyRequest,
+    Task, TaskExpander, TaskGraph, TaskGraphState, TaskInputSupplyRequest,
     TaskNode, TaskNodeContext, TaskNodeResultRef, TaskRef, TaskGraphLimits, TaskSubmissionCancellation,
 )
 from ...inputs import AgentTaskInput
@@ -58,7 +58,7 @@ from ...inputs import input_intent
 from ...inputs import CaptureInputRequest
 from ...persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ...execution import UsageSummary, TaskGraphRunEvent
-from ...observe import WaitResult
+from ...observe import MetricRecorderProvider, WaitResult
 from ...observe.stream import (
     ObservationSession, wait_for_result, validate_wait, await_stream_cleanup,
     drain_stream_tasks, is_observation_cleanup, report_observation_error,
@@ -67,7 +67,7 @@ from ...observe.cursors import (
     decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
 )
 from ...core import token_seed
-from ...persistence import PersistenceDomain
+from ...persistence import PersistenceDomain, PersistenceStorage
 from ...persistence.snapshots import SnapshotExclusiveGuard
 from ...execution import IdempotencyRecord
 from ...persistence.contracts import (
@@ -151,11 +151,14 @@ class Evaluations:
         """Create an evaluation producer whose caller owns its close lifetime."""
         from ...history import History
 
-        history_context = History.open(
-            persistence=engine.persistence, authorization=engine.authorization,
-        )
-        history = await history_context.__aenter__()
+        release_engine = engine.bind_evaluation()
+        history_context = None
+        history = None
         try:
+            history_context = History.open(
+                persistence=engine.persistence, authorization=engine.authorization,
+            )
+            history = await history_context.__aenter__()
             evaluations = cls(
                 engine, engine.authorization, engine.inputs, history,
                 cursor_signer=HmacCursorSigner("evaluation", token_seed(engine.namespace)),
@@ -163,20 +166,54 @@ class Evaluations:
             )
         except BaseException as primary:
             try:
-                await _finish_context_cleanup(history_context.__aexit__(None, None, None))
+                if history is not None:
+                    await _finish_context_cleanup(history_context.__aexit__(None, None, None))
             except BaseException as cleanup:
                 raise BaseExceptionGroup("Evaluation initialization and cleanup failed", [primary, cleanup])
+            finally:
+                release_engine()
             raise
         evaluations._history_context = history_context
+        evaluations._release_engine = release_engine
         return evaluations
 
     @classmethod
     @asynccontextmanager
     async def open(
-        cls, engine: "TaskEngine[AppT]", *, assets: Sequence[AssetStoreReader] = (),
+        cls, engine: "TaskEngine[AppT] | None" = None, *, assets: Sequence[AssetStoreReader] = (),
+        definitions: Sequence[Task[AppT, object] | TaskExpander] = (),
+        storage: PersistenceStorage | None = None, namespace: str | None = None,
+        tenant_id: str = "default", context: ExecutionContext[AppT] | None = None,
+        authorization: AuthorizationPolicy | None = None, metrics: MetricRecorderProvider | None = None,
+        asset_sources: Mapping[str, AssetStoreReader] | None = None,
+        model_refresh_interval_seconds: float = 1.0,
     ) -> AsyncIterator["Evaluations"]:
-        """Own evaluation coordination while borrowing task execution and persistence."""
-        evaluations = await cls.create(engine, assets=assets)
+        """Borrow an engine, or own standalone Task execution and its storage lifetime."""
+        from ...task.engine import TaskEngine
+
+        engine_context = None
+        if engine is not None:
+            if (definitions or storage is not None or namespace is not None or tenant_id != "default"
+                    or context is not None or authorization is not None or metrics is not None
+                    or asset_sources is not None or model_refresh_interval_seconds != 1.0):
+                raise ValueError("an existing engine cannot be combined with standalone engine options")
+        else:
+            engine_context = TaskEngine.open(
+                *definitions, storage=storage, namespace=namespace, tenant_id=tenant_id,
+                context=context, authorization=authorization, metrics=metrics,
+                asset_sources=asset_sources, model_refresh_interval_seconds=model_refresh_interval_seconds,
+            )
+            engine = await engine_context.__aenter__()
+        try:
+            evaluations = await cls.create(engine, assets=assets)
+        except BaseException as primary:
+            if engine_context is not None:
+                try:
+                    await _finish_context_cleanup(engine_context.__aexit__(None, None, None))
+                except BaseException as cleanup:
+                    raise BaseExceptionGroup("Evaluation initialization and task cleanup failed", [primary, cleanup])
+            raise
+        evaluations._engine_context = engine_context
         try:
             yield evaluations
         except BaseException as primary:
@@ -230,6 +267,8 @@ class Evaluations:
         self._controls_idle.set()
         self._close_task: asyncio.Task[None] | None = None
         self._history_context: AbstractAsyncContextManager[History] | None = None
+        self._engine_context: AbstractAsyncContextManager[TaskEngine[AppT]] | None = None
+        self._release_engine: Callable[[], None] | None = None
         self._recorder = Task("evaluation.record.v1", self._record_score, effect_policy="replay_safe")
 
     def _register_observation(self, session: ObservationSession) -> None:
@@ -356,6 +395,15 @@ class Evaluations:
             await self._history.close()
             await self._history_context.__aexit__(None, None, None)
             self._history_context = None
+        if self._release_engine is not None:
+            self._release_engine()
+            self._release_engine = None
+        if self._engine_context is not None:
+            # Keep the owned engine available for retry if cleanup fails. Do not
+            # consume its one-shot context until direct close has succeeded.
+            await self._engine_owner.close()
+            await self._engine_context.__aexit__(None, None, None)
+            self._engine_context = None
         self._closed = True
         self._notify_closed()
 

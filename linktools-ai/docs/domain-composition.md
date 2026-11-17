@@ -22,9 +22,9 @@ python linktools-ai/examples/domain_composition.py
 | Scenario | Current public entry points | Retained call shape | Owner and close |
 | --- | --- | --- | --- |
 | Simple Agent | `RuntimeFeatures.model`, `RuntimeFeatures.agent`, `Runtime.open`, `runtime.agents.get().start`, `Execution.wait` | No extra host adapter or manager | Runtime owns its Agent producer and its opened Persistence |
-| Ordinary Task | `Task`, `TaskGraph`, `TaskNode`, `TaskEngine.open`, `engine.start`, `graph.wait`, `graph.result` | No Agent or Runtime required | TaskEngine borrows Persistence; the outer host closes Persistence |
+| Ordinary Task | `Task`, `TaskGraph`, `TaskNode`, `TaskEngine.open`, `engine.start`, `graph.wait`, `graph.result` | No Agent or Runtime required | TaskEngine owns storage it opens; a supplied Persistence remains host-owned |
 | Mixed Task graph | `Task.from_agent`, `AgentTaskInput`, `TaskNodeResultRef` | Same Agent handle and same Persistence; explicit result input refs | Task owns scheduling; Agent remains the execution producer; closing Task does not close Agent |
-| Evaluation of a Task | `Evaluations.open(engine)`, `publish_dataset`, `start`, `run.wait`, `create_report` | Same ordinary Task producer; no Agent dependency | Evaluations borrows TaskEngine and its Persistence |
+| Evaluation of a Task | `Evaluations.open`, `publish_dataset`, `start`, `run.wait`, `create_report` | Same ordinary Task producer; no Agent dependency | Evaluations owns the engine it opens, or borrows the supplied engine |
 | Evaluation of an Agent | `Task.from_agent` plus the same Evaluation entry points | Agent is a target adapter, not a second evaluator | Close evaluation coordination before Task, then Agent |
 | Metrics alone | `Metrics.in_memory`, `define`, `record`, `query` | No execution engine or automatic recorder required | Metrics borrows its store and has no producer close; externally owned SQL engines stay host-owned |
 | Metrics in Agent/Task | Existing `metrics=provider` argument | Pass the same provider to both domains | Each producer closes only its own recorder, not its peer's recorder or the shared provider |
@@ -90,6 +90,31 @@ forwarding facade just to reduce the number of `service` references.
   Native snapshots are not copied into a second Runtime checkpoint archive.
 
 ## Resource ownership is selected per resource
+
+An application that needs only Task or Evaluation does not have to open
+Runtime or manage a separate Persistence context:
+
+```python
+async with TaskEngine.open(task, namespace="jobs", storage=storage) as engine:
+    run = await engine.start(graph, idempotency_key="start")
+    await run.wait()
+
+async with Evaluations.open(
+    namespace="evaluations", storage=storage, definitions=(target, scorer),
+) as evaluations:
+    run = await evaluations.start(request)
+    await run.wait()
+```
+
+When sharing resources, pass an open `Persistence` to `TaskEngine.open`, or
+pass an existing engine to `Evaluations.open(engine)`. Each borrower holds a
+reference until its cleanup completes. A close request with live borrowers
+fails without waiting or closing the dependency; close the borrowers and
+retry. Finishing the last borrow does not close anything on behalf of the
+owner. Owned resources close in dependency order: Evaluation, TaskEngine,
+then Persistence. For an Agent-backed task, use `Task.from_agent` with an
+explicit Agent and open the TaskEngine over that Agent's Persistence; neither
+independent entry point starts an Agent Runtime implicitly.
 
 `Runtime.attach` borrows Persistence, not every object in `features`. Resource
 declarations still determine who initializes and closes each dependency:
