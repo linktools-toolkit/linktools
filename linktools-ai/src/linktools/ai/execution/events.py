@@ -96,8 +96,16 @@ _BOUNDARY_METADATA_FIELDS = {
 
 
 def project_event_payload(
-    event_type: str, payload: JsonValue, *, include_content: bool
+    event_type: str, payload: JsonValue, *, include_content: bool, include_output_preview: bool = False
 ) -> JsonValue:
+    if event_type == ExecutionDeltaType.ASSISTANT_OUTPUT_PREVIEW.value:
+        if not include_output_preview:
+            return {}
+        if not isinstance(payload, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        fields = {"text", "preview_field", "preview_seq", "agent_run_seq", "model_request_seq",
+                  "stream_attempt_seq", "part_index", "part_start", "stream_truncated"}
+        return {key: value for key, value in payload.items() if key in fields}
     if include_content:
         return payload
     if event_type in {
@@ -129,17 +137,23 @@ class ExecutionDelta:
     def __post_init__(self) -> None:
         if self.position is not None:
             if not isinstance(self.position, Mapping) or any(
-                key not in {"agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index", "part_start"}
-                or (type(value) is not bool if key == "part_start" else
+                key not in {"agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index", "part_start", "preview_field", "preview_seq"}
+                or (not isinstance(value, str) or not value if key == "preview_field" else
+                    type(value) is not bool if key == "part_start" else
                     type(value) is not int or value < (0 if key == "part_index" else 1))
                 for key, value in self.position.items()
             ):
                 raise ValueError("stream delta position is invalid")
+            if ({"preview_field", "preview_seq"} & self.position.keys()
+                    and self.event_type is not ExecutionDeltaType.ASSISTANT_OUTPUT_PREVIEW):
+                raise ValueError("preview metadata requires an output preview")
             object.__setattr__(self, "position", dict(self.position))
 
     @property
     def preview_span(self) -> int:
         """Opaque preview position: empty part starts occupy one marker slot."""
+        if self.event_type is ExecutionDeltaType.ASSISTANT_OUTPUT_PREVIEW:
+            return 1
         return len(self.content) or int(bool(self.position and self.position.get("part_start")))
 
 
@@ -351,7 +365,8 @@ class LiveExecutionEventBroker:
         return self._base_event_seqs.get(execution_id)
 
     def publish(self, delta: ExecutionDelta) -> None:
-        if self._shared is not None and delta.preview_span:
+        if (self._shared is not None and delta.preview_span
+                and delta.event_type is not ExecutionDeltaType.ASSISTANT_OUTPUT_PREVIEW):
             self._shared.delta(delta.execution_id, delta.event_type, delta.content, delta.stream_truncated, delta.position)
         if not delta.preview_span:
             return

@@ -145,6 +145,7 @@ from ._tool_boundary import (
     managed_tool_descriptor_from_metadata,
     tool_capability_ref,
 )
+from ._output_preview import OutputPreview
 from ._tool_metrics import (
     ToolMetricsCapability,
 )
@@ -1239,9 +1240,10 @@ async def _materialize_agent(
     capabilities.append(model_observation)
     initial_history_count = len(without_history_system_prompts(scope.history)
                                 if scope.replace_history_system_prompt else scope.history)
+    runtime_policy = _runtime_feature_policy(compiled_agent.runtime_contributions)
     platform = await compose_platform_capabilities(
         runtime_capabilities=bound_runtime_capabilities,
-        capability_revisions=_runtime_feature_policy(compiled_agent.runtime_contributions).capability_revisions,
+        capability_revisions=runtime_policy.capability_revisions,
         initial_output_retries_used=scope.output_retries_used,
         transcript_start=(scope.run_store.checkpoint_transcript_start(
             scope.agent_run_id, initial_history_count=initial_history_count,
@@ -1308,6 +1310,10 @@ async def _materialize_agent(
     capabilities.append(
         _event_stream_capability(
             scope.event_sink, run_recorder, scope.agent_run_seq, scope.tool_operations,
+            output_preview=None if scope.parent_agent_run_id is not None or scope.context.parent_execution_id is not None else OutputPreview.from_binding(
+                scope.binding.output_binding,
+                runtime_policy.execution,
+            ),
         )
     )
     return agent, (_RunCapabilities(capabilities),)
@@ -1374,16 +1380,30 @@ def _event_stream_capability(
     recorder: AgentRunRecorder,
     agent_run_seq: int,
     tool_operations: ToolOperationBridge | None = None,
+    *, output_preview: OutputPreview | None = None,
 ) -> ProcessEventStream[AgentContext[object]]:
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
+        preview = None if output_preview is None else output_preview.new_stream()
+        preview_attempt: tuple[JsonValue, JsonValue] | None = None
         async for event in events:
             emission = _map_event(event)
             position: dict[str, JsonValue] = {"agent_run_seq": agent_run_seq, **recorder.stream_position}
             if isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent)):
                 position["part_index"] = event.index
+            if preview is not None:
+                attempt = (position.get("model_request_seq"), position.get("stream_attempt_seq"))
+                if preview_attempt is not None and preview_attempt != attempt:
+                    preview = preview.new_stream()
+                preview_attempt = attempt
+                update = preview.observe(event)
+                if update is not None:
+                    content, preview_position = update
+                    await sink(LiveDelta(ExecutionDeltaType.ASSISTANT_OUTPUT_PREVIEW, content,
+                                         {**{key: value for key, value in position.items() if key != "message_seq"},
+                                          **preview_position}))
             if isinstance(event, PartStartEvent):
                 recorder.stage_response_part(event.part, event.index, complete=False)
             elif isinstance(event, PartDeltaEvent):

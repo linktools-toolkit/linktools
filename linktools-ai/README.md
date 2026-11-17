@@ -1898,7 +1898,23 @@ result.safe_error_details
 result.error_diagnostics
 ```
 
-`error_code` remains the stable machine-readable classification used by Runtime control flow. `safe_error_details` remains the stable, explicitly selected mapping for ordinary application handling; it is not an automatically filtered copy of exception text. A failed execution may additionally expose `error_diagnostics` with:
+`error_code` remains the stable machine-readable classification used by Runtime control flow. `safe_error_details` remains the stable, explicitly selected mapping for ordinary application handling; it is not an automatically filtered copy of exception text.
+
+For recognized PydanticAI, OpenAI and Anthropic SDK failures, the optional
+`safe_error_details["provider_error"]` mapping carries only supplied `type`, `code`,
+`param` and `request_id` identifiers. Types and codes are at most 64 ASCII letters,
+digits or underscores; parameters are bounded dot/index field paths; request IDs
+are bounded `req_` identifiers or UUIDs. Parameters and request IDs are at most
+128 characters. Missing, malformed and unsupported identifiers are omitted, not
+inferred from messages or response bodies. The mapping survives public History
+reads and reopen. With referenced-content lifecycle omission, only known provider
+category/code vocabulary and standard request-field path segments survive; unknown
+identifier-shaped strings are also omitted because they may echo input. This is
+conservative diagnostic retention, not a provider acceptance registry. It does not
+change error classification, retry policy or diagnostic retention. It never
+includes provider messages, arbitrary payload fields, headers, credentials or URLs.
+
+A failed execution may additionally expose `error_diagnostics` with:
 
 - `exception_type`: original exception class name, at most 256 Unicode code points;
 - `exception_message`: `str(original_exception)`, at most 2048 Unicode code points;

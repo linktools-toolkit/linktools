@@ -25,13 +25,14 @@ class _ExecutionModelObservation:
     def __init__(
         self, owner: "ExecutionBinding", execution_id: str, principal: Principal,
         watch_tree: "ExecutionTreeWatcher", cursor: str | None, include_content: bool,
-        finalizing: asyncio.Event | None = None,
+        finalizing: asyncio.Event | None = None, *, include_output_preview: bool = False,
     ) -> None:
         self.owner = owner
         self.execution_id = execution_id
         self.principal = principal
         self.watch_tree = watch_tree
         self.include_content = include_content
+        self.include_output_preview = include_output_preview
         self.finalizing = finalizing
         positions = {} if cursor is None else decode_execution_observation_cursor(
             owner.namespace, principal.tenant_id, execution_id, cursor,
@@ -112,6 +113,7 @@ class _ExecutionModelObservation:
         stream = self.watch_tree(
             self.execution_id, principal=self.principal, after_event_seqs=self.sequences,
             include_content=self.include_content, ready=tree_ready,
+            include_output_preview=self.include_output_preview,
         )
         pending = asyncio.create_task(stream.__anext__())
         prepared = asyncio.create_task(tree_ready.wait())
@@ -254,7 +256,7 @@ class _ExecutionModelObservation:
                 # A new compensation pass also covers identities preceding the cursor.
                 final_owner = _ExecutionModelObservation(
                     self.owner, self.execution_id, self.principal, self.watch_tree,
-                    self.cursor, self.include_content,
+                    self.cursor, self.include_content, include_output_preview=self.include_output_preview,
                 )
                 final = await final_owner.final()
                 async for event in final:

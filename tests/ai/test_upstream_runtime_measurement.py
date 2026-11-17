@@ -17,7 +17,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
 from linktools.ai.capability.steps import AtomicStepPersistence
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._retention import RuntimeRetentionController
@@ -253,6 +253,8 @@ async def test_two_turn_storage_measurement(
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope="runtime")
     if checkpointed:
         features.capability(StepPersistence(store=steps, capture_frontier=os.environ.get("TURN_IO_FRONTIER", "1") == "1"), scope="runtime")
+    if os.environ.get("TURN_IO_TRACE") == "1":
+        features.capability(TraceCapability(), scope="runtime")
     features.tool(work, effect_policy=tool_effect_policy)
     features.agent("default", model="default", allow_tools=("work",))
     cache = InMemoryCacheBackend(max_bytes=16 * 1024 * 1024)
@@ -312,6 +314,10 @@ async def test_two_turn_storage_measurement(
             replay = await session.start("question-1", idempotency_key="round-1")
             assert (await replay.wait(timeout_seconds=10)).result.output == {"text": "answer"}
             assert len(effects) == 6 and sum(calls.values()) == 8
+            counts.clear()
+            transactions = []
+            open_transactions.clear()
+            active = True
             page = await runtime.history.messages("session", principal=runtime.default_principal, limit=100)
             parts = [part for message in page.items for part in message.parts]
             assert [part.content for part in parts if isinstance(part, UserPromptPart)] == ["question-0", "question-1"]
@@ -319,6 +325,12 @@ async def test_two_turn_storage_measurement(
             assert len([part for part in parts if isinstance(part, ToolReturnPart)]) == 6
             assert [part.content for part in parts if isinstance(part, TextPart)] == ["answer", "answer"]
             assert page.next_cursor is None
+            if os.environ.get("TURN_IO_TRACE") == "1":
+                metadata = await execution.model_interactions(include_content=False, limit=100)
+                bodies = await execution.model_interactions(include_content=True, limit=100)
+                assert len(metadata.items) == len(bodies.items) == 4
+            active = False
+            history_counts = dict(counts)
     finally:
         active = False
         event.remove(Engine, "before_cursor_execute", sql)
@@ -329,8 +341,8 @@ async def test_two_turn_storage_measurement(
         await engine.dispose()
     output = Path(os.environ.get("TURN_IO_OUTPUT", ".dev/turn-io-measurement.jsonl"))
     with output.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({"label": os.environ.get("TURN_IO_LABEL", "current"), "source_root": str(root), "tool_payload_bytes": len(payload), "checkpointed": checkpointed, "capture_frontier": os.environ.get("TURN_IO_FRONTIER", "1") == "1",
-                                 "coordinated": coordinated, "terminal": terminal, "tool_effect_policy": tool_effect_policy, "rounds": rows,
+        stream.write(json.dumps({"label": os.environ.get("TURN_IO_LABEL", "current"), "tool_payload_bytes": len(payload), "checkpointed": checkpointed, "capture_frontier": os.environ.get("TURN_IO_FRONTIER", "1") == "1",
+                                 "coordinated": coordinated, "terminal": terminal, "trace": os.environ.get("TURN_IO_TRACE") == "1", "history_counts": history_counts, "tool_effect_policy": tool_effect_policy, "rounds": rows,
                                  "transaction_attribution": transaction_rounds,
                                  "table_row_delta": {name: table_rows_after[name] - table_rows_before.get(name, 0) for name in table_rows_after},
                                  "assertions": {"tools": len(effects), "model_calls": sum(calls.values()),

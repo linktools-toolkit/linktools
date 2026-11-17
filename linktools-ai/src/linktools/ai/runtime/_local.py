@@ -5574,7 +5574,7 @@ class LocalExecutionBackend:
             prepared = (await native.prepare_step(run=run, events=events, snapshot=snapshot, managed_start=True)
                         if managed else await native.prepare_step(run=run, events=events, snapshot=snapshot))
             require_publication()
-            if joint or owner.observed is None or owner.attempt is None:
+            if owner.observed is None or owner.attempt is None:
                 observed = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
                 if (observed is None or observed.value.producer_generation != generation
                         or observed.value.producer_claim_id != claim_id):
@@ -5585,10 +5585,20 @@ class LocalExecutionBackend:
             written = None
 
             async def publish(group: StateGroupTransaction):
-                nonlocal written
+                nonlocal observed, next_record, written
                 transaction = group.transaction(state)
                 if not isinstance(transaction, SqlStateTransaction):
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                if joint:
+                    current = await repository.get_observed_in_transaction(
+                        transaction, execution.execution_id, tenant_id=self._tenant_id,
+                    )
+                    if (current is None or current.value.producer_generation != generation
+                            or current.value.producer_claim_id != claim_id):
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    observed = current
+                    next_record = current.value
+                    owner.observed = current
                 receipt = await repository.commit_boundary_in_transaction(
                     transaction, observed, next_record=next_record,
                     expected_producer_generation=generation, expected_producer_claim_id=claim_id,

@@ -71,6 +71,30 @@ async def test_joint_request_preserves_sync_history_with_less_sql(tmp_path: Path
         features.agent("default", model="default", allow_tools=())
         try:
             async with Persistence.open("joint", storage=PersistenceStorage.sql(engine)) as state:
+                shared_source = []
+                if enabled:
+                    repository = state.execution.executions
+                    read_source = repository.get_observed_in_transaction
+                    commit_boundary = repository.commit_boundary_in_transaction
+                    captured = {}
+
+                    async def capture_source(transaction, execution_id, **kwargs):
+                        value = await read_source(transaction, execution_id, **kwargs)
+                        if value is not None:
+                            captured[(execution_id, value.storage_revision)] = transaction
+                        return value
+
+                    async def publish_boundary(transaction, observed, **kwargs):
+                        source = captured.get((observed.value.execution_id, observed.storage_revision))
+                        if source is not None:
+                            # The fresh source and producer CAS share the physical snapshot;
+                            # no standalone read transaction is needed before publication.
+                            assert source is transaction
+                            shared_source.append(observed.value.execution_id)
+                        return await commit_boundary(transaction, observed, **kwargs)
+
+                    monkeypatch.setattr(repository, "get_observed_in_transaction", capture_source)
+                    monkeypatch.setattr(repository, "commit_boundary_in_transaction", publish_boundary)
                 async with Runtime.attach(persistence=state,
                     features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                     for name, listener in listeners:
@@ -81,6 +105,8 @@ async def test_joint_request_preserves_sync_history_with_less_sql(tmp_path: Path
                     for name, listener in listeners:
                         event.remove(engine.sync_engine, name, listener)
             assert observed == [1]
+            if enabled:
+                assert shared_source
             measurements.append({"statements": dict(traffic.statements), "transactions": transactions,
                                  "bound_bytes": traffic.bound_bytes})
         finally:

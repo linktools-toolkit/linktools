@@ -3,6 +3,7 @@
 """Provider error projection for model bindings."""
 
 from collections.abc import Mapping
+import re
 
 from pydantic_ai import exceptions as sdk_errors
 from pydantic_ai.exceptions import (
@@ -12,6 +13,27 @@ from pydantic_ai.exceptions import (
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+
+
+
+# Omission mode retains only fixed protocol vocabulary: even identifier-shaped
+# values in a provider error can echo omitted user input. These are diagnostic
+# retention rules, not provider acceptance, error classification or retry rules.
+_OMISSION_PROVIDER_TYPES = frozenset({
+    "invalid_request_error", "authentication_error", "permission_error", "not_found_error",
+    "rate_limit_error", "timeout_error", "overloaded_error", "api_error", "billing_error", "server_error",
+})
+_OMISSION_PROVIDER_CODES = frozenset({
+    "invalid_parameter", "invalid_value", "invalid_message", "unsupported_parameter", "unknown_parameter",
+    "context_length_exceeded", "invalid_prompt", "invalid_image", "rate_limit_exceeded", "insufficient_quota",
+    "server_error", "model_not_found", "invalid_api_key",
+})
+_OMISSION_PROVIDER_FIELDS = frozenset({
+    "model", "messages", "input", "content", "role", "type", "text", "image_url", "file_id", "file_data",
+    "max_tokens", "max_output_tokens", "temperature", "top_p", "top_k", "stream", "stop", "stop_sequences",
+    "tools", "tool_choice", "function", "name", "parameters", "response_format", "format", "json_schema",
+    "schema", "strict", "instructions", "system", "reasoning", "effort", "thinking", "budget_tokens",
+})
 
 
 def model_binding_error(
@@ -97,6 +119,16 @@ def model_binding_error(
             details["retry_after"] = retry_after
         if error.in_stream:
             retryable = False
+    try:
+        provider_values = _provider_error_details(error)
+    except Exception:
+        # Optional metadata must not replace the provider failure when an SDK
+        # extension exposes malformed attributes.
+        provider_values = {}
+    provider_details = _bounded_provider_error(provider_values,
+        omit_content=diagnostics is not None and diagnostics.content_omission_reason is not None)
+    if provider_details:
+        details["provider_error"] = provider_details
     return AIError(
         code,
         retryable=retryable,
@@ -134,6 +166,13 @@ def model_request_error(
         for key in ("model_name", "phase", "reason", "status_code", "retry_after"):
             if key in classified.safe_details:
                 details[key] = classified.safe_details[key]
+        provider_details = classified.safe_details.get("provider_error")
+        if provider is None:
+            # Existing AIError metadata may come from a less restrictive policy.
+            provider_details = _bounded_provider_error(provider_details,
+                omit_content=content_omission_reason is not None)
+        if provider_details:
+            details["provider_error"] = provider_details
     if code is None:
         if isinstance(classified, AIError):
             code = classified.code
@@ -149,6 +188,73 @@ def model_request_error(
         code, retryable=classified.retryable if isinstance(classified, AIError) else False,
         safe_details=details, diagnostics=diagnostics,
     )
+
+
+def _bounded_provider_error(value: object, *, omit_content: bool = False) -> dict[str, JsonValue]:
+    """Copy identifier-shaped diagnostics, never free text or an arbitrary body."""
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, JsonValue] = {}
+    patterns = {
+        "type": (64, r"[A-Za-z0-9_]+"),
+        "code": (64, r"[A-Za-z0-9_]+"),
+        "param": (128, r"[A-Za-z_][A-Za-z0-9_]*(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[[0-9]+\]))*"),
+        "request_id": (128, r"(?:req_[A-Za-z0-9_-]+|[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12})"),
+    }
+    for key, (limit, pattern) in patterns.items():
+        token = value.get(key)
+        if (isinstance(token, str) and 0 < len(token) <= limit
+                and re.fullmatch(pattern, token, flags=re.ASCII) is not None):
+            if omit_content:
+                if key == "type" and token not in _OMISSION_PROVIDER_TYPES:
+                    continue
+                if key == "code" and token not in _OMISSION_PROVIDER_CODES:
+                    continue
+                if key == "param" and any(segment not in _OMISSION_PROVIDER_FIELDS
+                        for segment in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", token, flags=re.ASCII)):
+                    continue
+            result[key] = token
+    return result
+
+
+def _provider_error_details(error: Exception) -> dict[str, object]:
+    """Read recognized SDK fields; the caller applies the retention policy once."""
+    values: dict[str, object] = {}
+    provider = error
+    if isinstance(error, ModelAPIError):
+        values.update(code=error.provider_error_code, type=error.provider_error_type)
+        if isinstance(error, ModelHTTPError) and error.headers is not None:
+            values["request_id"] = error.headers.get("x-request-id") or error.headers.get("request-id")
+        # PydanticAI documents this immediate cause as the provider SDK error.
+        provider = error.__cause__
+        if provider is None:
+            return values
+    try:
+        from openai import APIError, APIStatusError
+    except ModuleNotFoundError as missing:
+        if missing.name != "openai":
+            raise
+    else:
+        if isinstance(provider, APIError):
+            values["code"] = values.get("code") or provider.code
+            values["type"] = values.get("type") or provider.type
+            values["param"] = provider.param
+            if isinstance(provider, APIStatusError):
+                request_id = _bounded_provider_error({"request_id": provider.request_id}).get("request_id")
+                if request_id is not None:
+                    values["request_id"] = request_id
+    try:
+        from anthropic import APIStatusError
+    except ModuleNotFoundError as missing:
+        if missing.name != "anthropic":
+            raise
+    else:
+        if isinstance(provider, APIStatusError):
+            values["type"] = values.get("type") or provider.type
+            request_id = _bounded_provider_error({"request_id": provider.request_id}).get("request_id")
+            if request_id is not None:
+                values["request_id"] = request_id
+    return values
 
 
 def _is_context_window_error(error: Exception) -> bool:
