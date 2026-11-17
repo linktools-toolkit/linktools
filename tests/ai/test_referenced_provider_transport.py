@@ -206,6 +206,7 @@ async def test_native_error_echoes_of_referenced_bytes_are_omitted_from_safe_dia
     assert error.code is ErrorCode.MODEL_REQUEST_REJECTED
     assert error.safe_details == {
         "content_omission_reason": _REASON, "status_code": 400, "model_name": _MODEL,
+        "provider_error": {"type": "invalid_request_error"},
     }
     assert error.diagnostics.content_omission_reason == _REASON
     assert error.diagnostics.exception_message == f"[content omitted: {_REASON}]"
@@ -214,6 +215,7 @@ async def test_native_error_echoes_of_referenced_bytes_are_omitted_from_safe_dia
     assert error.diagnostics.exception_chain[0]["exception_type"] == rejection_type.__name__
     assert f"root: {rejection_type.__name__}:" in error.diagnostics.traceback
     assert "in request\n" in error.diagnostics.traceback
-    rendered = json.dumps(error.diagnostics.to_payload()) + str(error) + "".join(traceback.format_exception(error))
+    rendered = (json.dumps(error.diagnostics.to_payload()) + json.dumps(error.safe_details)
+                + str(error) + "".join(traceback.format_exception(error)))
     assert _BODY.decode() not in rendered and _BASE64 not in rendered
     assert source.closes == 1 and all(client.is_closed for client in clients)
