@@ -144,9 +144,14 @@ class ExecutionTreeStreamer:
         *,
         principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None,
+        include_descendants: bool = True,
     ) -> tuple[tuple[ExecutionView, int, int], ...]:
         """Freeze one finite visible subtree and its per-execution durable cutoffs."""
+        if not isinstance(include_descendants, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         sequences = _normalize_after_event_seqs(after_event_seqs)
+        if not include_descendants and (set(sequences) | set(get_preview_positions(sequences))) - {execution_id}:
+            raise AIError(ErrorCode.CURSOR_INVALID)
         root = await self._executions.inspect(execution_id, principal=principal)
         _validate_root(root, execution_id)
         views = {execution_id: root}
@@ -170,6 +175,8 @@ class ExecutionTreeStreamer:
             return True
 
         async def discover(parent_ids: tuple[str, ...]) -> None:
+            if not include_descendants:
+                return
             remaining = deque(parent_ids)
             while remaining:
                 parent_id = remaining.popleft()
@@ -263,9 +270,11 @@ class ExecutionTreeStreamer:
         after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         include_output_preview: bool = False,
+        include_descendants: bool = True,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        if not isinstance(include_content, bool) or not isinstance(include_output_preview, bool):
+        if (not isinstance(include_content, bool) or not isinstance(include_output_preview, bool)
+                or not isinstance(include_descendants, bool)):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return self._stream(
             execution_id,
@@ -273,6 +282,7 @@ class ExecutionTreeStreamer:
             after_event_seqs=_normalize_after_event_seqs(after_event_seqs),
             include_content=include_content,
             include_output_preview=include_output_preview,
+            include_descendants=include_descendants,
             ready=ready,
         )
 
@@ -284,8 +294,11 @@ class ExecutionTreeStreamer:
         after_event_seqs: Mapping[str, int],
         include_content: bool,
         include_output_preview: bool,
+        include_descendants: bool,
         ready: asyncio.Event | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
+        if not include_descendants and (set(after_event_seqs) | set(get_preview_positions(after_event_seqs))) - {execution_id}:
+            raise AIError(ErrorCode.CURSOR_INVALID)
         root = await self._executions.inspect(execution_id, principal=principal)
         _validate_root(root, execution_id)
 
@@ -310,6 +323,8 @@ class ExecutionTreeStreamer:
             pending[view.execution_id] = _next_event_task(stream, view.execution_id, after_event_seqs)
 
         def wait_for_children(parent_id: str) -> None:
+            if not include_descendants:
+                return
             child_waits[parent_id] = asyncio.create_task(
                 subscriptions[parent_id].wait(),
                 name=f"execution-tree-children-{parent_id}",
@@ -328,7 +343,7 @@ class ExecutionTreeStreamer:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return False
             try:
-                subscription = self._broker.subscribe(view.execution_id)
+                subscription = self._broker.subscribe(view.execution_id) if include_descendants else None
             except AIError:
                 raise
             except Exception as error:
@@ -352,6 +367,8 @@ class ExecutionTreeStreamer:
             return add_view(child, depths[parent_id] + 1)
 
         async def discover_persisted_children(parent_ids: tuple[str, ...]) -> bool:
+            if not include_descendants:
+                return False
             added = False
             remaining = deque(parent_ids)
             scanned: set[str] = set()
@@ -450,10 +467,11 @@ class ExecutionTreeStreamer:
                 ready.set()
 
             discovery_backoff = _DISCOVERY_BACKOFF_INITIAL
-            discovery_wait = asyncio.create_task(
-                asyncio.sleep(discovery_backoff),
-                name=f"execution-tree-discovery-{execution_id}",
-            )
+            if include_descendants:
+                discovery_wait = asyncio.create_task(
+                    asyncio.sleep(discovery_backoff),
+                    name=f"execution-tree-discovery-{execution_id}",
+                )
             final_discovery = False
             while True:
                 if not pending:

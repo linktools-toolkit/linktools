@@ -21,6 +21,7 @@ from ._model_resolver import _ModelResolver
 from ..spec import (
     DEFAULT_AGENT_RETRIES,
     AgentSpec,
+    RepositoryInstructions,
     AgentSpecCodec,
     CapabilityRef,
     SubagentRef,
@@ -62,6 +63,7 @@ class AgentCompiler:
         agents: Mapping[str, AgentSpec],
         capability_filter: CapabilityFilter | None = None,
         defaults: Mapping[str, JsonValue] | None = None,
+        repository_instructions: RepositoryInstructions | None = None,
     ) -> None:
         if models is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -70,6 +72,7 @@ class AgentCompiler:
         if not isinstance(agent_settings, dict):
             raise TypeError("agent defaults must be a JSON object")
         self._defaults = _AgentDefaults(**agent_settings)
+        self._repository_instructions = repository_instructions
         self._runtime_contributions = tuple(item for item in candidates if item.scope == "runtime")
         candidates = tuple(item for item in candidates if item.scope == "agent")
         generic = tuple(item for item in candidates if item.kind == "capability")
@@ -306,6 +309,7 @@ class AgentCompiler:
             compiled_agent,
             output_binding,
             binding_contract,
+            repository_instructions=self._repository_instructions,
         )
 
     def restore(
@@ -355,6 +359,7 @@ class AgentCompiler:
             compiled_agent,
             output_binding,
             binding_contract,
+            repository_instructions=self._repository_instructions,
         )
 
     def _restore_capabilities(

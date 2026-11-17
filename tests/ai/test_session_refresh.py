@@ -290,7 +290,7 @@ async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: P
         await state.conversation.sessions.create(_session())
         await _admit(state, status=ExecutionStatus.PENDING_START)
         checked = []
-        facade = RuntimeSessions(_service(state), object(), bind_session=None, ensure_open=lambda: checked.append(True))
+        facade = RuntimeSessions(_service(state), object(), start_session=None, bind_session=None, ensure_open=lambda: checked.append(True))
         detail = await facade.refresh("session", principal=_PRINCIPAL)
         assert detail.session.active_execution_id == "active"
         assert detail.timeline.items[0].execution_id == "active"
@@ -420,7 +420,7 @@ async def test_runtime_sessions_refresh_delegates_to_the_injected_service() -> N
         async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit))
             return result
-    facade = RuntimeSessions(Service(), object(), bind_session=None, ensure_open=lambda: calls.append("open"))
+    facade = RuntimeSessions(Service(), object(), start_session=None, bind_session=None, ensure_open=lambda: calls.append("open"))
     assert await facade.refresh("session", principal=_PRINCIPAL, cursor="cursor", limit=2) is result
     assert calls == ["open", ("session", _PRINCIPAL, "cursor", 2)]
 

@@ -26,6 +26,7 @@ class _ExecutionModelObservation:
         self, owner: "ExecutionBinding", execution_id: str, principal: Principal,
         watch_tree: "ExecutionTreeWatcher", cursor: str | None, include_content: bool,
         finalizing: asyncio.Event | None = None, *, include_output_preview: bool = False,
+        include_descendants: bool = True,
     ) -> None:
         self.owner = owner
         self.execution_id = execution_id
@@ -33,6 +34,7 @@ class _ExecutionModelObservation:
         self.watch_tree = watch_tree
         self.include_content = include_content
         self.include_output_preview = include_output_preview
+        self.include_descendants = include_descendants
         self.finalizing = finalizing
         positions = {} if cursor is None else decode_execution_observation_cursor(
             owner.namespace, principal.tenant_id, execution_id, cursor,
@@ -70,6 +72,7 @@ class _ExecutionModelObservation:
     async def capture(self, *, subscribe: bool = True) -> tuple[tuple[ExecutionView, int, int], ...]:
         captured = await self.owner.capture_tree(
             self.execution_id, principal=self.principal, after_event_seqs=ExecutionWatchPositions(self.sequences, self.previews),
+            **({"include_descendants": False} if not self.include_descendants else {}),
         )
         for view, depth, _ in captured:
             await self.models.add(self.execution_id, view, depth, subscribe=subscribe)
@@ -114,6 +117,7 @@ class _ExecutionModelObservation:
             self.execution_id, principal=self.principal, after_event_seqs=self.sequences,
             include_content=self.include_content, ready=tree_ready,
             include_output_preview=self.include_output_preview,
+            **({"include_descendants": False} if not self.include_descendants else {}),
         )
         pending = asyncio.create_task(stream.__anext__())
         prepared = asyncio.create_task(tree_ready.wait())
@@ -257,6 +261,7 @@ class _ExecutionModelObservation:
                 final_owner = _ExecutionModelObservation(
                     self.owner, self.execution_id, self.principal, self.watch_tree,
                     self.cursor, self.include_content, include_output_preview=self.include_output_preview,
+                    include_descendants=self.include_descendants,
                 )
                 final = await final_owner.final()
                 async for event in final:

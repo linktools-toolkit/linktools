@@ -403,6 +403,21 @@ same option. The default remains tree events only. In the opt-in mode each
 when tree content is requested. Agent and Session convenience calls do not
 forward this option.
 
+`Execution.watch(include_descendants=False)` observes only the selected execution,
+including its optional model metadata and output previews. It does not discover
+children, subscribe to child notifications, or add descendant model readers.
+The default `include_descendants=True` keeps full-tree observation available for
+explicit trace views. Both choices use the same authorized event and history
+owners, content projections, cancellation cleanup, and finite final drain.
+
+Root-only watch accepts a compatible root checkpoint. A cursor containing a
+non-root durable position or preview position is rejected rather than silently
+skipping that descendant. A root-only checkpoint can seed full-tree observation;
+root events resume at their saved positions and newly included descendants start
+at their own initial positions. Model metadata still requires its separate
+metadata-mode cursor. This option changes observation scope, not execution or
+cancellation scope, and does not change `wait()`'s tree callback behavior.
+
 The outer cursor is the metadata-mode checkpoint. A wrapped tree event retains
 its independent tree-only cursor; the two modes reject each other's cursors.
 Metadata delivery reuses the current durable event coordinates. Every new

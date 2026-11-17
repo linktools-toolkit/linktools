@@ -422,26 +422,44 @@ class SessionManager(Generic[HandleT]):
         async with self.consume_session(session_id, request.principal.tenant_id):
             record = await self._prepare_resume_session(agent_id, session_id, request.principal,
                 **({"read_session": read_session} if read_session is not None else {}))
-            record = await self.reconcile_admission(record)
-            if record.cwd is not None and self._canonicalize_path is None:
-                raise AIError(
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    safe_details={"field": "cwd", "reason": "workspace_required"},
-                )
-            await self._authorize_resume_execution(session_id, request.principal)
-            if record.agent_id != agent_id:
-                raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-            return await (execution or self._execution).start_for_session(
-                agent_id,
-                binding_digest,
-                session_id,
-                request,
-                session=record,
+            return await self._resume_record(
+                record, agent_id, binding_digest, session_id, request,
                 binding_contract=binding_contract, resolved_binding=resolved_binding,
                 dependency_hold_id=dependency_hold_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
-                budget_scope_id=budget_scope_id,
+                budget_scope_id=budget_scope_id, execution=execution,
             )
+
+    async def _resume_record(
+        self, record: SessionRecord, agent_id: str, binding_digest: str,
+        session_id: str, request: ResumeSessionRequest, *,
+        binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: "AgentBinding | None" = None,
+        dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
+        execution: SessionExecutionService[HandleT] | None = None,
+    ) -> HandleT:
+        record = await self.reconcile_admission(record)
+        if record.cwd is not None and self._canonicalize_path is None:
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "cwd", "reason": "workspace_required"},
+            )
+        await self._authorize_resume_execution(session_id, request.principal)
+        if record.agent_id != agent_id:
+            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+        return await (execution or self._execution).start_for_session(
+            agent_id,
+            binding_digest,
+            session_id,
+            request,
+            session=record,
+            binding_contract=binding_contract, resolved_binding=resolved_binding,
+            dependency_hold_id=dependency_hold_id,
+            requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
+        )
 
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
@@ -931,6 +949,14 @@ class SessionManager(Generic[HandleT]):
     ) -> AsyncIterator[None]:
         """Keep session resources retained while a control or display reader uses them."""
         await self.require_available()
+        async with self._retain_session(session_id, tenant_id, display_read=display_read):
+            yield
+
+    @asynccontextmanager
+    async def _retain_session(
+        self, session_id: str, tenant_id: str, *, display_read: bool = False,
+    ) -> AsyncIterator[None]:
+        """Retain resources while the caller checks its captured admission policy."""
         completed = None
         if display_read:
             if self._display_close_started:

@@ -10,6 +10,7 @@ from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
+    RepositoryInstructions,
     AgentSpecCodec,
     CapabilityRef,
     SubagentRef,
@@ -245,6 +246,8 @@ class AgentBinding:
     compiled_agent: "CompiledAgent"
     output_binding: OutputBinding
     binding_contract: AgentBindingContract
+    # Current declaration rules travel only with this operation, not its durable contract.
+    repository_instructions: RepositoryInstructions | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         from ._compiled import CompiledAgent
