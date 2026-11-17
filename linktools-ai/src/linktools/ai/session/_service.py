@@ -397,6 +397,13 @@ class SessionManager(Generic[HandleT]):
         return await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ,
                                           read_session=read_session)
 
+    async def _authorize_resume_execution(self, session_id: str, principal: Principal) -> None:
+        """Retain the generic adapter's admission policy boundary."""
+        await self._authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_RUN,
+            ResourceRef(ResourceKind.EXECUTION, session_id, principal.tenant_id),
+        )
+
     async def _resume(
         self,
         agent_id: str,
@@ -421,15 +428,7 @@ class SessionManager(Generic[HandleT]):
                     ErrorCode.REQUEST_FIELD_INVALID,
                     safe_details={"field": "cwd", "reason": "workspace_required"},
                 )
-            await self._authorization.authorize(
-                request.principal,
-                AuthorizationAction.EXECUTION_RUN,
-                ResourceRef(
-                    ResourceKind.EXECUTION,
-                    session_id,
-                    request.principal.tenant_id,
-                ),
-            )
+            await self._authorize_resume_execution(session_id, request.principal)
             if record.agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             return await (execution or self._execution).start_for_session(

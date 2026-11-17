@@ -48,7 +48,7 @@ from ..persistence.captures import (
     read_capture_record, read_capture_value, publish_capture_record, prepare_capture_value,
 )
 from ..persistence.codec import decode_domain, encode_domain, iter_runtime_object_refs
-from ..persistence.state import RecordQuery, StateTransaction, scope_key
+from ..persistence.state import RecordQuery, StateStore, StateTransaction, scope_key
 from ..execution import StoredUserInput
 
 ExecutionInputCaptureRef: TypeAlias = AgentInputCaptureRef | TaskInvocationInputRef
@@ -127,17 +127,24 @@ class InputCaptures:
         *,
         tenant_id: str,
         execution_repositories: ExecutionRepositories,
-        task_repositories: TaskRepositories,
+        task_repositories: TaskRepositories | None,
         object_stores: Mapping[PersistenceDomain, ObjectStore],
         context_archive: ExecutionContextArchive,
         execution_retention: StorageRetentionMode,
         task_retention: StorageRetentionMode,
         prepare_pending_capture: Callable[[str, Principal], Awaitable[None]] | None = None,
+        _persistence: Persistence | None = None,
     ) -> None:
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._execution_repositories = execution_repositories
-        self._task_repositories = task_repositories
+        if task_repositories is not None:
+            self._resolve_tasks: Callable[[], TaskRepositories] = lambda: task_repositories
+        elif _persistence is not None:
+            self._resolve_tasks = lambda: _persistence.task
+        else:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        self._persistence = _persistence
         self._object_stores = object_stores
         self._context_archive = context_archive
         self._execution_retention = execution_retention
@@ -146,7 +153,7 @@ class InputCaptures:
         self._execution = execution
         self._materializer = materializer
         self._prepare_pending_capture = prepare_pending_capture
-        self._state_store = task_repositories.tasks.state_store
+        self._direct_state_store = None if task_repositories is None else task_repositories.tasks.state_store
 
     @classmethod
     def from_persistence(
@@ -170,8 +177,8 @@ class InputCaptures:
             persistence.namespace, authorization, execution, materializer,
             tenant_id=persistence.tenant_id,
             execution_repositories=persistence.execution,
-            task_repositories=persistence.task,
-            object_stores={domain: persistence.object_store(domain) for domain in PersistenceDomain},
+            task_repositories=None,
+            object_stores={},
             context_archive=ExecutionContextArchive(
                 persistence.execution.executions.state_store,
                 persistence.archive_object_store(PersistenceDomain.EXECUTION),
@@ -182,7 +189,21 @@ class InputCaptures:
             execution_retention=persistence.plan.route(PersistenceDomain.EXECUTION).retention,
             task_retention=persistence.plan.route(PersistenceDomain.TASK).retention,
             prepare_pending_capture=prepare_pending_capture,
+            _persistence=persistence,
         )
+
+    @property
+    def _tasks(self) -> TaskRepositories:
+        return self._resolve_tasks()
+
+    @property
+    def _state_store(self) -> StateStore:
+        return self._direct_state_store if self._direct_state_store is not None else self._tasks.tasks.state_store
+
+    def _objects(self, domain: PersistenceDomain) -> ObjectStore:
+        if self._persistence is not None:
+            return self._persistence.object_store(domain)
+        return self._object_stores[domain]
 
     def _key(self, tenant_id: str, kind: str, identity: str) -> str:
         return input_capture_key(self._namespace, tenant_id, kind, identity)
@@ -190,7 +211,7 @@ class InputCaptures:
     async def _put(self, key: str, value: JsonValue) -> str:
         digest = canonical_sha256(value)
         stored = await prepare_capture_value(key, value, write_object=lambda raw: put_runtime_object(
-            self._object_stores[PersistenceDomain.TASK], ObjectKeyFactory(self._namespace),
+            self._objects(PersistenceDomain.TASK), ObjectKeyFactory(self._namespace),
             PersistenceDomain.TASK, self._tenant_id, raw))
         await publish_capture_record(self._state_store, namespace=self._namespace,
             tenant_id=self._tenant_id, key=key, value=stored,
@@ -200,7 +221,7 @@ class InputCaptures:
     async def _get(self, key: str, digest: str | None = None) -> JsonValue | None:
         value = await read_capture_value(self._state_store, namespace=self._namespace,
             tenant_id=self._tenant_id, key=key, read_object=lambda ref: read_runtime_object(
-                self._object_stores[PersistenceDomain.TASK], ref))
+                self._objects(PersistenceDomain.TASK), ref))
         if value is None:
             return None
         if digest is not None and canonical_sha256(value) != digest:
@@ -497,7 +518,7 @@ class InputCaptures:
                     "tenant_id": principal.tenant_id, "capture_key": key, "expired_at": now.isoformat()})
 
     async def record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
-        state = await self._task_repositories.tasks.graph_state(invocation.graph_id, tenant_id=invocation.principal.tenant_id)
+        state = await self._tasks.tasks.graph_state(invocation.graph_id, tenant_id=invocation.principal.tenant_id)
         node = next((node for node in state.nodes if node.node_id == invocation.node.node_id), None) if state is not None else None
         if node is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -529,13 +550,13 @@ class InputCaptures:
     ) -> JsonValue:
         if payload.encoding == "json-attachments":
             raw = await read_attachment_payload(payload,
-                read_object=lambda ref: read_runtime_object(self._object_stores[domain], ref))
+                read_object=lambda ref: read_runtime_object(self._objects(domain), ref))
         elif payload.kind == "inline":
             return payload.decode()
         else:
             if payload.ref is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            raw = await read_runtime_object(self._object_stores[domain], payload.ref)
+            raw = await read_runtime_object(self._objects(domain), payload.ref)
         try:
             return raw.decode("utf-8") if text else json.loads(raw)
         except (UnicodeDecodeError, ValueError) as error:
@@ -559,11 +580,11 @@ class InputCaptures:
             if state.status is not TaskStatus.SUCCEEDED:
                 captured.append(TaskDependencyCapture(name, state))
                 continue
-            admission = await self._task_repositories.admissions.get(source_graph, tenant_id=principal.tenant_id)
+            admission = await self._tasks.admissions.get(source_graph, tenant_id=principal.tenant_id)
             if admission is None:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
             await self._authorize(principal, ResourceKind.TASK_GRAPH, source_graph, AuthorizationAction.TASK_READ, admission.principal.principal_id)
-            records = await self._task_repositories.tasks.get_results(source_graph, (source_node,), tenant_id=principal.tenant_id)
+            records = await self._tasks.tasks.get_results(source_graph, (source_node,), tenant_id=principal.tenant_id)
             record = records.get(source_node)
             if record is None or record.result_digest != state.result_digest:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
@@ -652,7 +673,7 @@ class InputCaptures:
             node = decode_domain(invocation["node"], TaskNode)
             states = decode_domain(invocation["dependency_states"], dict[str, TaskDependencyState])
             dependencies = await self._capture_dependencies(node, invocation["graph_id"], states, principal)
-            admission = await self._task_repositories.admissions.get(invocation["graph_id"], tenant_id=principal.tenant_id)
+            admission = await self._tasks.admissions.get(invocation["graph_id"], tenant_id=principal.tenant_id)
             if admission is None:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
             bindings = await TaskGraphBindingCaptureStore(self._namespace, self._state_store).load(admission)
@@ -872,12 +893,12 @@ class InputCaptures:
         principal = request.principal
         await self._authorize(principal, ResourceKind.TASK_GRAPH, graph_id, AuthorizationAction.TASK_READ)
         await self._authorize(principal, ResourceKind.TASK_GRAPH, graph_id, AuthorizationAction.TASK_CAPTURE_GRAPH)
-        admission = await self._task_repositories.admissions.get(graph_id, tenant_id=principal.tenant_id)
+        admission = await self._tasks.admissions.get(graph_id, tenant_id=principal.tenant_id)
         if admission is None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         await self._authorize(principal, ResourceKind.TASK_GRAPH, graph_id, AuthorizationAction.TASK_READ, admission.principal.principal_id)
         await self._authorize(principal, ResourceKind.TASK_GRAPH, graph_id, AuthorizationAction.TASK_CAPTURE_GRAPH, admission.principal.principal_id)
-        state = await self._task_repositories.tasks.graph_state(graph_id, tenant_id=principal.tenant_id)
+        state = await self._tasks.tasks.graph_state(graph_id, tenant_id=principal.tenant_id)
         if state is None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         if request.mode == "materialized_graph":

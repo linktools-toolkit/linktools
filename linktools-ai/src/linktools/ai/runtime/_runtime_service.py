@@ -5,7 +5,9 @@
 import asyncio
 import math
 import secrets
+from builtins import ExceptionGroup
 from dataclasses import replace
+from functools import partial
 from types import MappingProxyType
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Generic, Protocol, TypedDict, TypeVar, overload
@@ -187,6 +189,7 @@ class Runtime(Generic[AppT]):
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         self._close_coordinator: _RuntimeCloseCoordinator | None = None
+        self._settled_evaluation_errors: list[Exception] = []
         self._agent_lifecycle: _AgentLifecycle | None = None
         self._close_callback: Callable[[], Awaitable[None]] | None = None
         self._handoff_callback: Callable[[], Awaitable[None]] | None = None
@@ -202,20 +205,34 @@ class Runtime(Generic[AppT]):
 
     @classmethod
     def open(
-        cls, namespace: str, *, storage: PersistenceStorage, tenant_id: str = "default",
+        cls, namespace: str | None = None, *, storage: PersistenceStorage | None = None,
+        persistence: Persistence | None = None, tenant_id: str | None = None,
         context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
         auto_recover: bool = True,
     ) -> "Runtime[AppT]":
-        """Own persistence and only the producer domains explicitly composed here.
+        """Open selected producer domains, owning storage or borrowing persistence.
 
-        Keep the returned Runtime before entering when the host needs to retry
-        cleanup after an initialization failure. Features opt into the Agent
-        domain; omitting them does not start an Agent producer.
+        Supply namespace and storage to own their lifetime, or an already open,
+        writable persistence without namespace, storage or tenant overrides.
+        Keep the returned Runtime before entering when cleanup may need retrying.
+        Features opt into Agent; omitting them does not start an Agent producer.
         """
+        if persistence is not None:
+            if namespace is not None or storage is not None or tenant_id is not None:
+                raise ValueError("persistence cannot be combined with namespace, storage or tenant_id")
+            if not isinstance(persistence, Persistence) or not persistence.ready or persistence.read_only:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "persistence must be open and writable")
+            return cls(
+                persistence=persistence, namespace=persistence.namespace, tenant_id=persistence.tenant_id,
+                owns_persistence=False, context=context, features=features, metrics=metrics,
+                authorization=authorization, auto_recover=auto_recover,
+            )
+        if namespace is None or storage is None:
+            raise ValueError("namespace and storage are required without persistence")
         return cls(
-            persistence=Persistence(storage), namespace=namespace, tenant_id=tenant_id,
+            persistence=Persistence(storage), namespace=namespace, tenant_id="default" if tenant_id is None else tenant_id,
             owns_persistence=True, context=context, features=features, metrics=metrics,
             authorization=authorization, auto_recover=auto_recover,
         )
@@ -227,12 +244,9 @@ class Runtime(Generic[AppT]):
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
         auto_recover: bool = True,
     ) -> "Runtime[AppT]":
-        """Borrow an open Persistence; its provider retains its close responsibility."""
-        if not isinstance(persistence, Persistence) or not persistence.ready or persistence.read_only:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "persistence must be open and writable")
-        return cls(
-            persistence=persistence, namespace=persistence.namespace, tenant_id=persistence.tenant_id,
-            owns_persistence=False, context=context, features=features, metrics=metrics,
+        """Compatibility alias for open(persistence=...); the provider owns storage."""
+        return cls.open(
+            persistence=persistence, context=context, features=features, metrics=metrics,
             authorization=authorization, auto_recover=auto_recover,
         )
 
@@ -952,7 +966,7 @@ class Runtime(Generic[AppT]):
     async def _cleanup(self) -> None:
         if self._close_coordinator is None:
             actions: list[Callable[[], Awaitable[None]]] = [
-                *(domain.close for domain in reversed(self._evaluations)),
+                *(partial(self._close_evaluation, domain) for domain in reversed(self._evaluations)),
                 *(engine.close for engine in reversed(self._task_engines)),
                 self._close_agent,
             ]
@@ -969,6 +983,21 @@ class Runtime(Generic[AppT]):
             self._closed = True
             self._ready = False
             _logger.info("runtime close completed: tenant=%s", self.tenant_id)
+        errors, self._settled_evaluation_errors = self._settled_evaluation_errors, []
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("Evaluation cleanup failed", errors)
+
+    async def _close_evaluation(self, evaluation: Evaluations) -> None:
+        try:
+            await evaluation.close()
+        except Exception as error:
+            if not evaluation.closed:
+                raise
+            # A consumed scope error cannot be retried. Its Task and Persistence
+            # dependencies must still close in order before surfacing the error.
+            self._settled_evaluation_errors.append(error)
 
     async def _close_agent(self) -> None:
         sessions = tuple(self._observation_sessions)

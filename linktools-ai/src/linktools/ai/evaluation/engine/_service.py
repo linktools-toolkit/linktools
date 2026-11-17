@@ -26,7 +26,7 @@ from ...agent import AgentInputCaptureRef
 from ...asset import AssetStoreReader, AssetVersionRef
 from ...core import (
     AuthorizationAction, AuthorizationPolicy, CursorPayload, CursorSigner, HmacCursorSigner,
-    ExecutionStatus, IdempotencyStatus, JsonValue, Page, Principal,
+    ExecutionContext, ExecutionStatus, IdempotencyStatus, JsonValue, Page, Principal,
     ResourceKind, ResourceRef, TaskStatus, UsageMetrics, canonical_json_bytes, canonical_sha256, deterministic_id,
     normalize_json_value, principal_identity_payload, validate_idempotency_key,
     validate_page_limit,
@@ -47,7 +47,7 @@ from ...evaluation import (
     build_evaluation_report, capture_mapping, evaluation_completion,
 )
 from ...task import (
-    Task, TaskGraph, TaskGraphState, TaskInputSupplyRequest,
+    Task, TaskExpander, TaskGraph, TaskGraphState, TaskInputSupplyRequest,
     TaskNode, TaskNodeContext, TaskNodeResultRef, TaskRef, TaskGraphLimits, TaskSubmissionCancellation,
 )
 from ...inputs import AgentTaskInput
@@ -58,7 +58,7 @@ from ...inputs import input_intent
 from ...inputs import CaptureInputRequest
 from ...persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ...execution import UsageSummary, TaskGraphRunEvent
-from ...observe import WaitResult
+from ...observe import MetricRecorderProvider, WaitResult
 from ...observe.stream import (
     ObservationSession, wait_for_result, validate_wait, await_stream_cleanup,
     drain_stream_tasks, is_observation_cleanup, report_observation_error,
@@ -67,7 +67,7 @@ from ...observe.cursors import (
     decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
 )
 from ...core import token_seed
-from ...persistence import PersistenceDomain
+from ...persistence import PersistenceDomain, PersistenceStorage
 from ...persistence.snapshots import SnapshotExclusiveGuard
 from ...execution import IdempotencyRecord
 from ...persistence.contracts import (
@@ -151,11 +151,14 @@ class Evaluations:
         """Create an evaluation producer whose caller owns its close lifetime."""
         from ...history import History
 
-        history_context = History.open(
-            persistence=engine.persistence, authorization=engine.authorization,
-        )
-        history = await history_context.__aenter__()
+        release_engine = engine.bind_evaluation()
+        history_context = None
+        history = None
         try:
+            history_context = History.open(
+                persistence=engine.persistence, authorization=engine.authorization,
+            )
+            history = await history_context.__aenter__()
             evaluations = cls(
                 engine, engine.authorization, engine.inputs, history,
                 cursor_signer=HmacCursorSigner("evaluation", token_seed(engine.namespace)),
@@ -163,20 +166,54 @@ class Evaluations:
             )
         except BaseException as primary:
             try:
-                await _finish_context_cleanup(history_context.__aexit__(None, None, None))
+                if history is not None:
+                    await _finish_context_cleanup(history_context.__aexit__(None, None, None))
             except BaseException as cleanup:
                 raise BaseExceptionGroup("Evaluation initialization and cleanup failed", [primary, cleanup])
+            finally:
+                release_engine()
             raise
         evaluations._history_context = history_context
+        evaluations._release_engine = release_engine
         return evaluations
 
     @classmethod
     @asynccontextmanager
     async def open(
-        cls, engine: "TaskEngine[AppT]", *, assets: Sequence[AssetStoreReader] = (),
+        cls, engine: "TaskEngine[AppT] | None" = None, *, assets: Sequence[AssetStoreReader] = (),
+        definitions: Sequence[Task[AppT, object] | TaskExpander] = (),
+        storage: PersistenceStorage | None = None, namespace: str | None = None,
+        tenant_id: str = "default", context: ExecutionContext[AppT] | None = None,
+        authorization: AuthorizationPolicy | None = None, metrics: MetricRecorderProvider | None = None,
+        asset_sources: Mapping[str, AssetStoreReader] | None = None,
+        model_refresh_interval_seconds: float = 1.0,
     ) -> AsyncIterator["Evaluations"]:
-        """Own evaluation coordination while borrowing task execution and persistence."""
-        evaluations = await cls.create(engine, assets=assets)
+        """Borrow an engine, or own standalone Task execution and its storage lifetime."""
+        from ...task.engine import TaskEngine
+
+        engine_context = None
+        if engine is not None:
+            if (definitions or storage is not None or namespace is not None or tenant_id != "default"
+                    or context is not None or authorization is not None or metrics is not None
+                    or asset_sources is not None or model_refresh_interval_seconds != 1.0):
+                raise ValueError("an existing engine cannot be combined with standalone engine options")
+        else:
+            engine_context = TaskEngine.open(
+                *definitions, storage=storage, namespace=namespace, tenant_id=tenant_id,
+                context=context, authorization=authorization, metrics=metrics,
+                asset_sources=asset_sources, model_refresh_interval_seconds=model_refresh_interval_seconds,
+            )
+            engine = await engine_context.__aenter__()
+        try:
+            evaluations = await cls.create(engine, assets=assets)
+        except BaseException as primary:
+            if engine_context is not None:
+                try:
+                    await _finish_context_cleanup(engine_context.__aexit__(None, None, None))
+                except BaseException as cleanup:
+                    raise BaseExceptionGroup("Evaluation initialization and task cleanup failed", [primary, cleanup])
+            raise
+        evaluations._engine_context = engine_context
         try:
             yield evaluations
         except BaseException as primary:
@@ -229,7 +266,10 @@ class Evaluations:
         self._controls_idle = asyncio.Event()
         self._controls_idle.set()
         self._close_task: asyncio.Task[None] | None = None
+        self._terminal_cleanup_error: BaseException | None = None
         self._history_context: AbstractAsyncContextManager[History] | None = None
+        self._engine_context: AbstractAsyncContextManager[TaskEngine[AppT]] | None = None
+        self._release_engine: Callable[[], None] | None = None
         self._recorder = Task("evaluation.record.v1", self._record_score, effect_policy="replay_safe")
 
     def _register_observation(self, session: ObservationSession) -> None:
@@ -308,11 +348,20 @@ class Evaluations:
         finally:
             self._notifying_closed = False
 
+    @property
+    def closed(self) -> bool:
+        """Whether owned resources are drained and close notifications completed."""
+        return self._closed and not self._close_callbacks
+
     async def close(self) -> None:
         """Settle admitted producer controls, then stop owned coordination and resource scopes."""
         self.stop_admission()
         if self._closed:
             self._notify_closed()
+            if self._terminal_cleanup_error is not None:
+                # Keep a consumed scope's failure observable, independently of
+                # close callbacks whose notification can genuinely be retried.
+                raise self._terminal_cleanup_error
             return
         if self._close_task is None or self._close_task.done():
             self._close_task = asyncio.create_task(self._cleanup(), name="evaluation-close")
@@ -342,22 +391,59 @@ class Evaluations:
         errors = [result for result in observation_results if isinstance(result, BaseException)]
         errors.extend(result for result in watcher_results
                       if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError))
+        # Observation close can still own resources; joined watcher tasks are
+        # already terminal even when their one-shot scope exit failed.
+        retryable = any(isinstance(result, BaseException) for result in observation_results)
         try:
             await self._close_trial_scopes()
         except BaseException as error:
             if all(error is not previous for previous in errors):
                 errors.append(error)
-        if len(errors) == 1:
-            raise errors[0]
-        if errors:
-            raise BaseExceptionGroup("Evaluation cleanup failed", errors)
-        if self._history_context is not None:
-            # Retry the owned reader directly: a failed context exit is not reentrant.
-            await self._history.close()
-            await self._history_context.__aexit__(None, None, None)
-            self._history_context = None
+
+        def raise_errors() -> None:
+            if len(errors) == 1:
+                raise errors[0]
+            if errors:
+                raise BaseExceptionGroup("Evaluation cleanup failed", errors)
+
+        if retryable or any(not scope.drained for scope in self._trial_scopes.values()):
+            if not errors:
+                errors.append(AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                                      "Evaluation scope cleanup is still active"))
+            raise_errors()
+        try:
+            if self._history_context is not None:
+                # Retry the owned reader directly: a failed context exit is not reentrant.
+                await self._history.close()
+                await self._history_context.__aexit__(None, None, None)
+                self._history_context = None
+            if self._release_engine is not None:
+                self._release_engine()
+                self._release_engine = None
+            if self._engine_context is not None:
+                # Keep the owned engine available for retry if cleanup fails. Do not
+                # consume its one-shot context until direct close has succeeded.
+                await self._engine_owner.close()
+                await self._engine_context.__aexit__(None, None, None)
+                self._engine_context = None
+        except BaseException as error:
+            if all(error is not previous for previous in errors):
+                errors.append(error)
+            raise_errors()
         self._closed = True
-        self._notify_closed()
+        if errors:
+            self._terminal_cleanup_error = (errors[0] if len(errors) == 1 else
+                BaseExceptionGroup("Evaluation cleanup failed", errors))
+        self._trial_scopes.clear()
+        try:
+            self._notify_closed()
+        except BaseException as error:
+            if self._terminal_cleanup_error is not None:
+                raise BaseExceptionGroup("Evaluation cleanup and notification failed",
+                                         [self._terminal_cleanup_error, error])
+            raise
+        if self._terminal_cleanup_error is not None:
+            raise self._terminal_cleanup_error
 
     def _ensure_accepting(self) -> None:
         self._ensure_open()

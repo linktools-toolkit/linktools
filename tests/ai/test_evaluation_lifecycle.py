@@ -163,7 +163,7 @@ async def test_close_waits_for_unwatched_admission_settlement(
 
 
 @pytest.mark.asyncio
-async def test_failed_scope_exit_remains_blocked_without_reentering_or_closing_reader(
+async def test_failed_scope_exit_drains_reader_and_releases_borrow_without_reentering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from collections.abc import AsyncIterator
@@ -202,14 +202,15 @@ async def test_failed_scope_exit_remains_blocked_without_reentering_or_closing_r
                 with pytest.raises(ValueError, match="scope exit failed"):
                     await evaluations.close()
             assert exits == ["exit"]
-            assert reader_closes == []
+            assert reader_closes
+            assert evaluations._closed
+            assert entered.drained
             assert persistence.ready
-            with pytest.raises(AIError):
-                evaluations.preflight_handoff()
+            await engine.close()
+            evaluations.preflight_handoff()
         finally:
-            # The injected scope has no resources; remove it only to release this fixture.
-            evaluations._trial_scopes.clear()
-            await manager.__aexit__(None, None, None)
+            with pytest.raises(ValueError, match="scope exit failed"):
+                await manager.__aexit__(None, None, None)
         assert reader_closes
         assert persistence.ready
 
@@ -316,3 +317,44 @@ async def test_context_exit_cancellation_retains_cleanup_failure_and_body_error(
         assert persistence.ready
         monkeypatch.setattr(evaluations._history, "close", original_close)
         await evaluations.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_drains_owned_storage_after_terminal_evaluation_scope_failure() -> None:
+    from contextlib import asynccontextmanager
+    from linktools.ai.evaluation.engine._scope import _EnteredTrialScope
+    from linktools.ai.runtime import Runtime
+
+    manager = Runtime.open("runtime-scope-cleanup", storage=PersistenceStorage.in_memory())
+    runtime = await manager.__aenter__()
+    persistence = runtime._state
+    engine = await runtime.tasks.bind()
+    evaluations = await runtime.evaluations.bind(engine)
+    failure = ValueError("terminal scope exit failed")
+    exits = []
+
+    @asynccontextmanager
+    async def scope():
+        try:
+            yield engine
+        finally:
+            exits.append("exit")
+            raise failure
+
+    entered = _EnteredTrialScope(scope())
+    await entered.engine()
+    evaluations._trial_scopes[("experiment", "slot")] = entered
+    try:
+        with pytest.raises(ValueError) as raised:
+            await manager.__aexit__(None, None, None)
+        assert raised.value is failure
+        assert evaluations.closed
+        assert not persistence.ready
+        await runtime.close()
+        assert exits == ["exit"]
+    finally:
+        # Keep this regression failure from leaking the intentionally broken
+        # owner's other resources while Runtime's coordinator is under repair.
+        if persistence.ready:
+            await engine.close()
+            await persistence.close()

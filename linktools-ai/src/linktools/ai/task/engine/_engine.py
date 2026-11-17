@@ -15,8 +15,8 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from ...asset import AssetStoreReader
 from ...execution.handle import ExecutionBinding
 from ...core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits, ToolEffects,
-    TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
-from ...persistence import Persistence, PersistenceDomain
+    TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key, validate_tenant_id)
+from ...persistence import Persistence, PersistenceDomain, PersistenceStorage
 from ...observe import MetricRecorderProvider, MetricsControl, MetricFlushResult, MetricRecorderStatus
 from ...storage import StorageRetentionMode
 from ...task import (
@@ -83,7 +83,7 @@ _ResultT = TypeVar("_ResultT")
 
 
 class TaskEngine(Generic[AppT]):
-    """An independent task-graph producer over borrowed persistence."""
+    """An independent task-graph producer over borrowed or explicitly owned persistence."""
 
     def __init__(
         self, *definitions: Task[AppT, object] | TaskExpander,
@@ -120,6 +120,8 @@ class TaskEngine(Generic[AppT]):
         self._notifying_closed = False
         self._close_callbacks: deque[Callable[[TaskEngine[AppT]], None]] = deque()
         self._closing = False
+        self._evaluation_borrowers: dict[object, TaskEngine[AppT]] = {}
+        self._owned_persistence: Persistence | None = None
         self._close_task: asyncio.Task[None] | None = None
         self._observation_sessions: set[ObservationSession] = set()
         self._cancel_settlements: set[_CancelSettlement] = set()
@@ -231,17 +233,39 @@ class TaskEngine(Generic[AppT]):
     @asynccontextmanager
     async def open(
         cls, *definitions: Task[AppT, object] | TaskExpander,
-        persistence: Persistence,
+        persistence: Persistence | None = None,
+        storage: PersistenceStorage | None = None,
+        namespace: str | None = None,
+        tenant_id: str = "default",
         context: ExecutionContext[AppT] | None = None,
         authorization: AuthorizationPolicy | None = None,
         metrics: MetricRecorderProvider | None = None,
         asset_sources: Mapping[str, AssetStoreReader] | None = None,
         model_refresh_interval_seconds: float = 1.0,
     ) -> AsyncIterator["TaskEngine[AppT]"]:
-        engine = cls(
-            *definitions, persistence=persistence, context=context, authorization=authorization, metrics=metrics,
-            asset_sources=asset_sources, model_refresh_interval_seconds=model_refresh_interval_seconds,
-        )
+        """Borrow supplied persistence or own storage explicitly opened here."""
+        owned = persistence is None
+        if owned:
+            if storage is None or namespace is None:
+                raise ValueError("storage and namespace are required without persistence")
+            persistence = Persistence(storage)
+            await persistence.initialize(namespace=namespace, tenant_id=validate_tenant_id(tenant_id))
+        elif storage is not None or namespace is not None or tenant_id != "default":
+            raise ValueError("persistence cannot be combined with storage, namespace or tenant_id")
+        try:
+            engine = cls(
+                *definitions, persistence=persistence, context=context, authorization=authorization, metrics=metrics,
+                asset_sources=asset_sources, model_refresh_interval_seconds=model_refresh_interval_seconds,
+            )
+        except BaseException as primary_error:
+            if owned:
+                try:
+                    await await_stream_cleanup(persistence.close(), None)
+                except BaseException as cleanup_error:
+                    raise primary_error from cleanup_error
+            raise
+        if owned:
+            engine._owned_persistence = persistence
         try:
             yield engine
         finally:
@@ -372,17 +396,37 @@ class TaskEngine(Generic[AppT]):
         finally:
             self._notifying_closed = False
 
+    def bind_evaluation(self) -> Callable[[], None]:
+        """Retain this definition view and its producer until Evaluation releases it."""
+        self._ensure_open()
+        token = object()
+        owner = self._owner
+        owner._evaluation_borrowers[token] = self
+
+        def release() -> None:
+            owner._evaluation_borrowers.pop(token, None)
+
+        return release
+
     async def close(self) -> None:
+        borrowers = self._owner._evaluation_borrowers
+        if borrowers and (self._owner is self or any(view is self for view in borrowers.values())):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "TaskEngine is borrowed by Evaluation")
         if self._owner is not self:
             self._closed = True
             return
         if self._closed:
             self._notify_closed()
-            return
-        self._closing = True
-        if self._close_task is None or (self._close_task.done() and (self._close_task.cancelled() or self._close_task.exception() is not None)):
-            self._close_task = asyncio.create_task(self._cleanup(), name="linktools-task-engine-close")
-        await asyncio.shield(self._close_task)
+        else:
+            self._closing = True
+            if self._close_task is None or (self._close_task.done() and (self._close_task.cancelled() or self._close_task.exception() is not None)):
+                self._close_task = asyncio.create_task(self._cleanup(), name="linktools-task-engine-close")
+            await asyncio.shield(self._close_task)
+        # Keep ownership until physical close succeeds, including retry after
+        # a context exit whose producer cleanup or persistence close failed.
+        if self._owned_persistence is not None:
+            await self._owned_persistence.close()
+            self._owned_persistence = None
 
     async def _cleanup(self) -> None:
         sessions = tuple(self._observation_sessions)

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from copy import copy
-from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from linktools.core import environ
@@ -17,7 +16,7 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from ..core import PromptLimits, ToolEffects, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
 from ..persistence.capabilities import CapabilityPersistence
-from ..capability.steps import AtomicStepPersistence, StepRunRegistration
+from ..capability.steps import AtomicStepPersistence, StepRunRegistration, bind_step_persistence
 from ._agent_run_recorder import AgentRunRecorder
 from ._step_store import RuntimeStepStore
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
@@ -214,19 +213,13 @@ async def compose_platform_capabilities(
                 return None
             bound_types.add(StepPersistence)
             persistence.metadata = {**capability.metadata, **persistence.metadata}
-            # Preserve user-defined hook overrides; only adapt the original native class.
-            if type(capability) is StepPersistence:
-                capability = AtomicStepPersistence(
-                    id=capability.id, description=capability.description, defer_loading=capability.defer_loading,
-                    store=capability.store, agent_name=capability.agent_name,
-                    run_id=capability.run_id, parent_run_id=capability.parent_run_id,
-                    metadata=capability.metadata, capture_frontier=capability.capture_frontier,
-                )
+            capability = AtomicStepPersistence.adapt(capability)
             native_metadata = {
                 **persistence.metadata, "linktools.transcript_start": str(transcript_start),
                 "linktools.transcript_run_id": (run_store.checkpoint_transcript_run_id(agent_run_id)
                     if isinstance(run_store, RuntimeAgentRunStore) else agent_run_id),
             }
+            registration = None
             if type(capability) is AtomicStepPersistence and isinstance(run_store, RuntimeAgentRunStore):
                 run_store.activate_step_boundary(agent_run_id)
                 if producer_generation is not None:
@@ -238,8 +231,7 @@ async def compose_platform_capabilities(
                         lifecycle_observer_types=(AtomicStepPersistence, TraceCapability),
                     )
                     persistence.native_registration = registration
-                    capability = replace(capability, run_registration=registration)
-            return replace(
+            return bind_step_persistence(
                 capability, run_id=agent_run_id, parent_run_id=parent_agent_run_id,
                 store=capability.store if tool_operations is None else RuntimeStepStore(
                     capability.store, tool_operations,
@@ -251,7 +243,7 @@ async def compose_platform_capabilities(
                                      and isinstance(capability, AtomicStepPersistence) else None),
                 ),
                 agent_name=agent_id,
-                metadata=native_metadata,
+                metadata=native_metadata, run_registration=registration,
             )
         for enabled, feature, service in ((guarantees[2], TraceCapability, TraceService),):
             if isinstance(capability, feature):

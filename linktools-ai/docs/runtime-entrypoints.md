@@ -19,7 +19,7 @@ manager for ordinary Agent calls.
 
 | Entry | Previous return | Current return and responsibility |
 | --- | --- | --- |
-| `Runtime.open(...)`, `Runtime.attach(...)` | `Runtime` | Unchanged: owned or borrowed composition and lifecycle |
+| `Runtime.open(namespace, storage=...)`, `Runtime.open(persistence=...)` | `Runtime` | Owned or borrowed composition through one entry point |
 | `runtime.agents.get(agent_id="default")`, `.restore(binding)` | `Agent` | Unchanged: live or captured definition handle |
 | `agent.start(prompt, ...)`, `session.start(prompt, ...)` | `Execution` | Unchanged: accepted execution handle |
 | `agent.run(...)`, `session.run(...)` | `WaitResult[ExecutionResult]` | Unchanged: start and wait, with optional observation |
@@ -143,9 +143,10 @@ redirect retention operations to a different override or drop `terminal_commit`.
   `handoff()` preserves eligible checkpointed Agent executions for explicit
   recovery in a fresh Runtime. Repeated close and failed-close retry semantics
   are unchanged.
-- `Runtime.open` owns Persistence. `Runtime.attach` borrows it. Independently
-  opened TaskEngine/Evaluations instances retain their own close responsibility;
-  Runtime-owned `tasks.bind`/`evaluations.bind` instances close with Runtime.
+- `Runtime.open(namespace, storage=...)` owns the Persistence it opens.
+  `Runtime.open(persistence=...)` borrows an open Persistence without closing
+  it. Independently opened TaskEngine/Evaluations have their own lifetimes;
+  `runtime.tasks.bind` and `runtime.evaluations.bind` close with Runtime.
 - `History.open` remains independent. An explicitly supplied native StepStore
   remains caller-owned; this API change neither replaces it nor adds another
   required context manager.

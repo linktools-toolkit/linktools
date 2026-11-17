@@ -5,22 +5,21 @@ storage package separates content, revision discovery, and metadata projection.
 
 `PersistenceStorage` declares reusable resource routes and an optional object store.
 Each Persistence binding acquires and closes its operational scope. Runtime and
-TaskEngine borrow it and own only their producer-local lifetimes; borrowed
-backends remain host-owned. Stores
+TaskEngine close storage they open from a configuration; when supplied an open
+Persistence, they only borrow it. Borrowed backends remain host-owned. Stores
 such as `AssetStore`, `ObjectStore`, and `MetricStore` expose their respective
 data contracts; repositories own domain records and state transitions. Backends
 provide replaceable source or transport capabilities. These roles are not
 determined by whether a type is a protocol or a concrete implementation, and a
 store does not necessarily imply durable retention.
 
-`Runtime.open` and `Runtime.attach` register their lifetime with Persistence
-before composing producers. An exclusively owned local SQLite source admits
+`Runtime.open` registers the Runtime lifetime with Persistence before composing
+producers, whether it owns or borrows that Persistence. An exclusively owned local SQLite source admits
 only one Agent Runtime on that Persistence;
 Task-only Runtimes do not occupy that exclusive execution slot. Shared SQL and
 Memory continue to allow independent Agent Runtimes.
-`TaskEngine(...)` and `TaskEngine.open(...)` also register a borrowed lifetime.
-Definition views share that registration; closing a view does not release the
-engine. Task producers do not occupy the Agent-exclusive slot, and
+TaskEngine holds a Persistence reference until engine cleanup. Definition views
+share that registration; closing a view does not release the engine. Task producers do not occupy the Agent-exclusive slot, and
 read-only Task observation remains available.
 
 `Persistence.close()` rejects active Runtime or TaskEngine borrowers without
@@ -789,7 +788,7 @@ requires a host-owned object implementing both `CacheBackend` and
 `TurnCoordinationBackend`. Compose those interfaces with explicit delegation:
 create the host object, pass it to `PersistenceStorage(..., coordination=...)`,
 open that single Persistence, bind its ready source backend exactly once, then
-use `Runtime.attach(persistence=...)`. Unbound calls must fail, not fall back to
+use `Runtime.open(persistence=...)`. Unbound calls must fail, not fall back to
 another authority. Carry the Persistence's read-only and ready/closed guards;
 never rebind an existing host object to another source or namespace. Runtime
 closes before its Persistence; the host retains ownership of the borrowed cache.

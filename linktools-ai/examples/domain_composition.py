@@ -15,7 +15,7 @@ from pydantic_ai.models.test import TestModel
 
 from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence, SqliteStepStore
-from linktools.ai.core import JsonValue, TaskStatus, service_principal
+from linktools.ai.core import JsonValue, Principal, TaskStatus, service_principal
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec,
     DimensionContract, EvaluationPolicy, EvaluationSpec, ScoreBundle,
@@ -59,6 +59,46 @@ async def read_answer(context: TaskNodeContext[None]) -> JsonValue:
     return await context.read_dependency("answer")
 
 
+async def evaluate_echo(
+    evaluations: Evaluations, target: Task[None], scorer: Task[None], principal: Principal,
+) -> None:
+    dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("echo", 1), cases=(
+        CaseSpec.task(CaseRef("echo", "hello", 1), input={"answer": "hello"}, expected="hello"),
+    )), principal=principal, idempotency_key="publish")
+    run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(
+        dataset, (CandidateSpec("current", task=target.ref),),
+        (ScorerSpec("exact", task=scorer.ref,
+                    dimensions=(DimensionContract("exact_match", "boolean", "higher", 0, 1),)),),
+    ), principal, "evaluate"))
+    view = (await run.wait(timeout_seconds=30)).result
+    assert view.completion == "complete", view.needs_attention
+    assert (await run.create_report()).scores[0].mean == 1.0
+
+
+async def standalone_task_and_evaluation(root: Path) -> None:
+    """Each entry point manages its own storage without a Runtime or outer owner."""
+    target = Task("demo.echo", echo, effect_policy="none")
+    scorer = Task("demo.exact", exact, effect_policy="none")
+    principal = service_principal("demo", "evaluation-owner")
+    async with TaskEngine.open(
+        target, namespace="tasks", tenant_id="demo",
+        storage=PersistenceStorage.from_root(root / "tasks", exclusive_writer=True),
+    ) as engine:
+        graph = await engine.start(TaskGraph("echo", (
+            TaskNode("echo", task=target, input={"answer": "hello"}),
+        )), principal=principal, idempotency_key="echo")
+        assert (await graph.wait(timeout_seconds=30)).result.status is TaskStatus.SUCCEEDED
+        assert await graph.result("echo") == "hello"
+    assert not engine.persistence.ready
+
+    async with Evaluations.open(
+        namespace="evaluations", tenant_id="demo", definitions=(target, scorer),
+        storage=PersistenceStorage.from_root(root / "evaluation", exclusive_writer=True),
+    ) as evaluations:
+        await evaluate_echo(evaluations, target, scorer, principal)
+    print("Independent Task and Evaluation with owned storage passed")
+
+
 async def task_only_evaluation(root: Path) -> None:
     """No Agent, model binding, or Runtime is constructed in this scenario."""
     target = Task("demo.echo", echo, effect_policy="none")
@@ -76,17 +116,7 @@ async def task_only_evaluation(root: Path) -> None:
         assert (await graph.wait(timeout_seconds=30)).result.status is TaskStatus.SUCCEEDED
         assert await graph.result("echo") == "hello"
         async with Evaluations.open(engine) as evaluations:
-            dataset = await evaluations.publish_dataset(DatasetSpec(DatasetRef("echo", 1), cases=(
-                CaseSpec.task(CaseRef("echo", "hello", 1), input={"answer": "hello"}, expected="hello"),
-            )), principal=principal, idempotency_key="publish")
-            run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(
-                dataset, (CandidateSpec("current", task=target.ref),),
-                (ScorerSpec("exact", task=scorer.ref,
-                            dimensions=(DimensionContract("exact_match", "boolean", "higher", 0, 1),)),),
-            ), principal, "evaluate"))
-            view = (await run.wait(timeout_seconds=30)).result
-            assert view.completion == "complete", view.needs_attention
-            assert (await run.create_report()).scores[0].mean == 1.0
+            await evaluate_echo(evaluations, target, scorer, principal)
         # Evaluation closes its coordination, not this borrowed Task producer.
         assert (await graph.state()).status is TaskStatus.SUCCEEDED
     print("Task-only graph and evaluation passed")
@@ -99,7 +129,7 @@ async def shared_agent_and_tasks(root: Path) -> None:
     features.agent("default", model="offline", allow_tools=())
     metrics = Metrics.in_memory()
     async with Persistence.open("shared-example", storage=PersistenceStorage.from_root(root, exclusive_writer=True)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features, metrics=metrics) as runtime:
+        async with Runtime.open(persistence=persistence, features=features, metrics=metrics) as runtime:
             agent = runtime.agents.get()
             assert (await (await agent.start("question")).wait()).result.output == {"text": "answer"}
             target = Task.from_agent("demo.agent", agent)
@@ -167,6 +197,7 @@ async def main() -> None:
     await standalone_metrics()
     with TemporaryDirectory(prefix="linktools-domains-") as directory:
         root = Path(directory)
+        await standalone_task_and_evaluation(root / "standalone")
         await task_only_evaluation(root / "tasks")
         await shared_agent_and_tasks(root / "shared")
         await composed_agent_evaluation(root / "composed")

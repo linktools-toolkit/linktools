@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 from ..core import OperationKind, OperationStatus, Principal, ResourceKind, TaskStatus
 from ..errors import AIError, ErrorCode
-from ..task.deadlines import deadline_policy
 
 if TYPE_CHECKING:
     from ..execution import ExecutionRecord
@@ -49,6 +48,8 @@ class TaskRecoveryGuard:
             execution = parent
 
     async def _allow_task(self, execution: "ExecutionRecord") -> bool:
+        from ..task.deadlines import deadline_policy
+
         tenant_id = self._persistence.tenant_id
         invocation = await self._captures.read_invocation_node(
             execution.execution_id,

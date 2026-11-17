@@ -61,8 +61,9 @@ async def test_active_producers_remain_owned_and_closed_views_do_not_release_own
         view = engine.with_definitions()
         evaluations = await runtime.evaluations.bind(view)
         engine_ref, evaluation_ref = weakref.ref(engine), weakref.ref(evaluations)
-        await view.close()
-        del engine, evaluations, view
+        sibling = engine.with_definitions()
+        await sibling.close()
+        del engine, evaluations, view, sibling
         gc.collect()
         assert engine_ref() is not None and evaluation_ref() is not None
         await evaluation_ref().close()

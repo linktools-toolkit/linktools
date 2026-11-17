@@ -1361,6 +1361,9 @@ class TaskExecutionService:
             await self.request_handoff_if_terminal(execution_id, tenant_id=principal.tenant_id)
         return result.output.size
 
+    def _task_admission_repository(self) -> TaskAdmissionRepository | None:
+        return self._admissions
+
     async def authorize_budget_scope(
         self,
         scope_id: str,
@@ -1389,10 +1392,11 @@ class TaskExecutionService:
             await self._repositories.budgets.read(scope_id)
             return
         if scope_id.startswith("graph:"):
-            if self._admissions is None:
+            admissions = self._task_admission_repository()
+            if admissions is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             graph_id = scope_id[len("graph:"):]
-            admission = await self._admissions.get(
+            admission = await admissions.get(
                 graph_id, tenant_id=principal.tenant_id,
             )
             if admission is None:
