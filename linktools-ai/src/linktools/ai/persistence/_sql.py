@@ -2737,11 +2737,19 @@ class _SqlTransaction:
                     ),
                 )
             )
-        statement = (
-            select(table)
+        page = (
+            select(table.c.id)
             .where(*conditions)
             .order_by(table.c.stream_key, table.c.sequence)
             .limit(limit)
+            .subquery()
+        )
+        # Raw-key archive ordering is not locator ordering. Keep large bodies
+        # out of that sort and materialize only the selected page.
+        statement = (
+            select(table)
+            .join(page, table.c.id == page.c.id)
+            .order_by(table.c.stream_key, table.c.sequence)
         )
         rows = (await self._execute(statement)).mappings().all()
         return tuple(_fact_from_row(row) for row in rows)
@@ -2865,10 +2873,11 @@ class _SqlTransaction:
         _require_scan_limit(limit)
 
         table = self._table("ai_state_operations")
-        statement = select(table).where(table.c.store_key == self._store_key)
+        page = select(table.c.id).where(table.c.store_key == self._store_key)
         if after is not None:
-            statement = statement.where(table.c.operation_key > after.key)
-        statement = statement.order_by(table.c.operation_key).limit(limit)
+            page = page.where(table.c.operation_key > after.key)
+        page = page.order_by(table.c.operation_key).limit(limit).subquery()
+        statement = select(table).join(page, table.c.id == page.c.id).order_by(table.c.operation_key)
         rows = (await self._execute(statement)).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
 

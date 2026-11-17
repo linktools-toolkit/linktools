@@ -14,7 +14,7 @@ from linktools.ai.persistence.codec import decode_fact, decode_operation, encode
 from linktools.ai.persistence.snapshots import _decode_snapshot_sequences
 from linktools.ai.persistence.state import (
     STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, FactQuery, FactScanCursor,
-    OperationQuery, StateTransaction, StoredFact, StoredOperation,
+    OperationQuery, OperationScanCursor, StateTransaction, StoredFact, StoredOperation,
     capability_receipt_key, record_key, stream_key, validate_stream_key,
 )
 
@@ -201,3 +201,31 @@ def test_pending_transcript_index_owner_and_current_reader_enforce_signed_bound(
     with pytest.raises(AIError) as caught:
         _decode_enveloped_domain(raw, TranscriptChunk)
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sql"))
+async def test_archive_pages_preserve_long_key_order_and_large_bodies(backend: str, tmp_path: Path) -> None:
+    owner = _record(1)
+    keys = (b"prefix" * 30 + b"b", b"prefix" * 30 + b"a", b"z", b"A", b"a")
+    body = {"content": "界" * 12000}
+    facts = tuple(StoredFact(key, sequence, owner.key, "probe", None, None, body)
+                  for key in keys for sequence in (1, 2, 3))
+    operations = tuple(StoredOperation(key, key, 1, "pending", False, body) for key in keys)
+    async with _open_store(backend, tmp_path / backend) as store:
+        async def seed(transaction: StateTransaction) -> None:
+            await transaction.insert_record(owner)
+            await transaction.insert_facts(facts)
+            for operation in operations:
+                await transaction.insert_operation(operation)
+        await store.mutate(seed)
+        found_facts, fact_cursor = [], None
+        while page := await store.read(lambda tx, cursor=fact_cursor: tx.scan_facts_page(after=cursor, limit=2)):
+            found_facts.extend(page)
+            fact_cursor = FactScanCursor(page[-1].stream_key, page[-1].sequence)
+        assert found_facts == sorted(facts, key=lambda item: (item.stream_key, item.sequence))
+        found_operations, operation_cursor = [], None
+        while page := await store.read(lambda tx, cursor=operation_cursor: tx.scan_operations_page(after=cursor, limit=2)):
+            found_operations.extend(page)
+            operation_cursor = OperationScanCursor(page[-1].key)
+        assert found_operations == sorted(operations, key=lambda item: item.key)
