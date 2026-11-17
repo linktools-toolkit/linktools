@@ -120,12 +120,13 @@ def model_binding_error(
         if error.in_stream:
             retryable = False
     try:
-        provider_details = _bounded_provider_error(_provider_error_details(error),
-            omit_content=diagnostics is not None and diagnostics.content_omission_reason is not None)
+        provider_values = _provider_error_details(error)
     except Exception:
         # Optional metadata must not replace the provider failure when an SDK
         # extension exposes malformed attributes.
-        provider_details = {}
+        provider_values = {}
+    provider_details = _bounded_provider_error(provider_values,
+        omit_content=diagnostics is not None and diagnostics.content_omission_reason is not None)
     if provider_details:
         details["provider_error"] = provider_details
     return AIError(
@@ -165,8 +166,11 @@ def model_request_error(
         for key in ("model_name", "phase", "reason", "status_code", "retry_after"):
             if key in classified.safe_details:
                 details[key] = classified.safe_details[key]
-        provider_details = _bounded_provider_error(classified.safe_details.get("provider_error"),
-            omit_content=content_omission_reason is not None)
+        provider_details = classified.safe_details.get("provider_error")
+        if provider is None:
+            # Existing AIError metadata may come from a less restrictive policy.
+            provider_details = _bounded_provider_error(provider_details,
+                omit_content=content_omission_reason is not None)
         if provider_details:
             details["provider_error"] = provider_details
     if code is None:
@@ -213,8 +217,8 @@ def _bounded_provider_error(value: object, *, omit_content: bool = False) -> dic
     return result
 
 
-def _provider_error_details(error: Exception) -> dict[str, JsonValue]:
-    """Read only public provider identifiers from recognized SDK failures."""
+def _provider_error_details(error: Exception) -> dict[str, object]:
+    """Read recognized SDK fields; the caller applies the retention policy once."""
     values: dict[str, object] = {}
     provider = error
     if isinstance(error, ModelAPIError):
@@ -224,7 +228,7 @@ def _provider_error_details(error: Exception) -> dict[str, JsonValue]:
         # PydanticAI documents this immediate cause as the provider SDK error.
         provider = error.__cause__
         if provider is None:
-            return _bounded_provider_error(values)
+            return values
     try:
         from openai import APIError, APIStatusError
     except ModuleNotFoundError as missing:
@@ -250,7 +254,7 @@ def _provider_error_details(error: Exception) -> dict[str, JsonValue]:
             request_id = _bounded_provider_error({"request_id": provider.request_id}).get("request_id")
             if request_id is not None:
                 values["request_id"] = request_id
-    return _bounded_provider_error(values)
+    return values
 
 
 def _is_context_window_error(error: Exception) -> bool:

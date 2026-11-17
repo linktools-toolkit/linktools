@@ -92,11 +92,12 @@ def test_wrapped_request_id_is_not_lost_to_missing_or_malformed_sdk_value(raw_re
     assert projected.safe_details["provider_error"] == {"param": "input[0].content", "request_id": "req_valid"}
 
 
-def test_malformed_optional_metadata_does_not_replace_the_provider_failure() -> None:
+@pytest.mark.parametrize("failure", (AttributeError, TypeError, ValueError, RuntimeError))
+def test_malformed_optional_metadata_does_not_replace_the_provider_failure(failure: type[Exception]) -> None:
     class MalformedMetadata(ModelHTTPError):
         def __getattribute__(self, name: str) -> object:
             if name == "provider_error_code":
-                raise ValueError("broken metadata extension")
+                raise failure("broken metadata extension")
             return super().__getattribute__(name)
 
     projected = model_binding_error(MalformedMetadata(400, "fixture"))

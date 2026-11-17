@@ -46,7 +46,7 @@ class OutputPreview:
     def observe(self, event: object) -> "tuple[str, dict[str, JsonValue]] | None":
         reset = False
         if isinstance(event, PartStartEvent):
-            if self.selected is not None and (self.selected == event.index or isinstance(event.part, ToolCallPart)):
+            if self.selected == event.index:
                 self.selected = None
                 reset = True
             self.parts.pop(event.index, None)

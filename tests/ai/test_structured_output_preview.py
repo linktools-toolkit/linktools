@@ -107,13 +107,15 @@ def test_preview_configuration_is_not_durable_capability_identity():
     assert CapabilityContribution.from_opaque("capability", plain.id, plain).contract == CapabilityContribution.from_opaque("capability", opted.id, opted).contract
 
 
-def test_multiple_tool_proposals_clear_previous_preview():
+def test_parallel_tool_proposal_keeps_preview_until_final_result_changes():
     current = preview()
-    current.observe(PartStartEvent(index=0, part=ToolCallPart("output", '{"message":"first"}', "call")))
+    current.observe(PartStartEvent(index=0, part=ToolCallPart("output", '{"message":"first', "call")))
     assert current.observe(FinalResultEvent(tool_name="output", tool_call_id="call"))[0] == "first"
-    assert current.observe(PartStartEvent(index=1, part=ToolCallPart("business", '{"message":"secret"}', "other")))[0] == ""
+    assert current.observe(PartStartEvent(index=1, part=ToolCallPart("business", '{"message":"secret"}', "other"))) is None
     assert current.observe(PartDeltaEvent(index=1, delta=ToolCallPartDelta(args_delta=' '))) is None
-    assert current.observe(FinalResultEvent(tool_name=None, tool_call_id=None)) is None
+    assert current.observe(PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta=' second"}')))[0] == "first second"
+    assert current.observe(FinalResultEvent(tool_name=None, tool_call_id=None))[0] == ""
+    assert current.observe(PartDeltaEvent(index=1, delta=ToolCallPartDelta(args_delta=' '))) is None
 
 
 def test_output_preview_never_writes_shared_stream_and_keeps_local_order():
