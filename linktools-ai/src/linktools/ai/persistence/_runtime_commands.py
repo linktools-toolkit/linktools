@@ -94,6 +94,7 @@ from ._conversation_repositories import (
     SessionRepositoryImpl,
 )
 from ._checkpoint_repositories import (
+    ToolRepositoryImpl,
     tool_admission_matches as _tool_admission_matches,
 )
 from ._step_contracts import (
@@ -2342,7 +2343,7 @@ class StateCommands:
 
     async def _materialize_pending_tools(
         self, execution: ExecutionRecord, operations: Sequence[ToolOperationRecord], *,
-        read_only: bool, terminal: bool,
+        read_only: bool, terminal: bool, transaction: StateTransaction | None = None,
     ) -> None:
         if not operations:
             return
@@ -2352,6 +2353,8 @@ class StateCommands:
                                     execution_id=execution.execution_id, agent_run_seq=1)
         if len({value.tool_operation_id for value in operations}) != len(operations):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        batch_tools = (self._tools if transaction is not None and not read_only and terminal
+                       and type(self._tools) is ToolRepositoryImpl else None)
         for value in operations:
             if (value.execution_id != execution.execution_id or value.agent_run_id != expected_run
                     or value.binding_digest != execution.binding_digest or not value.replay_safe
@@ -2360,9 +2363,17 @@ class StateCommands:
                     or isinstance(value.fence, bool) or not isinstance(value.fence, int) or value.fence < 1
                     or terminal and value.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if batch_tools is not None:
+                continue
             actual = (await self._tools.get_operation(value.tool_operation_id, tenant_id=self._tenant_id)
                       if read_only else await self._tools.reserve(value))
             if actual != value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if batch_tools is not None:
+            assert transaction is not None
+            actual = await batch_tools.reserve_many_in_transaction(transaction, operations)
+            if actual != tuple(operations):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def read_pending_turn(
@@ -2905,7 +2916,10 @@ class StateCommands:
                 await archive.materialize_checkpoint_in_transaction(
                     group.transaction(archive.state_store), conversation_agent_run, prepared[0],
                 )
-            await self._materialize_pending_tools(final.execution, tool_operations, read_only=False, terminal=True)
+            await self._materialize_pending_tools(
+                final.execution, tool_operations, read_only=False, terminal=True,
+                transaction=group.transaction(self._tools.state_store) if tool_operations else None,
+            )
             if capability_prefix is not None:
                 await capability_prefix.apply(group)
             candidate_published = True
