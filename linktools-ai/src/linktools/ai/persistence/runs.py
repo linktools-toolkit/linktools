@@ -1666,6 +1666,8 @@ class RuntimeAgentRunStore(AgentRunStore):
         *,
         target_transcript_message_count: int | None = None,
         request_projection: ContextProjection | None = None,
+        confirmed_interactions: tuple[ModelInteractionRecord, ...] = (),
+        confirmed_interaction_producer: tuple[str, int] | None = None,
     ) -> None:
         """FINALIZE: advance offsets and clear dirty state after durable success."""
         self._confirm_native_event_projection(captured.events)
@@ -1679,6 +1681,13 @@ class RuntimeAgentRunStore(AgentRunStore):
             )
             if request_projection is not None:
                 offset.request_projection = request_projection
+            if (confirmed_interaction_producer is not None
+                    and self._execution_producers.get(flight.agent_run_id) == confirmed_interaction_producer):
+                offset.confirmed_interactions = confirmed_interactions
+                offset.confirmed_interaction_producer = confirmed_interaction_producer
+            else:
+                offset.confirmed_interactions = ()
+                offset.confirmed_interaction_producer = None
             offset.events = max(offset.events, captured.target_event_offset)
             offset.checkpoints = max(offset.checkpoints, captured.target_checkpoint_offset)
             offset.interactions = max(
@@ -1852,10 +1861,16 @@ class RuntimeAgentRunStore(AgentRunStore):
             return
         started = monotonic()
         try:
+            offset = self.trace_persistence.offsets.get(captured.run.agent_run_id, _ProjectionOffset())
+            confirmed_interactions = (offset.confirmed_interactions
+                if captured.producer_generation is not None
+                and offset.confirmed_interaction_producer == (execution_id, captured.producer_generation) else ())
+            # Consume the preparation baseline; any failed/unknown publication
+            # leaves no retained hint for the next attempt.
+            offset.confirmed_interactions = ()
             prepared, observation, interactions, interaction_archive, durable_head = await archive.prepare_captured_projection(
-                captured, baseline=self.trace_persistence.offsets.get(
-                    captured.run.agent_run_id, _ProjectionOffset(),
-                ).request_projection,
+                captured, baseline=offset.request_projection,
+                confirmed_interactions=confirmed_interactions,
             )
             expected_head = ExecutionRunSealHead(
                 captured.run.agent_run_id,
@@ -2001,6 +2016,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                 target_transcript_message_count=result.value.transcript_message_count,
                 request_projection=next((value.request_context for value in reversed(interactions)
                                          if value.request_context is not None), None),
+                confirmed_interactions=(tuple(interactions) or confirmed_interactions)
+                    if result.error is None else (),
+                confirmed_interaction_producer=(execution_id, captured.producer_generation)
+                    if execution_id is not None and captured.producer_generation is not None else None,
             )
             if (result.error is None and projection_receipt is not None and confirmation is not None
                     and self._projection_confirmations.get(captured.run.agent_run_id) is confirmation):

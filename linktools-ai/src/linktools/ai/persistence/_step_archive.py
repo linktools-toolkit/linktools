@@ -149,6 +149,8 @@ class _ProjectionOffset:
     transcript_messages: int = 0
     interactions: int = 0
     request_projection: ContextProjection | None = None
+    confirmed_interactions: tuple[ModelInteractionRecord, ...] = ()
+    confirmed_interaction_producer: tuple[str, int] | None = None
     observation_task: asyncio.Task[None] | None = None
     observation_batch_size: int | None = None
     observation_flush_interval: float | None = None
@@ -1742,6 +1744,7 @@ class StateStepArchive(AgentRunStore):
 
     async def prepare_captured_projection(
         self, captured: CapturedExecutionProjection, *, baseline: ContextProjection | None,
+        confirmed_interactions: Sequence[ModelInteractionRecord] = (),
     ) -> tuple[PreparedAgentRunCheckpointBatch, PreparedTranscriptObservation | None,
                tuple[ModelInteractionRecord, ...], PreparedArchive, ExecutionRunSealHead]:
         """Prepare one projection, sharing only same-owner captured source facts."""
@@ -1773,7 +1776,8 @@ class StateStepArchive(AgentRunStore):
             observed_message_count=None if observation is None else observation.target_message_count,
         )
         prepare_interactions = (self.prepare_interactions if records is None else
-                                partial(self._prepare_interactions, observed_records=records))
+                                partial(self._prepare_interactions, observed_records=records,
+                                        confirmed_interactions=confirmed_interactions))
         interactions = await prepare_interactions(
             run, captured.interactions, dict(captured.payloads).__getitem__,
             local_message_count=(captured.target_message_index if captured.transcript is not None
@@ -1934,6 +1938,7 @@ class StateStepArchive(AgentRunStore):
         local_message_count: int = 0, local_messages: Sequence[ModelMessage] = (),
         prepared: PreparedArchive, replay: bool = False, baseline: ContextProjection | None = None,
         observed_records: Mapping[bytes, StoredRecord] | None = None,
+        confirmed_interactions: Sequence[ModelInteractionRecord] = (),
     ) -> tuple[ModelInteractionRecord, ...]:
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
@@ -1988,20 +1993,30 @@ class StateStepArchive(AgentRunStore):
         stored_interactions: dict[int, ModelInteractionRecord] = {}
         if replay:
             first, last = min(model_request_seqs), max(model_request_seqs)
-            existing = await self.list_model_interactions(
-                agent_run_id=run.agent_run_id,
-                after_model_request_seq=first - 1, limit=last - first + 1,
-            )
-            if any(not isinstance(value, ModelInteractionRecord) for value in existing):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            # Cold replay must verify retained bytes before reusing their immutable roots.
+            retained = {value.model_request_seq: value for value in confirmed_interactions
+                        if value.agent_run_id == run.agent_run_id}
+            if model_request_seqs <= retained.keys():
+                # These immutable contexts were confirmed by this producer's last
+                # publication. They are preparation inputs, never current CAS truth:
+                # _sync_interactions_in_transaction still reads and validates the
+                # authoritative successor before writing.
+                stored_interactions = {seq: retained[seq] for seq in model_request_seqs}
+            else:
+                existing = await self.list_model_interactions(
+                    agent_run_id=run.agent_run_id,
+                    after_model_request_seq=first - 1, limit=last - first + 1,
+                )
+                if any(not isinstance(value, ModelInteractionRecord) for value in existing):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                stored_interactions = {value.model_request_seq: value for value in existing}
+            # A confirmed DTO is not proof that its stored bytes remain intact.
+            # Preserve content verification for hot and cold replay alike.
             await self._history.load_projected_contexts(run.agent_run_id, tuple(
-                projection for value in existing
+                projection for value in stored_interactions.values()
                 for projection in (value.request_context, value.response_context,
                                    *(attempt.response_context for attempt in value.stream_attempts or ()))
                 if projection is not None
             ))
-            stored_interactions = {value.model_request_seq: value for value in existing}
         previous_projection = None
         if any(value.request_context is not None for value in values):
             if baseline is not None:
