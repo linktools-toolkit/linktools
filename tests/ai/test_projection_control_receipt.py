@@ -70,7 +70,7 @@ async def test_projection_receipt_updates_only_its_exact_live_owner(case: str) -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("change", (False, True))
-async def test_archive_receipt_requires_guard_only_payload(
+async def test_direct_archive_projection_keeps_none_return(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, change: bool,
 ) -> None:
     async with Persistence.open("projection-guard", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
@@ -89,13 +89,9 @@ async def test_archive_receipt_requires_guard_only_payload(
         receipt = await archive.sync_prepared_projection(
             AgentRunRecord("run"), events=(), checkpoints=(), producer_generation=1, execution_id="execution",
         )
-        if change:
-            assert receipt is None
-        else:
-            store, before, after = receipt
-            assert store is repository.state_store
-            assert after.storage_revision > before.storage_revision
-            assert replace(after, storage_revision=before.storage_revision) == before
+        assert receipt is None
+        stored = await repository.state_store.read_record(repository.execution_record_key("execution"))
+        assert stored.data.get("receipt_test", False) is change
 
 
 @pytest.mark.asyncio

@@ -2854,7 +2854,7 @@ class StateStepArchive(AgentRunStore):
         producer_generation: int | None = None,
         execution_id: str | None = None,
         archive: PreparedArchive | None = None,
-    ) -> tuple[StateStore, StoredRecord, StoredRecord] | None:
+    ) -> None:
         """Commit a prepared projection without preparing its payload twice."""
         self._ensure_open()
         require_no_run_history_lock(
@@ -2870,13 +2870,9 @@ class StateStepArchive(AgentRunStore):
         values = tuple(checkpoints)
         if any(not isinstance(value, PreparedAgentRunCheckpoint) for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        async def commit(transaction: StateTransaction) -> tuple[StateStore, StoredRecord, StoredRecord] | None:
+        async def commit(transaction: StateTransaction) -> None:
             if archive is not None:
                 await self._history.publish_archive(archive)
-            repository = self._execution_repository
-            core = self._execution_transaction(transaction) if repository is not None else None
-            key = repository.execution_record_key(execution_id) if repository is not None and execution_id else None
-            before = await core.get_record(key) if core is not None and key is not None else None
             await self._sync_projection_in_transaction(
                 transaction,
                 run,
@@ -2891,13 +2887,7 @@ class StateStepArchive(AgentRunStore):
                 await self._history.publish_native_archive(transaction, archive, owner_written=True)
             await self.share_published_content(run, execution_id=execution_id, checkpoints=values,
                                                    observation=observation, archive=archive or PreparedArchive())
-            if before is not None:
-                after = await core.get_record(key)
-                if (after is not None and after.storage_revision > before.storage_revision
-                        and replace(after, storage_revision=before.storage_revision) == before):
-                    return repository.state_store, before, after
-            return None
-        return await self._mutate(commit)
+        await self._mutate(commit)
 
     async def _sync_projection_in_transaction(
         self,

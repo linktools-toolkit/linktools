@@ -1875,15 +1875,31 @@ class RuntimeAgentRunStore(AgentRunStore):
         async def operation() -> ExecutionRunSealHead:
             async def commit(group: StateGroupTransaction) -> ExecutionRunSealHead:
                 async def publish_projection() -> None:
-                    nonlocal projection_receipt
-                    projection_receipt = await archive.sync_prepared_projection(
+                    await archive.sync_prepared_projection(
                         captured.run, events=captured.events, checkpoints=prepared.checkpoints,
                         interactions=interactions, observation=observation,
                         producer_generation=captured.producer_generation, execution_id=execution_id,
                         archive=interaction_archive,
                     )
+                nonlocal projection_receipt
+                projection_receipt = None
+                repository = self._execution_repository
                 if write is None:
+                    core = None
+                    before = None
+                    if (confirmation is not None and execution_id is not None
+                            and type(repository) is ExecutionRepositoryImpl
+                            and repository.state_store in archive.transaction_stores
+                            and repository.state_store.storage_group is archive.state_store.storage_group):
+                        core = group.transaction(repository.state_store)
+                        key = repository.execution_record_key(execution_id)
+                        before = await core.get_record(key)
                     await publish_projection()
+                    if before is not None:
+                        after = await core.get_record(key)
+                        if (after is not None and after.storage_revision > before.storage_revision
+                                and replace(after, storage_revision=before.storage_revision) == before):
+                            projection_receipt = repository.state_store, before, after
                 else:
                     await write(group, publish_projection)
                 head = await archive.execution_history_head_record(captured.run.agent_run_id)
