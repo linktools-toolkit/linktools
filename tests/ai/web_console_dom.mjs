@@ -313,6 +313,46 @@ if(process.argv[3]==='session-sync') {
   await until('stream tail loads committed turn',()=>node('conversation').textContent.includes('Committed with execution stream'));await settle();
   assert.equal(historyReads(),beforeStreamReads+1,'normal tail and release share one timeline read');
 
+  for(const metadataOnly of [false,true]){
+    const marker=`Retry committed history ${metadataOnly}`, prior=historyReads();
+    const old=timeline('a');
+    timelineOverrides.set('a',{...old,items:[...old.items,{...old.items[0],execution_id:`a-retry-${metadataOnly}`,user_input:marker}]});
+    if(metadataOnly)unavailableTimelines.add('a');else networkFailures.add('GET /api/sessions/a');
+    sessions.get('a').revision++;
+    await until('failed history read attempted',()=>historyReads()>prior);await settle();
+    assert.ok(!node('conversation').textContent.includes(marker));
+    const failedReads=historyReads(),source=sessionSources.at(-1);
+    source.snapshot();source.snapshot();await settle();
+    assert.equal(historyReads(),failedReads,'duplicate frames do not retry failed reads');
+    unavailableTimelines.delete('a');networkFailures.delete('GET /api/sessions/a');
+    source.onerror();source.snapshot();
+    await until('same revision reconnect retries history',()=>node('conversation').textContent.includes(marker));await settle();
+    assert.equal(historyReads(),failedReads+1,'reconnect retries the missing history once');
+    source.onerror();source.snapshot();await settle();
+    assert.equal(historyReads(),failedReads+1,'successful history is not reread on reconnect');
+    assert.equal(node('prompt').value,'My private draft');
+  }
+
+  for(const newerMetadata of [false,true]){
+    const marker=`Reconnect while history pending ${newerMetadata}`,old=timeline('a');
+    timelineOverrides.set('a',{...old,items:[...old.items,{...old.items[0],execution_id:`a-pending-${newerMetadata}`,user_input:marker}]});
+    const delayed=deferred('GET /api/sessions/a'),source=sessionSources.at(-1);
+    sessions.get('a').revision++;await delayed.requested;
+    const pendingReads=historyReads();
+    source.onerror();source.snapshot();source.snapshot();await settle();
+    assert.equal(historyReads(),pendingReads,'in-flight history request remains deduplicated');
+    if(newerMetadata){
+      const record=sessions.get('a');
+      // Advance the HTTP view without publishing that SSE revision yet.
+      Object.defineProperty(record,'revision',{value:record.revision+1,writable:true,configurable:true,enumerable:true});
+      delayed({session:{...record},timeline:null,timeline_error:'History temporarily unavailable'});
+    }else delayed.reject(new Error('transient history failure'));
+    await until('pending failure recovers after reconnect',()=>node('conversation').textContent.includes(marker));await settle();
+    assert.equal(historyReads(),pendingReads+1,'one retry satisfies reconnect during pending request');
+    assert.equal(node('prompt').value,'My private draft');
+    if(newerMetadata){sessions.set('a',{...sessions.get('a')});await settle();}
+  }
+
   // A local stream may not observe another process's writes. Explicit HTTP
   // refresh must take newer metadata without treating HTTP idle as a release.
   const staleSource=sessionSources.at(-1),httpRevision=sessions.get('a').revision+1;

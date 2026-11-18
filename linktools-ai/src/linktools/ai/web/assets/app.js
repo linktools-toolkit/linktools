@@ -298,13 +298,14 @@ function watchSession(id, {restart=false}={}) {
   const prior=sessionWatch?.id===id?sessionWatch:null;
   stopSessionWatch();
   const source=new EventSource(sessionURL(id,'events'));
-  const watch={id,source,ready:false,snapshot:prior?.snapshot || null,revision:prior?.revision ?? null,releasedExecution:null};
+  const watch={id,source,ready:false,snapshot:prior?.snapshot || null,revision:prior?.revision ?? null,releasedExecution:null,refresh:prior?.refresh || {revision:null,failed:false,reconnect:0}};
+  if(prior)watch.refresh.reconnect++;
   sessionWatch=watch;
   const current=()=>sessionWatch===watch && state.selectedSession===id && !watch.failed;
   source.addEventListener('session_error',()=>{
     if(current()){source.close();watch.failed=true;watch.ready=false;setDisabled();}
   });
-  source.onerror=()=>{if(current()){watch.ready=false;setDisabled();}};
+  source.onerror=()=>{if(current()){watch.ready=false;watch.refresh.reconnect++;setDisabled();}};
   source.onmessage=event=>{
     if(!current())return;
     let value;
@@ -317,7 +318,7 @@ function watchSession(id, {restart=false}={}) {
       watch.ready=false;setDisabled();return;
     }
     if(watch.revision!==null && value.revision<watch.revision)return;
-    const previous=watch.snapshot,previousRevision=watch.revision;
+    const previous=watch.snapshot,previousRevision=watch.revision,reconnected=!watch.ready;
     watch.revision=value.revision;
     if(previous?.active_execution_id && previous.active_execution_id!==value.active_execution_id)
       watch.releasedExecution=previous.active_execution_id;
@@ -331,23 +332,35 @@ function watchSession(id, {restart=false}={}) {
     // may release before that stream opens, leaving the session watch to catch up.
     const streamWillRefresh=previousOwner && state.observedExecution===previousOwner && state.stream;
     if(state.session && !value.active_execution_id && !streamWillRefresh
-      && Number.isSafeInteger(timelineRevision) && value.revision>timelineRevision)refreshSessionTimeline(watch);
+      && (reconnected && watch.refresh.failed || Number.isSafeInteger(timelineRevision) && value.revision>timelineRevision))refreshSessionTimeline(watch);
     if(!state.session || previous && previous.status===value.status
       && previous.active_execution_id===value.active_execution_id)return;
     if(value.active_execution_id)void syncObservation().catch(error=>{if(current())showError(error);});
   };
 }
 function refreshSessionTimeline(watch) {
-  if(watch.refreshRevision===watch.revision)return;
-  watch.refreshRevision=watch.revision;
-  const generation=state.generation;
+  const refresh=watch.refresh;
+  if(refresh.revision===watch.revision)return;
+  refresh.revision=watch.revision;refresh.failed=false;
+  const generation=state.generation,revision=watch.revision,reconnect=refresh.reconnect;
+  const current=()=>sessionWatch?.refresh===refresh && state.selectedSession===watch.id && generation===state.generation;
+  const failed=()=>{
+    if(refresh.revision!==revision)return;
+    refresh.revision=null;refresh.failed=true;
+    // A reconnect can arrive before the failed HTTP request finishes.
+    if(refresh.reconnect!==reconnect && sessionWatch.ready && !sessionWatch.snapshot?.active_execution_id)
+      refreshSessionTimeline(sessionWatch);
+  };
   void readSession(watch.id).then(payload=>{
-    if(sessionWatch!==watch || state.selectedSession!==watch.id || generation!==state.generation)return;
+    if(!current())return;
+    // acceptSession may replace the watch when HTTP sees a newer revision.
+    if(refresh.revision===revision && !payload.timeline){refresh.revision=null;refresh.failed=true;}
     if(!acceptSession(payload))return;
     state.timelineError=payload.timeline_error || '';renderSessionHeader();
     if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
     renderConversation();setDisabled();
-  }).catch(error=>{if(sessionWatch===watch && generation===state.generation)showError(error);});
+    if(refresh.failed && refresh.reconnect!==reconnect && sessionWatch.ready && !sessionWatch.snapshot?.active_execution_id)refreshSessionTimeline(sessionWatch);
+  }).catch(error=>{if(current()){failed();showError(error);}});
 }
 function reconcileAdmissionWatch(id, executionId=null) {
   if(state.selectedSession!==id)return;
