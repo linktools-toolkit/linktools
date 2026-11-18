@@ -1862,46 +1862,11 @@ class RuntimeAgentRunStore(AgentRunStore):
             return
         started = monotonic()
         try:
-            observation = None
-            interaction_archive = PreparedArchive()
-            if captured.transcript is not None:
-                observation = await archive.transcript_repository.prepare_observation(
-                    captured.run.agent_run_id,
-                    captured.transcript.messages,
-                    first_message_index=captured.base_message_index,
-                    pending=captured.transcript.pending,
-                    pending_keys=captured.transcript.pending_keys,
-                    archive=interaction_archive,
-                )
-            await archive.prepare_run_registration(captured.run)
-            prepared = await archive.prepare_checkpoints(
-                captured.run,
-                captured.checkpoints,
-                observed_message_count=None if observation is None else observation.target_message_count,
-                archive=interaction_archive,
-            )
-            local_count = (captured.target_message_index if captured.transcript is not None
-                           else prepared.target_transcript_message_count)
-            payloads = dict(captured.payloads)
-            interactions = await archive.prepare_interactions(
-                captured.run,
-                captured.interactions,
-                payloads.__getitem__,
-                local_message_base=0,
-                local_message_count=local_count,
-                local_messages=captured.local_messages,
-                prepared=interaction_archive,
-                replay=any(value.model_request_seq <= captured.base_interaction_offset
-                           for value in captured.interactions),
-                baseline=self.trace_persistence.offsets.get(
+            prepared, observation, interactions, interaction_archive, durable_head = await archive.prepare_captured_projection(
+                captured, baseline=self.trace_persistence.offsets.get(
                     captured.run.agent_run_id, _ProjectionOffset(),
                 ).request_projection,
             )
-            checkpoint_values, observation, interaction_archive = archive.combine_projection_archives(
-                prepared.checkpoints, observation, interaction_archive,
-            )
-            prepared = replace(prepared, checkpoints=checkpoint_values)
-            durable_head = await archive.execution_history_head_record(captured.run.agent_run_id)
             expected_head = ExecutionRunSealHead(
                 captured.run.agent_run_id,
                 durable_head.event_count + len(captured.events),

@@ -1300,11 +1300,12 @@ function reconcileCancellation(info, session, revision) {
   const occupied=session?.active_execution_id===info.execution_id;
   notice(`${outcome}${occupied?' Session release is not yet confirmed.':session?.active_execution_id?' Another execution now owns the session.':session?' Session released.':''}`,occupied?info.execution_id:null,revision);
 }
-async function refreshObservation(id, generation) {
+async function refreshObservation(id, generation, snapshot=null) {
   const sessionId=state.observedInfo?.session_id===state.selectedSession?state.selectedSession:null, refreshGeneration=++state.refreshGeneration, readGeneration=++state.observationReadGeneration, noticeRevision=state.noticeRevision;
   const current=()=>generation===state.observationGeneration && id===state.observedExecution && refreshGeneration===state.refreshGeneration && readGeneration===state.observationReadGeneration;
   let info,payload;
-  try {info=await api(`/api/executions/${enc(id)}`);if(!current())return;payload=sessionId ? await readSession(sessionId) : null;}
+  // Only the unchanged snapshot from this successful stream tail is reusable.
+  try {info=snapshot?.status==='SUCCEEDED' && snapshot===state.observedInfo ? snapshot : await api(`/api/executions/${enc(id)}`);if(!current())return;payload=sessionId ? await readSession(sessionId) : null;}
   catch(error){if(current()){unavailableSelection(error);throw error;}return;}
   if(!current())return;
   info=observedInfo(info,readGeneration);
@@ -1340,11 +1341,11 @@ async function watchExecution(id,generation) {
       if(!response.ok){const payload=await response.json();const error=new Error(payload.error_code || payload.code || 'Observation unavailable');error.code=payload.error_code || payload.code;error.path=`/api/executions/${enc(id)}/events`;error.reconnect=response.status>=500;throw error;}
       if(!current())return;
       connection('Live');
-      let ended=false;
+      let ended=false,endingSnapshot=null;
       await readSSE(response,async frame=>{
         if(!current())return;
         if(frame.event==='snapshot') {
-          ++state.observationReadGeneration;const info=observedInfo(frame.data);ended=true;
+          ++state.observationReadGeneration;const info=observedInfo(frame.data);ended=true;endingSnapshot=info;
           renderLive();
           if(id===state.selectedExecution){state.execution=info;state.executionError=false;renderExecution();}
           setDisabled();return;
@@ -1379,7 +1380,7 @@ async function watchExecution(id,generation) {
       if(ended) {
         // A competing readback is not a broken stream; retain incomplete live content.
         let refreshed=false;
-        while(current() && !refreshed)refreshed=await refreshObservation(id,generation);
+        while(current() && !refreshed)refreshed=await refreshObservation(id,generation,endingSnapshot);
         if(!current())return;
         if(state.view==='sessions' && state.session?.active_execution_id && state.session.active_execution_id!==id){await syncObservation();if(!current())return;}
         const status=state.observedInfo?.status;

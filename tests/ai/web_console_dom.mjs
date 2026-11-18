@@ -182,6 +182,52 @@ async function detail(name,pattern){
 }
 await until('initial session list',()=>node('list').children.length===2);
 assert.equal(node('list').children.length,2);
+if(process.argv[3]==='snapshot-tail') {
+  const id='a-tail';
+  executions.set(id,{...info(id,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(id,{});sessions.get('a').active_execution_id=id;
+  await select('#session=a&execution=a-run');
+  await until('tail watch opened',()=>Boolean(streamBlocks.get(id).controller));
+  node('prompt').value='Keep local draft';node('prompt').focus();
+  const reads=()=>calls.filter(call=>call.method==='GET' && call.key===`/api/executions/${id}`).length;
+  const sessionReads=()=>calls.filter(call=>call.method==='GET' && call.key==='/api/sessions/a').length;
+  const before=reads(),beforeSession=sessionReads();
+  executions.set(id,info(id,'a'));
+  const stream=streamBlocks.get(id).controller;
+  stream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));stream.close();
+  await until('successful tail reads timeline',()=>sessionReads()>beforeSession);await settle();
+  assert.equal(reads(),before,'authorized final SSE snapshot replaces the redundant execution GET');
+  assert.equal(sessionReads(),beforeSession+1,'committed session timeline still refreshes');
+  assert.equal(node('prompt').value,'Keep local draft');assert.equal(document.activeElement,node('prompt'));
+  assert.equal(node('detail-turn').value,'a-run','tail does not select the observed execution');
+  assert.equal(node('send').disabled,true,'execution completion cannot release the session owner');
+
+  const failed='a-broken';executions.set(failed,{...info(failed,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(failed,{});sessions.get('a').active_execution_id=failed;
+  await until('broken watch opened',()=>Boolean(streamBlocks.get(failed).controller));
+  const failures=()=>calls.filter(call=>call.method==='GET' && call.key===`/api/executions/${failed}`).length;
+  const beforeFailure=failures(),old=streamBlocks.get(failed).controller;
+  old.close();
+  await until('transport failure reads current execution',()=>failures()>beforeFailure);
+  await until('transport reconnect opens new stream',()=>streamBlocks.get(failed).controller!==old);
+  const reconnected=streamBlocks.get(failed).controller,beforeTyped=failures();
+  executions.set(failed,{...info(failed,'a'),status:'FAILED'});
+  reconnected.enqueue(new TextEncoder().encode('event: observation_error\ndata: {"error_code":"STORAGE_NOT_FOUND","origin":"stream"}\n\n'));
+  await until('observation error reads final state',()=>failures()>beforeTyped);
+  assert.equal(node('prompt').value,'Keep local draft');assert.equal(node('detail-turn').value,'a-run');
+  const terminalFailure='a-failed-snapshot';
+  executions.set(terminalFailure,{...info(terminalFailure,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(terminalFailure,{});sessions.get('a').active_execution_id=terminalFailure;
+  await until('failed snapshot watch opened',()=>Boolean(streamBlocks.get(terminalFailure).controller));
+  const failureReads=()=>calls.filter(call=>call.method==='GET' && call.key===`/api/executions/${terminalFailure}`).length;
+  const beforeFinalFailure=failureReads(),failedSnapshot={...info(terminalFailure,'a'),status:'FAILED'};
+  executions.set(terminalFailure,failedSnapshot);
+  const failedStream=streamBlocks.get(terminalFailure).controller;
+  failedStream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(failedSnapshot)+'\n\n'));failedStream.close();
+  await until('failed terminal snapshot keeps metadata readback',()=>failureReads()>beforeFinalFailure);
+  console.log('Successful SSE tail reuses metadata; transport/reconnect and observation errors reread authority');
+  process.exit(0);
+}
 if(process.argv[3]==='session-sync') {
   await select('#session=a&execution=a-run');
   await until('session initial snapshot',()=>!node('send').disabled);
@@ -754,11 +800,11 @@ if(process.argv[3]==='streaming') {
   assert.equal(node('conversation').scrollTop,0,'Streaming respects a reader away from the bottom');node('conversation').clientHeight=300;
   await copy.click();assert.equal(copied,expected);
   // A final snapshot flushes pending text even while animation frames are paused.
-  const release=deferred(`GET /api/executions/${id}`);emit('ASSISTANT_TEXT_DELTA',' terminal');expected+=' terminal';
+  const release=deferred('GET /api/sessions/a');emit('ASSISTANT_TEXT_DELTA',' terminal');expected+=' terminal';
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
   timelineOverrides.set('a',{items:[{...timeline('a').items[0],execution_id:id,items:[{item_kind:'assistant',content:expected}]}],next_cursor:null});
   stream.controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));stream.controller.close();
-  await release.requested;assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(frames.size,0);release(info(id,'a'));
+  await release.requested;assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(frames.size,0);release({session:sessions.get('a'),timeline:timeline('a')});
   await until('canonical final Markdown',()=>node('connection').textContent==='Observation: Complete');assert.equal(node('live').textContent,'');assert.match(node('conversation').textContent,/terminal/);
   // Navigation cancels an old pending preview instead of repainting it elsewhere.
   const next='smooth-next';sessions.get('a').active_execution_id=next;executions.set(next,{...info(next,'a'),status:'STARTED'});streamBlocks.set(next,{});

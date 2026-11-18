@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from functools import partial
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
@@ -1487,6 +1488,12 @@ class StateStepArchive(AgentRunStore):
             return records, sequences
 
         records, sequences = await self._store.read(read)
+        return self._decode_execution_history_heads(unique_agent_run_ids, records, sequences)
+
+    def _decode_execution_history_heads(
+        self, unique_agent_run_ids: Sequence[str], records: Mapping[bytes, StoredRecord],
+        sequences: Mapping[bytes, int],
+    ) -> Mapping[str, ExecutionRunSealHead]:
         result: dict[str, ExecutionRunSealHead] = {}
         for agent_run_id in unique_agent_run_ids:
             agent_run_record = records.get(self._agent_run_key(agent_run_id))
@@ -1733,6 +1740,102 @@ class StateStepArchive(AgentRunStore):
 
         return load
 
+    async def prepare_captured_projection(
+        self, captured: CapturedExecutionProjection, *, baseline: ContextProjection | None,
+    ) -> tuple[PreparedAgentRunCheckpointBatch, PreparedTranscriptObservation | None,
+               tuple[ModelInteractionRecord, ...], PreparedArchive, ExecutionRunSealHead]:
+        """Prepare one projection, sharing only same-owner captured source facts."""
+        require_no_run_history_lock("StateStepArchive.prepare_captured_projection")
+        self._ensure_open()
+        run = captured.run
+        prepared_archive = PreparedArchive()
+        source = await self._capture_projection_source(captured, prepared_archive)
+        records = None if source is None else source[0]
+        observation = None
+        if captured.transcript is not None:
+            if source is None:
+                observation = await self._history.prepare_observation(
+                    run.agent_run_id, captured.transcript.messages,
+                    first_message_index=captured.base_message_index,
+                    pending=captured.transcript.pending, pending_keys=captured.transcript.pending_keys,
+                    archive=prepared_archive,
+                )
+            else:
+                load_observation = source[2]
+                assert load_observation is not None
+                observation = await load_observation()
+        # Independent registrations keep their original post-observation publication order.
+        await self.prepare_run_registration(run)
+        prepare_checkpoints = (self.prepare_checkpoints if records is None else
+                               partial(self._prepare_checkpoints, observed_records=records))
+        prepared = await prepare_checkpoints(
+            run, captured.checkpoints, archive=prepared_archive,
+            observed_message_count=None if observation is None else observation.target_message_count,
+        )
+        prepare_interactions = (self.prepare_interactions if records is None else
+                                partial(self._prepare_interactions, observed_records=records))
+        interactions = await prepare_interactions(
+            run, captured.interactions, dict(captured.payloads).__getitem__,
+            local_message_count=(captured.target_message_index if captured.transcript is not None
+                                 else prepared.target_transcript_message_count),
+            local_messages=captured.local_messages, prepared=prepared_archive, baseline=baseline,
+            replay=any(value.model_request_seq <= captured.base_interaction_offset
+                       for value in captured.interactions),
+        )
+        checkpoints, observation, prepared_archive = self.combine_projection_archives(
+            prepared.checkpoints, observation, prepared_archive,
+        )
+        head = (await self.execution_history_head_record(run.agent_run_id) if source is None else
+                self._decode_execution_history_heads((run.agent_run_id,), source[0], source[1])[run.agent_run_id])
+        return replace(prepared, checkpoints=checkpoints), observation, interactions, prepared_archive, head
+
+    async def _capture_projection_source(
+        self, captured: CapturedExecutionProjection, prepared_archive: PreparedArchive,
+    ) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, int],
+               Callable[[], Awaitable[PreparedTranscriptObservation]] | None] | None:
+        if (type(self).prepare_checkpoints is not StateStepArchive.prepare_checkpoints
+                or type(self).prepare_interactions is not StateStepArchive.prepare_interactions
+                or type(self).execution_history_heads is not StateStepArchive.execution_history_heads
+                or type(self).execution_history_head_record is not StateStepArchive.execution_history_head_record
+                or type(self).prepare_run_registration is not StateStepArchive.prepare_run_registration
+                or type(self._history) is not TranscriptRepository
+                or self._runtime_domain is not PersistenceDomain.TRACE
+                or active_state_scope() is not None
+                or self._run_registrations is not None and not self._run_registrations.joins(self._store)
+                or any(isinstance(item, TranscriptSpanRef)
+                       for value in captured.interactions
+                       for projection in (value.request_context, value.response_context,
+                                          *(attempt.response_context for attempt in value.stream_attempts or ()))
+                       if projection is not None for item in projection.items)):
+            return None
+        run = captured.run
+        owner_id = run.agent_run_id
+        keys = (self._agent_run_key(owner_id), self._history.head_key(owner_id),
+                self._history.projection_key(owner_id))
+        sequences = tuple(self._stream(owner_id, kind) for kind in ("event", "checkpoint", "interaction"))
+
+        async def capture(transaction: StateTransaction):
+            registrations = await self.read_run_registrations((owner_id,))
+            records = await self.read_run_records(
+                transaction, keys, sequence_keys=sequences, registrations=registrations,
+            )
+            counts = await transaction.get_sequences(sequences)
+            observation = None
+            if captured.transcript is not None:
+                observation = await self._history.capture_observation(
+                    transaction, owner_id, captured.transcript.messages,
+                    first_message_index=captured.base_message_index,
+                    pending=captured.transcript.pending, pending_keys=captured.transcript.pending_keys,
+                    archive=prepared_archive, head_record=records.get(self._history.head_key(owner_id)),
+                )
+            return records, counts, observation
+
+        stores = (self._store, *(self._run_registrations.transaction_stores(self._store)
+                                if self._run_registrations is not None else ()))
+        return await self._store.storage_group.read_many(
+            tuple(dict.fromkeys(stores)), lambda group: capture(group.transaction(self._store)),
+        )
+
     async def prepare_interactions(
         self,
         run: AgentRunRecord,
@@ -1745,6 +1848,19 @@ class StateStepArchive(AgentRunStore):
         prepared: PreparedArchive,
         replay: bool = False,
         baseline: ContextProjection | None = None,
+    ) -> tuple[ModelInteractionRecord, ...]:
+        return await self._prepare_interactions(
+            run, interactions, payload, local_message_base=local_message_base,
+            local_message_count=local_message_count, local_messages=local_messages,
+            prepared=prepared, replay=replay, baseline=baseline,
+        )
+
+    async def _prepare_interactions(
+        self, run: AgentRunRecord, interactions: Sequence[StagedModelInteraction],
+        payload: Callable[[str], bytes], *, local_message_base: int = 0,
+        local_message_count: int = 0, local_messages: Sequence[ModelMessage] = (),
+        prepared: PreparedArchive, replay: bool = False, baseline: ContextProjection | None = None,
+        observed_records: Mapping[bytes, StoredRecord] | None = None,
     ) -> tuple[ModelInteractionRecord, ...]:
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
@@ -1815,8 +1931,14 @@ class StateStepArchive(AgentRunStore):
             stored_interactions = {value.model_request_seq: value for value in existing}
         previous_projection = None
         if any(value.request_context is not None for value in values):
-            previous_projection = (baseline if baseline is not None
-                                   else await self._history.load_projection(run.agent_run_id))
+            if baseline is not None:
+                previous_projection = baseline
+            elif observed_records is None:
+                previous_projection = await self._history.load_projection(run.agent_run_id)
+            else:
+                record = observed_records.get(self._history.projection_key(run.agent_run_id))
+                previous_projection = (None if record is None else
+                                       _decode_enveloped_domain(record.data, ContextProjection))
             if previous_projection is None:
                 context = self._context_baselines.get(run.agent_run_id)
                 if (context is not None and isinstance(context.archive_root, NativeMessageRoot)
@@ -2313,6 +2435,7 @@ class StateStepArchive(AgentRunStore):
         *,
         observed_message_count: int | None = None,
         archive: PreparedArchive | None = None,
+        observed_records: Mapping[bytes, StoredRecord] | None = None,
     ) -> PreparedAgentRunCheckpointBatch:
         values = checkpoints
         if not values:
@@ -2325,7 +2448,11 @@ class StateStepArchive(AgentRunStore):
                 if self._runtime_domain is PersistenceDomain.CONVERSATION
                 else run.agent_run_id
             )
-            head = await self._history.get_head(head_owner)
+            if observed_records is None:
+                head = await self._history.get_head(head_owner)
+            else:
+                record = observed_records.get(self._history.head_key(head_owner))
+                head = None if record is None else self._history.decode_head(record)
             return PreparedAgentRunCheckpointBatch(
                 run.agent_run_id,
                 (),
@@ -2335,6 +2462,7 @@ class StateStepArchive(AgentRunStore):
             )
         return await self._prepare_explicit_checkpoints(
             run, values, observed_message_count=observed_message_count, archive=archive,
+            observed_records=observed_records,
         )
 
     async def _prepare_explicit_checkpoints(
