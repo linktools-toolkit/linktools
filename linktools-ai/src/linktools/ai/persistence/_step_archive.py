@@ -2791,7 +2791,10 @@ class StateStepArchive(AgentRunStore):
                 and terminal_publication.execution == terminal_execution
                 and terminal_execution.execution_id == execution_id
                 and terminal_execution.producer_generation == producer_generation
-                and not terminal_execution.durable_trace
+                and (not terminal_execution.durable_trace or (
+                    terminal_publication.history_seal is not None
+                    and terminal_publication.history_seal.execution_id == execution_id
+                    and terminal_publication.history_seal.seal_digest == terminal_execution.history_seal_digest))
                 and terminal_execution.recovery_state is not ExecutionRecoveryState.HANDOFF
                 and terminal_execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
             return
