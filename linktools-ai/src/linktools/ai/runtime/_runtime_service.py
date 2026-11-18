@@ -108,6 +108,7 @@ class _ExecutionTreeStreamer(Protocol):
         *,
         principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None,
+        include_descendants: bool = True,
     ) -> tuple[tuple[ExecutionView, int, int], ...]: ...
 
     def replay(
@@ -127,6 +128,7 @@ class _ExecutionTreeStreamer(Protocol):
         after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
+        include_descendants: bool = True,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -514,7 +516,7 @@ class Runtime(Generic[AppT]):
             principal=principal,
             after_event_seqs=after_event_seqs,
             include_content=include_content, include_output_preview=include_output_preview,
-            ready=ready, **({"include_descendants": False} if not include_descendants else {}),
+            ready=ready, include_descendants=include_descendants,
         )
 
     async def _capture_execution_tree(
@@ -529,7 +531,7 @@ class Runtime(Generic[AppT]):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._tree_streamer.capture(
             execution_id, principal=principal, after_event_seqs=after_event_seqs,
-            **({"include_descendants": False} if not include_descendants else {}),
+            include_descendants=include_descendants,
         )
 
     def _replay_execution_tree(

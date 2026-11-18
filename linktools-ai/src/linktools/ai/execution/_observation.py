@@ -72,7 +72,7 @@ class _ExecutionModelObservation:
     async def capture(self, *, subscribe: bool = True) -> tuple[tuple[ExecutionView, int, int], ...]:
         captured = await self.owner.capture_tree(
             self.execution_id, principal=self.principal, after_event_seqs=ExecutionWatchPositions(self.sequences, self.previews),
-            **({"include_descendants": False} if not self.include_descendants else {}),
+            include_descendants=self.include_descendants,
         )
         for view, depth, _ in captured:
             await self.models.add(self.execution_id, view, depth, subscribe=subscribe)
@@ -117,7 +117,7 @@ class _ExecutionModelObservation:
             self.execution_id, principal=self.principal, after_event_seqs=self.sequences,
             include_content=self.include_content, ready=tree_ready,
             include_output_preview=self.include_output_preview,
-            **({"include_descendants": False} if not self.include_descendants else {}),
+            include_descendants=self.include_descendants,
         )
         pending = asyncio.create_task(stream.__anext__())
         prepared = asyncio.create_task(tree_ready.wait())

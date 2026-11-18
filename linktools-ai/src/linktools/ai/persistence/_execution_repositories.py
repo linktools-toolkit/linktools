@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import TypeVar
-from ._record_owner import ExecutionRecoveryCandidateQuery
+from ._record_query import ExecutionRecoveryCandidateQuery
 from ._message_root import NativeTextReference, NativeMessageRoot
 from linktools.core import environ
 from ..core import (
@@ -2760,3 +2760,4 @@ __all__ = [
     "ExecutionRepositoryImpl",
     "IdempotencyRepositoryImpl",
 ]
+

@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.persistence._record_owner import EXECUTION_SCAN_STATES, ExecutionRecoveryCandidateQuery, record_scan_kinds
+from linktools.ai.persistence._record_owner import EXECUTION_SCAN_STATES, record_scan_kind, record_scan_kinds
+from linktools.ai.persistence._record_query import ExecutionRecoveryCandidateQuery
 from linktools.ai.persistence.state import RecordQuery
 
 from .test_state_batch_delete_backends import _digest, _open_store, _record
@@ -23,7 +24,7 @@ def test_execution_scan_bucket_selection_keeps_exact_persisted_states() -> None:
     assert record_scan_kinds("execution", frozenset({"DONE"})) == ("e:1", "e:0")
     assert record_scan_kinds("execution", frozenset({"STARTED "})) == ("e:1", "e:0")
     assert record_scan_kinds("execution", frozenset({"unknown"})) == ("e:1", "e:0")
-    assert record_scan_kinds("execution ", frozenset({"STARTED"})) == ("k:execution ", "e:1", "e:0")
+    assert record_scan_kinds("execution ", frozenset({"STARTED"})) == ("e:1",)
     assert record_scan_kinds("execution", frozenset({"STARTED", "DONE"})) == ("e:1", "e:0")
     assert record_scan_kinds("execution", None) == ("e:1", "e:0")
     assert record_scan_kinds("execution", frozenset()) == ()
@@ -176,3 +177,54 @@ async def test_recovery_candidates_do_not_decode_unrelated_cold_payloads(tmp_pat
     with pytest.raises(AIError) as caught:
         execution_prepared_handoff(marker)
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+
+def test_scan_projection_is_not_domain_state_or_a_typed_owner_column():
+    from linktools.ai.persistence._record_owner import record_owner_values
+    from linktools.ai.persistence._sql import _record_values
+
+    record = replace(_record(0), kind="execution", state="FAILED")
+    values = _record_values(record)
+    assert values["state"] == "FAILED" and values["scan_kind"] == "e:0"
+    assert record_scan_kind("execution", "FAILED", prepared=True) == "e:1"
+    assert record_scan_kind("execution ", "STARTED ") == "e:1"
+    for owner in ("ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions"):
+        assert "scan_kind" not in record_owner_values(owner, {"scan_kind": "k:probe"})
+
+
+@pytest.mark.asyncio
+async def test_sql_scan_projection_follows_mutations_and_survives_lease_only_writes(tmp_path):
+    from sqlalchemy import select
+    from linktools.ai.persistence.state import RecordReplacement
+
+    marker = {"value": {"payload": {"fields": {"recovery": {"fields": {
+        "handoff_phase": {"value": "prepared"}}}}}}}
+    hot = replace(_record(0), kind="execution", state="STARTED")
+    cold = replace(_record(1), kind="execution", state="FAILED")
+    async with _open_store("sql", tmp_path / "sql") as store:
+        await store.mutate(lambda tx: tx.insert_records((hot, cold)))
+        table = store.storage_group.metadata.tables["ai_state_records"]
+
+        async def buckets():
+            async with store.storage_group.context.engine.connect() as connection:
+                return dict((await connection.execute(select(table.c.key, table.c.scan_kind).where(
+                    table.c.store_key == store.store_key))).all())
+
+        assert await buckets() == {hot.key: "e:1", cold.key: "e:0"}
+        stopped = replace(hot, state="SUCCEEDED", storage_revision=1)
+        pending = replace(cold, data=marker, storage_revision=1)
+        await store.mutate(lambda tx: tx.replace_records((
+            RecordReplacement(stopped, 0), RecordReplacement(pending, 0))))
+        assert await buckets() == {hot.key: "e:0", cold.key: "e:1"}
+        assert await store.mutate(lambda tx: tx.update_record_lease(
+            pending.key, expected_storage_revision=1, lease_owner=None, lease_fence=1,
+            lease_expires_at=None))
+        assert await buckets() == {hot.key: "e:0", cold.key: "e:1"}
+        after_lease = await store.read_record(pending.key)
+        completed = replace(after_lease, data=cold.data, storage_revision=3)
+        assert await store.mutate(lambda tx: tx.replace_record(completed, expected_storage_revision=2))
+        assert await buckets() == {hot.key: "e:0", cold.key: "e:0"}
+        immutable = replace(_record(2), kind="archive_probe", state=None)
+        await store.mutate(lambda tx: tx.insert_immutable_records((immutable,)))
+        assert (await buckets())[immutable.key] == "k:archive_probe"

@@ -557,11 +557,11 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
 
 
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
-def test_record_scan_bucket_is_stored_generated_and_replaces_only_generic_index(dialect_name: str) -> None:
+def test_record_scan_bucket_is_write_through_and_replaces_only_generic_index(dialect_name: str) -> None:
     from sqlalchemy.dialects import postgresql, sqlite
     from sqlalchemy.schema import CreateColumn
 
-    from linktools.ai.persistence._record_owner import EXECUTION_SCAN_STATES, RECORD_OWNER_TABLES
+    from linktools.ai.persistence._record_owner import RECORD_OWNER_TABLES
 
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.EXECUTION}))
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
@@ -570,23 +570,14 @@ def test_record_scan_bucket_is_stored_generated_and_replaces_only_generic_index(
     records = metadata.tables["ai_state_records"]
     column = records.c.scan_kind
     assert column.type.length == 34
-    assert column.computed is not None and column.computed.persisted is True
+    assert column.computed is None and not column.nullable
     ddl = str(CreateColumn(column).compile(dialect=dialect))
-    assert "GENERATED ALWAYS AS" in ddl and "STORED" in ddl
-    assert all("'" + state + "'" in ddl for state in EXECUTION_SCAN_STATES)
-    assert "'e:1'" in ddl and "'e:0'" in ddl and "'k:'" in ddl
-    assert "execution_handoff" not in ddl
-    assert "handoff_phase" in ddl and "'prepared'" in ddl
-    assert "payload_json" in ddl
-    # Candidate derivation unwraps the canonical JSON-string layer, without
-    # database-specific DDL leaking into the other supported dialects.
-    assert {"mysql": "JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(payload_json)",
-            "sqlite": "json_extract(json_extract(payload_json, '$')",
-            "postgresql": "(payload_json #>> '{}')::json"}[dialect_name] in ddl
-
+    assert "GENERATED" not in ddl and "JSON_EXTRACT" not in ddl
+    assert "handoff_phase" not in ddl
     indexes = {tuple(index.columns.keys()) for index in records.indexes}
     assert ("store_key", "scan_kind", "sort_prefix") in indexes
     assert ("store_key", "kind", "sort_prefix") not in indexes
     for name in RECORD_OWNER_TABLES:
         if name != "ai_state_records":
             assert "scan_kind" not in metadata.tables[name].c
+

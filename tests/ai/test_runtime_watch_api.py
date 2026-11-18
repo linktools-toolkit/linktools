@@ -272,6 +272,7 @@ def _watch_tree(
     include_content=False,
     include_output_preview: bool = False,
     ready: asyncio.Event | None = None,
+    include_descendants: bool = True,
 ):
     if ready is not None:
         ready.set()
@@ -330,6 +331,7 @@ async def test_task_graph_watch_forwards_model_request_progress_with_execution_i
         after_event_seqs=None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
+        include_descendants: bool = True,
     ):
         if ready is not None:
             ready.set()
@@ -392,6 +394,7 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
         after_event_seqs=None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
+        include_descendants: bool = True,
     ):
         if ready is not None:
             ready.set()
@@ -527,6 +530,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         after_event_seqs=None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
+        include_descendants: bool = True,
     ):
         if ready is not None:
             ready.set()
@@ -1292,6 +1296,7 @@ async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -
         after_event_seqs=None,
         include_content=False,
         ready: asyncio.Event | None = None,
+        include_descendants: bool = True,
     ):
         if ready is not None:
             ready.set()
@@ -1596,7 +1601,7 @@ async def test_graph_live_subagent_root_cursor_binds_selected_execution():
         assert execution_id == "selected"
         return ExecutionView("selected", "agent", ExecutionStatus.SUCCEEDED,
             ExecutionLineageKind.SUBAGENT, "parent", "lineage-root", "invocation", agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), event_seq=1)
-    async def tree(execution_id, *, principal, after_event_seqs=None, include_content=False, ready=None):
+    async def tree(execution_id, *, principal, after_event_seqs=None, include_content=False, ready=None, include_descendants: bool = True):
         assert execution_id == "selected"
         if ready is not None:
             ready.set()

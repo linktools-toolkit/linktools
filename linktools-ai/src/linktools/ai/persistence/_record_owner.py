@@ -5,8 +5,6 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from .state import RecordQuery
-
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
 
 if TYPE_CHECKING:
@@ -21,22 +19,21 @@ EXECUTION_SCAN_STATES = frozenset((
 ))
 
 
-class ExecutionRecoveryCandidateQuery(RecordQuery):
-    """Internal indexed candidate selection; decoded recovery remains authoritative."""
+def record_scan_kind(kind: str, state: str | None, *, prepared: bool = False) -> str:
+    """Compute a query-only projection in the same write as its source record.
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.kind != "execution" or self.states is not None:
-            raise ValueError("execution recovery candidates require execution kind without a status filter")
+    Widen PAD SPACE aliases into the same candidate range on every backend;
+    raw kind/state predicates still determine which rows a query returns.
+    """
+    if kind.rstrip(" ") == "execution":
+        hot = state is not None and state.rstrip(" ") in EXECUTION_SCAN_STATES
+        return "e:1" if hot or prepared else "e:0"
+    return "k:" + kind
 
 
 def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[str, ...]:
     """Select disjoint physical ranges without replacing the logical state filter."""
-    if kind != "execution":
-        # MySQL's binary VARCHAR collation ignores trailing spaces, whereas
-        # SQLite/PostgreSQL preserve them. Keep both possible classifications.
-        if kind.rstrip(" ") == "execution":
-            return ("k:" + kind, "e:1", "e:0")
+    if kind.rstrip(" ") != "execution":
         return ("k:" + kind,)
     if states is None:
         return ("e:1", "e:0")
@@ -93,7 +90,7 @@ def record_owner_names(*, keys: Sequence[bytes] | None = None, kind: str | None 
     if kind == "archive_content":
         return ("ai_state_records",)
     if kind is not None:
-        owner = _KIND_OWNERS.get(kind)
+        owner = _KIND_OWNERS.get(kind.rstrip(" "))
         return ("ai_state_records", owner) if owner is not None else ("ai_state_records",)
     return RECORD_OWNER_TABLES
 
@@ -143,8 +140,10 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
     for key, value in _CONSTANTS.get(name, {}).items():
         if key in values and values[key] != value:
             raise ValueError(f"{name} requires {key}={value!r}")
-    return {key: value for key, value in values.items() if key not in _CONSTANTS.get(name, {})}
+    return {key: value for key, value in values.items()
+            if key not in _CONSTANTS.get(name, {}) and (key != "scan_kind" or name == "ai_state_records")}
 
 
 
-__all__ = ["ExecutionRecoveryCandidateQuery", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+

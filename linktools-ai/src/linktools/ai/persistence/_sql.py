@@ -26,7 +26,8 @@ from ..storage import (
 )
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
-from ._record_owner import ExecutionRecoveryCandidateQuery, RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
+from ._record_query import ExecutionRecoveryCandidateQuery, record_scan_projection
+from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
 from .state import state_content_members
@@ -84,12 +85,12 @@ _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 192
 # One partition bind plus a locator and raw identity per key fits SQLite 999.
 _RAW_KEY_BATCH_SIZE = 499
-# Each immutable record contributes seventeen bound values.
+# Eighteen record values plus the store key fit SQLite 999 at this batch size.
 _IMMUTABLE_RECORD_BATCH_SIZE = 48
 # One store and two stream predicates leave 996 SQLite sequence binds.
 _FACT_READ_BATCH_SIZE = 996
-# Seven CASE assignments and seven identity/CAS binds plus the IN key
-# require at most 22 binds per row and one shared store bind.
+# Eight CASE assignments and seven identity/CAS binds plus the IN key
+# require at most 24 binds per row and one shared store bind.
 _RECORD_REPLACE_BATCH_SIZE = 40
 # Store, scope, and kind predicates leave 996 SQLite subject binds.
 _RECORD_SUBJECT_READ_BATCH_SIZE = 995
@@ -1883,7 +1884,7 @@ class _SqlTransaction:
 
         table = self._table(owners[0])
         prepared = tuple(record_owner_values(owners[0], _record_values(value.record)) for value in ordered)
-        columns = ("state", "storage_revision", "lease_owner", "lease_fence",
+        columns = ("state", "scan_kind", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json", "payload_bytes")
         identity_columns = tuple(name for name in ("scope_key", "parent_key", "subject_id", "kind", "sort_key") if name in table.c)
         columns = tuple(name for name in columns if name in table.c)
@@ -2983,6 +2984,7 @@ def _record_values(record: StoredRecord) -> dict[str, object]:
         if record.subject_id is None
         else record.subject_id.encode("utf-8"),
         "kind": record.kind,
+        "scan_kind": record_scan_projection(record.kind, record.state, record.data),
         "sort_key": record.sort_key,
         "state": record.state,
         "storage_revision": record.storage_revision,
@@ -3301,4 +3303,5 @@ def _record_page_statement(table: "FromClause", store_key: bytes, query: RecordQ
 
 
 __all__ = ["SqlStateStorageGroup", "SqlStateStore"]
+
 

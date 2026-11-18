@@ -261,7 +261,7 @@ class Execution(Generic[AppT]):
             self.execution_id, principal=self._principal, after_event_seqs=sequences,
             include_content=include_content, ready=ready,
             include_output_preview=include_output_preview,
-            **({"include_descendants": False} if not include_descendants else {}),
+            include_descendants=include_descendants,
         )
         return self._watch_with_cursor(stream, sequences, include_content, cursor)
 

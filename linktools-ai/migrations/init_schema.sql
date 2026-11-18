@@ -23,7 +23,7 @@ CREATE TABLE ai_state_records (
 	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete scope_key; raw identity must also match.',
 	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete parent_key; raw identity must also match.',
 	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.',
-	scan_kind VARCHAR(34) GENERATED ALWAYS AS (CASE WHEN (kind = 'execution') THEN CASE WHEN (state IN ('CANCELLING', 'FINALIZING', 'PENDING_START', 'RECOVERY_REQUIRED', 'STARTED', 'WAITING_DEFERRED')) THEN 'e:1' WHEN (JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(payload_json), '$.value.payload.fields.recovery.fields.handoff_phase.value')) = 'prepared') THEN 'e:1' ELSE 'e:0' END ELSE concat('k:', kind) END) STORED NOT NULL COMMENT 'Derived kind and execution recovery eligibility bucket for ordered record scans.',
+	scan_kind VARCHAR(34) NOT NULL COMMENT 'Write-through kind and execution recovery candidate projection; never domain authority.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
@@ -449,4 +449,5 @@ CREATE TABLE ai_metric_observations (
 )ENGINE=InnoDB COMMENT='Immutable metric observations and retained pruning receipts.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
 -- Official StepStore physical mapping.
+
 

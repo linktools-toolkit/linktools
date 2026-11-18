@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """SQL columns shared by independently owned optimistic domain rows."""
 
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from ..core import RESOURCE_ID_MAX_BYTES
@@ -17,49 +16,15 @@ from ..storage import (
     sql_table_options,
     sql_unique,
 )
-from ._record_owner import EXECUTION_SCAN_STATES
 from .state import STORE_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
 
-@lru_cache(maxsize=1)
-def _execution_handoff_phase_type():
-    """Extract retained control from the JSON-string canonical envelope in DDL."""
-    from sqlalchemy import String
-    from sqlalchemy.ext.compiler import compiles
-    from sqlalchemy.sql.functions import FunctionElement
-
-    class ExecutionHandoffPhase(FunctionElement):
-        type = String()
-        inherit_cache = True
-
-    from .codec import EXECUTION_HANDOFF_PHASE_PATH
-    path = "$." + ".".join(EXECUTION_HANDOFF_PHASE_PATH)
-    postgres_path = "{" + ",".join(EXECUTION_HANDOFF_PHASE_PATH) + "}"
-
-    @compiles(ExecutionHandoffPhase, "mysql")
-    def mysql_phase(element, compiler, **kwargs):
-        column = compiler.process(next(iter(element.clauses)), **{**kwargs, "include_table": False})
-        return f"JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE({column}), '{path}'))"
-
-    @compiles(ExecutionHandoffPhase, "sqlite")
-    def sqlite_phase(element, compiler, **kwargs):
-        column = compiler.process(next(iter(element.clauses)), **{**kwargs, "include_table": False})
-        return f"json_extract(json_extract({column}, '$'), '{path}')"
-
-    @compiles(ExecutionHandoffPhase, "postgresql")
-    def postgres_phase(element, compiler, **kwargs):
-        column = compiler.process(next(iter(element.clauses)), **{**kwargs, "include_table": False})
-        return f"(({column} #>> '{{}}')::json #>> '{postgres_path}')"
-
-    return ExecutionHandoffPhase
-
-
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
     """Build one physical owner with the common optimistic record contract."""
-    from sqlalchemy import TIMESTAMP, BigInteger, JSON, Column, Computed, LargeBinary, String, Table, Text, case, literal, text
+    from sqlalchemy import TIMESTAMP, BigInteger, JSON, Column, LargeBinary, String, Table, Text, text
     from sqlalchemy.dialects import mysql
 
     if name in metadata.tables:
@@ -158,22 +123,9 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         *sql_audit_columns(),
     ]
     if name == "ai_state_records":
-        kind = next(column for column in columns if column.name == "kind")
-        state = next(column for column in columns if column.name == "state")
-        payload = next(column for column in columns if column.name == "payload_json")
         columns.insert(-2, Column(
-            "scan_kind",
-            String(34),
-            Computed(case(
-                (kind == "execution", case(
-                    (state.in_(sorted(EXECUTION_SCAN_STATES)), literal("e:1")),
-                    (_execution_handoff_phase_type()(payload) == "prepared", literal("e:1")),
-                    else_=literal("e:0"),
-                )),
-                else_=literal("k:") + kind,
-            ), persisted=True),
-            nullable=False,
-            comment="Derived kind and execution recovery eligibility bucket for ordered record scans.",
+            "scan_kind", String(34), nullable=False,
+            comment="Write-through kind and execution recovery candidate projection; never domain authority.",
         ))
     omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
     if name == "ai_task_graphs":
@@ -197,3 +149,4 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
 
 
 __all__ = ["build_record_owner_table"]
+

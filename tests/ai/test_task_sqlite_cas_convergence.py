@@ -473,6 +473,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
             after_event_seqs: dict[str, int] | None = None,
             include_content: bool = False,
             ready: asyncio.Event | None = None,
+            include_descendants: bool = True,
         ) -> AsyncIterator[ExecutionTreeEvent]:
             del include_content
             if ready is not None:
@@ -502,7 +503,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
 
             return events()
 
-        async def capture_tree(execution_id: str, *, principal: Principal, after_event_seqs=None):
+        async def capture_tree(execution_id: str, *, principal: Principal, after_event_seqs=None, include_descendants: bool = True):
             view = await inspect_execution(execution_id, principal=principal)
             return ((view, 0, view.event_seq),)
 

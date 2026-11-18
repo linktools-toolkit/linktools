@@ -67,6 +67,7 @@ class _Tree:
     def stream(
         self, execution_id: str, *, principal: Principal, after_event_seqs=None,
         include_content: bool = False, include_output_preview: bool = False, ready: asyncio.Event | None = None,
+        include_descendants: bool = True,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         self.calls += 1
 
@@ -84,12 +85,12 @@ class _Tree:
         return values()
 
 
-    async def capture(self, execution_id: str, *, principal: Principal, after_event_seqs=None):
+    async def capture(self, execution_id: str, *, principal: Principal, after_event_seqs=None, include_descendants: bool = True):
         sequences = after_event_seqs or {}
         root = ExecutionView(execution_id, "agent", ExecutionStatus.SUCCEEDED,
             ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
         values = [(root, 0, sequences.get(execution_id, 0))]
-        for child_id, sequence in sequences.items():
+        for child_id, sequence in (sequences.items() if include_descendants else ()):
             if child_id != execution_id:
                 child = ExecutionView(child_id, "agent", ExecutionStatus.SUCCEEDED,
                     ExecutionLineageKind.SUBAGENT, execution_id, execution_id, "invocation", agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))

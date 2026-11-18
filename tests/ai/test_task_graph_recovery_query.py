@@ -46,9 +46,9 @@ def test_graph_pages_preserve_scopes_and_raw_tie_cursors(
         for row in rows:
             opaque = row["key"].startswith(b"opaque")
             connection.execute(insert(generic if opaque else graph),
-                               dict(row, kind="task_graph") if opaque else row)
+                               dict(row, kind="task_graph", scan_kind="k:task_graph") if opaque else row)
         # A different kind in the fallback table cannot enter the graph page.
-        connection.execute(insert(generic), dict(_row(200, state="PENDING", opaque=True), kind="other"))
+        connection.execute(insert(generic), dict(_row(200, state="PENDING", opaque=True), kind="other", scan_kind="k:other"))
         expected = sorted((row for row in rows if row["store_key"] == b"partition"
             and (states is None or row["state"] in states)
             and (scope is None or row["scope_key"] == scope)
@@ -138,3 +138,4 @@ def test_graph_recovery_scan_is_bounded_by_state_page(analyze: bool, terminal: b
         # should expand an already-bounded page. VM work is not physical I/O.
         assert work[1] < work[0] * 2
     engine.dispose()
+
