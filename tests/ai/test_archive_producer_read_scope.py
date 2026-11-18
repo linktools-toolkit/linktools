@@ -62,11 +62,17 @@ async def test_revoked_producer_check_uses_one_sql_metadata_snapshot(
     await repository.state_store.mutate(seed)
     engine = repository.state_store.storage_group.context.engine.sync_engine
     begins = []
+    selects = []
+
+    def after(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+            selects.append(statement)
 
     def begin(connection):
         begins.append(connection)
 
     event.listen(engine, "begin", begin)
+    event.listen(engine, "after_cursor_execute", after)
     try:
         if expected is None:
             await archive.require_revoked_execution_producer(execution_id="execution", producer_generation=1, terminal_execution=hint)
@@ -75,9 +81,14 @@ async def test_revoked_producer_check_uses_one_sql_metadata_snapshot(
                 await archive.require_revoked_execution_producer(execution_id="execution", producer_generation=1, terminal_execution=hint)
             assert raised.value.code is expected
         assert len(begins) <= 1
+        if outcome == "sealed":
+            assert len(selects) == 2
+        elif outcome == "new_generation":
+            assert len(selects) == 1
         assert active_state_scope() is None
     finally:
         event.remove(engine, "begin", begin)
+        event.remove(engine, "after_cursor_execute", after)
         await state.close()
 
 

@@ -185,3 +185,69 @@ async def test_mysql_payload_returning_fallback_does_not_execute() -> None:
         NoExecute(), table=table, rows=({"sha256": "a" * 64},),
         index_elements=("store_locator", "sha256"), returning=("sha256",),
     ) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_mixed_codecs_preserve_winner_and_validate_generic_content(tmp_path: Path, backend: str) -> None:
+    from linktools.ai.errors import ErrorCode
+
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "codecs.db")
+    async with Persistence.open("payload-publish", tenant_id="tenant", storage=storage) as state:
+        scope, store = await state.execution.executions.state_store.storage_group.open_archive(create=True)
+        archive = ContentArchive(store, scope, namespace="payload-publish", tenant_id="tenant", object_store=None)
+        values = ((PAYLOAD_CODEC, b"body"), ("execution-binding", b"binding"))
+        identities = await archive.ensure_content(values)
+        payload_key, generic_key = archive.content_record_keys(values)
+        winner = await store.read_record(payload_key)
+        await store.mutate(lambda tx: tx.guard_record_revision(payload_key, expected_storage_revision=winner.storage_revision))
+        winner = await store.read_record(payload_key)
+        statements = []
+
+        def observe(connection, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                statements.append(statement)
+
+        engine = store.storage_group.context.engine.sync_engine if backend == "sqlite" else None
+        if engine is not None:
+            event.listen(engine, "before_cursor_execute", observe)
+        try:
+            assert await archive.ensure_content(values) == identities
+        finally:
+            if engine is not None:
+                event.remove(engine, "before_cursor_execute", observe)
+        assert not any("ai_step_messages" in statement for statement in statements)
+        assert await store.read_record(payload_key) == winner
+        assert await archive.read_contents((identities[0],), codec=PAYLOAD_CODEC) == (b"body",)
+        generic = await store.read_record(generic_key)
+        damaged = replace(generic, payload_bytes=b"corrupt", storage_revision=generic.storage_revision + 1)
+        assert await store.mutate(lambda tx: tx.replace_record(damaged, expected_storage_revision=generic.storage_revision))
+        with pytest.raises(AIError) as caught:
+            await archive.ensure_content(values)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await store.read_record(payload_key) == winner
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_mixed_codecs_outer_rollback_can_retry(tmp_path: Path, backend: str) -> None:
+    from linktools.ai.errors import ErrorCode
+
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "rollback.db")
+    async with Persistence.open("payload-publish", tenant_id="tenant", storage=storage) as state:
+        scope, store = await state.execution.executions.state_store.storage_group.open_archive(create=True)
+        archive = ContentArchive(store, scope, namespace="payload-publish", tenant_id="tenant", object_store=None)
+        values = ((PAYLOAD_CODEC, b"body"), ("execution-binding", b"binding"))
+
+        async def abort(transaction):
+            await archive.ensure_content(values)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+        with pytest.raises(AIError):
+            await store.mutate(abort)
+        for key in archive.content_record_keys(values):
+            assert await store.read_record(key) is None
+        identities = await archive.ensure_content(values)
+        assert await archive.ensure_content(values) == identities
+        assert await archive.read_contents((identities[0],), codec=PAYLOAD_CODEC) == (b"body",)
+        assert await archive.read_contents((identities[1],), codec="execution-binding") == (b"binding",)

@@ -244,6 +244,9 @@ class SqlTraceEventStore:
                      after_timestamp: datetime | None = None, after_sequence: int = 0, limit: int | None = None,
                      model_request_seq: int | None = None, step_index: int | None = None,
                      tool_call_id: str | None = None) -> tuple[StoredFact, ...]:
+        # Trace sequences start at one; an empty durable prefix has no roles.
+        if high_water == 0:
+            return ()
         from sqlalchemy import and_, or_, select, union_all
         t = self.table.c
         statement = select(self.table).where(t.store_key == self.state.store_key, t.run_id == _identity(run_id),

@@ -2442,6 +2442,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if (generation < producer_generation or status not in {
                     ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if (seal_digest is not None
+                    and runtime_policy_reference(decode_envelope(record.data).value.get("payload")) is not None):
+                await self._execution_content.prefetch_projection_owners(
+                    (record.key,), additional_records={self._store: (
+                        self._key("execution_history_seal", (execution_id,)),
+                    )},
+                )
             expanded, = await self._execution_content.expand_policies((record,))
             _generation, _status, durable_trace, seal_digest = decode_execution_producer_control(expanded.data)
             if not durable_trace:

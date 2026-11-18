@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import Select
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._trace_event_store import SqlTraceEventStore
 from linktools.ai.persistence.state import StateTransaction
 
@@ -122,3 +123,54 @@ async def test_history_associations_join_counter_and_dependency_keys(
             await archive.read_history_associations(
                 agent_run_id="missing", message_seqs=(2,), tool_call_ids=(), event_high_water=1)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_first_trace_publication_skips_empty_role_prefix_but_checks_later_conflicts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        statements = []
+        original = SqlTraceEventStore._rows
+
+        async def capture(self, transaction, statement):
+            statements.append(statement)
+            return await original(self, transaction, statement)
+
+        monkeypatch.setattr(SqlTraceEventStore, "_rows", capture)
+        first = _event(run_id, "MODEL_REQUEST_STARTED")
+        await _append(archive, first)
+        assert not statements
+        with pytest.raises(AIError) as caught:
+            await _append(archive, _event(run_id, "MODEL_REQUEST_STARTED", second=1))
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert statements
+        assert await archive.list_events(agent_run_id=run_id) == [first]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sequence", (0, -1))
+async def test_trace_restore_rejects_nonpositive_sequence(tmp_path: Path, sequence: int) -> None:
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        await _append(archive, _event(run_id, "MODEL_REQUEST_STARTED"))
+        from linktools.ai.persistence.state import FactQuery
+        row, = await archive.state_store.read(lambda tx: archive._trace_events.read_rows(
+            tx, FactQuery(archive._stream(run_id, "event"))))
+        with pytest.raises(AIError) as caught:
+            await archive.state_store.mutate(lambda tx: archive._trace_events.restore(
+                tx, ({**row, "sequence": sequence},)))
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_first_trace_batch_still_rejects_duplicate_roles(tmp_path: Path) -> None:
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        run = await archive.get_agent_run(agent_run_id=run_id)
+        assert run is not None
+        with pytest.raises(AIError) as caught:
+            await archive.sync_projection(run, events=(
+                _event(run_id, "TOOL_CALL_STARTED", tool="call"),
+                _event(run_id, "TOOL_CALL_STARTED", tool="call", second=1),
+            ), checkpoints=(), execution_id="execution")
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await archive.list_events(agent_run_id=run_id) == []

@@ -454,9 +454,12 @@ class ContentArchive:
 
     async def ensure_content(self, values: Sequence[tuple[str, bytes]]) -> tuple[str, ...]:
         """Publish typed payloads by address; retain other immutable content contracts."""
-        keys = self.content_record_keys(values)
         opened = self.store.storage_group.opened_archive
         typed_owner = opened is not None and opened[1] is self.store
+        keys = self.content_record_keys(tuple(
+            (codec, raw) for codec, raw in values
+            if not typed_owner or codec != EXECUTION_PAYLOAD_CODEC
+        ))
 
         async def ensure(transaction: StateTransaction) -> tuple[str, ...]:
             prepared = PreparedArchive()
