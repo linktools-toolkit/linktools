@@ -215,6 +215,10 @@ def _decode_tool(server_id: str, value: JsonValue) -> _FixtureTool:
     if not isinstance(name, str) or not name:
         raise ValueError("fixture original tool name is invalid")
     mcp_tool_selector(server_id, name)
+    if isinstance(definition, dict) and "durable" in definition and definition["durable"] is None:
+        # Native captures may serialize the unset execution-placement setting.
+        # The offline catalog does not accept explicit placement overrides.
+        definition = {key: value for key, value in definition.items() if key != "durable"}
     if (
         not isinstance(definition, dict)
         or not {"name", "parameters_json_schema"}.issubset(definition)

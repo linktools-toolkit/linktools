@@ -16,7 +16,9 @@ from pydantic_ai import Agent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import AgentContext
 from linktools.ai.core import CommitPolicy, JsonValue
@@ -168,7 +170,7 @@ async def test_native_replacement_cannot_reuse_another_persistence_owner(
         if phase == "agent":
             first.for_agent(Agent())
         else:
-            await first.for_run(SimpleNamespace())
+            await first.for_run(RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id="one"))
     template.replacement = replacement
     second = writes.bind("probe", "two", "two", template, adapt=_PersistenceCapability)
     second.wrapped.owner = "second"
@@ -177,7 +179,7 @@ async def test_native_replacement_cannot_reuse_another_persistence_owner(
             if phase == "agent":
                 second.for_agent(Agent())
             else:
-                await second.for_run(SimpleNamespace())
+                await second.for_run(RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id="two"))
         await second.wrapped.writer.submit(key="retained-owner", payload={"key": "retained-owner"})
         await writes.close()
         rows = await store.read(lambda transaction: transaction.scan_records())

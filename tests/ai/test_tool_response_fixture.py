@@ -140,7 +140,9 @@ async def test_fixture_preserves_optional_tool_kind_filter_without_silent_downgr
 
 @pytest.mark.asyncio
 async def test_fixture_reads_saved_version_with_borrowed_reader_after_default_changes() -> None:
-    store, original = await _store(_manifest())
+    payload = _manifest()
+    payload["servers"][0]["tools"][0]["definition"]["durable"] = None
+    store, original = await _store(payload)
     try:
         updated = _manifest()
         updated["servers"][0]["tools"][0]["responses"][0]["outcome"]["value"] = "new"
@@ -278,7 +280,7 @@ async def test_fixture_coverage_and_named_revision_must_match_selected_servers()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid", (
-    "version", "unknown_field", "missing_schema", "unknown_outcome", "raw_mcp",
+    "version", "unknown_field", "explicit_durable", "missing_schema", "unknown_outcome", "raw_mcp",
     "multimodal", "duplicate_tool", "conflicting_response", "wrong_model_name",
 ))
 async def test_fixture_rejects_unsupported_or_conflicting_inputs(invalid: str) -> None:
@@ -289,6 +291,8 @@ async def test_fixture_rejects_unsupported_or_conflicting_inputs(invalid: str) -
         payload["version"] = 2
     elif invalid == "unknown_field":
         tool["definition"]["unknown"] = "ignored"
+    elif invalid == "explicit_durable":
+        tool["definition"]["durable"] = False
     elif invalid == "missing_schema":
         del tool["definition"]["parameters_json_schema"]
     elif invalid == "unknown_outcome":
