@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.persistence._record_owner import EXECUTION_SCAN_STATES, record_scan_kinds
+from linktools.ai.persistence._record_owner import EXECUTION_SCAN_STATES, ExecutionRecoveryCandidateQuery, record_scan_kinds
 from linktools.ai.persistence.state import RecordQuery
 
 from .test_state_batch_delete_backends import _digest, _open_store, _record
@@ -17,7 +17,7 @@ from .test_state_batch_delete_backends import _digest, _open_store, _record
 def test_execution_scan_bucket_selection_keeps_exact_persisted_states() -> None:
     assert EXECUTION_SCAN_STATES == frozenset({
         "PENDING_START", "STARTED", "RECOVERY_REQUIRED", "CANCELLING",
-        "FINALIZING", "WAITING_DEFERRED", "execution_handoff",
+        "FINALIZING", "WAITING_DEFERRED",
     })
     assert record_scan_kinds("execution", EXECUTION_SCAN_STATES) == ("e:1",)
     assert record_scan_kinds("execution", frozenset({"DONE"})) == ("e:1", "e:0")
@@ -129,7 +129,7 @@ async def test_execution_recovery_sqlite_plan_uses_store_and_scan_bucket(tmp_pat
         engine = store.storage_group.context.engine
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
-            query = RecordQuery(kind="execution", states=EXECUTION_SCAN_STATES, limit=2)
+            query = ExecutionRecoveryCandidateQuery(kind="execution", limit=2)
             assert await store.read(lambda tx: tx.list_records(query)) == (records[0], records[64])
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -148,3 +148,31 @@ async def test_execution_recovery_sqlite_plan_uses_store_and_scan_bucket(tmp_pat
             assert "SCAN ai_state_records" not in details
             # Full-sort and raw-key ties may require a right-part sort; the
             # candidate range must still be bounded by store and recovery bucket.
+
+
+
+@pytest.mark.parametrize("options", ({"kind": "other"}, {"kind": "execution", "states": frozenset({"STARTED"})}))
+def test_internal_recovery_query_does_not_overload_status_filters(options):
+    with pytest.raises(ValueError):
+        ExecutionRecoveryCandidateQuery(**options)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sql"))
+async def test_recovery_candidates_do_not_decode_unrelated_cold_payloads(tmp_path, backend):
+    # StateStore permits opaque custom records. Recovery candidate selection
+    # must not interpret every cold execution-kind record as a valid envelope.
+    cold = replace(_record(0), kind="execution", state="SUCCEEDED", data={"opaque": "cold"})
+    marker = {"value": {"payload": {"fields": {"recovery": {"fields": {
+        "handoff_phase": {"value": "prepared"}}}}}}}
+    claimed = replace(_record(1), kind="execution", state="FAILED", data=marker)
+    async with _open_store(backend, tmp_path / backend) as store:
+        await store.mutate(lambda tx: tx.insert_records((cold, claimed)))
+        query = ExecutionRecoveryCandidateQuery(kind="execution")
+        assert await store.read(lambda tx: tx.list_records(query)) == (claimed,)
+    # Selecting the marker is not authority to consume a malformed record.
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.persistence.codec import execution_prepared_handoff
+    with pytest.raises(AIError) as caught:
+        execution_prepared_handoff(marker)
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

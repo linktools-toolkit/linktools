@@ -5,6 +5,8 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from .state import RecordQuery
+
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
 
 if TYPE_CHECKING:
@@ -15,8 +17,17 @@ if TYPE_CHECKING:
 
 EXECUTION_SCAN_STATES = frozenset((
     "PENDING_START", "STARTED", "RECOVERY_REQUIRED", "CANCELLING",
-    "FINALIZING", "WAITING_DEFERRED", "execution_handoff",
+    "FINALIZING", "WAITING_DEFERRED",
 ))
+
+
+class ExecutionRecoveryCandidateQuery(RecordQuery):
+    """Internal indexed candidate selection; decoded recovery remains authoritative."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.kind != "execution" or self.states is not None:
+            raise ValueError("execution recovery candidates require execution kind without a status filter")
 
 
 def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[str, ...]:
@@ -136,5 +147,4 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
 
 
 
-__all__ = ["EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
-
+__all__ = ["ExecutionRecoveryCandidateQuery", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]

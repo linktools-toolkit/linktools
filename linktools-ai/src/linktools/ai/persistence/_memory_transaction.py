@@ -708,6 +708,10 @@ def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
         query.sort_key_prefix
     ):
         return False
+    from ._record_owner import EXECUTION_SCAN_STATES, ExecutionRecoveryCandidateQuery
+    if isinstance(query, ExecutionRecoveryCandidateQuery):
+        from .codec import execution_prepared_handoff_candidate
+        return record.state in EXECUTION_SCAN_STATES or execution_prepared_handoff_candidate(record.data)
     return query.states is None or record.state in query.states
 
 

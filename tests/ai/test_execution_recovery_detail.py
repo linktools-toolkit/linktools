@@ -196,7 +196,7 @@ async def test_terminal_pending_handoff_remains_in_recoverable_index(tmp_path: P
         assert await repository.list_by_session("session", tenant_id="tenant", statuses=frozenset({ExecutionStatus.FAILED})) == (current,)
         assert await repository.list_by_session("session", tenant_id="tenant", statuses=frozenset({ExecutionStatus.STARTED})) == ()
         stored = await repository.state_store.read(lambda tx: tx.get_record(repository.execution_record_key("execution")))
-        assert stored.state == "execution_handoff"
+        assert stored.state == ExecutionStatus.FAILED.value
         completed = replace(current, revision=1, recovery=replace(current.recovery, handoff_phase=RecoveryHandoffPhase.COMPLETED))
         await repository.compare_and_swap("execution", tenant_id="tenant", expected_revision=0, next_record=completed)
         assert (await repository.list_recoverable_page(tenant_id="tenant", cursor=None, limit=1)).items == ()
@@ -224,3 +224,56 @@ async def test_activation_returns_real_physical_receipt_after_independent_guard(
             expected_producer_claim_id=receipt.value.producer_claim_id,
         ))
         assert dispatched.storage_revision == receipt.storage_revision + 1
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("status", (ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED))
+async def test_real_terminal_state_retains_pending_handoff_and_immutable_result(tmp_path, backend, status):
+    from linktools.ai.execution import RecoveryHandoffPhase
+    from tests.ai.persistence.test_execution_outcome_storage import _terminal
+
+    async with Persistence.open("recovery-detail", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
+        repository = state.execution.executions
+        pending = _terminal(status)
+        pending = replace(pending, session_id="session", completed_at=pending.updated_at)
+        await repository.create_execution(pending)
+        raw = await repository.state_store.read_record(repository.execution_record_key(pending.execution_id))
+        assert raw.state == status.value
+        assert (await repository.list_recoverable_page(tenant_id="tenant", cursor=None, limit=1)).items == (pending,)
+        for selected in (frozenset({status}), frozenset(), frozenset({ExecutionStatus.STARTED})):
+            assert await repository.list_by_session("session", tenant_id="tenant", statuses=selected) == (
+                (pending,) if status in selected else ())
+        # A prepared handoff does not permit changing an already published result.
+        changed = replace(pending, revision=1, result=replace(pending.result,
+                          usage=replace(pending.result.usage, model_requests=999)))
+        with pytest.raises(AIError) as conflict:
+            await repository.compare_and_swap(pending.execution_id, tenant_id="tenant",
+                                              expected_revision=0, next_record=changed)
+        assert conflict.value.code is ErrorCode.EXECUTION_RESULT_CONFLICT
+        completed = replace(pending, revision=1, recovery=replace(
+            pending.recovery, handoff_phase=RecoveryHandoffPhase.COMPLETED))
+        await repository.compare_and_swap(pending.execution_id, tenant_id="tenant",
+                                          expected_revision=0, next_record=completed)
+        assert (await repository.list_recoverable_page(tenant_id="tenant", cursor=None, limit=1)).items == ()
+        assert await repository.list_by_session("session", tenant_id="tenant", statuses=frozenset({status})) == (completed,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_nonterminal_prepared_handoff_keeps_real_status(tmp_path, backend):
+    from tests.ai.persistence.test_execution_outcome_storage import _terminal
+
+    async with Persistence.open("recovery-detail", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
+        repository = state.execution.executions
+        terminal = _terminal()
+        pending = replace(terminal, status=ExecutionStatus.STARTED, result=None)
+        await repository.create_execution(pending)
+        raw = await repository.state_store.read_record(repository.execution_record_key(pending.execution_id))
+        assert raw.state == ExecutionStatus.STARTED.value
+        assert (await repository.list_recoverable_page(tenant_id="tenant", cursor=None, limit=1)).items == (pending,)
+        published = replace(terminal, revision=1, completed_at=terminal.updated_at)
+        await repository.compare_and_swap(pending.execution_id, tenant_id="tenant",
+                                          expected_revision=0, next_record=published)
+        assert (await repository.list_recoverable_page(tenant_id="tenant", cursor=None, limit=1)).items == (published,)

@@ -575,6 +575,15 @@ def test_record_scan_bucket_is_stored_generated_and_replaces_only_generic_index(
     assert "GENERATED ALWAYS AS" in ddl and "STORED" in ddl
     assert all("'" + state + "'" in ddl for state in EXECUTION_SCAN_STATES)
     assert "'e:1'" in ddl and "'e:0'" in ddl and "'k:'" in ddl
+    assert "execution_handoff" not in ddl
+    assert "handoff_phase" in ddl and "'prepared'" in ddl
+    assert "payload_json" in ddl
+    # Candidate derivation unwraps the canonical JSON-string layer, without
+    # database-specific DDL leaking into the other supported dialects.
+    assert {"mysql": "JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(payload_json)",
+            "sqlite": "json_extract(json_extract(payload_json, '$')",
+            "postgresql": "(payload_json #>> '{}')::json"}[dialect_name] in ddl
+
     indexes = {tuple(index.columns.keys()) for index in records.indexes}
     assert ("store_key", "scan_kind", "sort_prefix") in indexes
     assert ("store_key", "kind", "sort_prefix") not in indexes

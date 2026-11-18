@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import TypeVar
-from ._record_owner import EXECUTION_SCAN_STATES
+from ._record_owner import ExecutionRecoveryCandidateQuery
 from ._message_root import NativeTextReference, NativeMessageRoot
 from linktools.core import environ
 from ..core import (
@@ -24,7 +24,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_observation, decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import execution_prepared_handoff, decode_execution_observation, decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -504,8 +504,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                                  verified_native_previous: ExecutionRecord | None = None) -> StoredRecord:
         candidate = await super()._projected_content(current, value, result_source=result_source,
             verified_native_previous=verified_native_previous)
-        if current.state in {ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value,
-                             ExecutionStatus.CANCELLED.value, "execution_handoff"}:
+        if (current.state in {ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value,
+                              ExecutionStatus.CANCELLED.value} or execution_prepared_handoff(current.data)):
             if not isinstance(value, ExecutionRecord) or not await self._execution_content.terminal_matches(current, candidate, value):
                 raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         return candidate
@@ -619,11 +619,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if tenant_id != self._tenant_id:
                 return Page(())
             _validate_page_limit(limit)
-            states = EXECUTION_SCAN_STATES
             selected: list[tuple[StoredRecord, ExecutionRecord]] = []
             next_cursor = cursor
             while len(selected) <= limit:
-                records = await self._records("execution", states=states, cursor=next_cursor, limit=limit + 1)
+                records = await self._records("execution", cursor=next_cursor, limit=limit + 1,
+                                              query_type=ExecutionRecoveryCandidateQuery)
                 if not records:
                     break
                 for record, value in zip(records, await self._decode_many(records), strict=True):
@@ -820,7 +820,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 scope=self._scope("execution", "session", (session_id,)),
                 states=None
                 if statuses is None
-                else frozenset(status.value for status in statuses) | {"execution_handoff"},
+                else frozenset(status.value for status in statuses),
             )
             values = await self._decode_many(records)
             return tuple(value for value in values if statuses is None or value.status in statuses)
@@ -2760,4 +2760,3 @@ __all__ = [
     "ExecutionRepositoryImpl",
     "IdempotencyRepositoryImpl",
 ]
-

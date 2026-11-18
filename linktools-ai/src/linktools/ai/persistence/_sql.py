@@ -26,7 +26,7 @@ from ..storage import (
 )
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
-from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
+from ._record_owner import ExecutionRecoveryCandidateQuery, RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
 from .state import state_content_members
@@ -3221,7 +3221,8 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
                 store_key, query,
             )
             for owner in record_owner_names(kind=query.kind)
-            for bucket in record_scan_kinds(query.kind, query.states)
+            for bucket in (("e:1",) if isinstance(query, ExecutionRecoveryCandidateQuery)
+                           else record_scan_kinds(query.kind, query.states))
         ]
         if len(branches) == 1:
             return branches[0]
