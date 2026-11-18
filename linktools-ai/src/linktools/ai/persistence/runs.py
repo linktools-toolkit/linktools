@@ -80,7 +80,7 @@ from ._native_event_reference import NativeEventReferences
 from ._step_store import SqlStepStore, StepWriteReceipt
 from ..steps import NativeStepSource
 from ._sql import SqlStateStore
-from .state import StateGroupTransaction, StateTransaction, StateStore
+from .state import StateGroupTransaction, StateTransaction, StateStore, StoredRecord
 
 if TYPE_CHECKING:
     from .capabilities import RuntimeCapabilityWrites
@@ -156,6 +156,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._execution_producers: dict[str, tuple[str, int]] = {}
         self._step_boundaries: dict[str, Callable[..., Awaitable[StepWriteReceipt | None]]] = {}
         self._step_boundary_guards: dict[str, Callable[[], None]] = {}
+        self._projection_confirmations: dict[str, Callable[[StateStore, StoredRecord, StoredRecord], None]] = {}
         self._atomic_step_runs: set[str] = set()
         self._execution_persistence: dict[str, tuple[bool, bool, bool]] = {}
         self._checkpoint_transcript_starts: dict[str, int] = {}
@@ -214,13 +215,18 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     def bind_step_boundary(
         self, run_id: str, commit: Callable[..., Awaitable[StepWriteReceipt | None]],
-        require_active: Callable[[], None],
+        require_active: Callable[[], None], *,
+        confirm_projection: Callable[[StateStore, StoredRecord, StoredRecord], None] | None = None,
     ) -> None:
         """Bind the admitted Runtime's single short-transaction boundary."""
         if run_id not in self._execution_producers:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         self._step_boundaries[run_id] = commit
         self._step_boundary_guards[run_id] = require_active
+        if confirm_projection is not None:
+            self._projection_confirmations[run_id] = confirm_projection
+        else:
+            self._projection_confirmations.pop(run_id, None)
 
     def activate_step_boundary(self, run_id: str) -> None:
         """Use local prechecks only when the actual model/leaf writer fences dispatch."""
@@ -458,6 +464,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._run_sources.clear()
         self._step_boundaries.clear()
         self._step_boundary_guards.clear()
+        self._projection_confirmations.clear()
         self._atomic_step_runs.clear()
         self._checkpoint_transcript_starts.clear()
         self._checkpoint_transcript_runs.clear()
@@ -1862,10 +1869,14 @@ class RuntimeAgentRunStore(AgentRunStore):
             await self.abandon_execution_projection(flight)
             raise
 
+        confirmation = self._projection_confirmations.get(captured.run.agent_run_id) if write is None else None
+        projection_receipt = None
+
         async def operation() -> ExecutionRunSealHead:
             async def commit(group: StateGroupTransaction) -> ExecutionRunSealHead:
                 async def publish_projection() -> None:
-                    await archive.sync_prepared_projection(
+                    nonlocal projection_receipt
+                    projection_receipt = await archive.sync_prepared_projection(
                         captured.run, events=captured.events, checkpoints=prepared.checkpoints,
                         interactions=interactions, observation=observation,
                         producer_generation=captured.producer_generation, execution_id=execution_id,
@@ -1975,6 +1986,12 @@ class RuntimeAgentRunStore(AgentRunStore):
                 request_projection=next((value.request_context for value in reversed(interactions)
                                          if value.request_context is not None), None),
             )
+            if (result.error is None and projection_receipt is not None and confirmation is not None
+                    and self._projection_confirmations.get(captured.run.agent_run_id) is confirmation):
+                try:
+                    confirmation(*projection_receipt)
+                except Exception:
+                    _logger.warning("projection receipt consumer failed", exc_info=True)
             if result.cancelled:
                 raise asyncio.CancelledError
         elif result.state is DurableCommitState.NOT_COMMITTED:
@@ -2278,6 +2295,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         producer = self._execution_producers.pop(agent_run_id, None)
                         self._step_boundaries.pop(agent_run_id, None)
                         self._step_boundary_guards.pop(agent_run_id, None)
+                        self._projection_confirmations.pop(agent_run_id, None)
                         self._atomic_step_runs.discard(agent_run_id)
                         self.invalidate_step_run(agent_run_id)
                         if producer is not None and self.capability_writes is not None:
@@ -2540,6 +2558,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self.checkpoint_persistence.reader.clear_confirmed_runs()
         self._step_boundaries.clear()
         self._step_boundary_guards.clear()
+        self._projection_confirmations.clear()
         self._atomic_step_runs.clear()
         self._checkpoint_transcript_starts.clear()
         self._checkpoint_transcript_runs.clear()

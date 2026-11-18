@@ -165,9 +165,10 @@ from ..execution import (
 )
 from ..persistence.runs import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
 from ..persistence.commands import RuntimeRecoveryCommands
+from ..persistence.codec import decode_execution_control
 from ..persistence.repositories import operation_identity_matches
 from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
-from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction
+from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction, StateStore, StoredRecord
 from ..persistence import NativeToolErrorReference, SqlStepStore, StepWriteReceipt
 from ..storage import SqlStorageContext
 
@@ -5778,8 +5779,38 @@ class LocalExecutionBackend:
         owner.tool_admission = admit_tool
         owner.tool_terminal = settle_tool
         owner.tool_unknown = unknown_tool
+        def confirm_projection(store: StateStore, before: StoredRecord, after: StoredRecord) -> None:
+            self._confirm_execution_projection(
+                execution.execution_id, owner, generation, claim_id, store, before, after,
+            )
+
         self._run_store.bind_step_boundary(agent_run_id, commit_boundary,
-                                           lambda: self._require_turn_dispatch(owner))
+                                           lambda: self._require_turn_dispatch(owner),
+                                           confirm_projection=confirm_projection)
+
+    def _confirm_execution_projection(
+        self, execution_id: str, owner: _OwnedExecutionTurn, generation: int, claim_id: str,
+        store: StateStore, before: StoredRecord, after: StoredRecord,
+    ) -> None:
+        repository = self._execution.executions
+        observed = owner.observed
+        if (store is not repository.state_store or self._turn_owners.get(execution_id) is not owner
+                or observed is None or observed.storage_revision != before.storage_revision
+                or before.key != repository.execution_record_key(execution_id)
+                or after.storage_revision <= before.storage_revision
+                or replace(after, storage_revision=before.storage_revision) != before
+                or observed.value.producer_generation != generation
+                or observed.value.producer_claim_id != claim_id):
+            return
+        control = decode_execution_control(before.data)
+        value = observed.value
+        if (control.execution_id != execution_id or control.producer_generation != generation
+                or control.producer_claim_id != claim_id or control.status is not value.status
+                or control.history_seal_digest != value.history_seal_digest
+                or control.budget_scope_id != value.budget_scope_id
+                or control.retention_closed != value.retention_closed):
+            return
+        owner.observed = replace(observed, storage_revision=after.storage_revision)
 
     def _owned_attempt_capture(self, execution: ExecutionRecord) -> _InitialAttemptCapture | None:
         owner = self._turn_owners.get(execution.execution_id)
