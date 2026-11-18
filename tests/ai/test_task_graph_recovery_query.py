@@ -6,7 +6,7 @@ from dataclasses import replace
 from hashlib import sha256
 
 import pytest
-from sqlalchemy import create_engine, insert, text
+from sqlalchemy import String, create_engine, insert, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 
 from linktools.ai.persistence._sql import _record_query_statement
@@ -68,6 +68,32 @@ def test_graph_pages_preserve_scopes_and_raw_tie_cursors(
         for dialect in (sqlite.dialect(), mysql.dialect(), postgresql.dialect()):
             assert str(_record_query_statement(metadata, b"partition", query).compile(dialect=dialect))
     engine.dispose()
+
+
+
+def test_graph_page_does_not_split_overlapping_state_ranges() -> None:
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TASK}))
+    graph = metadata.tables["ai_task_graphs"]
+    # Reproduce the equality of MySQL's PAD SPACE state collation on SQLite.
+    for name in ("ai_task_graphs", "ai_state_records"):
+        metadata.tables[name].c.state.type = String(64, collation="PAD_SPACE")
+
+    def compare(left: str, right: str) -> int:
+        left, right = left.rstrip(" "), right.rstrip(" ")
+        return (left > right) - (left < right)
+
+    engine = create_engine("sqlite://")
+    try:
+        with engine.begin() as connection:
+            connection.connection.driver_connection.create_collation("PAD_SPACE", compare)
+            metadata.create_all(connection)
+            rows = [_row(0, state="PENDING"), _row(1, state="PENDING ")]
+            connection.execute(insert(graph), rows)
+            query = RecordQuery(kind="task_graph", states=frozenset({"PENDING", "PENDING "}), limit=2)
+            page = connection.execute(_record_query_statement(metadata, b"partition", query)).mappings().all()
+            assert [row["key"] for row in page] == [row["key"] for row in rows]
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.parametrize("analyze", [False, True])

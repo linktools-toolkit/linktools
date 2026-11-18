@@ -3231,8 +3231,10 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
                 candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
             )
             return statement.limit(query.limit) if query.limit is not None else statement
+    # PAD SPACE collations can make distinct raw states share one equality range.
     if (query.kind == "task_graph" and query.limit is not None and query.states
-            and len(query.states) <= 2):
+            and len(query.states) <= 2
+            and len({state.rstrip(" ") for state in query.states}) == len(query.states)):
         # Bound each physical owner's equality range before the global merge.
         # A range's first N records contain every possible global first-N member.
         branches = [
