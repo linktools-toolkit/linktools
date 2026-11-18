@@ -3,18 +3,6 @@
 
 -- Runtime control, facts, counters and operation receipts
 
-CREATE TABLE ai_archive_scopes (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	resource_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded identity of the physical archive resource.',
-	scope_id CHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Immutable archive identity independent of resettable domain state.',
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	KEY ix_created_at (created_at),
-	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_resource_key (resource_key)
-)ENGINE=InnoDB COMMENT='Authoritative archive resource identities; preserve with retained content.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
-
 CREATE TABLE ai_state_records (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',

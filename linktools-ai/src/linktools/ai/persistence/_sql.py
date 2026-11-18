@@ -516,36 +516,73 @@ class SqlStateStorageGroup:
         await self.initialize()
         if create and self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
-        archive = await self._open_partition(STATE_GROUP_ARCHIVE_KEY)
+        metadata_key = STATE_GROUP_METADATA_KEY
+        metadata_store = await self._open_partition(metadata_key)
         if create and self._archive_on_mutation and not self._archive_scope_initialized:
+            # The mutation already establishes and confirms the archive identity.
+            # Do not repeat its absence/content checks in separate read snapshots.
             async def prepare(_group: StateGroupTransaction) -> None:
                 pass
-            await self.mutate((archive,), prepare)
+            await self.mutate((metadata_store,), prepare)
             if self._opened_archive is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return self._opened_archive
-        if create:
-            from ._native_content_index import run_native_mutation
-            scope, _ = await run_native_mutation(
-                self._context, self._initialize_archive_scope, domain="runtime.state.group",
-            )
-        else:
-            from ._native_content_index import read_archive_scope
-
-            async with self._session() as session:
-                scope = await self._context.run_statement(read_archive_scope(session))
-                if scope is None and await self._archive_content_exists(session):
-                    scope = await self._context.run_statement(read_archive_scope(session))
-                    if scope is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if scope is None:
+        key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+        record = await metadata_store.read(lambda tx: tx.get_record(key))
+        archive_key = STATE_GROUP_ARCHIVE_KEY
+        if record is None:
+            archive = await self._open_partition(archive_key)
+            if await archive.read(lambda tx: tx.scan_records_page(after=None, limit=1)):
+                record = await metadata_store.read(lambda tx: tx.get_record(key))
+                if record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record is None and create:
+            async def initialize_scope(tx: StateTransaction) -> StoredRecord:
+                existing = await tx.get_record(key)
+                if existing is not None:
+                    return existing
+                value = StoredRecord(
+                    key=key, scope_key=None, parent_key=None,
+                    kind="archive_scope", sort_key=b"archive_scope", state=None,
+                    storage_revision=0, lease_owner=None, lease_fence=0,
+                    lease_expires_at=None, data={"archive_scope_id": uuid4().hex},
+                )
+                await tx.insert_record(value)
+                return value
+            try:
+                record = await metadata_store.mutate(initialize_scope)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                record = await metadata_store.read(lambda tx: tx.get_record(key))
+                if record is None:
+                    raise
+        if record is None:
             return None
-        self._archive_member = archive
+        scope = record.data.get("archive_scope_id")
+        if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        archive_key = STATE_GROUP_ARCHIVE_KEY
+        self._archive_member = await self._open_partition(archive_key)
         self._archive_scope_initialized = True
-        self._opened_archive = scope, archive
+        self._opened_archive = scope, self._archive_member
         return self._opened_archive
 
-    async def _archive_content_exists(self, session: "AsyncSession") -> bool:
+    async def _initialize_archive_scope(
+        self, session: "AsyncSession", clock: "_SqlTransactionClock",
+    ) -> tuple[str, bool]:
+        """Establish resource identity in the first owner mutation's commit."""
+        metadata_key = STATE_GROUP_METADATA_KEY
+        key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+        metadata = _SqlTransaction(
+            session, self._metadata, self._context, metadata_key, clock=clock,
+        )
+        record = await metadata.get_record(key)
+        if record is not None:
+            scope = record.data.get("archive_scope_id")
+            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return scope, True
         from sqlalchemy import func, literal, select, union_all
 
         # Only existence matters here; never hydrate an orphan's stored body.
@@ -556,37 +593,39 @@ class SqlStateStorageGroup:
         statements.append(select(literal(1)).select_from(messages).where(
             func.substr(messages.c.store_key, 1, 14) == b"\x00\x0cstep_payload"))
         occupied = await self._context.run_statement(session.execute(union_all(*statements).limit(1)))
-        return occupied.first() is not None
-
-    async def _initialize_archive_scope(self, session: "AsyncSession") -> tuple[str, bool]:
-        """Establish immutable resource identity in the first owner's commit.
-
-        This identity outlives resettable domain records. Never assign a new
-        identity to surviving content whose original identity has been lost.
-        """
-        from ._native_content_index import read_archive_scope
-
-        scope = await self._context.run_statement(read_archive_scope(session))
-        if scope is not None:
-            return scope, True
-        if await self._archive_content_exists(session):
-            # READ COMMITTED may observe another writer's publication here.
-            scope = await self._context.run_statement(read_archive_scope(session))
-            if scope is None:
+        if occupied.first() is not None:
+            # Under READ COMMITTED another writer can publish between the two
+            # reads. Recheck identity before treating visible content as orphaned.
+            metadata = _SqlTransaction(
+                session, self._metadata, self._context, metadata_key, clock=clock,
+            )
+            record = await metadata.get_record(key)
+            scope = None if record is None else record.data.get("archive_scope_id")
+            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return scope, True
-        candidate = uuid4().hex
+        record = StoredRecord(
+            key=key, scope_key=None, parent_key=None,
+            kind="archive_scope", sort_key=b"archive_scope", state=None,
+            storage_revision=0, lease_owner=None, lease_fence=0,
+            lease_expires_at=None, data={"archive_scope_id": uuid4().hex},
+        )
+        # Another first writer may already have established this resource's
+        # immutable identity. Its winning value must never be overwritten.
         await self._context.run_statement(self._context.dialect.insert_ignore_conflict(
-            session, table=self._metadata.tables["ai_archive_scopes"],
-            values={"resource_key": STATE_GROUP_METADATA_KEY, "scope_id": candidate},
-            index_elements=("resource_key",),
+            session, table=self._metadata.tables["ai_state_records"],
+            values={**_record_values(record), "store_key": metadata_key},
+            index_elements=("store_key", "key_locator"),
         ))
-        # A concurrent winner must never be overwritten or replaced by our
-        # rollback-prone candidate.
-        scope = await self._context.run_statement(read_archive_scope(session))
-        if scope is None:
+
+        # A competing first writer can win after our initial absence read.
+        # Expose only its committed identity, never our rollback-prone candidate.
+        metadata = _SqlTransaction(session, self._metadata, self._context, metadata_key, clock=clock)
+        winner = await metadata.get_record(key)
+        scope = None if winner is None else winner.data.get("archive_scope_id")
+        if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return scope, scope != candidate
+        return scope, scope != record.data["archive_scope_id"]
 
     async def _open_partition(self, key: bytes) -> "SqlStateStore":
         store = self._members.get(key)
@@ -752,7 +791,7 @@ class SqlStateStorageGroup:
             capture_tokens = {store: store._reads.capture_token for store in members}
             clock = _SqlTransactionClock(session, self._context)
             if self._archive_on_mutation and not self._archive_scope_initialized:
-                pending_archive_scope, already_committed = await self._initialize_archive_scope(session)
+                pending_archive_scope, already_committed = await self._initialize_archive_scope(session, clock)
                 if already_committed:
                     self._opened_archive = pending_archive_scope, self._archive_member
             transactions = self._create_transactions(members, session, clock, observers)
