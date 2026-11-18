@@ -278,6 +278,41 @@ if(process.argv[3]==='session-sync') {
   first.onerror();sessions.get('a').revision+=2;
   await settle();assert.equal(historyReads(),priorReads+2,'reconnect snapshot catches an idle turn missed while disconnected');
 
+  // The remote turn can commit before our first execution GET finishes.
+  for(const stale of [false,true]){
+    const quick=`a-released-before-observation-${stale}`,late=deferred(`GET /api/executions/${quick}`);
+    const beforeReleaseReads=historyReads(),answer=`Committed before observation ${stale}`;
+    sessions.get('a').active_execution_id=quick;
+    await late.requested;
+    assert.equal(node('send').disabled,true);
+    const quickTimeline=timeline('a');
+    timelineOverrides.set('a',{...quickTimeline,items:[...quickTimeline.items,{...quickTimeline.items[0],execution_id:quick,user_input:answer}]});
+    sessions.get('a').active_execution_id=null;sessions.get('a').revision++;
+    await until('remote release enables sending',()=>!node('send').disabled);
+    late(stale?{...info(quick,'a'),status:'STARTED',terminal_at:null}:info(quick,'a'));
+    await until('released turn without execution stream appears',()=>node('conversation').textContent.includes(answer));
+    await settle();
+    assert.equal(historyReads(),beforeReleaseReads+1,'release without stream reads the timeline once');
+    assert.equal(calls.filter(call=>call.key===`/api/executions/${quick}/events`).length,0);
+    assert.equal(node('detail-turn').value,'a-run');assert.equal(node('prompt').value,'My private draft');
+    assert.equal(node('planning').checked,true);assert.equal(node('thinking').value,'3');assert.equal(document.activeElement,node('prompt'));
+  }
+
+  const streamed='a-released-before-tail',beforeStreamReads=historyReads();
+  executions.set(streamed,{...info(streamed,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(streamed,{});sessions.get('a').active_execution_id=streamed;
+  await until('remote execution stream starts',()=>Boolean(streamBlocks.get(streamed).controller));
+  const streamedTimeline=timeline('a');
+  timelineOverrides.set('a',{...streamedTimeline,items:[...streamedTimeline.items,{...streamedTimeline.items[0],execution_id:streamed,user_input:'Committed with execution stream'}]});
+  sessions.get('a').active_execution_id=null;sessions.get('a').revision++;
+  await until('release while streaming enables sending',()=>!node('send').disabled);await settle();
+  assert.equal(historyReads(),beforeStreamReads,'release leaves the timeline read to the open stream');
+  executions.set(streamed,info(streamed,'a'));
+  const remoteStream=streamBlocks.get(streamed).controller;
+  remoteStream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(streamed,'a'))+'\n\n'));remoteStream.close();
+  await until('stream tail loads committed turn',()=>node('conversation').textContent.includes('Committed with execution stream'));await settle();
+  assert.equal(historyReads(),beforeStreamReads+1,'normal tail and release share one timeline read');
+
   // A local stream may not observe another process's writes. Explicit HTTP
   // refresh must take newer metadata without treating HTTP idle as a release.
   const staleSource=sessionSources.at(-1),httpRevision=sessions.get('a').revision+1;

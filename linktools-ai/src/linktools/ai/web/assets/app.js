@@ -325,8 +325,12 @@ function watchSession(id, {restart=false}={}) {
     watch.ready=true;
     if(state.session)Object.assign(state.session,watch.snapshot);
     setDisabled();
-    const timelineRevision=previousRevision ?? state.session?.revision;
-    if(state.session && !previous?.active_execution_id && !value.active_execution_id
+    const previousOwner=previous?.active_execution_id;
+    const timelineRevision=previousOwner ? state.session?.revision : previousRevision ?? state.session?.revision;
+    // An open execution stream reads the timeline at its tail. A fast turn
+    // may release before that stream opens, leaving the session watch to catch up.
+    const streamWillRefresh=previousOwner && state.observedExecution===previousOwner && state.stream;
+    if(state.session && !value.active_execution_id && !streamWillRefresh
       && Number.isSafeInteger(timelineRevision) && value.revision>timelineRevision)refreshSessionTimeline(watch);
     if(!state.session || previous && previous.status===value.status
       && previous.active_execution_id===value.active_execution_id)return;
@@ -1291,6 +1295,9 @@ async function syncObservation({refresh=false}={}) {
     if(generation!==state.observationGeneration || id!==state.observedExecution || readGeneration!==state.observationReadGeneration)return;
   }
   if(!info)return;
+  // An execution GET in flight may describe the owner before its SSE release.
+  const watch=state.view==='sessions'?sessionWatch:null;
+  if(!terminal(info.status) && watch?.id===state.selectedSession && watch.releasedExecution===id && watch.snapshot?.active_execution_id!==id)return;
   info=observedInfo(info);setDisabled();
   if(info && !terminal(info.status) && !state.config.read_only && !state.stream)watchExecution(id,generation).catch(showError);
 }
