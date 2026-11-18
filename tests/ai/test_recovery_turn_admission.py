@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from linktools.ai.core import ApprovalStatus, ExecutionStatus, Page
+from linktools.ai.core import ApprovalStatus, ExecutionStatus, IdempotencyStatus, Page
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import (
     ExecutionRecoveryDetail, PendingDeferredCall,
@@ -71,6 +71,7 @@ def _port(admission: _TurnAdmission) -> SimpleNamespace:
         _reconcile_session_recovery=AsyncMock(return_value=True),
         _recovery_idempotency=AsyncMock(return_value=None),
         _ensure_recovery_idempotency=AsyncMock(),
+        _restore_recovery_idempotency=AsyncMock(),
         restore_user_input=AsyncMock(return_value="prompt"),
         _prepare_recovery_relaunch=Mock(return_value=True),
         _reset_local_producer=Mock(),
@@ -84,6 +85,8 @@ async def test_checkpoint_recovery_holds_admission_through_producer_launch() -> 
     admission = _TurnAdmission()
     port = _port(admission)
     events = []
+    identity = object()
+    port._recovery_idempotency.return_value = identity
 
     async def commit(*args, **kwargs):
         assert admission.active
@@ -98,6 +101,11 @@ async def test_checkpoint_recovery_holds_admission_through_producer_launch() -> 
     port.launch = launch
     assert await _RecoveryCoordinator(port, None).reconcile_execution(port.execution)
     assert events == ["producer", "launch"]
+    port._recovery_idempotency.assert_awaited_once_with(port.execution)
+    port._restore_recovery_idempotency.assert_awaited_once_with(
+        port.execution, identity, expected_status=IdempotencyStatus.STARTED,
+    )
+    port._ensure_recovery_idempotency.assert_not_awaited()
     assert admission.owner_task is None
 
 
