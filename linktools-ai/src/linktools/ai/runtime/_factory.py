@@ -472,6 +472,7 @@ def _runtime_close_actions(
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
     if session is not None:
+        actions.append(("runtime.session.watch", session.close_watches))
         actions.append(("runtime.session.display", session.drain_display_reads))
     if execution is not None:
         actions.append(("runtime.execution.preflight", execution.preflight_close))
@@ -856,6 +857,7 @@ async def _build_local_components(
             workspace_access=input_materializer.access,
         )
         lifecycle.session = session
+        runtime_bridge.pending_turns.session_changed = state.conversation.sessions.notify_session_change
 
         async def prepare_pending_capture(execution_id: str, principal) -> None:
             await execution.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT)

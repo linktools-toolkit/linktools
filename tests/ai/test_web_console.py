@@ -36,6 +36,115 @@ def client(app: object) -> httpx.AsyncClient:
 
 
 @pytest.mark.asyncio
+async def test_session_events_expose_only_authorized_occupancy() -> None:
+    from types import SimpleNamespace
+
+    from collections.abc import AsyncIterator
+
+    from linktools.ai.core import Principal, SessionStatus
+    from linktools.ai.errors import AIError, ErrorCode
+
+    principal = Principal("runtime", "default")
+
+    async def watch(session_id: str, *, principal: Principal) -> AsyncIterator[SimpleNamespace]:
+        assert principal.principal_id == "runtime"
+        if session_id != "chosen":
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        for revision, execution_id in enumerate((None, "running", None)):
+            yield SimpleNamespace(status=SessionStatus.OPEN, active_execution_id=execution_id, revision=revision,
+                                  metadata={"title": "private"})
+
+    runtime = SimpleNamespace(history=None, default_principal=principal, sessions=SimpleNamespace(watch=watch))
+    async with client(create_app(runtime=runtime)) as http:
+        response = await http.get("/api/session/events?session_id=chosen")
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.headers["x-accel-buffering"] == "no"
+        assert [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")] == [
+            {"status": "OPEN", "active_execution_id": execution_id, "revision": revision}
+            for revision, execution_id in enumerate((None, "running", None))
+        ]
+        rejected = await http.get("/api/session/events?session_id=other")
+        assert rejected.text.splitlines()[:2] == [
+            "event: session_error", 'data: {"error_code": "AUTHORIZATION_DENIED"}',
+        ]
+
+
+@pytest.mark.asyncio
+async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pydantic_ai.messages import ModelMessage, ModelResponse
+    from pydantic_ai.models.function import AgentInfo
+
+    from linktools.ai.storage import InMemoryCacheBackend
+    from . import _runtime_test_helpers as helpers
+
+    release = asyncio.Event()
+    original = helpers._runtime_usage_model
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        await release.wait()
+        return await original(messages, info)
+
+    monkeypatch.setattr(helpers, "_runtime_usage_model", model)
+    features = RuntimeFeatures("web-session-events")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    storage = PersistenceStorage.in_memory(coordination=InMemoryCacheBackend(max_bytes=0))
+    async with Persistence.open("web-session-events", storage=storage) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(RuntimeUsageModels(), features),
+    ) as runtime:
+        app = create_app(runtime=runtime)
+        path = "/api/session/events"
+        scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
+                 "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"session_id=shared",
+                 "headers": [], "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 12345)}
+
+        async def connect(frames: asyncio.Queue, disconnect: asyncio.Event) -> None:
+            async def receive() -> dict[str, object]:
+                await disconnect.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message: dict[str, object]) -> None:
+                body = message.get("body")
+                if isinstance(body, bytes) and body.startswith(b"data: "):
+                    frames.put_nowait(json.loads(body[6:]))
+
+            await app(dict(scope), receive, send)
+
+        async with client(app) as http:
+            created = await http.post("/api/sessions", json={"session_id": "shared", "request_id": "create"}, headers=_HEADERS)
+            assert created.status_code == 201
+            streams = (asyncio.Queue(), asyncio.Queue())
+            disconnect = asyncio.Event()
+            async with asyncio.TaskGroup() as tasks:
+                for frames in streams:
+                    tasks.create_task(connect(frames, disconnect))
+                try:
+                    initial = await asyncio.gather(*(asyncio.wait_for(frames.get(), 5) for frames in streams))
+                    assert initial[0] == initial[1]
+                    assert initial[0]["status"] == "OPEN" and initial[0]["active_execution_id"] is None
+                    accepted = await http.post("/api/session/messages?session_id=shared", headers=_HEADERS,
+                                               json={"prompt": "first", "request_id": "first"})
+                    assert accepted.status_code == 202
+                    identity = accepted.json()["execution_id"]
+                    active = await asyncio.gather(*(asyncio.wait_for(frames.get(), 5) for frames in streams))
+                    assert active[0] == active[1]
+                    assert active[0]["status"] == "OPEN" and active[0]["active_execution_id"] == identity
+                    replay = await http.post("/api/session/messages?session_id=shared", headers=_HEADERS,
+                                             json={"prompt": "first", "request_id": "first"})
+                    assert replay.status_code == 202 and replay.json()["execution_id"] == identity
+                    collision = await http.post("/api/session/messages?session_id=shared", headers=_HEADERS,
+                                                 json={"prompt": "second", "request_id": "second"})
+                    assert collision.status_code == 409 and collision.json()["code"] == "SESSION_BUSY"
+                    release.set()
+                    idle = await asyncio.gather(*(asyncio.wait_for(frames.get(), 5) for frames in streams))
+                    assert idle[0] == idle[1]
+                    assert idle[0]["status"] == "OPEN" and idle[0]["active_execution_id"] is None
+                    assert idle[0]["revision"] > active[0]["revision"]
+                finally:
+                    release.set()
+                    disconnect.set()
+
+
+@pytest.mark.asyncio
 async def test_failed_history_debug_reports_stage_without_payload_or_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -36,7 +36,7 @@ from .contracts import (
 from ._history_index import build_fork_index_node_from_roots
 from ._plan import PersistenceDomain
 from .state import (
-    FactQuery,
+    FactQuery, SqlMutationObserver,
     RecordQuery,
     StateStore,
     StateTransaction,
@@ -453,6 +453,34 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             value_type=SessionRecord,
         )
 
+
+        self._change_observers: dict[bytes, set[Callable[[], None]]] = {}
+
+    def observe_changes(self, session_id: str, callback: Callable[[], None]) -> Callable[[], None]:
+        """Subscribe to local commit hints, not another copy of session state."""
+        key = self.session_record_key(session_id)
+        observers = self._change_observers.setdefault(key, set())
+        observers.add(callback)
+        def unsubscribe() -> None:
+            observers.discard(callback)
+            if not observers:
+                self._change_observers.pop(key, None)
+        return unsubscribe
+
+    def notify_session_change(self, session_id: str, *, tenant_id: str) -> None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        self._notify_change(self.session_record_key(session_id))
+
+    def _notify_change(self, key: bytes) -> None:
+        for callback in tuple(self._change_observers.get(key, ())):
+            callback()
+
+    async def _replace_observed(
+        self, transaction: StateTransaction, record: StoredRecord, revision: int,
+    ) -> None:
+        await _replace_checked(transaction, record, revision)
+        if isinstance(transaction, SqlMutationObserver):
+            transaction.observe_mutation(lambda _committed: self._notify_change(record.key))
 
     def _timeline_stream(self, session_id: str) -> bytes:
         return stream_key(
@@ -1164,7 +1192,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     proposed, active_execution_id=value.active_execution_id
                 )
             candidate = _projected_record(self, current, proposed)
-            await _replace_checked(transaction, candidate, current.storage_revision)
+            await self._replace_observed(transaction, candidate, current.storage_revision)
             await self._bump_list_generation(transaction, value.owner_principal_id)
             return proposed, False
 
@@ -1196,7 +1224,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 proposed = replace(
                     proposed, active_execution_id=current.active_execution_id
                 )
-            await _replace_checked(
+            await self._replace_observed(
                 transaction,
                 _projected_record(self, record, proposed),
                 record.storage_revision,
@@ -1353,7 +1381,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     raise AIError(ErrorCode.SESSION_BUSY)
                 next_value = replace(value, active_execution_id=execution_id)
             candidate = _projected_record(self, current, next_value)
-            await _replace_checked(transaction, candidate, current.storage_revision)
+            await self._replace_observed(transaction, candidate, current.storage_revision)
             if release and next_value.history_quality != value.history_quality:
                 await self._bump_list_generation(transaction, value.owner_principal_id)
             if not release:
@@ -1424,7 +1452,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 revision=current.revision + 1,
                 updated_at=now,
             )
-            await _replace_checked(
+            await self._replace_observed(
                 transaction,
                 _projected_record(self, record, next_value),
                 record.storage_revision,
@@ -1484,7 +1512,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             revision=current.revision + 1,
             updated_at=await transaction.now(),
         )
-        await _replace_checked(
+        await self._replace_observed(
             transaction, _projected_record(self, record, updated), record.storage_revision,
         )
         await self._bump_list_generation(transaction, current.owner_principal_id)
@@ -1553,7 +1581,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         continuation=next_cursor if successful else current.continuation,
                         history_quality="complete" if successful else current.history_quality,
                         revision=current.revision + 1, updated_at=await transaction.now())
-        await _replace_checked(transaction, _projected_record(self, record, final), record.storage_revision)
+        await self._replace_observed(transaction, _projected_record(self, record, final), record.storage_revision)
         stream = self._timeline_stream(current.session_id)
         sequences = await transaction.reserve_sequences({
             stream: 1, self._list_generation_key(current.owner_principal_id): 1,
@@ -1614,7 +1642,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             revision=current.revision + 1,
             updated_at=now,
         )
-        await _replace_checked(
+        await self._replace_observed(
             transaction,
             _projected_record(self, record, next_value),
             record.storage_revision,

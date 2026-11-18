@@ -45,6 +45,11 @@ _HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
 }
+_SSE_HEADERS = {
+    **_HEADERS,
+    "Cache-Control": _HEADERS["Cache-Control"] + ", no-transform",
+    "X-Accel-Buffering": "no",
+}
 
 
 def _wire(value: object) -> object:
@@ -274,6 +279,28 @@ class _Console:
             ))
         return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
 
+    async def session_events(self, request: Request) -> Response:
+        runtime = self.require_runtime()
+        identity = _text(request.query_params, "session_id")
+
+        async def stream() -> AsyncIterator[str]:
+            watch = runtime.sessions.watch(identity, principal=self.principal)
+            try:
+                async for session in watch:
+                    payload = {
+                        "status": session.status.value,
+                        "active_execution_id": session.active_execution_id,
+                        "revision": session.revision,
+                    }
+                    yield "data: " + json.dumps(payload) + "\n\n"
+            except AIError as error:
+                _debug_error(request, error)
+                yield "event: session_error\ndata: " + json.dumps({"error_code": error.code.value}) + "\n\n"
+            finally:
+                await watch.aclose()
+
+        return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
     async def executions(self, request: Request) -> Response:
         if environ.debug:
             request.state.phase = "execution.list"
@@ -413,11 +440,7 @@ class _Console:
             finally:
                 await watch.aclose()
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={
-            **_HEADERS,
-            "Cache-Control": _HEADERS["Cache-Control"] + ", no-transform",
-            "X-Accel-Buffering": "no",
-        })
+        return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     async def metric_query(self, request: Request) -> Response:
         if environ.debug:
@@ -500,6 +523,7 @@ def create_app(
         Route("/api/config", console.config),
         Route("/api/sessions", console.sessions, methods=["GET", "POST"]),
         Route("/api/session", console.session),
+        Route("/api/session/events", console.session_events),
         Route("/api/session/{action}", console.session_action, methods=["POST"]),
         Route("/api/executions", console.executions),
         Route("/api/executions/{execution_id}", console.execution),

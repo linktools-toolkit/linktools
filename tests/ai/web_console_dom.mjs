@@ -56,7 +56,32 @@ globalThis.location={get hash(){return hash;},set hash(value){hash=value;hashCha
 let counter=0;Object.defineProperty(globalThis,"crypto",{value:{randomUUID:()=>`request-${++counter}`},configurable:true});globalThis.confirm=()=>true;globalThis.prompt=()=> 'Retry prompt';
 const networkFailures=new Set(),calls=[],delays=new Map(),timelineOverrides=new Map(),streamBlocks=new Map(),detailResponses=new Map(),unavailableTimelines=new Set();
 const info=(id,session_id=id[0])=>({execution_id:id,agent_id:'default',session_id,status:'SUCCEEDED',binding_kind:'agent',lineage_kind:'ROOT',created_at:'2026-01-01T00:00:00Z',started_at:'2026-01-01T00:00:00Z',terminal_at:'2026-01-01T00:00:01Z'});
-const sessions=new Map(['a','b'].map(id=>[id,{session_id:id,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:id==='a'?'Alpha':'Beta'}}]));
+const sessionSources=[];
+function notifySession(id) {
+  queueMicrotask(()=>sessionSources.filter(source=>!source.closed && source.id===id).forEach(source=>source.snapshot()));
+}
+class SessionFixtures extends Map {
+  set(id,value) {
+    const record={...value,active_execution_id:value.active_execution_id ?? null};
+    for(const key of Object.keys(record)) {
+      let field=record[key];
+      Object.defineProperty(record,key,{enumerable:true,configurable:true,
+        get(){return field;},set(value){field=value;notifySession(id);}});
+    }
+    super.set(id,record);
+    notifySession(id);return this;
+  }
+}
+const sessions=new SessionFixtures(['a','b'].map(id=>[id,{session_id:id,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:id==='a'?'Alpha':'Beta'}}]));
+globalThis.EventSource=class {
+  constructor(url) {
+    this.id=new URL(url,'http://localhost').searchParams.get('session_id');this.listeners=new Map();
+    sessionSources.push(this);queueMicrotask(()=>{if(!this.closed)this.snapshot();});
+  }
+  addEventListener(name,callback){this.listeners.set(name,callback);}
+  snapshot(){const value=sessions.get(this.id);if(value)this.onmessage?.({data:JSON.stringify({status:value.status,revision:value.revision,active_execution_id:value.active_execution_id ?? null})});}
+  close(){this.closed=true;}
+};
 const executions=new Map([['a-run',info('a-run')],['b-run',info('b-run')]]);
 const timeline=id=>timelineOverrides.get(id) || ({items:[{execution_id:`${id}-run`,status:'SUCCEEDED',created_at:'2026-01-01T00:00:00Z',user_input:`${id} question`,conversation_committed:true,items:[{item_kind:'assistant',content:`${id} answer`}]}],next_cursor:null});
 function response(value,status=200){return new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});}
@@ -157,6 +182,138 @@ async function detail(name,pattern){
 }
 await until('initial session list',()=>node('list').children.length===2);
 assert.equal(node('list').children.length,2);
+if(process.argv[3]==='session-sync') {
+  await select('#session=a&execution=a-run');
+  await until('session initial snapshot',()=>!node('send').disabled);
+  let first=sessionSources.at(-1);
+  node('prompt').value='My private draft';node('planning').checked=true;node('thinking').value='3';
+  node('prompt').focus();
+  executions.set('a-live',{...info('a-live','a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set('a-live',{});
+  sessions.get('a').active_execution_id='a-live';
+  await until('other client admission',()=>node('send').disabled && node('current-status').textContent.includes('occupied'));
+  assert.equal(node('prompt').disabled,false);assert.equal(node('planning').disabled,false);assert.equal(node('thinking').disabled,false);
+  assert.equal(node('prompt').value,'My private draft');assert.equal(node('planning').checked,true);assert.equal(node('thinking').value,'3');
+  assert.equal(document.activeElement,node('prompt'));
+  assert.equal(node('detail-turn').value,'a-run','a remote start cannot select another history turn');
+  await settle();
+  const before=calls.length;
+  first.snapshot();first.snapshot();await settle();
+  assert.equal(calls.length,before,'duplicate session frames do not trigger reads');
+  const posts=calls.filter(call=>call.method==='POST').length;
+  await node('composer').requestSubmit();
+  assert.equal(calls.filter(call=>call.method==='POST').length,posts,'keyboard/programmatic submit obeys authoritative occupancy');
+  detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),active_execution_id:null},timeline:timeline('a')});
+  await refresh();
+  assert.equal(node('send').disabled,true,'HTTP metadata cannot release the SSE owner');
+  detailResponses.delete('/api/sessions/a');
+  first=sessionSources.at(-1);
+  executions.set('a-live',{...info('a-live','a')});
+  sessions.get('a').active_execution_id=null;
+  await until('authoritative release',()=>!node('send').disabled);
+  assert.equal(node('prompt').value,'My private draft');
+  first.onerror();assert.equal(node('send').disabled,true);
+  assert.equal(node('prompt').disabled,false);
+  first.snapshot();assert.equal(node('send').disabled,false);
+
+  const historyReads=()=>calls.filter(call=>call.method==='GET' && call.key==='/api/sessions/a').length;
+  const priorReads=historyReads();
+  const oldTimeline=timeline('a');
+  timelineOverrides.set('a',{...oldTimeline,items:[...oldTimeline.items,{...oldTimeline.items[0],execution_id:'a-coalesced',user_input:'Fast remote turn'}]});
+  sessions.get('a').revision+=2;
+  await until('coalesced idle turn appears',()=>node('conversation').textContent.includes('Fast remote turn'));
+  assert.equal(historyReads(),priorReads+1,'changed idle revision performs one timeline read');
+  assert.equal(node('detail-turn').value,'a-run');assert.equal(node('prompt').value,'My private draft');
+  assert.equal(node('planning').checked,true);assert.equal(node('thinking').value,'3');assert.equal(document.activeElement,node('prompt'));
+  const afterFast=calls.length;
+  first.snapshot();first.snapshot();await settle();assert.equal(calls.length,afterFast,'same revision has no read cost');
+  first.onmessage({data:JSON.stringify({status:'OPEN',active_execution_id:null,revision:0})});
+  await settle();assert.equal(calls.length,afterFast,'stale revisions do not refresh history');
+  first.onerror();sessions.get('a').revision+=2;
+  await settle();assert.equal(historyReads(),priorReads+2,'reconnect snapshot catches an idle turn missed while disconnected');
+
+  // A local stream may not observe another process's writes. Explicit HTTP
+  // refresh must take newer metadata without treating HTTP idle as a release.
+  const staleSource=sessionSources.at(-1),httpRevision=sessions.get('a').revision+1;
+  detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),revision:httpRevision,status:'CLOSING',active_execution_id:'a-live'},timeline:timeline('a')});
+  await refresh();
+  const refreshedSource=sessionSources.at(-1);
+  assert.notEqual(refreshedSource,staleSource);assert.equal(staleSource.closed,true);
+  assert.equal(node('send').disabled,true);
+  assert.match(node('session-details').textContent,/CLOSING/);
+  assert.match(node('session-details').textContent,/a-live/);
+  assert.equal(node('prompt').value,'My private draft');
+  const staleCalls=calls.length;
+  staleSource.onmessage({data:JSON.stringify({revision:httpRevision+1,status:'OPEN',active_execution_id:null})});
+  refreshedSource.onmessage({data:JSON.stringify({revision:httpRevision-1,status:'OPEN',active_execution_id:null})});
+  await settle();assert.equal(node('send').disabled,true);assert.equal(calls.length,staleCalls);
+  detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),revision:httpRevision+1,status:'OPEN',active_execution_id:null},timeline:timeline('a')});
+  await refresh();assert.equal(node('send').disabled,true,'newer HTTP idle alone cannot authorize sending');
+  detailResponses.delete('/api/sessions/a');
+  sessions.get('a').revision=httpRevision+1;
+  await until('fresh SSE confirms HTTP idle',()=>!node('send').disabled);
+
+  const beforeExternal=sessionSources.at(-1),sameRevision=sessions.get('a').revision;
+  const realSnapshot=EventSource.prototype.snapshot;
+  EventSource.prototype.snapshot=function(){
+    if(this.id==='a')this.onmessage?.({data:JSON.stringify({status:'OPEN',active_execution_id:'a-live',revision:sameRevision})});
+    else realSnapshot.call(this);
+  };
+  detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),active_execution_id:'a-live'},timeline:timeline('a')});
+  await refresh();
+  assert.notEqual(sessionSources.at(-1),beforeExternal,'explicit Refresh resubscribes even at unchanged admission revision');
+  assert.equal(beforeExternal.closed,true);assert.equal(node('send').disabled,true);
+  assert.equal(node('prompt').value,'My private draft');
+  EventSource.prototype.snapshot=realSnapshot;detailResponses.delete('/api/sessions/a');
+  sessionSources.at(-1).snapshot();await settle();assert.equal(node('send').disabled,false);
+
+  const admissionSource=sessionSources.at(-1);
+  const rejected=deferred('POST /api/sessions/a/messages');
+  const sending=node('composer').requestSubmit();await rejected.requested;
+  const attempts=calls.filter(call=>call.key==='/api/sessions/a/messages').length;
+  await node('composer').requestSubmit();
+  assert.equal(calls.filter(call=>call.key==='/api/sessions/a/messages').length,attempts,'in-flight send guard precedes network admission');
+  node('prompt').value='Edited while another client won';
+  sessions.get('a').active_execution_id='a-live';
+  rejected({code:'SESSION_BUSY'},409);await sending;
+  assert.equal(node('send').disabled,true);assert.equal(node('prompt').value,'Edited while another client won');
+  const replacement=sessionSources.at(-1);
+  assert.equal(replacement,admissionSource,'observed busy owner avoids an unnecessary reconnect');
+  await select('#session=b');
+  assert.equal(replacement.closed,true);
+  replacement.onmessage({data:JSON.stringify({status:'CLOSED',active_execution_id:'a-live'})});
+  assert.equal(node('conversation-title').textContent,'Beta');assert.equal(node('send').disabled,false);
+  node('prompt').value='Other tab/session draft';
+  await select('#session=a');
+  assert.equal(node('prompt').value,'Edited while another client won');assert.equal(node('send').disabled,true);
+  const current=sessionSources.at(-1);
+  current.listeners.get('session_error')({data:'{"error_code":"AUTHORIZATION_DENIED"}'});
+  assert.equal(current.closed,true);assert.equal(node('send').disabled,true);
+  current.onmessage({data:JSON.stringify({status:'OPEN',active_execution_id:null})});
+  assert.equal(node('send').disabled,true,'late frames after a terminal error cannot reopen sending');
+  sessions.get('a').active_execution_id=null;
+  await refresh();await until('explicit refresh resubscribes',()=>!node('send').disabled);
+  assert.equal(node('prompt').value,'Edited while another client won');
+  const synchronized=sessionSources.at(-1);
+  const accepted=deferred('POST /api/sessions/a/messages');
+  const acceptedSend=node('composer').requestSubmit();await accepted.requested;
+  executions.set('a-fast',info('a-fast','a'));
+  sessions.get('a').active_execution_id='a-fast';await settle();
+  sessions.get('a').active_execution_id=null;await settle();
+  assert.equal(node('send').disabled,true,'an unfinished POST stays fenced even after observed release');
+  accepted({execution_id:'a-fast'},202);await acceptedSend;
+  assert.equal(sessionSources.at(-1),synchronized,'observed admission and release reuse the existing subscription');
+  assert.equal(node('send').disabled,false);
+  node('prompt').value='No observed owner transition';
+  const fast=deferred('POST /api/sessions/a/messages');
+  const fastSend=node('composer').requestSubmit();await fast.requested;
+  executions.set('a-instant',info('a-instant','a'));
+  fast({execution_id:'a-instant'},202);await fastSend;
+  assert.notEqual(sessionSources.at(-1),synchronized,'idle without an observed admission needs one fresh authoritative snapshot');
+  assert.equal(node('send').disabled,false);
+  console.log('Session synchronization preserves drafts, focus and selected history; admission, reconnect, stale frames and typed errors remain fenced');
+  process.exit(0);
+}
 if(process.argv[3]==='unavailable') {
   const denied=()=>response({error_code:'AUTHORIZATION_DENIED'},404);
   await until('restored unavailable session',()=>node('conversation-title').textContent==='Conversation unavailable');

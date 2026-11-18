@@ -289,6 +289,7 @@ class InMemoryStateStorageGroup:
             }
             group_transaction = _MemoryGroupTransaction(self, transactions)
             token = bind_state_scope(self, transactions)
+            committed = False
             try:
                 result = await fn(group_transaction)
                 for transaction in transactions.values():
@@ -296,6 +297,7 @@ class InMemoryStateStorageGroup:
                         raise transaction.mutation_error
                 for store, transaction in transactions.items():
                     store._apply_transaction(transaction)
+                committed = True
                 _logger.debug(
                     "state storage group committed: backend=memory stores=%s",
                     len(transactions),
@@ -303,6 +305,13 @@ class InMemoryStateStorageGroup:
                 return result
             finally:
                 reset_state_transaction(token)
+                for transaction in transactions.values():
+                    for observer in transaction.mutation_observers:
+                        try:
+                            observer(committed)
+                        except Exception:
+                            _logger.warning("Memory mutation observer failed", exc_info=True)
+                    transaction.mutation_observers.clear()
                 for store in members:
                     await store._reads.invalidate()
 

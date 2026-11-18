@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Plural Runtime domain entry points."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
 from ..session import SessionAdmission
@@ -285,6 +285,11 @@ class RuntimeSessions(Generic[AppT]):
         """Read current session state without constructing a bound handle."""
         self._ensure_open()
         return await self._service.get(session_id, principal=principal)
+
+    def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
+        """Observe this Runtime's session changes; external writes need explicit refresh."""
+        self._ensure_open()
+        return self._service.watch(session_id, principal=principal)
 
     async def lookup_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,

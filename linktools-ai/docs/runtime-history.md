@@ -910,6 +910,28 @@ store/namespace together before using new persistent semantics. Mixed-version
 writers and a write-enabled downgrade are not supported; preserve the store
 rather than deleting sessions or hand-modifying their payloads.
 
+### Subscribe to local session changes
+
+```python
+from contextlib import aclosing
+
+async with aclosing(runtime.sessions.watch(session_id, principal=principal)) as updates:
+    async for view in updates:
+        await send_status(view.status, view.active_execution_id, view.revision)
+```
+
+The first view is current; later views are driven by changes in the same Runtime.
+There is no periodic storage read. Intermediate changes can coalesce, so use the
+session revision to refresh committed history and an execution watch for output.
+Closing the iterator does not cancel execution. After disconnect, subscribe again
+for a fresh view. A view does not reserve the session, and writes from another
+process are not signaled by this local subscription.
+
+For a single-process host, pass `InMemoryCacheBackend(max_bytes=0)` as the
+storage's `coordination` backend to reject competing turns without a content
+cache. Hosts with multiple workers can supply their own `TurnCoordinationBackend`;
+the session watch itself is not a distributed notification channel.
+
 ### Observe session inactivity without consuming a result
 
 ```python

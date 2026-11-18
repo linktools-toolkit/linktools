@@ -1337,6 +1337,8 @@ class ExecutionService(Protocol):
 
 
 class SessionService(Protocol):
+    def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]: ...
+
     async def wait_inactive(
         self, session_id: str, *, principal: Principal, timeout_seconds: float | None = None,
         observation_timeout_seconds: float | None = None,

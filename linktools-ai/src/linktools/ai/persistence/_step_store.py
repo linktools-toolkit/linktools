@@ -381,10 +381,17 @@ class SqlStepStore:
         table = self._table("runs")
         result = await self._context.dialect.insert_ignore_conflict(
             session, table=table, values=values, index_elements=("store_locator", "run_id"),
+            conflict_columns=tuple(table.c.keys()),
         )
         if result.inserted:
             return _RunFields.from_row(values, engine=self._context.engine)
-        row = (await session.execute(select(table).where(*self._run_predicates(table, record.run_id)))).mappings().one()
+        row = result.conflict_row
+        if row is None:
+            row = (await session.execute(select(table).where(*self._run_predicates(table, record.run_id)))).mappings().one()
+        elif row["store_key"] != self.store_key:
+            # Locator equality is not proof of the original owner's identity.
+            from sqlalchemy.exc import NoResultFound
+            raise NoResultFound()
         if _RUN_ADAPTER.validate_python(self._record_data(row)) != record:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return _RunFields.from_row(row, engine=self._context.engine)
