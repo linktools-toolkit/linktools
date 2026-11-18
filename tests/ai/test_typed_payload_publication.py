@@ -202,21 +202,7 @@ async def test_mixed_codecs_preserve_winner_and_validate_generic_content(tmp_pat
         winner = await store.read_record(payload_key)
         await store.mutate(lambda tx: tx.guard_record_revision(payload_key, expected_storage_revision=winner.storage_revision))
         winner = await store.read_record(payload_key)
-        statements = []
-
-        def observe(connection, cursor, statement, parameters, context, executemany):
-            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
-                statements.append(statement)
-
-        engine = store.storage_group.context.engine.sync_engine if backend == "sqlite" else None
-        if engine is not None:
-            event.listen(engine, "before_cursor_execute", observe)
-        try:
-            assert await archive.ensure_content(values) == identities
-        finally:
-            if engine is not None:
-                event.remove(engine, "before_cursor_execute", observe)
-        assert not any("ai_step_messages" in statement for statement in statements)
+        assert await archive.ensure_content(values) == identities
         assert await store.read_record(payload_key) == winner
         assert await archive.read_contents((identities[0],), codec=PAYLOAD_CODEC) == (b"body",)
         generic = await store.read_record(generic_key)
@@ -251,3 +237,19 @@ async def test_mixed_codecs_outer_rollback_can_retry(tmp_path: Path, backend: st
         assert await archive.ensure_content(values) == identities
         assert await archive.read_contents((identities[0],), codec=PAYLOAD_CODEC) == (b"body",)
         assert await archive.read_contents((identities[1],), codec="execution-binding") == (b"binding",)
+
+
+@pytest.mark.asyncio
+async def test_mixed_duplicate_rejects_corrupt_typed_size(tmp_path: Path) -> None:
+    from sqlalchemy import text
+
+    async with Persistence.open('mixed', tenant_id='tenant', storage=PersistenceStorage.sqlite(tmp_path / 'mixed.db')) as state:
+        scope, store = await state.execution.executions.state_store.storage_group.open_archive(create=True)
+        archive = ContentArchive(store, scope, namespace='mixed', tenant_id='tenant', object_store=None)
+        values = ((PAYLOAD_CODEC, b'body'), ('execution-binding', b'binding'))
+        await archive.ensure_content(values)
+        async with store.storage_group.context.engine.begin() as connection:
+            await connection.execute(text('UPDATE ai_step_messages SET raw_size = raw_size + 1'))
+        with pytest.raises(AIError) as caught:
+            await archive.ensure_content(values)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
