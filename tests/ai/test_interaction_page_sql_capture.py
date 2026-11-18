@@ -35,7 +35,8 @@ async def test_sql_interaction_page_is_bounded_and_scope_exact(tmp_path: Path, m
                 table.c.store_key == archive.state_store.store_key,
                 table.c.key == archive._interaction_key("run", 2),
             ))).mappings().one())
-            row.pop("id")
+            row = {column.name: row[column.name] for column in table.c
+                   if not column.primary_key and column.computed is None}
             row["store_key"] = state_store_key("foreign-namespace", "foreign-tenant", "trace")
             await connection.execute(insert(table), row)
         statements: list[str] = []

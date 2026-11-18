@@ -313,7 +313,7 @@ async def test_recovery_requests_bound_maximum_execution_identity_in_both_launch
         execution = replace(_record(), execution_id=identity, recovery=ExecutionRecoveryDetail(agent_run_id="run"))
         port = SimpleNamespace(tenant_id="tenant", validate_binding=AsyncMock(return_value=None),
             _reconcile_session_recovery=AsyncMock(return_value=True), _recovery_idempotency=AsyncMock(return_value=None),
-            _ensure_recovery_idempotency=AsyncMock(), restore_user_input=AsyncMock(return_value="prompt"),
+            _restore_recovery_idempotency=AsyncMock(), restore_user_input=AsyncMock(return_value="prompt"),
             _prepare_recovery_relaunch=lambda value: True, launch=AsyncMock())
         coordinator = _RecoveryCoordinator(port, None)
         assert await coordinator._relaunch_execution(execution, producer_generation=1,

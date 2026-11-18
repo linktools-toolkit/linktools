@@ -342,7 +342,8 @@ class TaskEngine(Generic[AppT]):
 
     async def _watch_execution_tree(self, execution_id: str, *, principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None, include_content: bool = False,
-        ready: asyncio.Event | None = None,
+        ready: asyncio.Event | None = None, include_output_preview: bool = False,
+        include_descendants: bool = True,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         view = await self._execution_reads.inspect(execution_id, principal=principal)
         port = None if view.binding_kind == "task" else (
@@ -351,14 +352,17 @@ class TaskEngine(Generic[AppT]):
         )
         watch = self._tree_streamer.stream if port is None else port.watch_tree
         async with aclosing(watch(execution_id, principal=principal,
-            after_event_seqs=after_event_seqs, include_content=include_content, ready=ready)) as stream:
+            after_event_seqs=after_event_seqs, include_content=include_content, ready=ready,
+            include_output_preview=include_output_preview,
+            include_descendants=include_descendants)) as stream:
             async for event in stream:
                 yield event
 
     async def _capture_execution_tree(self, execution_id: str, *, principal: Principal,
-        after_event_seqs: Mapping[str, int] | None = None,
+        after_event_seqs: Mapping[str, int] | None = None, include_descendants: bool = True,
     ) -> tuple[tuple[ExecutionView, int, int], ...]:
-        return await self._tree_streamer.capture(execution_id, principal=principal, after_event_seqs=after_event_seqs)
+        return await self._tree_streamer.capture(execution_id, principal=principal, after_event_seqs=after_event_seqs,
+            include_descendants=include_descendants)
 
     def _replay_execution_tree(self, captured: tuple[tuple[ExecutionView, int, int], ...], *,
         principal: Principal, after_event_seqs: Mapping[str, int] | None = None, include_content: bool = False,

@@ -708,6 +708,9 @@ def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
         query.sort_key_prefix
     ):
         return False
+    from ._record_query import ExecutionRecoveryCandidateQuery, record_scan_projection
+    if isinstance(query, ExecutionRecoveryCandidateQuery):
+        return record_scan_projection(record.kind, record.state, record.data) == "e:1"
     return query.states is None or record.state in query.states
 
 
@@ -736,3 +739,4 @@ async def _validate_transaction_integrity(
 
 
 __all__ = ["_MemoryTransaction", "_validate_transaction_integrity"]
+

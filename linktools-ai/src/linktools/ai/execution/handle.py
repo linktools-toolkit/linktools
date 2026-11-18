@@ -42,6 +42,7 @@ class ExecutionTreeWatcher(Protocol):
         after_event_seqs: "Mapping[str, int] | None" = None,
         include_content: bool = False,
         include_output_preview: bool = False,
+        include_descendants: bool = True,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
@@ -177,6 +178,7 @@ class Execution(Generic[AppT]):
     def watch(
         self, *, cursor: str | None = None, include_content: bool = False,
         include_output_preview: bool = False,
+        include_descendants: bool = True,
         include_model_interactions: Literal[False] = False,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
@@ -184,6 +186,7 @@ class Execution(Generic[AppT]):
     def watch(
         self, *, cursor: str | None = None, include_content: bool = False,
         include_output_preview: bool = False,
+        include_descendants: bool = True,
         include_model_interactions: Literal[True],
     ) -> AsyncIterator[ExecutionObservationEvent]: ...
 
@@ -191,15 +194,24 @@ class Execution(Generic[AppT]):
     def watch(
         self, *, cursor: str | None = None, include_content: bool = False,
         include_output_preview: bool = False,
+        include_descendants: bool = True,
         include_model_interactions: bool,
     ) -> AsyncIterator[ExecutionTreeEvent | ExecutionObservationEvent]: ...
 
     def watch(
         self, *, cursor: str | None = None, include_content: bool = False,
         include_output_preview: bool = False,
+        include_descendants: bool = True,
         include_model_interactions: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent | ExecutionObservationEvent]:
-        """Watch descendants; output previews require a separate process-local opt-in."""
+        """Watch this execution and, by default, its descendants.
+
+        Root-only observation skips child discovery but retains the same event,
+        authorization and replay contracts. Output previews remain process-local
+        and require their independent opt-in.
+        """
+        if not isinstance(include_descendants, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(include_output_preview, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(include_model_interactions, bool):
@@ -207,13 +219,13 @@ class Execution(Generic[AppT]):
         if include_model_interactions:
             finalizing = asyncio.Event()
             return owned_watch(
-                self._watch_models(cursor, include_content, None, finalizing, include_output_preview=include_output_preview),
+                self._watch_models(cursor, include_content, None, finalizing, include_output_preview=include_output_preview, include_descendants=include_descendants),
                 scope="execution", resource_id=self.execution_id, cursor=cursor,
                 finalizing=finalizing,
                 register=self._binding.register_observation, release=self._binding.release_observation,
             )
         return owned_watch(
-            self._watch_prepared(cursor, include_content, None, include_output_preview=include_output_preview),
+            self._watch_prepared(cursor, include_content, None, include_output_preview=include_output_preview, include_descendants=include_descendants),
             scope="execution", resource_id=self.execution_id, cursor=cursor,
             finalizing=asyncio.Event(),
             register=self._binding.register_observation, release=self._binding.release_observation,
@@ -222,6 +234,7 @@ class Execution(Generic[AppT]):
     def _watch_models(
         self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
         finalizing: asyncio.Event | None = None, *, include_output_preview: bool = False,
+        include_descendants: bool = True,
     ) -> AsyncIterator[ExecutionObservationEvent]:
         self._binding.ensure_open()
         if not isinstance(include_content, bool):
@@ -229,11 +242,12 @@ class Execution(Generic[AppT]):
         return _ExecutionModelObservation(
             self._binding, self.execution_id, self._principal, self._watch_tree,
             cursor, include_content, finalizing, include_output_preview=include_output_preview,
+            include_descendants=include_descendants,
         ).watch(ready)
 
     def _watch_prepared(
         self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
-        *, include_output_preview: bool = False,
+        *, include_output_preview: bool = False, include_descendants: bool = True,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         self._binding.ensure_open()
         if not isinstance(include_content, bool):
@@ -247,6 +261,7 @@ class Execution(Generic[AppT]):
             self.execution_id, principal=self._principal, after_event_seqs=sequences,
             include_content=include_content, ready=ready,
             include_output_preview=include_output_preview,
+            include_descendants=include_descendants,
         )
         return self._watch_with_cursor(stream, sequences, include_content, cursor)
 

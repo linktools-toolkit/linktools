@@ -176,6 +176,7 @@ async def test_watch_routes_preserve_authorization_cursor_readiness_and_close(ro
             assert ready.is_set()
             assert calls[-1] == (owner, "execution", {
                 "principal": principal, "after_event_seqs": cursor, "include_content": True, "ready": ready,
+                "include_output_preview": False, "include_descendants": True,
             })
             await stream.aclose()
             assert closed == [owner]

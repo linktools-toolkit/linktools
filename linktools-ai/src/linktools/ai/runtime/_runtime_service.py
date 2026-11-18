@@ -55,7 +55,7 @@ from ._agent_binding_resolver import _AgentBindingResolver
 from ..observe.stream import ObservationSession, await_stream_cleanup
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
 from ..core import ExecutionContext
-from ..model import normalize_input_files
+from ..model import UserPromptInput, normalize_input_files
 from ..inputs import CanonicalUserInput
 from ..observe import (MetricRecorderProvider, MetricRecorderStatus, MetricFlushResult, MetricsControl,
                        RuntimeMetricsStatus, RuntimeMetricsFlushResult)
@@ -108,6 +108,7 @@ class _ExecutionTreeStreamer(Protocol):
         *,
         principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None,
+        include_descendants: bool = True,
     ) -> tuple[tuple[ExecutionView, int, int], ...]: ...
 
     def replay(
@@ -127,6 +128,7 @@ class _ExecutionTreeStreamer(Protocol):
         after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
+        include_descendants: bool = True,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -415,7 +417,7 @@ class Runtime(Generic[AppT]):
         )
         self._session_service = session
         self._sessions = RuntimeSessions(
-            session, self._get_session, bind_session=self._session_handle, ensure_open=self._ensure_open,
+            session, self._get_session, start_session=self._start_existing_session, bind_session=self._session_handle, ensure_open=self._ensure_open,
         )
         self._approvals = approval
         self._external_calls = external
@@ -504,6 +506,7 @@ class Runtime(Generic[AppT]):
         after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         include_output_preview: bool = False,
+        include_descendants: bool = True,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         if self._tree_streamer is None:
@@ -512,7 +515,8 @@ class Runtime(Generic[AppT]):
             execution_id,
             principal=principal,
             after_event_seqs=after_event_seqs,
-            include_content=include_content, include_output_preview=include_output_preview, ready=ready,
+            include_content=include_content, include_output_preview=include_output_preview,
+            ready=ready, include_descendants=include_descendants,
         )
 
     async def _capture_execution_tree(
@@ -521,11 +525,13 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         after_event_seqs: Mapping[str, int] | None = None,
+        include_descendants: bool = True,
     ) -> tuple[tuple[ExecutionView, int, int], ...]:
         if self._tree_streamer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._tree_streamer.capture(
             execution_id, principal=principal, after_event_seqs=after_event_seqs,
+            include_descendants=include_descendants,
         )
 
     def _replay_execution_tree(
@@ -619,6 +625,28 @@ class Runtime(Generic[AppT]):
             principal=resolved_principal,
         )
         return self._session_handle(view, resolved_principal)
+
+    async def _start_existing_session(
+        self, session_id: str, user_prompt: UserPromptInput, *, principal: Principal,
+        idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
+        correlation: Mapping[str, object] | None = None,
+    ) -> "Execution[AppT]":
+        from ..core import validate_idempotency_key
+        from ..model import validate_user_input
+
+        self._ensure_open()
+        validate_resource_id(session_id)
+        prompt = validate_user_input(user_prompt)
+        key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
+        validate_idempotency_key(key)
+
+        async def start(agent_id, resume):
+            return await self._get_agent(agent_id).execution_port.start(
+                prompt, files=(), output=output, principal=principal, session_id=session_id,
+                idempotency_key=key, mode="run", planning=None, thinking=None,
+                correlation=correlation, _resume=resume)
+
+        return await self._session_service.start_existing(session_id, principal, key, start)
 
     def _session_handle(self, view: SessionView, principal: Principal) -> Session[AppT]:
         return Session(self, view.agent_id, None, view.session_id, principal)

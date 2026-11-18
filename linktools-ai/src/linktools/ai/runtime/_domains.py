@@ -14,6 +14,8 @@ from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolE
 from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, CloseSessionRequest, CreateSessionRequest, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ForkSessionRequest, ListExecutionRequest, ListSessionRequest, ModelInteractionItem, Page, RetryExecutionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, TranscriptItem, UpdateSessionRequest, UsageReadCutoff, ExecutionService, SessionService
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from ..model import UserPromptInput
     from pydantic import BaseModel
     from ._agent import Agent, Session
     from ..execution import Execution
@@ -257,9 +259,11 @@ class RuntimeSessions(Generic[AppT]):
         service: SessionService,
         get_session: Callable[[str, Principal | None], Awaitable["Session[AppT]"]],
         *,
+        start_session: Callable[..., Awaitable["Execution[AppT]"]],
         bind_session: Callable[[SessionView, Principal], "Session[AppT]"],
         ensure_open: Callable[[], None] = lambda: None,
     ) -> None:
+        self._start_session = start_session
         self._service = service
         self._get_session = get_session
         self._bind_session = bind_session
@@ -267,6 +271,15 @@ class RuntimeSessions(Generic[AppT]):
 
     async def get(self, session_id: str, *, principal: Principal | None = None) -> "Session[AppT]":
         return await self._get_session(session_id, principal)
+
+    async def start(
+        self, session_id: str, user_prompt: "UserPromptInput", *, principal: Principal,
+        idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
+    ) -> "Execution[AppT]":
+        """Start a turn on an existing authorized session using its current Agent."""
+        return await self._start_session(session_id, user_prompt, principal=principal,
+            idempotency_key=idempotency_key, output=output, correlation=correlation)
 
     async def inspect(self, session_id: str, *, principal: Principal) -> SessionView:
         """Read current session state without constructing a bound handle."""

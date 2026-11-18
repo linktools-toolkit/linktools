@@ -54,6 +54,7 @@ class _Owner:
 
     async def _capture_execution_tree(
         self, execution_id: str, *, principal: Principal, after_event_seqs: Mapping[str, int] | None = None,
+        include_descendants: bool = True,
     ) -> tuple[tuple[ExecutionView, int, int], ...]:
         self.requests["capture"] = execution_id, principal
         return ()
@@ -69,6 +70,7 @@ class _Owner:
 async def _tree(
     execution_id: str, *, principal: Principal, after_event_seqs: Mapping[str, int] | None = None,
     include_content: bool = False, include_output_preview: bool = False, ready: asyncio.Event | None = None,
+    include_descendants: bool = True,
 ) -> AsyncIterator[ExecutionTreeEvent]:
     if ready is not None:
         ready.set()
@@ -107,3 +109,38 @@ async def test_model_observation_replays_empty_execution_snapshot_without_histor
     assert [event async for event in stream] == []
     assert owner.requests["capture"] == ("execution", principal)
     assert not owner.sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_descendants", (False, True))
+async def test_observation_passes_descendant_mode_explicitly(include_descendants: bool) -> None:
+    owner = _Owner()
+    principal = Principal("worker", "tenant")
+    captures = []
+    watches = []
+
+    async def capture(execution_id, *, principal, after_event_seqs, include_descendants):
+        captures.append(include_descendants)
+        return ()
+
+    async def tree(execution_id, *, principal, after_event_seqs, include_content,
+                   include_output_preview, ready, include_descendants):
+        watches.append(include_descendants)
+        if ready is not None:
+            ready.set()
+        if False:
+            yield
+
+    from dataclasses import replace
+
+    binding = replace(owner.binding(), capture_tree=capture)
+    handle = Execution(binding, "execution", principal, tree)
+    assert [item async for item in handle.watch(include_descendants=include_descendants)] == []
+    observation = _ExecutionModelObservation(
+        binding, "execution", principal, tree, None, False,
+        include_descendants=include_descendants,
+    )
+    final = await observation.final()
+    assert [item async for item in final] == []
+    assert watches == [include_descendants]
+    assert captures == [include_descendants]

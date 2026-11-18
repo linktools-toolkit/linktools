@@ -350,6 +350,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion(late_producer: b
         after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
+        include_descendants: bool = True,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         del after_event_seqs, include_content
         if ready is not None:

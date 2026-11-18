@@ -9,10 +9,10 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 
-from ._feature_policy import _RuntimeFeaturePolicy
+from ._feature_policy import _RuntimeFeaturePolicy, _runtime_feature_policy
 from ._execution import DefaultExecutionService, _SessionStartRead
 from ..session import SessionPendingExecutionLookup, SessionReleaseCallback, SessionManager, SessionRecordReader
 from ..agent import AgentBinding, AgentBindingContract
@@ -153,6 +153,9 @@ class _SessionExecutionAdapter:
         await self._execution.wait(execution_id, principal=principal)
 
 
+_AdmissionT = TypeVar("_AdmissionT")
+
+
 class RuntimeSessionService(SessionManager[ExecutionHandle]):
     """Enforce session ownership, Agent identity immutability, and revision CAS."""
 
@@ -168,6 +171,35 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         # Custom services retain the generic manager's admission contract.
         if type(self._admission_execution) is not DefaultExecutionService:
             await super()._authorize_resume_execution(session_id, principal)
+
+    async def start_existing(self, session_id: str, principal: Principal, idempotency_key: str,
+                             start: Callable[[str, Callable[..., Awaitable[ExecutionHandle]]], Awaitable[_AdmissionT]],
+                             ) -> _AdmissionT:
+        """Authorize an existing session once; keep admission within its retention scope."""
+        async with self._retain_session(session_id, principal.tenant_id):
+            execution = self._admission_execution
+            adapter = self._execution
+            read_session = self._read_session
+            if isinstance(execution, DefaultExecutionService):
+                adapter = _SessionExecutionAdapter(execution)
+                async def read_session(identity: str, *, tenant_id: str) -> SessionRecord | None:
+                    adapter.start_read = await execution._read_session_start(
+                        identity, idempotency_key, tenant_id=tenant_id)
+                    return adapter.start_read.session
+            record = await self.read_authorized(
+                session_id, principal, AuthorizationAction.SESSION_READ, read_session=read_session)
+            if record.status is not SessionStatus.OPEN:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+
+            async def resume(agent_id: str, binding_digest: str, identity: str,
+                             request: ResumeSessionRequest, **kwargs) -> ExecutionHandle:
+                binding = kwargs["resolved_binding"]
+                if not _runtime_feature_policy(binding.compiled_agent.runtime_contributions).session.enabled:
+                    raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
+                return await self._resume_record(
+                    record, agent_id, binding_digest, identity, request, execution=adapter, **kwargs)
+
+            return await start(record.agent_id, resume)
 
     async def _resume(self, agent_id: str, binding_digest: str, session_id: str,
                       request: ResumeSessionRequest, **kwargs) -> ExecutionHandle:

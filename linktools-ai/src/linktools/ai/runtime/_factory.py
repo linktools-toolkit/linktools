@@ -256,6 +256,7 @@ async def compose_runtime_components(
                 candidates=tuple(item for item in current if item.kind != "agent"),
                 defaults=None if resolution is None else resolution.defaults,
                 models=models, agents=agents,
+                repository_instructions=RepositoryInstructions(()) if resolution is None else resolution.instructions,
                 capability_filter=None if resolution is None else resolution.filter,
             )
 
@@ -440,6 +441,7 @@ async def compose_runtime_components(
             asset_sources=asset_sources,
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
+            instruction_resolver_for=resolver_for,
             object_key_factory=object_key_factory,
             input_materializer=input_materializer,
             memory_scope=memory_scope,
@@ -601,6 +603,7 @@ async def _build_local_components(
     asset_sources: Mapping[str, AssetStoreReader],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
+    instruction_resolver_for: Callable[[RepositoryInstructions], RepositoryInstructionResolver],
     object_key_factory: ObjectKeyFactory,
     input_materializer: ExecutionInputMaterializer,
     memory_scope: str | None,
@@ -694,6 +697,7 @@ async def _build_local_components(
             retained_turn_confirmed=state.retention.terminal_publication_confirmed,
             retained_publication=state.retention.terminal_publication,
             instruction_resolver=instruction_resolver,
+            instruction_resolver_for=instruction_resolver_for,
             object_key_factory=object_key_factory,
             input_materializer=input_materializer,
             object_reader=state.read_object,

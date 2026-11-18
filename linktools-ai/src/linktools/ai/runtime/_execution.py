@@ -442,6 +442,7 @@ class DefaultExecutionService(TaskExecutionService):
         history_service: "ExecutionHistoryService | None" = None,
         release_terminal: _ExecutionReleaseCallback | None = None,
         instruction_resolver: "RepositoryInstructionResolver | None" = None,
+        instruction_resolver_for: "Callable[[RepositoryInstructions], RepositoryInstructionResolver] | None" = None,
         object_key_factory: "ObjectKeyFactory | None" = None,
         input_materializer: "ExecutionInputMaterializer | None" = None,
         resolve_task_admissions: Callable[[], TaskAdmissionRepository] | None = None,
@@ -475,6 +476,7 @@ class DefaultExecutionService(TaskExecutionService):
         self._history_reader = history_reader
         self._history_service = history_service
         self._instruction_resolver = instruction_resolver
+        self._instruction_resolver_for = instruction_resolver_for
         self._input_materializer = input_materializer
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
@@ -1508,6 +1510,9 @@ class DefaultExecutionService(TaskExecutionService):
             ))
         request = context.request
 
+        instruction_resolver = self._instruction_resolver
+        if binding.repository_instructions is not None and self._instruction_resolver_for is not None:
+            instruction_resolver = self._instruction_resolver_for(binding.repository_instructions)
         input_context = None
         repository_instructions = None
         if request.input_context is not None:
@@ -1524,7 +1529,7 @@ class DefaultExecutionService(TaskExecutionService):
             )
             if request.input_context.repository_instructions is not None:
                 RepositoryInstructions.from_payload(request.input_context.repository_instructions)
-        elif self._instruction_resolver is not None:
+        elif instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
                 if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1551,11 +1556,11 @@ class DefaultExecutionService(TaskExecutionService):
                         *((".",) if repository_instructions is None else ()),
                         *input_instruction_paths,
                     )):
-                        resolved = await self._instruction_resolver.resolve(path, exclude_sources=frozenset(documents))
+                        resolved = await instruction_resolver.resolve(path, exclude_sources=frozenset(documents))
                         for document in resolved.documents:
                             documents.setdefault(document.source, document)
                     resolved_instructions = RepositoryInstructions(tuple(documents.values()))
-                    self._instruction_resolver.validate(resolved_instructions)
+                    instruction_resolver.validate(resolved_instructions)
                     if resolved_instructions.documents:
                         repository_instructions = await self._capture_repository_instructions(
                             resolved_instructions,
@@ -1578,13 +1583,13 @@ class DefaultExecutionService(TaskExecutionService):
                 ))
                 documents = {}
                 for path in instruction_paths:
-                    resolved = await self._instruction_resolver.resolve(
+                    resolved = await instruction_resolver.resolve(
                         path, exclude_sources=frozenset(documents),
                     )
                     for document in resolved.documents:
                         documents.setdefault(document.source, document)
                 resolved_instructions = RepositoryInstructions(tuple(documents.values()))
-                self._instruction_resolver.validate(resolved_instructions)
+                instruction_resolver.validate(resolved_instructions)
                 if resolved_instructions.documents:
                     repository_instructions = await self._capture_repository_instructions(
                         resolved_instructions,

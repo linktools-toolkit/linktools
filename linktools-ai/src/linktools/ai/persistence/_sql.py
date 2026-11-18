@@ -26,7 +26,8 @@ from ..storage import (
 )
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
-from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_rows, record_owner_values
+from ._record_query import ExecutionRecoveryCandidateQuery, record_scan_projection
+from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
 from .state import state_content_members
@@ -75,7 +76,7 @@ if TYPE_CHECKING:
     from ..storage import SqlValue
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Result
-    from sqlalchemy.sql import ColumnElement, CompoundSelect, Executable, Select
+    from sqlalchemy.sql import ColumnElement, CompoundSelect, Executable, FromClause, Select
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 ValueT = TypeVar("ValueT")
@@ -84,13 +85,13 @@ _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 192
 # One partition bind plus a locator and raw identity per key fits SQLite 999.
 _RAW_KEY_BATCH_SIZE = 499
-# Each immutable record contributes seventeen bound values.
+# Eighteen record values plus the store key fit SQLite 999 at this batch size.
 _IMMUTABLE_RECORD_BATCH_SIZE = 48
 # One store and two stream predicates leave 996 SQLite sequence binds.
 _FACT_READ_BATCH_SIZE = 996
-# Seven CASE assignments and seven identity/CAS binds plus the IN key
-# require at most 22 binds per row and one shared store bind.
-_RECORD_REPLACE_BATCH_SIZE = 40
+# Each SQLite row uses 16 CASE binds and 10 key/CAS binds, plus one
+# store bind per statement: 38 * 26 + 1 = 989, within the 999 budget.
+_RECORD_REPLACE_BATCH_SIZE = 38
 # Store, scope, and kind predicates leave 996 SQLite subject binds.
 _RECORD_SUBJECT_READ_BATCH_SIZE = 995
 _GROUP_RECORD_BIND_BUDGET = 999
@@ -413,7 +414,7 @@ class _SqlGroupTransaction:
         from sqlalchemy import and_, or_, select
 
         table = record_owner_rows(self._group.metadata, keys=tuple(key for keys in requests.values() for key in keys))
-        return select(table).where(or_(*(and_(
+        return select(*record_owner_columns(table)).where(or_(*(and_(
             table.c.store_key == self.transaction(store)._store_key,
             _keys_match(table.c.key, tuple(validate_record_key(key) for key in keys)),
         ) for store, keys in requests.items())))
@@ -1400,7 +1401,7 @@ class _SqlTransaction:
         row = (
             (
                 await self._execute(
-                    select(table).where(
+                    select(*record_owner_columns(table)).where(
                         table.c.store_key == self._store_key,
                         _locator_column(table.c.key) == _key_locator(validate_record_key(key)),
                     )
@@ -1438,7 +1439,7 @@ class _SqlTransaction:
             rows = (
                 (
                     await self._execute(
-                        select(table).where(
+                        select(*record_owner_columns(table)).where(
                             table.c.store_key == self._store_key,
                             _locator_column(table.c.key).in_(tuple(_key_locator(key) for key in missing))
                         )
@@ -1597,7 +1598,8 @@ class _SqlTransaction:
         table = self._table("ai_state_records")
         current = table.alias("archive_current")
         current_scope = and_(current.c.store_key == self._store_key,
-                             _key_matches(current.c.scope_key, scope_key), current.c.kind == "archive_sequence")
+                             _key_matches(current.c.scope_key, scope_key), current.c.kind == "archive_sequence",
+                             current.c.scan_kind == literal("k:archive_sequence", literal_execute=True))
         branches = []
         for slot, field in ((ArchiveNodeSlot.SELF, None), (ArchiveNodeSlot.LEFT, "left"),
                             (ArchiveNodeSlot.RIGHT, "right"), (ArchiveNodeSlot.NEXT, "next")):
@@ -1617,7 +1619,8 @@ class _SqlTransaction:
                 node = table.alias("archive_" + field)
                 joined = current.outerjoin(node, and_(
                     node.c.store_key == self._store_key, _key_matches(node.c.scope_key, scope_key),
-                    node.c.kind == "archive_sequence", node.c.sort_prefix == func.substr(identity, 1, 128),
+                    node.c.kind == "archive_sequence",
+                    node.c.scan_kind == literal("k:archive_sequence", literal_execute=True), node.c.sort_prefix == func.substr(identity, 1, 128),
                     node.c.sort_key == identity,
                 ))
             branches.append(select(literal("archive_content").label("kind"),
@@ -1629,10 +1632,11 @@ class _SqlTransaction:
             # Metadata-only frontiers cannot reference payload owners.
             owners = ("ai_state_records",)
             for owner in owners:
-                targets = record_owner_rows(self._metadata, owner=owner)
-                lookup = select(targets).select_from(keys.outerjoin(targets, and_(
+                targets = self._metadata.tables[owner]
+                lookup = select(*record_owner_columns(targets)).select_from(keys.outerjoin(targets, and_(
                     targets.c.store_key == self._store_key, _key_matches(targets.c.scope_key, scope_key),
-                    targets.c.kind == keys.c.kind, targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
+                    targets.c.kind == keys.c.kind, targets.c.scan_kind == literal("k:", literal_execute=True) + keys.c.kind,
+                    targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
                     targets.c.sort_key == keys.c.identity,
                 )))
                 selections.append(lookup)
@@ -1642,7 +1646,7 @@ class _SqlTransaction:
             owner_keys = tuple(validate_record_key(key) for key in content_keys
                                if record_owner_table(key, store_key=self._store_key) == owner)
             content = record_owner_rows(self._metadata, keys=owner_keys)
-            selections.append(select(content).where(
+            selections.append(select(*record_owner_columns(content)).where(
                 content.c.store_key == self._store_key, _key_matches(content.c.scope_key, scope_key),
                 content.c.kind == "archive_content", _keys_match(content.c.key, owner_keys),
             ))
@@ -1880,7 +1884,7 @@ class _SqlTransaction:
 
         table = self._table(owners[0])
         prepared = tuple(record_owner_values(owners[0], _record_values(value.record)) for value in ordered)
-        columns = ("state", "storage_revision", "lease_owner", "lease_fence",
+        columns = ("state", "scan_kind", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json", "payload_bytes")
         identity_columns = tuple(name for name in ("scope_key", "parent_key", "subject_id", "kind", "sort_key") if name in table.c)
         columns = tuple(name for name in columns if name in table.c)
@@ -2980,6 +2984,7 @@ def _record_values(record: StoredRecord) -> dict[str, object]:
         if record.subject_id is None
         else record.subject_id.encode("utf-8"),
         "kind": record.kind,
+        "scan_kind": record_scan_projection(record.kind, record.state, record.data),
         "sort_key": record.sort_key,
         "state": record.state,
         "storage_revision": record.storage_revision,
@@ -3207,9 +3212,52 @@ def _require_scan_limit(limit: int) -> None:
         raise ValueError("scan page limit must be positive")
 
 def _record_query_statement(metadata: "MetaData", store_key: bytes, query: RecordQuery) -> "Select":
+    from sqlalchemy import select, union_all
+
+    if query.kind is not None and query.kind.rstrip(" ") == "execution":
+        # Each disjoint range keeps all possible members of the global page.
+        # Logical filters and raw-key cursors apply before each branch limit.
+        branches = [
+            _record_page_statement(
+                record_owner_rows(metadata, kind=query.kind, owner=owner, scan_kind=bucket),
+                store_key, query,
+            )
+            for owner in record_owner_names(kind=query.kind)
+            for bucket in (("e:1",) if isinstance(query, ExecutionRecoveryCandidateQuery)
+                           else record_scan_kinds(query.kind, query.states))
+        ]
+        if len(branches) == 1:
+            return branches[0]
+        if branches:
+            candidates = union_all(*(select(branch.subquery()) for branch in branches)).subquery()
+            statement = select(candidates).order_by(
+                candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
+            )
+            return statement.limit(query.limit) if query.limit is not None else statement
+    # PAD SPACE collations can make distinct raw states share one equality range.
+    if (query.kind == "task_graph" and query.limit is not None and query.states
+            and len(query.states) <= 2
+            and len({state.rstrip(" ") for state in query.states}) == len(query.states)):
+        # Bound each physical owner's equality range before the global merge.
+        # A range's first N records contain every possible global first-N member.
+        branches = [
+            select(_record_page_statement(
+                record_owner_rows(metadata, owner=owner, kind=query.kind), store_key,
+                replace(query, states=frozenset((state,))),
+            ).subquery())
+            for owner in record_owner_names(kind=query.kind)
+            for state in sorted(query.states)
+        ]
+        candidates = union_all(*branches).subquery()
+        return select(candidates).order_by(
+            candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
+        ).limit(query.limit)
+    return _record_page_statement(record_owner_rows(metadata, kind=query.kind), store_key, query)
+
+
+def _record_page_statement(table: "FromClause", store_key: bytes, query: RecordQuery) -> "Select":
     from sqlalchemy import and_, or_, select
 
-    table = record_owner_rows(metadata, kind=query.kind)
     conditions = [table.c.store_key == store_key]
     if query.scope_key is not None:
         conditions.append(_key_matches(table.c.scope_key, query.scope_key))
@@ -3218,7 +3266,8 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
     if query.kind is not None:
         conditions.append(table.c.kind == query.kind)
     if query.states is not None:
-        conditions.append(table.c.state.in_(tuple(query.states)))
+        conditions.append(table.c.state == next(iter(query.states)) if len(query.states) == 1
+                          else table.c.state.in_(tuple(query.states)))
     if query.sort_key_prefix is not None:
         conditions.append(table.c.sort_prefix >= query.sort_key_prefix[:128])
         conditions.append(table.c.sort_key >= query.sort_key_prefix)
@@ -3254,3 +3303,5 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
 
 
 __all__ = ["SqlStateStorageGroup", "SqlStateStore"]
+
+

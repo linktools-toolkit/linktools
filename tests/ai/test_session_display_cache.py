@@ -397,7 +397,7 @@ async def test_display_cache_facade_passes_max_age_to_custom_service():
         async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit, max_age))
             return "custom"
-    facade = RuntimeSessions(Custom(), object(), bind_session=None, ensure_open=lambda: None)
+    facade = RuntimeSessions(Custom(), object(), start_session=None, bind_session=None, ensure_open=lambda: None)
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=0) == "custom"
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=3) == "custom"
     assert calls == [("session", _PRINCIPAL, None, 100, 0), ("session", _PRINCIPAL, None, 100, 3)]

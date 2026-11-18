@@ -122,11 +122,24 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                comment="First 128 bytes of the full sort key; non-unique query projection only."),
         *sql_audit_columns(),
     ]
+    if name == "ai_state_records":
+        columns.insert(-2, Column(
+            "scan_kind", String(34), nullable=False,
+            comment="Write-through kind and execution recovery candidate projection; never domain authority.",
+        ))
     omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
+    if name == "ai_task_graphs":
+        omitted = {"kind"}
     records = Table(name, metadata, *(column for column in columns if column.name not in omitted),
                     comment=comment, **sql_table_options())
     sql_unique(records, "store_key", "key_locator")
-    if "kind" in records.c:
+    if name == "ai_task_graphs":
+        sql_query_index(records, "store_key", "state", "sort_prefix")
+        sql_audit_indexes(records)
+        return
+    if name == "ai_state_records":
+        sql_query_index(records, "store_key", "scan_kind", "sort_prefix")
+    elif "kind" in records.c:
         sql_query_index(records, "store_key", "kind", "sort_prefix")
     if name != "ai_step_tool_operations":
         sql_query_index(records, "scope_locator", "sort_prefix")
@@ -136,3 +149,4 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
 
 
 __all__ = ["build_record_owner_table"]
+

@@ -25,6 +25,7 @@ manager for ordinary Agent calls.
 | `agent.run(...)`, `session.run(...)` | `WaitResult[ExecutionResult]` | Unchanged: start and wait, with optional observation |
 | `agent.session(id, ...)` | `Session` | Unchanged: lazy definition-bound handle, no creation/read |
 | `agent.create_session(id, ...)` | `Session` | Unchanged: create then bind, retaining Agent derivations |
+| `runtime.sessions.start(id, prompt, principal=..., ...)` | No facade operation | `Execution`, strict existing-session admission without a display read |
 | `runtime.sessions.get(id, principal=...)` | `Session` | Unchanged: authorized lookup and handle |
 | `runtime.sessions.create(agent_id, request)` | `SessionView` | `Session`, bound to `request.principal` |
 | `runtime.sessions.fork(agent_id, id, request)` | `SessionView` | `Session`, bound to `request.principal` |
@@ -80,6 +81,25 @@ handle use `agent.session`. The latter keeps derived or restored Agent semantics
 and deliberately does not check that a Session exists. `Session.fork` and
 `Agent.create_session` preserve those definition bindings rather than replacing
 them with a fresh default Agent.
+
+For an HTTP turn targeting an existing conversation, use:
+
+```python
+execution = await runtime.sessions.start(
+    session_id, "Hello", principal=actor, idempotency_key=request_id,
+)
+```
+
+This entry rejects missing or unauthorized Sessions instead of lazily creating
+one. It selects the Agent recorded by the authorized Session, preserves admission
+CAS and idempotency, and does not build a Session display view first. `output`
+and `correlation` may refine the turn just as on `Session.start`.
+
+Session policy, Agent binding and declaration-provided repository rules use one
+current declaration capture for this admission. The rules are not added to the
+durable Agent binding contract. Workspace instructions still resolve from actual
+paths at admission; later tool-boundary instruction checks remain current. No
+capture is reused by the next call or after reopening Runtime.
 
 ## Task and graph semantics stay with Task
 

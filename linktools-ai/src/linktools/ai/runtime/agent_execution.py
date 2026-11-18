@@ -16,7 +16,7 @@ from ._capabilities import runtime_feature_leaves
 from ..core import (BudgetUsage, OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
                     normalize_thinking, overlay_correlation, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
-from ..execution import (Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest,
+from ..execution import (ExecutionHandle, Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest,
     ExecutionView, ExecutionResult, CancelExecutionRequest, CancelExecutionResult, ExecutionHistoryService,
     ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, UsageReadCutoff)
 from ..execution.handle import ExecutionBinding, ExecutionTreeWatcher
@@ -243,6 +243,7 @@ class AgentExecutionPort(Generic[AppT]):
         budget_scope_id: str | None = None,
         tool_effects: ToolEffects = "live",
         session_context: SessionContext = "all",
+        _resume: Callable[..., Awaitable[ExecutionHandle]] | None = None,
     ) -> "Execution[AppT]":
         self._operations.ensure_open()
         normalize_session_context(session_context)
@@ -336,7 +337,7 @@ class AgentExecutionPort(Generic[AppT]):
                 tool_effects=request.tool_effects,
                 session_context=request.session_context,
             )
-            handle = await self._sessions.resume(
+            handle = await (_resume or self._sessions.resume)(
                 compiled_agent.spec.id,
                 binding.binding_digest,
                 session_id,

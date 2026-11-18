@@ -114,7 +114,7 @@ class _BoundExecutionService:
         return ExecutionView(execution_id, "agent", ExecutionStatus.STARTED,
             ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
 
-    async def capture(self, execution_id, *, principal, after_event_seqs=None):
+    async def capture(self, execution_id, *, principal, after_event_seqs=None, include_descendants: bool = True):
         return ((await self.inspect(execution_id, principal=principal), 0, 0),)
 
     async def replay(self, captured, **kwargs):

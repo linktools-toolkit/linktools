@@ -36,7 +36,6 @@ from .contracts import (
     ArtifactRecord,
     EvaluationRecord,
     ExecutionRecord,
-    RecoveryHandoffPhase,
     ExternalCallRecord,
     IdempotencyRecord,
     MemoryRecord,
@@ -215,6 +214,7 @@ class _RepositoryBase:
         sort_key_prefix: bytes | None = None,
         cursor: str | None = None,
         limit: int | None = None,
+        query_type: type[RecordQuery] = RecordQuery,
     ) -> tuple[StoredRecord, ...]:
         if limit is not None and (
             isinstance(limit, bool)
@@ -227,7 +227,7 @@ class _RepositoryBase:
 
         async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
             records = await transaction.list_records(
-                RecordQuery(
+                query_type(
                     scope_key=scope,
                     parent_key=parent,
                     kind=kind,
@@ -242,7 +242,7 @@ class _RepositoryBase:
                 return records
             last = records[-1]
             probe = await transaction.list_records(
-                RecordQuery(
+                query_type(
                     scope_key=scope,
                     parent_key=parent,
                     kind=kind,
@@ -973,8 +973,6 @@ def _domain_revision(value: object) -> int:
 
 
 def _status_value(value: object) -> str | None:
-    if isinstance(value, ExecutionRecord) and value.recovery is not None and value.recovery.handoff_phase is RecoveryHandoffPhase.PREPARED:
-        return "execution_handoff"
     if isinstance(
         value,
         (

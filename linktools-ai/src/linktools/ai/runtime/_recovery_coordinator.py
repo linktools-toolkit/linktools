@@ -289,6 +289,14 @@ class _RecoveryCoordinatorPort(Protocol):
         expected_status: IdempotencyStatus,
     ) -> IdempotencyRecord: ...
 
+    async def _restore_recovery_idempotency(
+        self,
+        execution: ExecutionRecord,
+        identity: IdempotencyRecord,
+        *,
+        expected_status: IdempotencyStatus,
+    ) -> IdempotencyRecord: ...
+
     async def _expected_session_cursor(
         self,
         execution: ExecutionRecord,
@@ -962,8 +970,9 @@ class _RecoveryCoordinator:
         elif execution.status is ExecutionStatus.START_UNKNOWN:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         elif execution.recovery_state is ExecutionRecoveryState.ADMITTED:
-            await self._port._ensure_recovery_idempotency(
+            await self._port._restore_recovery_idempotency(
                 execution,
+                identity,
                 expected_status=IdempotencyStatus.STARTED,
             )
         elif execution.recovery_state is ExecutionRecoveryState.WAITING:
@@ -984,8 +993,9 @@ class _RecoveryCoordinator:
         elif execution.recovery_state is ExecutionRecoveryState.ACTIVE:
             if execution.status is not ExecutionStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._port._ensure_recovery_idempotency(
+            await self._port._restore_recovery_idempotency(
                 execution,
+                identity,
                 expected_status=IdempotencyStatus.STARTED,
             )
         else:
