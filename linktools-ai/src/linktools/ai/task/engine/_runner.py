@@ -2745,9 +2745,10 @@ class TaskNodeExecutor(Generic[AppT]):
         name: str,
     ) -> JsonValue:
         if invocation.input_capture is not None:
-            contract = await self._input_captures.read_task(invocation.input_capture, principal=invocation.principal)
-            if any(item.name == name for item in contract.dependencies):
-                return await self._input_captures.read_dependency(invocation.input_capture, name, principal=invocation.principal)
+            found, value = await self._input_captures.find_dependency(
+                invocation.input_capture, name, principal=invocation.principal)
+            if found:
+                return value
         reference, record = await self._input_result_source(invocation, name)
         del reference
         if record.execution_id is None:

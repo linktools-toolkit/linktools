@@ -647,10 +647,30 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             expected_revision=expected_revision, next_record=next_record,
         ))
 
+    async def compare_and_swap_observed(
+        self, execution_id: str, *, tenant_id: str,
+        expected_revision: int, next_record: ExecutionRecord,
+    ) -> Observed[ExecutionRecord]:
+        """Return the physical revision written by a successful control CAS."""
+        await self._execution_content.prepare_value(next_record)
+        return await self._store.mutate(lambda transaction: self._compare_and_swap_observed_in_transaction(
+            transaction, execution_id, tenant_id=tenant_id,
+            expected_revision=expected_revision, next_record=next_record,
+        ))
+
     async def compare_and_swap_in_transaction(
         self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
         expected_revision: int, next_record: ExecutionRecord,
     ) -> ExecutionRecord:
+        return (await self._compare_and_swap_observed_in_transaction(
+            transaction, execution_id, tenant_id=tenant_id,
+            expected_revision=expected_revision, next_record=next_record,
+        )).value
+
+    async def _compare_and_swap_observed_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
+        expected_revision: int, next_record: ExecutionRecord,
+    ) -> Observed[ExecutionRecord]:
         _require_repository_tenant(tenant_id, self._tenant_id)
         stored = await transaction.get_record(self._key("execution", (execution_id,)))
         if stored is None:
@@ -661,8 +681,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if fields["revision"] != expected_revision or next_record.execution_id != execution_id or next_record.revision != expected_revision + 1:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await _replace_checked(transaction, await self._projected_content(stored, next_record), stored.storage_revision)
-        return next_record
+        candidate = await self._projected_content(stored, next_record)
+        await _replace_checked(transaction, candidate, stored.storage_revision)
+        return Observed(next_record, candidate.storage_revision)
 
     async def commit_boundary_in_transaction(
         self, transaction: StateTransaction, observed: Observed[ExecutionRecord], *,

@@ -4085,7 +4085,7 @@ class LocalExecutionBackend:
 
     async def _persist_input_context(
         self, execution: ExecutionRecord, context: ExecutionInputContext,
-        loaded: LoadedModelContext | None = None,
+        loaded: LoadedModelContext | None = None, *, owner: _OwnedExecutionTurn | None = None,
     ) -> tuple[ExecutionRecord, ExecutionInputContext]:
         prepared = await self._context_archive.prepare(context,
             history_root=None if loaded is None else loaded.archive_root,
@@ -4097,11 +4097,19 @@ class LocalExecutionBackend:
                 async def publish_context(transaction):
                     del transaction
                     await prepared.publish()
-                    return await self._execution.executions.compare_and_swap(current.execution_id, tenant_id=self._tenant_id,
+                    repository = self._execution.executions
+                    compare = (repository.compare_and_swap_observed
+                               if type(repository) is ExecutionRepositoryImpl and owner is not None
+                               else repository.compare_and_swap)
+                    return await compare(current.execution_id, tenant_id=self._tenant_id,
                         expected_revision=current.revision,
                         next_record=replace(current, input_context=reference, repository_instructions=None,
                                             revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
                 committed = await self._execution.executions.state_store.mutate(publish_context)
+                if isinstance(committed, Observed):
+                    if self._turn_owners.get(current.execution_id) is owner:
+                        owner.observed = committed
+                    return committed.value, context
                 return committed, context
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -4482,7 +4490,7 @@ class LocalExecutionBackend:
                         context_write = (prepared.archive, prepared.records)
                 else:
                     current, accepted_context = await self._persist_input_context(
-                        current, accepted_context, loaded_context,
+                        current, accepted_context, loaded_context, owner=owner,
                     )
                     if accepted_context is not proposed_context and accepted_context.digest != proposed_context.digest:
                         history = list(accepted_context.model_messages())
