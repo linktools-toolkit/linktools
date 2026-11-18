@@ -284,6 +284,7 @@ function renderList() {
 }
 function stopStream() { state.stream?.abort(); state.stream=null;cancelLiveRender(); }
 let sessionWatch=null;
+let observationRead=null;
 const sessionSubmissions=new Set();
 function sessionSendBlocked() {
   return state.session?.status!=='OPEN' || sessionSubmissions.has(state.selectedSession) || Boolean(state.session?.active_execution_id)
@@ -743,7 +744,7 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
   if(terminal(info.status))for(const request of state.liveAttempts.values())if(request.execution_id===info.execution_id && request.status==='SUCCEEDED')readLiveResponse(request);
   return info;
 }
-async function selectExecution(id, generation=state.generation) {
+async function selectExecution(id, generation=state.generation, {reuseObservation=false}={}) {
   const executionGeneration=++state.executionGeneration,executionReadGeneration=++state.executionReadGeneration,selectionChanged=id!==state.selectedExecution;
   const readGeneration=id===state.observedExecution?++state.observationReadGeneration:state.observationReadGeneration;
   if(state.nativeTimeline?.id!==id){state.nativeTimeline=null;state.readerSelection=null;state.readerRaw=false;state.readerCache=null;state.readerExpanded.clear();}
@@ -752,7 +753,9 @@ async function selectExecution(id, generation=state.generation) {
   $('execution-meta').textContent=`Loading ${id}…`;
   if(selectionChanged && state.view==='sessions' && state.conversationMode==='original')renderConversation();
   try {
-  let info=await api(`/api/executions/${enc(id)}`);
+  const captured=reuseObservation && id===state.observedExecution ? state.observedInfo : null;
+  const pending=reuseObservation && observationRead?.id===id && observationRead.generation===state.observationGeneration ? observationRead.promise : null;
+  let info=captured || await (pending || api(`/api/executions/${enc(id)}`));
   if (generation!==state.generation || executionGeneration!==state.executionGeneration || executionReadGeneration!==state.executionReadGeneration || id!==state.selectedExecution) return;
   info=observedInfo(info,readGeneration);
   state.execution=info;state.executionError=false; renderExecution();
@@ -1303,7 +1306,13 @@ async function syncObservation({refresh=false}={}) {
   let info=state.observedInfo;
   if(refresh || !info){
     const readGeneration=++state.observationReadGeneration;
-    try {info=id===state.selectedExecution?state.execution:await api(`/api/executions/${enc(id)}`);}
+    try {
+      if(id===state.selectedExecution)info=state.execution;
+      else {
+        const read={id,generation,promise:api(`/api/executions/${enc(id)}`)};observationRead=read;
+        try {info=await read.promise;} finally {if(observationRead===read)observationRead=null;}
+      }
+    }
     catch(error){if(generation===state.observationGeneration && id===state.observedExecution && readGeneration===state.observationReadGeneration && view===state.view){unavailableSelection(error);throw error;}return;}
     if(generation!==state.observationGeneration || id!==state.observedExecution || readGeneration!==state.observationReadGeneration)return;
   }
@@ -1425,7 +1434,7 @@ async function watchExecution(id,generation) {
   } finally {if(state.stream===controller){state.stream=null;if(current())renderLive();}}
 }
 async function sendMessage(event) {
-  event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,promptValue=$('prompt').value;
+  event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,executionGeneration=state.executionGeneration,promptValue=$('prompt').value;
   if(!sessionId || !state.session || state.session.status!=='OPEN' || state.config?.read_only || !promptValue.trim() || sessionSendBlocked())return;
   sessionSubmissions.add(sessionId);
   $('send').disabled=true;notice('');
@@ -1435,9 +1444,18 @@ async function sendMessage(event) {
     if(generation!==state.generation){const draft=state.drafts.get(sessionId);if(draft?.prompt===promptValue)draft.prompt='';if(state.selectedSession===sessionId && $('prompt').value===promptValue)$('prompt').value='';return;}
     if($('prompt').value===promptValue)$('prompt').value='';
     reconcileAdmissionWatch(sessionId,result.execution_id);
-    await openSelection(sessionId,result.execution_id,{preserveInspector:true}); await loadList();
+    // Keep the current page and draft; refresh only the admitted turn's projection.
+    const payload=await readSession(sessionId);
+    if(generation!==state.generation || sessionId!==state.selectedSession)return;
+    if(acceptSession(payload)) {
+      state.timelineError=payload.timeline_error || '';renderSessionHeader();
+      if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
+      renderConversation();renderList();
+    }
+    if(executionGeneration===state.executionGeneration)await selectExecution(result.execution_id,generation,{reuseObservation:true});
   } catch(error){
     if(generation!==state.generation || sessionId!==state.selectedSession)return;
+    unavailableSelection(error);
     reconcileAdmissionWatch(sessionId);
     if(['SESSION_BUSY','SESSION_CONFLICT'].includes(error.code))error.message+='; this message was not started. Check the current execution, then send again when the session is available.';
     showError(error);

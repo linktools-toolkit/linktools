@@ -432,6 +432,79 @@ if(process.argv[3]==='session-sync') {
   fast({execution_id:'a-instant'},202);await fastSend;
   assert.notEqual(sessionSources.at(-1),synchronized,'idle without an observed admission needs one fresh authoritative snapshot');
   assert.equal(node('send').disabled,false);
+  // Admission reuses only its current observation, whether SSE wins or loses
+  // the POST race. Ordinary navigation must retain fresh execution reads.
+  for(const order of ['observed','pending','post-first','terminal']) {
+    await select('#session=b');await select('#session=a');await until('admission ready',()=>!node('send').disabled);
+    const id=`a-admission-${order}`,before=calls.length;
+    executions.set(id,{...info(id,'a'),status:order==='terminal'?'SUCCEEDED':'STARTED',terminal_at:null});
+    streamBlocks.set(id,{});
+    const accepted=deferred('POST /api/sessions/a/messages');node('prompt').value=`Send ${order}`;
+    const sending=node('composer').requestSubmit();await accepted.requested;
+    if(order==='pending') {
+      const pending=deferred(`GET /api/executions/${id}`);
+      sessions.get('a').active_execution_id=id;await pending.requested;
+      accepted({execution_id:id});await settle();pending(executions.get(id));await sending;
+    } else if(order==='post-first') {
+      const source=sessionSources.at(-1),snapshot=source.snapshot;
+      source.snapshot=()=>{};sessions.get('a').active_execution_id=id;
+      accepted({execution_id:id});await sending;source.snapshot=snapshot;source.snapshot();
+    } else if(order==='terminal') {
+      sessions.get('a').active_execution_id=id;sessions.get('a').active_execution_id=null;
+      accepted({execution_id:id});await sending;
+    } else {
+      sessions.get('a').active_execution_id=id;
+      await until('admission observer opens',()=>Boolean(streamBlocks.get(id).controller));
+      accepted({execution_id:id});await sending;
+    }
+    if(order!=='terminal') {
+      await until('admission live stream opens',()=>Boolean(streamBlocks.get(id).controller));
+      const snapshot=info(id,'a');executions.set(id,snapshot);
+      const controller=streamBlocks.get(id).controller;
+      controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(snapshot)+'\n\n'));controller.close();
+      sessions.get('a').active_execution_id=null;
+    }
+    await until('admission released',()=>!node('send').disabled);await settle();
+    const reads=calls.slice(before);
+    assert.equal(reads.filter(call=>call.method==='GET' && call.key===`/api/executions/${id}`).length,1,order);
+    assert.equal(reads.filter(call=>call.method==='GET' && call.key==='/api/sessions').length,0,order);
+    assert.ok(reads.some(call=>call.method==='GET' && call.key==='/api/sessions/a'),'admission still reads committed/pending timeline');
+  }
+
+  // A successful POST does not authorize a late read to select a different
+  // history turn, navigate back to this session, or overwrite another draft.
+  for(const destination of ['history','session','session-denied']) {
+    await select('#session=b');await select('#session=a');await until('selection race ready',()=>!node('send').disabled);
+    const accepted=deferred('POST /api/sessions/a/messages');node('prompt').value='Accepted message';
+    const sending=node('composer').requestSubmit();await accepted.requested;
+    const timelineRead=deferred('GET /api/sessions/a');accepted({execution_id:'a-instant'});await timelineRead.requested;
+    if(destination==='history') {
+      if(node('inspector').hidden)node('inspector-toggle').click();
+      node('detail-turn').value='a-run';await node('detail-turn').onchange();
+    } else {await select('#session=b');node('prompt').value='Private B draft';node('prompt').focus();}
+    const before=calls.length;
+    if(destination==='session-denied')timelineRead({code:'AUTHORIZATION_DENIED'},403);
+    else timelineRead({session:sessions.get('a'),timeline:timeline('a')});
+    await sending;
+    assert.equal(calls.slice(before).filter(call=>call.key==='/api/executions/a-instant').length,0);
+    if(destination==='history')assert.equal(node('detail-turn').value,'a-run');
+    else {
+      assert.equal(location.hash,'#session=b');assert.equal(node('conversation-title').textContent,'Beta');
+      assert.equal(node('prompt').value,'Private B draft');assert.equal(document.activeElement,node('prompt'));
+    }
+  }
+  const beforeNavigation=calls.length;await select('#session=a&execution=a-run');
+  assert.ok(calls.slice(beforeNavigation).some(call=>call.key==='/api/executions/a-run'),'navigation retains authority read');
+
+  // Losing session access after admission must erase stale content and keep
+  // controls disabled, just as a normal selection read failure does.
+  await until('denial case ready',()=>!node('send').disabled);
+  const acceptedAfterRevocation=deferred('POST /api/sessions/a/messages');node('prompt').value='Accepted before revocation';
+  const deniedSend=node('composer').requestSubmit();await acceptedAfterRevocation.requested;
+  const deniedTimeline=deferred('GET /api/sessions/a');acceptedAfterRevocation({execution_id:'a-instant'});await deniedTimeline.requested;
+  deniedTimeline({code:'AUTHORIZATION_DENIED'},403);await deniedSend;
+  assert.equal(node('send').disabled,true);assert.equal(node('conversation-title').textContent,'Conversation unavailable');
+  assert.doesNotMatch(node('conversation').textContent,/a answer/);
   console.log('Session synchronization preserves drafts, focus and selected history; admission, reconnect, stale frames and typed errors remain fenced');
   process.exit(0);
 }
