@@ -97,6 +97,9 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
         raise ValueError("unknown record owner")
     names = (owner,) if owner is not None else record_owner_names(keys=keys, kind=kind)
     canonical = metadata.tables["ai_state_records"]
+    if (names == ("ai_state_records",) and keys is not None and kind is None
+            and scan_kind is None and not include_run_counters):
+        return canonical
     selections = []
     for name in names:
         table = metadata.tables[name]

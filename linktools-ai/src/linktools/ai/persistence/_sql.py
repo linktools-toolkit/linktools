@@ -413,7 +413,7 @@ class _SqlGroupTransaction:
         from sqlalchemy import and_, or_, select
 
         table = record_owner_rows(self._group.metadata, keys=tuple(key for keys in requests.values() for key in keys))
-        return select(table).where(or_(*(and_(
+        return select(*record_owner_columns(table)).where(or_(*(and_(
             table.c.store_key == self.transaction(store)._store_key,
             _keys_match(table.c.key, tuple(validate_record_key(key) for key in keys)),
         ) for store, keys in requests.items())))
@@ -1400,7 +1400,7 @@ class _SqlTransaction:
         row = (
             (
                 await self._execute(
-                    select(table).where(
+                    select(*record_owner_columns(table)).where(
                         table.c.store_key == self._store_key,
                         _locator_column(table.c.key) == _key_locator(validate_record_key(key)),
                     )
@@ -1438,7 +1438,7 @@ class _SqlTransaction:
             rows = (
                 (
                     await self._execute(
-                        select(table).where(
+                        select(*record_owner_columns(table)).where(
                             table.c.store_key == self._store_key,
                             _locator_column(table.c.key).in_(tuple(_key_locator(key) for key in missing))
                         )
@@ -1645,7 +1645,7 @@ class _SqlTransaction:
             owner_keys = tuple(validate_record_key(key) for key in content_keys
                                if record_owner_table(key, store_key=self._store_key) == owner)
             content = record_owner_rows(self._metadata, keys=owner_keys)
-            selections.append(select(content).where(
+            selections.append(select(*record_owner_columns(content)).where(
                 content.c.store_key == self._store_key, _key_matches(content.c.scope_key, scope_key),
                 content.c.kind == "archive_content", _keys_match(content.c.key, owner_keys),
             ))

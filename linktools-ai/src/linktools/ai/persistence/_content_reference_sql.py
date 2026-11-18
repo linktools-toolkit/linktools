@@ -43,7 +43,7 @@ def content_reference_statement(
     owner_query = owner_statement
     if owner_query is None:
         table = record_owner_rows(metadata, keys=owner_keys)
-        owner_query = select(table).where(
+        owner_query = select(*record_owner_columns(table)).where(
             table.c.store_key == owner_store_key,
             table.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in owner_keys)),
             table.c.key.in_(tuple(owner_keys)),
@@ -90,7 +90,7 @@ def content_reference_statement(
             *(column.label("typed_" + column.name) for column in native.c)).select_from(joined_native))
     for store_key, keys in (additional_records or {}).items():
         extra = record_owner_rows(metadata, keys=keys)
-        selections.append(select(literal(3).label("source_kind"), *extra.c, *native_nulls).where(
+        selections.append(select(literal(3).label("source_kind"), *record_owner_columns(extra), *native_nulls).where(
             extra.c.store_key == store_key,
             extra.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in keys)),
             extra.c.key.in_(tuple(keys))))

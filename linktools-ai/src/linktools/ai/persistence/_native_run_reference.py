@@ -14,7 +14,7 @@ from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeS
 from ..errors import AIError, ErrorCode
 from ..steps import native_store_locator, encode_native_replay_key
 from ._run_registration import RunRegistrationReference
-from ._record_owner import record_owner_rows
+from ._record_owner import record_owner_columns, record_owner_rows
 from ._run_counters import run_counter_address, run_counter_streams
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
@@ -169,7 +169,7 @@ class NativeRunReferences:
                 "outcome", "store_key", "run_fields", "body_sha256", "fields_sha256",
             )
             source_columns += tuple(events.c[name].label(prefix + "_" + name) for name in names)
-        statement = select(records, *source_columns).select_from(joined)
+        statement = select(*record_owner_columns(records), *source_columns).select_from(joined)
         # Render typed invariant JOIN literals without consuming the record
         # reader's existing bind budget. Keys and query inputs remain bound.
         def inline_constant(node):
