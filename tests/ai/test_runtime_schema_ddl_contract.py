@@ -119,7 +119,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         if index.info.get("ddl_dialect") == "mysql"
     }
     for name in (
-        "ix_store_key_kind_sort_prefix",
+        "ix_store_key_scan_kind_sort_prefix",
         "ix_scope_locator_sort_prefix",
         "ix_parent_locator_sort_prefix",
     ):
@@ -142,7 +142,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     assert "sort_key VARCHAR(128)" not in migration
     assert "partition_digest" not in migration
     for fragment in (
-        "ix_store_key_kind_sort_prefix (store_key, kind, sort_prefix)",
+        "ix_store_key_scan_kind_sort_prefix (store_key, scan_kind, sort_prefix)",
         "ix_scope_locator_sort_prefix (scope_locator, sort_prefix)",
         "ix_parent_locator_sort_prefix (parent_locator, sort_prefix)",
         "ix_scope_locator_subject_id (scope_locator, subject_id)",
@@ -202,7 +202,7 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
     expected = {
         "ai_state_records": {
             "uk_store_key_key_locator",
-            "ix_store_key_kind_sort_prefix",
+            "ix_store_key_scan_kind_sort_prefix",
             "ix_scope_locator_sort_prefix",
             "ix_scope_locator_subject_id",
             "ix_parent_locator_sort_prefix",
@@ -554,3 +554,30 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
         ("ai_objects", ("store_id", "object_locator")),
     ):
         assert any(index.unique and tuple(index.columns.keys()) == columns for index in metadata.tables[name].indexes)
+
+
+@pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
+def test_record_scan_bucket_is_stored_generated_and_replaces_only_generic_index(dialect_name: str) -> None:
+    from sqlalchemy.dialects import postgresql, sqlite
+    from sqlalchemy.schema import CreateColumn
+
+    from linktools.ai.persistence._record_owner import EXECUTION_SCAN_STATES, RECORD_OWNER_TABLES
+
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.EXECUTION}))
+    dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
+    if dialect_name == "mysql":
+        dialect.server_version_info = (5, 7, 44)
+    records = metadata.tables["ai_state_records"]
+    column = records.c.scan_kind
+    assert column.type.length == 34
+    assert column.computed is not None and column.computed.persisted is True
+    ddl = str(CreateColumn(column).compile(dialect=dialect))
+    assert "GENERATED ALWAYS AS" in ddl and "STORED" in ddl
+    assert all("'" + state + "'" in ddl for state in EXECUTION_SCAN_STATES)
+    assert "'e:1'" in ddl and "'e:0'" in ddl and "'k:'" in ddl
+    indexes = {tuple(index.columns.keys()) for index in records.indexes}
+    assert ("store_key", "scan_kind", "sort_prefix") in indexes
+    assert ("store_key", "kind", "sort_prefix") not in indexes
+    for name in RECORD_OWNER_TABLES:
+        if name != "ai_state_records":
+            assert "scan_kind" not in metadata.tables[name].c

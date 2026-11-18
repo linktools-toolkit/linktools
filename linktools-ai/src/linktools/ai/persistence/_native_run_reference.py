@@ -135,7 +135,8 @@ class NativeRunReferences:
         from sqlalchemy.sql.elements import BindParameter
 
         records = record_owner_rows(self._record_metadata, keys=keys, kind="agent_run" if query is not None else None,
-                                    include_run_counters=include_run_counters)
+                                    include_run_counters=include_run_counters,
+                                    scan_kind="k:agent_run" if query is not None else None)
         runs = self._runs
         encoded = type_coerce(records.c.payload_json, JSON)[()].as_string()
         payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
@@ -299,3 +300,4 @@ class NativeRunReferences:
 
 
 __all__ = ["NativeRunReferences", "is_native_run_reference"]
+

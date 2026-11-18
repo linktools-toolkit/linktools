@@ -23,6 +23,7 @@ CREATE TABLE ai_state_records (
 	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete scope_key; raw identity must also match.',
 	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete parent_key; raw identity must also match.',
 	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.',
+	scan_kind VARCHAR(34) GENERATED ALWAYS AS (CASE WHEN (kind = 'execution') THEN CASE WHEN (state IN ('CANCELLING', 'FINALIZING', 'PENDING_START', 'RECOVERY_REQUIRED', 'STARTED', 'WAITING_DEFERRED', 'execution_handoff')) THEN 'e:1' ELSE 'e:0' END ELSE concat('k:', kind) END) STORED NOT NULL COMMENT 'Derived kind and execution recovery eligibility bucket for ordered record scans.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
@@ -30,7 +31,7 @@ CREATE TABLE ai_state_records (
 	KEY ix_parent_locator_sort_prefix (parent_locator, sort_prefix),
 	KEY ix_scope_locator_sort_prefix (scope_locator, sort_prefix),
 	KEY ix_scope_locator_subject_id (scope_locator, subject_id),
-	KEY ix_store_key_kind_sort_prefix (store_key, kind, sort_prefix),
+	KEY ix_store_key_scan_kind_sort_prefix (store_key, scan_kind, sort_prefix),
 	KEY ix_updated_at (updated_at),
 	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
 )ENGINE=InnoDB COMMENT='Current durable state for runtime and step resources persisted as versioned records.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
@@ -448,3 +449,4 @@ CREATE TABLE ai_metric_observations (
 )ENGINE=InnoDB COMMENT='Immutable metric observations and retained pruning receipts.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
 -- Official StepStore physical mapping.
+

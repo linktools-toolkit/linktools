@@ -26,7 +26,7 @@ from ..storage import (
 )
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
-from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values
+from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
 from .state import state_content_members
@@ -1597,7 +1597,8 @@ class _SqlTransaction:
         table = self._table("ai_state_records")
         current = table.alias("archive_current")
         current_scope = and_(current.c.store_key == self._store_key,
-                             _key_matches(current.c.scope_key, scope_key), current.c.kind == "archive_sequence")
+                             _key_matches(current.c.scope_key, scope_key), current.c.kind == "archive_sequence",
+                             current.c.scan_kind == literal("k:archive_sequence", literal_execute=True))
         branches = []
         for slot, field in ((ArchiveNodeSlot.SELF, None), (ArchiveNodeSlot.LEFT, "left"),
                             (ArchiveNodeSlot.RIGHT, "right"), (ArchiveNodeSlot.NEXT, "next")):
@@ -1617,7 +1618,8 @@ class _SqlTransaction:
                 node = table.alias("archive_" + field)
                 joined = current.outerjoin(node, and_(
                     node.c.store_key == self._store_key, _key_matches(node.c.scope_key, scope_key),
-                    node.c.kind == "archive_sequence", node.c.sort_prefix == func.substr(identity, 1, 128),
+                    node.c.kind == "archive_sequence",
+                    node.c.scan_kind == literal("k:archive_sequence", literal_execute=True), node.c.sort_prefix == func.substr(identity, 1, 128),
                     node.c.sort_key == identity,
                 ))
             branches.append(select(literal("archive_content").label("kind"),
@@ -1629,10 +1631,11 @@ class _SqlTransaction:
             # Metadata-only frontiers cannot reference payload owners.
             owners = ("ai_state_records",)
             for owner in owners:
-                targets = record_owner_rows(self._metadata, owner=owner)
-                lookup = select(targets).select_from(keys.outerjoin(targets, and_(
+                targets = self._metadata.tables[owner]
+                lookup = select(*record_owner_columns(targets)).select_from(keys.outerjoin(targets, and_(
                     targets.c.store_key == self._store_key, _key_matches(targets.c.scope_key, scope_key),
-                    targets.c.kind == keys.c.kind, targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
+                    targets.c.kind == keys.c.kind, targets.c.scan_kind == literal("k:", literal_execute=True) + keys.c.kind,
+                    targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
                     targets.c.sort_key == keys.c.identity,
                 )))
                 selections.append(lookup)
@@ -3209,13 +3212,32 @@ def _require_scan_limit(limit: int) -> None:
 def _record_query_statement(metadata: "MetaData", store_key: bytes, query: RecordQuery) -> "Select":
     from sqlalchemy import select, union_all
 
+    if query.kind is not None and query.kind.rstrip(" ") == "execution":
+        # Each disjoint range keeps all possible members of the global page.
+        # Logical filters and raw-key cursors apply before each branch limit.
+        branches = [
+            _record_page_statement(
+                record_owner_rows(metadata, kind=query.kind, owner=owner, scan_kind=bucket),
+                store_key, query,
+            )
+            for owner in record_owner_names(kind=query.kind)
+            for bucket in record_scan_kinds(query.kind, query.states)
+        ]
+        if len(branches) == 1:
+            return branches[0]
+        if branches:
+            candidates = union_all(*(select(branch.subquery()) for branch in branches)).subquery()
+            statement = select(candidates).order_by(
+                candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
+            )
+            return statement.limit(query.limit) if query.limit is not None else statement
     if (query.kind == "task_graph" and query.limit is not None and query.states
             and len(query.states) <= 2):
         # Bound each physical owner's equality range before the global merge.
         # A range's first N records contain every possible global first-N member.
         branches = [
             select(_record_page_statement(
-                record_owner_rows(metadata, owner=owner), store_key,
+                record_owner_rows(metadata, owner=owner, kind=query.kind), store_key,
                 replace(query, states=frozenset((state,))),
             ).subquery())
             for owner in record_owner_names(kind=query.kind)
@@ -3276,3 +3298,4 @@ def _record_page_statement(table: "FromClause", store_key: bytes, query: RecordQ
 
 
 __all__ = ["SqlStateStorageGroup", "SqlStateStore"]
+

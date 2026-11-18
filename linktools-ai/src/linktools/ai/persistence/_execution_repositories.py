@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import TypeVar
+from ._record_owner import EXECUTION_SCAN_STATES
 from ._message_root import NativeTextReference, NativeMessageRoot
 from linktools.core import environ
 from ..core import (
@@ -618,10 +619,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if tenant_id != self._tenant_id:
                 return Page(())
             _validate_page_limit(limit)
-            states = frozenset(status.value for status in (
-                ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED,
-                ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING, ExecutionStatus.WAITING_DEFERRED,
-            )) | {"execution_handoff"}
+            states = EXECUTION_SCAN_STATES
             selected: list[tuple[StoredRecord, ExecutionRecord]] = []
             next_cursor = cursor
             while len(selected) <= limit:
@@ -2762,3 +2760,4 @@ __all__ = [
     "ExecutionRepositoryImpl",
     "IdempotencyRepositoryImpl",
 ]
+

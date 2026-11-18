@@ -10,6 +10,37 @@ from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
     from sqlalchemy.sql.selectable import FromClause
+    from sqlalchemy.sql.elements import ColumnElement
+
+
+EXECUTION_SCAN_STATES = frozenset((
+    "PENDING_START", "STARTED", "RECOVERY_REQUIRED", "CANCELLING",
+    "FINALIZING", "WAITING_DEFERRED", "execution_handoff",
+))
+
+
+def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[str, ...]:
+    """Select disjoint physical ranges without replacing the logical state filter."""
+    if kind != "execution":
+        # MySQL's binary VARCHAR collation ignores trailing spaces, whereas
+        # SQLite/PostgreSQL preserve them. Keep both possible classifications.
+        if kind.rstrip(" ") == "execution":
+            return ("k:" + kind, "e:1", "e:0")
+        return ("k:" + kind,)
+    if states is None:
+        return ("e:1", "e:0")
+    if not states:
+        return ()
+    # SQL collations can equate noncanonical strings (including trailing
+    # spaces) with a hot state. Only exact known members prove a single range.
+    if states <= EXECUTION_SCAN_STATES:
+        return ("e:1",)
+    return ("e:1", "e:0")
+
+
+def record_owner_columns(table: "FromClause") -> tuple["ColumnElement", ...]:
+    """Exclude physical scan projections from the common record wire shape."""
+    return tuple(column for column in table.c if column.name != "scan_kind")
 
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
@@ -58,15 +89,13 @@ def record_owner_names(*, keys: Sequence[bytes] | None = None, kind: str | None 
 
 def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = None,
                       kind: str | None = None, owner: str | None = None,
-                      include_run_counters: bool = False) -> "FromClause":
+                      include_run_counters: bool = False, scan_kind: str | None = None) -> "FromClause":
     """Read a bounded owner set as one SQL statement, preserving global ordering."""
     from sqlalchemy import BigInteger, String, cast, literal, null, select, union_all
 
     if owner is not None and owner not in RECORD_OWNER_TABLES:
         raise ValueError("unknown record owner")
     names = (owner,) if owner is not None else record_owner_names(keys=keys, kind=kind)
-    if names == ("ai_state_records",) and not include_run_counters:
-        return metadata.tables[names[0]]
     canonical = metadata.tables["ai_state_records"]
     selections = []
     for name in names:
@@ -78,14 +107,20 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
         # NULL has no text comparison semantics. Use a collation-free string
         # cast target: MySQL forbids COLLATE inside CAST(... AS CHAR ...).
         # Keep binary/date targets explicit for PostgreSQL derived UNIONs.
-        selections.append(select(*(
+        selection = select(*(
             (cast(null(), String(column.type.length) if isinstance(column.type, String) else column.type) if constants[column.name] is None else
              literal(constants[column.name], type_=column.type, literal_execute=True)).label(column.name)
             if column.name in constants else table.c[column.name]
-            for column in canonical.c), *(
+            for column in record_owner_columns(canonical)), *(
                 (table.c[name] if name in table.c else cast(null(), BigInteger)).label(name)
                 for name in RUN_COUNTER_COLUMNS if include_run_counters
-            )))
+            ))
+        if name == "ai_state_records":
+            if scan_kind is not None:
+                selection = selection.where(table.c.scan_kind == literal(scan_kind, literal_execute=True))
+            elif kind is not None and kind.rstrip(" ") != "execution":
+                selection = selection.where(table.c.scan_kind == literal("k:" + kind, literal_execute=True))
+        selections.append(selection)
     return (selections[0] if len(selections) == 1 else union_all(*selections)).subquery("record_owners")
 
 
@@ -98,4 +133,5 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
 
 
 
-__all__ = ["RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+

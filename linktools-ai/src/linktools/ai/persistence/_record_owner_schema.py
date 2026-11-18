@@ -16,6 +16,7 @@ from ..storage import (
     sql_table_options,
     sql_unique,
 )
+from ._record_owner import EXECUTION_SCAN_STATES
 from .state import STORE_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
     """Build one physical owner with the common optimistic record contract."""
-    from sqlalchemy import TIMESTAMP, BigInteger, JSON, Column, LargeBinary, String, Table, Text, text
+    from sqlalchemy import TIMESTAMP, BigInteger, JSON, Column, Computed, LargeBinary, String, Table, Text, case, literal, text
     from sqlalchemy.dialects import mysql
 
     if name in metadata.tables:
@@ -122,6 +123,22 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                comment="First 128 bytes of the full sort key; non-unique query projection only."),
         *sql_audit_columns(),
     ]
+    if name == "ai_state_records":
+        kind = next(column for column in columns if column.name == "kind")
+        state = next(column for column in columns if column.name == "state")
+        columns.insert(-2, Column(
+            "scan_kind",
+            String(34),
+            Computed(case(
+                (kind == "execution", case(
+                    (state.in_(sorted(EXECUTION_SCAN_STATES)), literal("e:1")),
+                    else_=literal("e:0"),
+                )),
+                else_=literal("k:") + kind,
+            ), persisted=True),
+            nullable=False,
+            comment="Derived kind and execution recovery eligibility bucket for ordered record scans.",
+        ))
     omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
     if name == "ai_task_graphs":
         omitted = {"kind"}
@@ -132,7 +149,9 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         sql_query_index(records, "store_key", "state", "sort_prefix")
         sql_audit_indexes(records)
         return
-    if "kind" in records.c:
+    if name == "ai_state_records":
+        sql_query_index(records, "store_key", "scan_kind", "sort_prefix")
+    elif "kind" in records.c:
         sql_query_index(records, "store_key", "kind", "sort_prefix")
     if name != "ai_step_tool_operations":
         sql_query_index(records, "scope_locator", "sort_prefix")
@@ -142,3 +161,4 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
 
 
 __all__ = ["build_record_owner_table"]
+
