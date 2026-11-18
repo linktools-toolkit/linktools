@@ -1189,32 +1189,15 @@ class RuntimeAgentRunStore(AgentRunStore):
                         break
                     await asyncio.shield(completion)
             prepared: list[PreparedExecutionProjection] = []
-            durable_heads = await archive.execution_history_heads(
-                tuple(projection.run.agent_run_id for _seal, projection in captured)
+            durable_heads, preparations = await archive.capture_terminal_projection_preparations(
+                tuple(projection for _seal, projection in captured)
             )
-            for _seal, projection in captured:
+            for (_seal, projection), prepare in zip(captured, preparations, strict=True):
                 projection = replace(projection, run=self._canonical_trace_run(projection.run))
                 durable_head = durable_heads.get(projection.run.agent_run_id)
                 if durable_head is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                observation = None
-                interaction_archive = PreparedArchive()
-                if projection.transcript is not None:
-                    observation = await archive.transcript_repository.prepare_observation(
-                        projection.run.agent_run_id,
-                        projection.transcript.messages,
-                        first_message_index=projection.base_message_index,
-                        pending=projection.transcript.pending,
-                        pending_keys=projection.transcript.pending_keys,
-                        archive=interaction_archive,
-                    )
-                await archive.prepare_run_registration(projection.run)
-                batch = await archive.prepare_checkpoints_after_seal(
-                    projection.run,
-                    projection.checkpoints,
-                    observed_message_count=None if observation is None else observation.target_message_count,
-                    archive=interaction_archive,
-                )
+                batch, observation, interaction_archive = await prepare(projection.run)
                 local_base = 0
                 local_count = (projection.target_message_index if projection.transcript is not None
                                else batch.target_transcript_message_count)
