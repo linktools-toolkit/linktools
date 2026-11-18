@@ -89,9 +89,9 @@ _RAW_KEY_BATCH_SIZE = 499
 _IMMUTABLE_RECORD_BATCH_SIZE = 48
 # One store and two stream predicates leave 996 SQLite sequence binds.
 _FACT_READ_BATCH_SIZE = 996
-# Eight CASE assignments and seven identity/CAS binds plus the IN key
-# require at most 24 binds per row and one shared store bind.
-_RECORD_REPLACE_BATCH_SIZE = 40
+# Each SQLite row uses 16 CASE binds and 10 key/CAS binds, plus one
+# store bind per statement: 38 * 26 + 1 = 989, within the 999 budget.
+_RECORD_REPLACE_BATCH_SIZE = 38
 # Store, scope, and kind predicates leave 996 SQLite subject binds.
 _RECORD_SUBJECT_READ_BATCH_SIZE = 995
 _GROUP_RECORD_BIND_BUDGET = 999
