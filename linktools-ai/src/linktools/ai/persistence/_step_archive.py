@@ -1789,16 +1789,18 @@ class StateStepArchive(AgentRunStore):
                 self._decode_execution_history_heads((run.agent_run_id,), source[0], source[1])[run.agent_run_id])
         return replace(prepared, checkpoints=checkpoints), observation, interactions, prepared_archive, head
 
+    def _uses_default_preparation(self, methods: Sequence[Callable[..., object]]) -> bool:
+        # Captured facts may bypass only the actual built-in preparation methods,
+        # not overrides on an archive class or a live instance.
+        return all(getattr(getattr(self, method.__name__), "__func__", None) is method for method in methods)
+
     async def _capture_projection_source(
         self, captured: CapturedExecutionProjection, prepared_archive: PreparedArchive,
     ) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, int],
                Callable[[], Awaitable[PreparedTranscriptObservation]] | None] | None:
-        if (type(self).prepare_checkpoints is not StateStepArchive.prepare_checkpoints
-                or type(self).prepare_interactions is not StateStepArchive.prepare_interactions
-                or type(self).execution_history_heads is not StateStepArchive.execution_history_heads
-                or type(self).execution_history_head_record is not StateStepArchive.execution_history_head_record
-                or type(self).prepare_run_registration is not StateStepArchive.prepare_run_registration
+        if (not self._uses_default_preparation(_PROJECTION_DEFAULTS)
                 or type(self._history) is not TranscriptRepository
+                or getattr(self._history.prepare_observation, "__func__", None) is not _DEFAULT_OBSERVATION
                 or self._runtime_domain is not PersistenceDomain.TRACE
                 or active_state_scope() is not None
                 or self._run_registrations is not None and not self._run_registrations.joins(self._store)
@@ -1853,10 +1855,9 @@ class StateStepArchive(AgentRunStore):
         archives = tuple(PreparedArchive() for _ in projections)
         records = None
         observations = {}
-        if (owner_ids and type(self).prepare_checkpoints_after_seal is StateStepArchive.prepare_checkpoints_after_seal
-                and type(self).execution_history_heads is StateStepArchive.execution_history_heads
-                and type(self).prepare_run_registration is StateStepArchive.prepare_run_registration
+        if (owner_ids and self._uses_default_preparation(_SEALED_PROJECTION_DEFAULTS)
                 and type(self._history) is TranscriptRepository
+                and getattr(self._history.prepare_observation, "__func__", None) is _DEFAULT_OBSERVATION
                 and self._runtime_domain is PersistenceDomain.TRACE
                 and active_state_scope() is None and not _held_run_history_locks.get()
                 and (self._run_registrations is None or self._run_registrations.joins(self._store))):
@@ -4401,6 +4402,21 @@ def _step_event_type(value: StepEvent) -> str:
 
 def _decode_step(value: Mapping[str, object]) -> object:
     return _decode_step_envelope(value)
+
+
+_PROJECTION_DEFAULTS = (
+    StateStepArchive.prepare_checkpoints,
+    StateStepArchive.prepare_interactions,
+    StateStepArchive.execution_history_heads,
+    StateStepArchive.execution_history_head_record,
+    StateStepArchive.prepare_run_registration,
+)
+_SEALED_PROJECTION_DEFAULTS = (
+    StateStepArchive.prepare_checkpoints_after_seal,
+    StateStepArchive.execution_history_heads,
+    StateStepArchive.prepare_run_registration,
+)
+_DEFAULT_OBSERVATION = TranscriptRepository.prepare_observation
 
 
 __all__ = [
