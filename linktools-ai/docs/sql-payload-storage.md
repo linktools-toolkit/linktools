@@ -74,6 +74,33 @@ development payload shapes. This contract does not reconstruct numeric
 distinctions already lost in old data. Use the current schema and writer for
 new data rather than restoring the old text-column or native-object contract.
 
+## Archive identity lifecycle
+
+`ai_archive_scopes` is the sole physical SQL archive-identity owner. Its immutable
+`scope_id` is separate from ordinary `ai_state_records`; resetting that state table
+does not reset the resource identity or relabel retained Step payloads. This does
+not restore deleted executions, sessions, checkpoints, or authorize replay. Other
+typed owners and their consistency checks retain their existing semantics.
+
+Provision this table explicitly with the rest of the schema before using the new
+writer. Runtime does not create a missing table or fall back to the former generic
+state record. For a controlled upgrade of a healthy existing development database,
+stop writers and preserve its verified original archive scope together with its
+content when moving the identity into the new owner. Do not generate a replacement
+UUID, leave two authoritative identity rows, or infer identity from arbitrary
+surviving content. This change supplies no automatic legacy migration.
+
+If the original scope has already been lost while content remains, opening the
+archive still fails closed. To start independent new work without restoring it,
+use a fresh physical SQL resource through the normal storage configuration. A new
+namespace or UUID in the old resource is not isolation. Keep the orphaned resource
+untouched for any separately authorized recovery or disposal.
+
+Physical backup/restore must include `ai_archive_scopes` alongside retained content.
+Portable snapshot export/restore uses the explicit archive identity and existing
+reference remapping contract; enumerating generic State records alone is not a
+physical archive backup.
+
 ## Acceptance
 
 Use newly created data with the same SDK version for write, read, shutdown,

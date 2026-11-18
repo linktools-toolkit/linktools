@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
@@ -16,7 +17,7 @@ from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStorageGroup, SqlStateStore
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import STATE_GROUP_METADATA_KEY, StateGroupTransaction, StoredRecord, record_key
+from linktools.ai.persistence.state import STATE_GROUP_METADATA_KEY, StateGroupTransaction, StoredRecord
 from linktools.ai.storage import create_sql_storage_context
 
 pytestmark = pytest.mark.asyncio
@@ -239,13 +240,9 @@ async def test_sql_archive_rejects_missing_identity_with_existing_content(tmp_pa
     try:
         _, archive = await owner.storage_group.open_archive(create=True)
         await archive.mutate(lambda tx: tx.insert_record(_record("content")))
-        metadata = None
-        for store in await owner.storage_group.scan_stores():
-            if await store.read(lambda tx: tx.get_record(record_key("", "", "archive", "archive_scope", ("archive_scope_id",)))) is not None:
-                metadata = store
-                break
-        assert metadata is not None
-        await metadata.mutate(lambda tx: tx.delete_record(record_key("", "", "archive", "archive_scope", ("archive_scope_id",))))
+        scopes = owner.storage_group.metadata.tables["ai_archive_scopes"]
+        async with engine.begin() as connection:
+            await connection.execute(delete(scopes))
         for create in (False, True):
             with pytest.raises(AIError) as error:
                 await owner.storage_group.open_archive(create=create)
@@ -386,8 +383,6 @@ async def test_sql_owner_without_archive_declaration_does_not_create_scope(tmp_p
 
 
 async def test_sql_first_owner_write_rejects_orphan_archive_without_repair(tmp_path: Path) -> None:
-    from sqlalchemy import delete
-
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'orphan-archive.db'}")
     await provision_database(engine)
     owner = SqlStateStore(engine)
@@ -396,10 +391,10 @@ async def test_sql_first_owner_write_rejects_orphan_archive_without_repair(tmp_p
         await owner.initialize()
         _, archive = await owner.storage_group.open_archive(create=True)
         await archive.mutate(lambda tx: tx.insert_record(_record("orphan")))
-        table = owner.storage_group.metadata.tables["ai_state_records"]
+        table = owner.storage_group.metadata.tables["ai_archive_scopes"]
         async with engine.begin() as connection:
             await connection.execute(delete(table).where(
-                table.c.store_key == STATE_GROUP_METADATA_KEY,
+                table.c.resource_key == STATE_GROUP_METADATA_KEY,
             ))
         await reopened.initialize()
         with pytest.raises(AIError) as error:
@@ -488,4 +483,48 @@ async def test_sql_first_archive_owner_unknown_commit_keeps_scope_with_owner_tru
     finally:
         await owner.close()
         await group.close()
+        await engine.dispose()
+
+
+async def test_sql_archive_identity_survives_state_record_table_recreation(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reset-state.db'}")
+    await provision_database(engine)
+    original = _sql_archive_owner(engine)
+    await original.initialize()
+    await original.mutate(lambda tx: tx.insert_record(_record("old-owner")))
+    scope, archive = await original.storage_group.open_archive()
+    from linktools.ai.persistence._step_payload_owner import (
+        payload_record_from_row, payload_store_key, payload_store_locator,
+    )
+    body = b'{"probe":"retained"}'
+    payload_partition = payload_store_key("namespace", "tenant")
+    payload = payload_record_from_row({
+        "store_key": payload_partition, "store_locator": payload_store_locator(payload_partition),
+        "sha256": hashlib.sha256(body).hexdigest(), "message": body,
+        "compression": "raw", "raw_size": len(body), "payload_json": None, "gc_revision": 0,
+    })
+    await archive.mutate(lambda tx: tx.insert_record(payload))
+    metadata = original.storage_group.metadata
+    await original.close()
+    await original.storage_group.close()
+    # Simulate the specific destructive operation; the resource identity is
+    # intentionally not part of this ordinary-state table's lifecycle.
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.tables["ai_state_records"].drop)
+        await connection.run_sync(metadata.tables["ai_state_records"].create)
+    reader = SqlStateStorageGroup(create_sql_storage_context(engine), metadata, read_only=True)
+    reopened = _sql_archive_owner(engine)
+    try:
+        read_scope, retained = await reader.open_archive()
+        assert read_scope == scope
+        assert await retained.read_record(payload.key) == payload
+        await reopened.initialize()
+        assert await reopened.read_record(_record("old-owner").key) is None
+        await reopened.mutate(lambda tx: tx.insert_record(_record("new-owner")))
+        assert (await reopened.storage_group.open_archive())[0] == scope
+        assert await reopened.read_record(_record("new-owner").key) == _record("new-owner")
+    finally:
+        await reader.close()
+        await reopened.close()
+        await reopened.storage_group.close()
         await engine.dispose()

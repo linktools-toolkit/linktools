@@ -82,6 +82,21 @@ def build_runtime_sql_metadata(
     ):
         raise ValueError("at least one durable PersistenceDomain is required")
 
+    scopes = Table(
+        "ai_archive_scopes", metadata, sql_id_column(),
+        Column("resource_key", LargeBinary(STORE_KEY_MAX_BYTES).with_variant(
+            mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"), nullable=False,
+            comment="Exact bounded identity of the physical archive resource."),
+        Column("scope_id", String(32).with_variant(
+            mysql.CHAR(32, charset="utf8mb4", collation="utf8mb4_bin"), "mysql"),
+            nullable=False, comment="Immutable archive identity independent of resettable domain state."),
+        *_audit(),
+        comment="Authoritative archive resource identities; preserve with retained content.",
+        **sql_table_options(),
+    )
+    sql_unique(scopes, "resource_key")
+    sql_audit_indexes(scopes)
+
     from ._record_owner_schema import build_record_owner_table
     build_record_owner_table(metadata, name="ai_state_records", comment=_RECORD_COMMENT)
     build_record_owner_table(metadata, name="ai_task_graphs",
@@ -256,6 +271,7 @@ def required_runtime_sql_tables(plan: PersistencePlan) -> frozenset[str]:
     ):
         return frozenset()
     tables = {
+        "ai_archive_scopes",
         "ai_state_records",
         "ai_state_facts",
         "ai_state_counters",

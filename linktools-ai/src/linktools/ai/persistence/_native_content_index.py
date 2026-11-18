@@ -159,21 +159,28 @@ async def index_nodes(
     return sequences
 
 
+async def read_archive_scope(session: "AsyncSession") -> str | None:
+    """Read the single physical archive identity, including Native owner flushes."""
+    from sqlalchemy import LargeBinary, String, column, select, table
+    from .state import STATE_GROUP_METADATA_KEY, STORE_KEY_MAX_BYTES
+
+    scopes = table("ai_archive_scopes", column("resource_key", LargeBinary(STORE_KEY_MAX_BYTES)),
+                   column("scope_id", String(32)))
+    scope = await session.scalar(select(scopes.c.scope_id).where(
+        scopes.c.resource_key == STATE_GROUP_METADATA_KEY,
+    ))
+    if scope is not None and (
+        not isinstance(scope, str) or len(scope) != 32
+        or any(c not in "0123456789abcdef" for c in scope)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return scope
+
+
 async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *, group_id: str | None) -> None:
-    import hashlib
-    import json
-    from sqlalchemy import JSON, LargeBinary, String, column, select, table
-    from .state import RECORD_KEY_MAX_BYTES, STORE_KEY_MAX_BYTES, STATE_GROUP_METADATA_KEY, record_key
     pending = session.info.pop(_PENDING, {})
     if group_id is None and any(pending.values()):
-        records = table("ai_state_records", column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", JSON()), column("key_locator", String(64)))
-        scope_key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
-        wire = await session.scalar(select(records.c.payload_json).where(
-            records.c.store_key == STATE_GROUP_METADATA_KEY,
-            records.c.key == scope_key, records.c.key_locator == hashlib.sha256(scope_key).hexdigest(),
-        ))
-        if wire is not None:
-            group_id = json.loads(wire)["archive_scope_id"]
+        group_id = await read_archive_scope(session)
     targets: dict[bytes, set[str]] = {}
     for roots in pending.values():
         for root in roots:
@@ -208,4 +215,4 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
 
 __all__ = ["NativeContentUnavailable", "PublicationUnavailable", "stage_owner", "register_recovery",
            "register_publication", "run_native_mutation", "resolve_targets", "index_nodes",
-           "flush_owners"]
+           "flush_owners", "read_archive_scope"]

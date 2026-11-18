@@ -480,7 +480,7 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
     metadata = build_sql_schema_metadata()
     assert set(metadata.tables) == {
         "ai_asset_batch_receipts", "ai_asset_changes", "ai_asset_entries", "ai_asset_heads",
-        "ai_metric_definitions", "ai_metric_observations",
+        "ai_metric_definitions", "ai_metric_observations", "ai_archive_scopes",
         "ai_object_chunks", "ai_objects", "ai_state_facts",
         "ai_state_operations", "ai_state_records", "ai_state_counters", "ai_step_events",
         "ai_step_messages", "ai_step_runs", "ai_step_sequences", "ai_step_snapshots", "ai_trace_events",

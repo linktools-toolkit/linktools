@@ -125,7 +125,11 @@ async def test_raw_sql_store_keys_reopen_and_keep_system_archive_scope(tmp_path:
             async with group.context.engine.connect() as connection:
                 rows = (await connection.execute(text("SELECT DISTINCT store_key, typeof(store_key) FROM ai_state_records"))).all()
                 assert all(type(key) is bytes and kind == "blob" for key, kind in rows)
-                assert set(keys) | {STATE_GROUP_METADATA_KEY} <= {key for key, _ in rows}
+                assert set(keys) <= {key for key, _ in rows}
+                identities = (await connection.execute(text(
+                    "SELECT resource_key, scope_id, typeof(resource_key) FROM ai_archive_scopes"
+                ))).all()
+                assert identities == [(STATE_GROUP_METADATA_KEY, scope, "blob")]
 
 
 def test_standalone_constructor_uses_compact_partition_without_rehashing_explicit_keys() -> None:
@@ -194,14 +198,12 @@ def test_raw_store_and_partition_names_are_not_in_object_representations() -> No
 async def test_native_publication_checks_scoped_targets_without_owner_edge_queries(
     kind: str, known_group: bool,
 ) -> None:
-    import json
     from types import SimpleNamespace
     from sqlalchemy.sql import Select
     from sqlalchemy.dialects import mysql, postgresql, sqlite
     from linktools.ai.persistence import _native_content_index as index
     from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
     from linktools.ai.persistence.contracts import ArchivedContextBlock
-    from linktools.ai.persistence.state import record_key
     from linktools.ai.steps import native_store_locator
 
     group_id, native_store, root_id = "a" * 32, native_store_key("native", "tenant"), "c" * 64
@@ -217,8 +219,8 @@ async def test_native_publication_checks_scoped_targets_without_owner_edge_queri
         for dialect in (mysql.dialect(), postgresql.dialect(), sqlite.dialect()):
             compiled = statement.compile(dialect=dialect)
             assert STATE_GROUP_METADATA_KEY in compiled.params.values()
-            assert record_key("", "", "archive", "archive_scope", ("archive_scope_id",)) in compiled.params.values()
-        return json.dumps({"archive_scope_id": group_id})
+            assert "ai_archive_scopes" in str(compiled)
+        return group_id
 
     async def execute(statement: Select) -> SimpleNamespace:
         target_reads.append(statement)
