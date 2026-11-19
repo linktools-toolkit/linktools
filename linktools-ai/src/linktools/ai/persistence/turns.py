@@ -220,7 +220,10 @@ class StateTurnCoordination:
         record = await tx.get_record(self._records.key(scope, kind, identity))
         return None if record is None else self._records.validate(record)
 
-    async def _graph(self, tx: StateTransaction, anchor: StoredRecord) -> _Graph:
+    async def _graph(
+        self, tx: StateTransaction, anchor: StoredRecord, *,
+        prefetched: Mapping[bytes, StoredRecord] | None = None,
+    ) -> _Graph:
         scope = _text(anchor.data["scope"])
         identities = {"turn_execution": _text(anchor.data["execution_id"]),
                       "turn_request": _text(anchor.data["request_key"]),
@@ -228,7 +231,7 @@ class StateTurnCoordination:
         keys = {kind: self._records.key(scope, kind, identity)
                 for kind, identity in identities.items() if kind != anchor.kind}
         try:
-            found = await tx.get_records(tuple(keys.values()))
+            found = await tx.get_records(tuple(keys.values())) if prefetched is None else prefetched
             records = {anchor.kind: anchor}
             for kind, key in keys.items():
                 record = found.get(key)
@@ -312,7 +315,7 @@ class StateTurnCoordination:
         if owned:
             lease = Lease(canonical_json_bytes([
                 "state-turn", 1, self._records.namespace, self._records.tenant_id,
-                data["scope"], data["execution_id"],
+                data["scope"], data["execution_id"], data["session_key"], data["request_key"],
             ]).decode("utf-8"), data["fence"], data["token"])
         return TurnCoordination(data["execution_id"], data["owner_id"], data["cancel_requested"], lease)
 
@@ -577,36 +580,58 @@ class StateTurnCoordination:
             local_scope, execution_id, receipt=token, kind="claim",
         ))
 
-    def _lease_identity(self, lease: Lease) -> tuple[str, str] | None:
+    def _lease_identity(self, lease: Lease) -> tuple[str, str, str, str] | None:
         try:
             if (isinstance(lease.fence, bool) or not isinstance(lease.fence, int) or lease.fence < 1
                     or not isinstance(lease.token, str) or not lease.token):
                 return None
             value = json.loads(lease.key)
-            if (not isinstance(value, list) or len(value) != 6 or value[:2] != ["state-turn", 1]
+            if (not isinstance(value, list) or len(value) != 8 or value[:2] != ["state-turn", 1]
                     or isinstance(value[1], bool)
                     or value[2:4] != [self._records.namespace, self._records.tenant_id]):
                 return None
-            return TurnScopeIdentity.validate_scope(value[4]), _text(value[5])
+            scope = TurnScopeIdentity.validate_scope(value[4])
+            execution_id, session_key, request_key = map(_text, value[5:])
+            return scope, execution_id, session_key, request_key
         except (ValueError, TypeError):
             return None
 
     async def _change(
-        self, scope: str, execution_id: str, *, kind: str, lease: Lease | None = None,
-        duration: float | None = None,
+        self, scope: str, execution_id: str, *, kind: str,
+        lease: tuple[Lease, str, str] | None = None, duration: float | None = None,
     ) -> TurnCoordination | bool | None:
         self._writable()
         _text(scope)
         _text(execution_id)
+        graph_keys = ()
+        if lease is not None:
+            _, session_key, request_key = lease
+            try:
+                graph_keys = (
+                    self._records.key(scope, "turn_execution", execution_id),
+                    self._records.key(scope, "turn_session", session_key),
+                    self._records.key(scope, "turn_request", request_key),
+                )
+            except ValueError:
+                return None if kind == "renew" else False
         receipt = uuid4().hex
 
         async def change(tx: StateTransaction) -> TurnCoordination | bool | None:
-            execution = await self._load(tx, scope, "turn_execution", execution_id)
+            prefetched = None
+            if lease is None:
+                execution = await self._load(tx, scope, "turn_execution", execution_id)
+            else:
+                owner, session_key, request_key = lease
+                prefetched = await tx.get_records(graph_keys)
+                execution = prefetched.get(graph_keys[0])
+                if execution is not None:
+                    self._records.validate(execution)
+                    if (execution.data["token"] != owner.token or execution.data["fence"] != owner.fence
+                            or execution.data["session_key"] != session_key or execution.data["request_key"] != request_key):
+                        execution = None
             if execution is None or execution.state == "RETIRED":
                 return None if kind == "renew" else False
-            if lease is not None and (execution.data["token"] != lease.token or execution.data["fence"] != lease.fence):
-                return None if kind == "renew" else False
-            graph = await self._graph(tx, execution)
+            graph = await self._graph(tx, execution, prefetched=prefetched)
             session = await tx.transition_record_lease(
                 graph.session.key, expected_storage_revision=graph.session.storage_revision,
                 transition=RecordLeaseTransition("guard" if kind in {"cancel", "release"} else kind,
@@ -635,14 +660,16 @@ class StateTurnCoordination:
         identity = self._lease_identity(lease)
         if identity is None:
             return None
-        return await self._change(*identity, kind="renew", lease=lease, duration=duration)
+        scope, execution_id, session_key, request_key = identity
+        return await self._change(scope, execution_id, kind="renew", lease=(lease, session_key, request_key), duration=duration)
 
     async def release_turn(self, lease: Lease) -> bool:
         self._writable()
         identity = self._lease_identity(lease)
         if identity is None:
             return False
-        return await self._change(*identity, kind="release", lease=lease)
+        scope, execution_id, session_key, request_key = identity
+        return await self._change(scope, execution_id, kind="release", lease=(lease, session_key, request_key))
 
     async def cancel_turn(self, scope: TurnScopeIdentity, execution_id: str) -> bool:
         return await self._change(self._local_scope(scope), execution_id, kind="cancel")

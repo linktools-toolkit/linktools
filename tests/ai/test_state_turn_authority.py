@@ -611,7 +611,15 @@ async def test_state_turn_fence_is_scoped_and_full_lease_identity_is_required(tm
         foreign = json.loads(left.lease.key)
         foreign[3] = "other-tenant"
         foreign_lease = replace(left.lease, key=json.dumps(foreign))
-        for lease in (wrong_key, wrong_token, wrong_fence, bool_fence, foreign_lease):
+        altered_session = json.loads(left.lease.key)
+        altered_session[-2] = "other-session"
+        altered_request = json.loads(left.lease.key)
+        altered_request[-1] = "other-request"
+        for lease in (
+            wrong_key, wrong_token, wrong_fence, bool_fence, foreign_lease,
+            replace(left.lease, key=json.dumps(altered_session)),
+            replace(left.lease, key=json.dumps(altered_request)),
+        ):
             assert not await authority.release_turn(lease)
             assert await authority.renew_turn(lease, lease_seconds=60) is None
         assert await authority.read_turn_by_session(_SCOPE, "s") == replace(left, lease=None)
@@ -691,8 +699,12 @@ async def test_state_turn_sqlite_known_graph_statement_budgets(tmp_path):
             assert await authority.read_turn_by_session(_SCOPE, "s") == replace(first, lease=None)
             assert counts["SELECT"] == 2 and counts["BEGIN"] == 1 and counts["UPDATE"] == 0
             counts.clear()
+            assert await authority.renew_turn(first.lease, lease_seconds=60) == first
+            # One indexed graph read plus both clocks around the lease CAS.
+            assert counts["SELECT"] == 3 and counts["BEGIN"] == 1
+            counts.clear()
             assert await authority.release_turn(first.lease)
-            assert counts["SELECT"] <= 4 and counts["UPDATE"] <= 2
+            assert counts["SELECT"] == 3 and counts["BEGIN"] == 1 and counts["UPDATE"] <= 2
         finally:
             event.remove(engine, "before_cursor_execute", count)
 
