@@ -403,3 +403,30 @@ async def test_builtin_session_inspection_reuses_its_authorized_row(tmp_path, mo
         view = await runtime.history.inspect_session(session.session_id, principal=runtime.default_principal)
         assert view.session_id == session.session_id
         assert reads == 1
+
+
+async def test_remote_pending_refresh_does_not_materialize_an_absent_execution(tmp_path, monkeypatch):
+    cache = InMemoryCacheBackend(max_bytes=2**24)
+    async with _runtimes(tmp_path, cache=cache, source_authority=True) as (runtimes, entered, finish, block):
+        owner, _ = runtimes[0]
+        reader, storage = runtimes[1]
+        session = await owner.agents.get().create_session("pending-refresh")
+        block()
+        execution = await session.start("pending input", idempotency_key="request")
+        await asyncio.wait_for(entered.wait(), 5)
+        repository = storage.execution.executions
+        original = repository.get_timeline_many
+
+        async def get_timeline_many(ids, **kwargs):
+            assert execution.execution_id not in ids
+            return await original(ids, **kwargs)
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(repository, "get_timeline_many", get_timeline_many)
+                view = await reader.sessions.refresh("pending-refresh", principal=reader.default_principal)
+            assert view.session.active_execution_id == execution.execution_id
+            assert view.timeline.items[0].execution_id == execution.execution_id
+        finally:
+            finish.set()
+            await execution.wait()

@@ -341,9 +341,15 @@ async def capture_session_timeline(
                     or root.active_execution_id is not None
                     or pending_execution.session_id != root.session_id
                     or pending_execution.parent_execution_id is not None
-                    or pending_execution.created_at < root.created_at
-                    or pending_execution.execution_id in await executions.get_timeline_many((pending_execution.execution_id,), tenant_id=tenant_id)):
+                    or pending_execution.created_at < root.created_at):
                 pending_execution = None
+            else:
+                execution_id = pending_execution.execution_id
+                # A source miss is the normal case for a cache-only pending
+                # turn. No payload or native message is needed to prove it.
+                if (not shared_native_scope or await executions.get_header(execution_id, tenant_id=tenant_id) is not None):
+                    if execution_id in await executions.get_timeline_many((execution_id,), tenant_id=tenant_id):
+                        pending_execution = None
         page_limit = validate_page_limit(limit)
         coordinate = _decode_timeline_cursor(
             cursor, tenant_id=tenant_id, session_id=session_id, signer=cursor_signer,
