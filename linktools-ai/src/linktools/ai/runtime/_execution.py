@@ -18,6 +18,7 @@ from linktools.core import environ
 from ..execution import (ExecutionResultRecord, TaskExecutionService, ExecutionReleaseCallback as _ExecutionReleaseCallback,
     LocalExecutionWaiter as _LocalExecutionWaiter, overlay_execution_correlation as _overlay_execution_correlation,
     consumed_terminal_query, observed_query as _observed_query)
+from ..persistence.coordination import read_admission_request
 from ..persistence.commands import StoredExecutionManagementAdapter
 
 
@@ -665,20 +666,14 @@ class DefaultExecutionService(TaskExecutionService):
         pending = pending_turns.peek_request(
             tenant_id=principal.tenant_id, scope=scope, idempotency_key=key,
         )
-        identity = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
-        record = None
-        if identity is None:
-            if pending is not None:
-                if pending.uncertain or pending.failure is not None:
-                    raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-                record = pending.execution
-            elif pending_turns.coordination is not None:
-                record = await pending_turns.coordination.read_request_execution(
-                    canonical_sha256([scope, key]), tenant_id=principal.tenant_id,
-                )
-                if record is None:
-                    # The owner may have committed and released between reads.
-                    identity = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
+        identity, record = await read_admission_request(
+            self._state.idempotency, pending_turns.coordination, scope=scope, key=key,
+            tenant_id=principal.tenant_id, local_pending=pending is not None,
+        )
+        if identity is None and pending is not None:
+            if pending.uncertain or pending.failure is not None:
+                raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+            record = pending.execution
         if identity is not None:
             if (identity.resource_kind is not ResourceKind.EXECUTION
                     or identity.scope != scope or identity.idempotency_key != key

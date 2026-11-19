@@ -1,12 +1,35 @@
 # Live turn coordination
 
-A host may expose the optional `TurnCoordinationBackend` method group on the
-object passed explicitly as `PersistenceStorage.sqlite(path, coordination=backend)`.
+When the Execution state store owns both durable receipts and turn authority,
+select that binding explicitly:
+
+```python
+from linktools.ai.persistence import PersistenceStorage, StateTurnResources
+
+storage = PersistenceStorage.sqlite(
+    path, coordination=StateTurnResources(pending_cache=pending_cache),
+)
+```
+
+Persistence binds the authority to its opened Execution store and namespace.
+A pending cache and a preview stream are independently optional and borrowed;
+select a stream with `StateTurnResources(stream=...)` rather than inferring it
+from a cache. Do not wrap the state authority in a host cache adapter. A genuine
+external authority still exposes `TurnCoordinationBackend` on the backend
+passed as `PersistenceStorage.sqlite(path, coordination=backend)`.
 `cache=...` remains a separate hot-read resource; it does not enable coordination. The group is
 independent of hot bytes, pending writes, and preview streams. Adapters need
 only the complete groups they use; a partial group is a configuration error.
 Runtime and independent History borrow the same configured resource through
 Persistence; there is no second Runtime coordinator argument or required base class.
+
+Session admission lookup authorizes the session first. With state-owned authority,
+a consistent source read checks the durable receipt before live ownership. A
+miss for both needs no second read: the two facts were absent at the same cut.
+Live pending bytes are read outside that transaction, then checked against a
+new source read; a newly durable receipt takes precedence. With external
+authority a fresh durable read is still needed after a negative owner lookup.
+A confirmed receipt never requires the external backend.
 
 ```python
 from linktools.ai.storage import Lease, TurnCoordination, TurnCoordinationBackend, TurnScope, TurnScopeIdentity
