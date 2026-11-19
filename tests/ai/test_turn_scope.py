@@ -323,3 +323,51 @@ async def test_renewal_failure_preserves_backend_error(failure: Exception) -> No
         with pytest.raises(type(failure)) as validity:
             lifetime.require_active()
         assert validity.value is failure
+
+
+@pytest.mark.asyncio
+async def test_scope_exit_settles_inflight_renewal_before_release() -> None:
+    renew_started, allow_ack, close_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    events: list[str] = []
+
+    class Backend(InMemoryCacheBackend):
+        async def renew_turn(self, lease, *, lease_seconds):
+            # Model a write that has reached the backend but not acknowledged.
+            result = await super().renew_turn(lease, lease_seconds=lease_seconds)
+            renew_started.set()
+            try:
+                await allow_ack.wait()
+            except asyncio.CancelledError:
+                events.append("renew_canceled")
+                raise
+            events.append("renew_acknowledged")
+            return result
+
+        async def release_turn(self, lease):
+            events.append("lease_released")
+            return await super().release_turn(lease)
+
+    backend = Backend(max_bytes=1)
+    lifetime = RenewingTurnScope(
+        backend, _SCOPE, session_key="session", request_key="request", request_digest="digest",
+        execution_id="execution", owner_id="owner", lease_seconds=60, renew_seconds=.01,
+    )
+
+    async def owned() -> None:
+        async with lifetime:
+            await renew_started.wait()
+            close_started.set()
+
+    closing = asyncio.create_task(owned())
+    try:
+        await asyncio.wait_for(close_started.wait(), 1)
+        # Allow the owner and its cleanup task to run before the commit ack.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert events == []
+        assert not closing.done()
+    finally:
+        allow_ack.set()
+        await asyncio.wait_for(closing, 1)
+    assert events == ["renew_acknowledged", "lease_released"]
+    assert await backend.read_turn(_SCOPE, "execution") is None

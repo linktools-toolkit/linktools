@@ -70,7 +70,7 @@ async def test_sql_lease_decision_samples_once_after_existing_write_protection(
             return result
 
         result = await store.mutate(callback)
-        assert len(sampled) == (2 if source == "cached" else 1)
+        assert len(sampled) == (2 if source == "cached" and operation != "acquire" else 1)
         assert await store.read(lambda tx: tx.get_record(record.key)) == result
 
 
