@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.persistence import Persistence, PersistenceDomain
+from linktools.ai.persistence import Persistence, PersistenceDomain, PersistencePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
@@ -29,12 +30,6 @@ def _execution():
 
 
 def _controller(repository, calls):
-    controller = object.__new__(RuntimeRetentionController)
-    controller._execution = SimpleNamespace(executions=repository)
-    controller._namespace = _NAMESPACE
-    controller._terminal_publications = {}
-    controller._transient_domains = frozenset({PersistenceDomain.TRACE})
-    controller._objects = SimpleNamespace()
     async def session_release(session_id, **kwargs):
         assert active_state_scope() is None
         record = await repository.get(kwargs["execution_id"], tenant_id=kwargs["tenant_id"])
@@ -46,9 +41,13 @@ def _controller(repository, calls):
         if record is not None:
             assert record.retention_closed
         calls.append(("objects", owner_scope.removeprefix("execution:")))
-    controller._conversation = SimpleNamespace(sessions=SimpleNamespace(release_execution=session_release))
-    controller._objects = SimpleNamespace(release_object_scope=object_release)
-    return controller
+    return RuntimeRetentionController(
+        conversation=SimpleNamespace(sessions=SimpleNamespace(release_execution=session_release)),
+        execution=SimpleNamespace(executions=repository),
+        objects=SimpleNamespace(release_object_scope=object_release),
+        plan=PersistencePlan(trace=StorageRoute.transient()),
+        namespace=_NAMESPACE,
+    )
 
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
