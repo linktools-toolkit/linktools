@@ -235,3 +235,63 @@ async def test_memory_commit_observer_failure_does_not_change_commit():
         assert saved.metadata == {'saved': True}
         assert observed == [True]
         assert (await repository.get('session', tenant_id=runtime.tenant_id)).metadata == {'saved': True}
+
+
+@pytest.mark.parametrize("sqlite", [False, True])
+async def test_host_invalidations_follow_sync_turn_without_reading_state(tmp_path, monkeypatch, sqlite):
+    from linktools.ai.core import CommitPolicy, ExecutionStatus
+
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def model(messages, info):
+        entered.set()
+        await finish.wait()
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = model_features(_Models(_UsageFunctionModel(model)))
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    storage = PersistenceStorage.sqlite(tmp_path / "invalidation.db") if sqlite else PersistenceStorage.in_memory()
+    invalidated, failed = asyncio.Event(), asyncio.Event()
+    async with Runtime.open("invalidations", storage=storage, features=features) as runtime:
+        session = await runtime.agents.get().create_session("session")
+        other = await runtime.agents.get().create_session("other")
+        state_capture = AsyncMock(side_effect=AssertionError("host invalidations must not read a view"))
+        monkeypatch.setattr(runtime._session_service, "_observe_changes", state_capture)
+        unsubscribe = runtime.sessions.observe_changes("session", invalidated.set)
+
+        def fail_once():
+            remove_bad()
+            failed.set()
+            raise RuntimeError("host callback failure does not stop other observers")
+
+        remove_bad = runtime.sessions.observe_changes("session", fail_once)
+        await other.close(idempotency_key="other")
+        assert not invalidated.is_set() and not failed.is_set()
+
+        execution = await session.start("hello", idempotency_key="send")
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await asyncio.wait_for(invalidated.wait(), 5)
+            await asyncio.wait_for(failed.wait(), 5)
+            invalidated.clear()
+        finally:
+            finish.set()
+        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+        await asyncio.wait_for(invalidated.wait(), 5)
+        unsubscribe()
+        invalidated.clear()
+        unsubscribed = runtime.sessions.observe_changes("session", invalidated.set)
+        unsubscribe()  # A stale unsubscribe must not remove the newer observer.
+        await session.close(idempotency_key="close")
+        assert invalidated.is_set()
+        invalidated.clear()
+        assert state_capture.await_count == 0
+        repository = runtime._state.conversation.sessions
+
+    # Runtime teardown owns every registration, be it still open or removed.
+    repository.notify_session_change("session", tenant_id=runtime.tenant_id)
+    assert not invalidated.is_set()
+    unsubscribed()
+    with pytest.raises(AIError) as closed:
+        runtime.sessions.observe_changes("session", invalidated.set)
+    assert closed.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY

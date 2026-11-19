@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Conversation-domain repository implementations."""
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
@@ -463,8 +464,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         observers.add(callback)
         def unsubscribe() -> None:
             observers.discard(callback)
-            if not observers:
-                self._change_observers.pop(key, None)
+            if not observers and self._change_observers.get(key) is observers:
+                del self._change_observers[key]
         return unsubscribe
 
     def notify_session_change(self, session_id: str, *, tenant_id: str) -> None:
@@ -473,7 +474,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
     def _notify_change(self, key: bytes) -> None:
         for callback in tuple(self._change_observers.get(key, ())):
-            callback()
+            try:
+                callback()
+            except (Exception, asyncio.CancelledError) as error:
+                _logger.warning("Session invalidation callback failed: %s", type(error).__name__)
 
     async def _replace_observed(
         self, transaction: StateTransaction, record: StoredRecord, revision: int,
