@@ -51,7 +51,6 @@ from ..task import (
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
-from ..persistence.coordination import PendingTurnCoordination
 from ..persistence.objects import runtime_object_source_reads
 from ..execution.events import project_event_payload
 from ..core import decode_cursor as decode_runtime_cursor
@@ -1720,9 +1719,7 @@ async def _open_runtime_history(
     selected_state = persistence
     resolved_namespace = persistence.namespace
     effective_tenant_id = persistence.tenant_id
-    pending_coordination = PendingTurnCoordination.select(
-        persistence.coordination_backend, namespace=resolved_namespace, tenant_id=effective_tenant_id,
-    )
+    pending_coordination = persistence.pending_turn_coordination
     history_store = selected_state.run_store.read_store(PersistenceDomain.TRACE)
     if selected_state.plan.route(PersistenceDomain.TRACE).retention is StorageRetentionMode.TRANSIENT:
         if not isinstance(history_store, StagingAgentRunStore):

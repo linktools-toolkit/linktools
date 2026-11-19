@@ -18,7 +18,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, StateTurnResources
 from linktools.ai.execution import CancelExecutionRequest, ListSessionRequest
 from linktools.ai.persistence.state import active_state_scope, record_key
 from linktools.ai.storage import InMemoryCacheBackend
@@ -33,7 +33,7 @@ pytestmark = pytest.mark.asyncio
 
 
 @asynccontextmanager
-async def _runtimes(tmp_path, *, cache, shared=True):
+async def _runtimes(tmp_path, *, cache, shared=True, source_authority=False):
     entered, finish = asyncio.Event(), asyncio.Event()
     pause = False
 
@@ -57,7 +57,8 @@ async def _runtimes(tmp_path, *, cache, shared=True):
     async with AsyncExitStack() as stack:
         values = []
         for _ in range(2 if shared and cache is not None else 1):
-            storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
+            storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache,
+                coordination=StateTurnResources(pending_cache=cache) if source_authority else cache)
             persistence = await stack.enter_async_context(Persistence.open("pending-session-display", storage=storage))
             runtime = await stack.enter_async_context(Runtime.attach(
                 persistence=persistence, features=model_features(models, group()),

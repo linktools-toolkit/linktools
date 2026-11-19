@@ -23,10 +23,12 @@ from ..storage import (
     ObjectStore,
     StorageRetentionMode,
 )
-from ._root import PersistenceStorage, _validate_storage_configuration
+from ._root import PersistenceStorage, StateTurnResources, _validate_storage_configuration
 from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
 from .contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
                          ExecutionRepositories, MemoryRepositories, CheckpointRepositories, TaskRepositories)
+from .coordination import PendingTurnCoordination
+from .turns import StateTurnCoordination
 from .state import StateStore, capability_store_key
 from ..steps import NativeStepSource
 from ._snapshot import SnapshotLimits, SnapshotExclusiveGuard
@@ -74,7 +76,10 @@ class Persistence:
     ) -> None:
         if not isinstance(storage, PersistenceStorage):
             raise TypeError("storage must be PersistenceStorage")
-        self._coordination_backend = storage.coordination
+        self._coordination_config = storage.coordination
+        self._coordination_backend: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None
+        self._turn_stream: StreamBackend | None = None
+        self._pending_turn_coordination: PendingTurnCoordination | None = None
         self._plan = storage.plan
         self._external_object_store = storage.object_store
         self._lifecycle = _RuntimeStateLifecycle.NEW
@@ -136,9 +141,19 @@ class Persistence:
 
     @property
     def coordination_backend(self) -> CacheBackend | TurnCoordinationBackend | StreamBackend | None:
-        """Read the borrowed physical coordination resource, not a live producer."""
+        """Read the bound turn backend or the externally supplied resource."""
         self._require_ready()
         return self._coordination_backend
+
+    @property
+    def pending_turn_coordination(self) -> PendingTurnCoordination | None:
+        self._require_ready()
+        return self._pending_turn_coordination
+
+    @property
+    def turn_stream(self) -> StreamBackend | None:
+        self._require_ready()
+        return self._turn_stream
 
     @property
     def plan(self) -> PersistencePlan:
@@ -406,6 +421,28 @@ class Persistence:
                     tenant_id,
                 )
                 self._read_only = read_only
+                config = self._coordination_config
+                if isinstance(config, StateTurnResources):
+                    execution_store = materialized.execution.executions.state_store
+                    if materialized.execution.idempotency.state_store.storage_group is not execution_store.storage_group:
+                        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
+                                      "State turn authority and execution receipts must share their storage group")
+                    authority = StateTurnCoordination(
+                        execution_store,
+                        namespace=namespace, tenant_id=tenant_id,
+                        read_only=read_only, require_ready=self._require_ready,
+                    )
+                    self._coordination_backend = authority
+                    self._pending_turn_coordination = PendingTurnCoordination.for_state(
+                        config.pending_cache, authority, namespace=namespace, tenant_id=tenant_id,
+                    )
+                    self._turn_stream = config.stream
+                else:
+                    self._coordination_backend = config
+                    self._pending_turn_coordination = PendingTurnCoordination.select(
+                        config, namespace=namespace, tenant_id=tenant_id,
+                    )
+                    self._turn_stream = config if isinstance(config, StreamBackend) else None
                 self._lifecycle = _RuntimeStateLifecycle.READY
             except BaseException as error:
                 self._lifecycle = _RuntimeStateLifecycle.CLOSING

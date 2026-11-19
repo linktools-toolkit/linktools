@@ -3,6 +3,7 @@
 """Physical persistence resources and typed route configuration."""
 
 import json
+from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,12 +15,29 @@ from ._plan import PersistenceDomain, PersistencePlan
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+@dataclass(frozen=True, slots=True)
+class StateTurnResources:
+    """Select Persistence-owned turn authority, with explicitly borrowed views."""
+
+    pending_cache: CacheBackend | None = None
+    stream: StreamBackend | None = None
+
+    def __post_init__(self) -> None:
+        if self.pending_cache is not None and not isinstance(self.pending_cache, CacheBackend):
+            raise TypeError("pending_cache must implement cache operations")
+        if self.stream is not None and not isinstance(self.stream, StreamBackend):
+            raise TypeError("stream must implement stream operations")
+
+
+_Coordination = StateTurnResources | CacheBackend | TurnCoordinationBackend | StreamBackend
+
+
 class PersistenceStorage:
     """Reusable resource declaration; each Persistence owns its operational handles."""
 
     def __init__(
         self, plan: PersistencePlan, *, object_store: ObjectStore | None = None,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
+        coordination: _Coordination | None = None,
     ) -> None:
         _validate_storage_configuration(plan, object_store)
         for names in (
@@ -31,7 +49,7 @@ class PersistenceStorage:
             if any(method is not None for method in methods) and not all(callable(method) for method in methods):
                 raise TypeError(f"coordination must implement {', '.join(names)} together")
         if coordination is not None and not isinstance(
-            coordination, (CacheBackend, TurnCoordinationBackend, StreamBackend),
+            coordination, (StateTurnResources, CacheBackend, TurnCoordinationBackend, StreamBackend),
         ):
             raise TypeError("coordination must implement cache, turn coordination or stream operations")
         self._coordination = coordination
@@ -39,7 +57,7 @@ class PersistenceStorage:
         self._object_store = object_store
 
     @property
-    def coordination(self) -> CacheBackend | TurnCoordinationBackend | StreamBackend | None:
+    def coordination(self) -> _Coordination | None:
         """Borrowed coordination resource shared by producers and read-only views."""
         return self._coordination
 
@@ -55,7 +73,7 @@ class PersistenceStorage:
     @classmethod
     def in_memory(
         cls, *, cache: CacheBackend | None = None,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
+        coordination: _Coordination | None = None,
     ) -> "PersistenceStorage":
         route = StorageRoute.memory(cache=cache)
         return cls(PersistencePlan.from_default(route), coordination=coordination)
@@ -68,7 +86,7 @@ class PersistenceStorage:
         *,
         object_store: "ObjectStore | None" = None,
         cache: CacheBackend | None = None,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
+        coordination: _Coordination | None = None,
     ) -> "PersistenceStorage":
         route = StorageRoute.sqlite(path, cache=cache)
         return cls(
@@ -80,7 +98,7 @@ class PersistenceStorage:
     def from_root(
         cls, root: "str | Path", *, cache: CacheBackend | None = None,
         exclusive_writer: bool = False,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
+        coordination: _Coordination | None = None,
     ) -> "PersistenceStorage":
         if not isinstance(exclusive_writer, bool):
             raise TypeError("exclusive_writer must be a bool")
@@ -100,7 +118,7 @@ class PersistenceStorage:
         *,
         object_store: "ObjectStore | None" = None,
         cache: CacheBackend | None = None,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
+        coordination: _Coordination | None = None,
     ) -> "PersistenceStorage":
         route = StorageRoute.sql(engine, cache=cache)
         return cls(
@@ -114,7 +132,7 @@ class PersistenceStorage:
         plan: PersistencePlan,
         *,
         object_store: "ObjectStore | None" = None,
-        coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
+        coordination: _Coordination | None = None,
     ) -> "PersistenceStorage":
         return cls(
             plan, object_store=object_store, coordination=coordination,
@@ -155,4 +173,4 @@ def _normalize_path(value: "str | Path") -> Path:
     return Path(value).expanduser().resolve(strict=False)
 
 
-__all__ = ["PersistenceStorage"]
+__all__ = ["PersistenceStorage", "StateTurnResources"]

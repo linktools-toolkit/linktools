@@ -55,7 +55,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import CacheBackend, ObjectStore, StreamBackend, TurnCoordinationBackend
+from ..storage import CacheBackend, ObjectStore
 from ..workspace import (
     WorkspaceInstructionResolver,
     LocalWorkspaceBackend,
@@ -81,7 +81,6 @@ from ..inputs import InputCaptures
 from ..inputs.recovery import TaskRecoveryGuard
 from ..inputs import ExecutionContextArchive
 from ._local import LocalExecutionBackend
-from ..persistence.coordination import PendingTurnCoordination
 from pydantic_ai_harness.memory import MemoryStore
 from ..memory import PersistentMemoryStore
 from ..persistence.objects import ObjectKeyFactory
@@ -418,7 +417,6 @@ async def compose_runtime_components(
             run_store=run_store,
             metrics=metrics,
             commit=execution_capability.commit,
-            coordination=persistence.coordination_backend,
             catalog=catalog,
             compiler=compiler,
             authorization=selected_authorization,
@@ -581,7 +579,6 @@ async def _build_local_components(
     run_store: RuntimeAgentRunStore,
     metrics: MetricRecorderProvider | None,
     commit: CommitPolicy,
-    coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None,
     catalog: AgentCatalog,
     compiler: AgentCompiler,
     authorization: AuthorizationPolicy,
@@ -648,16 +645,10 @@ async def _build_local_components(
         metric_buffer = None if metrics is None else MetricsService(metrics)
         lifecycle.metric_buffer = metric_buffer
         metric_source_namespace = None if metric_buffer is None else namespace
-        if coordination is not None:
-            runtime_bridge.pending_turns.bind_coordination(PendingTurnCoordination.select(
-                coordination, namespace=namespace, tenant_id=tenant_id,
-            ))
-        stream_cache = (
-            coordination
-            if isinstance(coordination, StreamBackend)
-            and state.plan.route(PersistenceDomain.EXECUTION).retention is StorageRetentionMode.DURABLE
-            else None
-        )
+        runtime_bridge.pending_turns.bind_coordination(state.pending_turn_coordination)
+        stream_cache = (state.turn_stream
+                        if state.plan.route(PersistenceDomain.EXECUTION).retention is StorageRetentionMode.DURABLE
+                        else None)
         live_broker = LiveExecutionEventBroker(shared=(
             None if stream_cache is None else SharedStreamPublisher(
                 stream_cache, namespace, tenant_id,

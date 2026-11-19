@@ -10,16 +10,20 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
 from ..core import JsonValue, canonical_json_bytes, validate_persistence_namespace, validate_tenant_id, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScope, TurnScopeIdentity, RenewingTurnScope
 from .state import (
-    RecordLeaseTransition, RecordReplacement, StateStore, StateTransaction, StateTransactionNestingError,
+    RecordLeaseTransition, RecordReplacement, StateGroupTransaction, StateStore, StateTransaction, StateTransactionNestingError,
     StoredRecord, active_state_scope, record_key, scope_key,
 )
+
+if TYPE_CHECKING:
+    from .contracts import IdempotencyRecord, IdempotencyRepository
+
 
 _Value = TypeVar("_Value")
 _KINDS = frozenset({"turn_session", "turn_request", "turn_execution"})
@@ -289,6 +293,33 @@ class StateTurnCoordination:
     async def read_turn_by_request(self, scope: TurnScopeIdentity, request_key: str) -> TurnCoordination | None:
         graph = await self._observe(self._local_scope(scope), "turn_request", request_key)
         return None if graph is None else self._coordination(graph)
+
+    async def read_admission_request(
+        self, requests: IdempotencyRepository, scope: TurnScopeIdentity, *,
+        idempotency_scope: str, idempotency_key: str, request_key: str,
+    ) -> tuple[IdempotencyRecord | None, TurnCoordination | None]:
+        """Read the durable receipt and, only on a miss, the source turn graph."""
+        self._outside_transaction()
+        local_scope = self._local_scope(scope)
+        request_key = _text(request_key)
+        group = self._store.storage_group
+        if requests.state_store.storage_group is not group:
+            raise StateTransactionNestingError("admission receipt and authority must share a state group")
+
+        async def capture(
+            transaction: StateGroupTransaction,
+        ) -> tuple[IdempotencyRecord | None, TurnCoordination | None]:
+            receipt = await requests.get(idempotency_scope, idempotency_key, tenant_id=scope.tenant_id)
+            if receipt is not None:
+                return receipt, None
+            turn = transaction.transaction(self._store)
+            graph = await self._anchor(turn, local_scope, "turn_request", request_key)
+            if graph is None or graph.session.lease_expires_at <= await turn.now():
+                return None, None
+            return None, self._coordination(graph)
+
+        stores = tuple(dict.fromkeys((self._store, requests.state_store)))
+        return await group.read_many(stores, capture)
 
     async def read_turn_by_session(self, scope: TurnScopeIdentity, session_key: str) -> TurnCoordination | None:
         graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
