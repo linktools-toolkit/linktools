@@ -622,8 +622,16 @@ class StateTurnCoordination:
                 execution = await self._load(tx, scope, "turn_execution", execution_id)
             else:
                 owner, session_key, request_key = lease
-                prefetched = await tx.get_records(graph_keys)
-                execution = prefetched.get(graph_keys[0])
+                try:
+                    prefetched = await tx.get_records(graph_keys)
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        raise
+                    # A batch may decode the companion rows before the anchor
+                    # rejects a stale lease. Keep staged validation in that case.
+                    execution = await self._load(tx, scope, "turn_execution", execution_id)
+                else:
+                    execution = prefetched.get(graph_keys[0])
                 if execution is not None:
                     self._records.validate(execution)
                     if (execution.data["token"] != owner.token or execution.data["fence"] != owner.fence

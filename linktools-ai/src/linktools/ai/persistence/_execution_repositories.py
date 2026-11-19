@@ -588,10 +588,22 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         execution = await self.get_in_transaction(transaction, execution_id, tenant_id=tenant_id)
         return execution if execution is not None and execution.recovery is not None else None
 
-    async def get_observed(self, execution_id: str, *, tenant_id: str) -> Observed[ExecutionRecord] | None:
+    async def get_observed(
+        self, execution_id: str, *, tenant_id: str, previous: Observed[ExecutionRecord] | None = None,
+    ) -> Observed[ExecutionRecord] | None:
+        """Read a fresh owner, reusing the exact recorded projection when unchanged."""
         async def read(_group):
             _require_repository_tenant(tenant_id, self._tenant_id)
             key = self._key("execution", (execution_id,))
+            if previous is not None and previous.value.execution_id == execution_id:
+                retained = self._execution_content.projection(previous.value)
+                if retained is not None:
+                    current = await self._record(key)
+                    if current is None:
+                        return None
+                    if (previous.storage_revision == current.storage_revision
+                            and replace(retained, storage_revision=current.storage_revision) == current):
+                        return previous
             await self._execution_content.prefetch_projection_owners(
                 (key,), bindings=True, input_body=True, result=True,
                 result_body=True, recovery=True, terminal_details=True,
@@ -1476,7 +1488,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         input_context: RuntimePayloadRef, producer_claim_id: str,
         recovery: ExecutionRecoveryDetail | None = None,
         observed: Observed[ExecutionRecord] | None = None,
-    ) -> ExecutionRecord:
+    ) -> Observed[ExecutionRecord]:
         """Claim the first attempt and its already materialized input together."""
         _require_repository_tenant(tenant_id, self._tenant_id)
         if observed is None:
@@ -1501,8 +1513,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                            updated_at=await transaction.now(), recovery=current.recovery if recovery is None else recovery)
         final = replace(admitted, input_context=input_context, repository_instructions=None,
                         revision=admitted.revision + 1)
-        await _replace_checked(transaction, await self._projected_content(record, final), record.storage_revision)
-        return final
+        projected = await self._projected_content(record, final)
+        await _replace_checked(transaction, projected, record.storage_revision)
+        return Observed(final, projected.storage_revision)
 
     async def enter_deferred_wait_in_transaction(
         self,

@@ -861,3 +861,41 @@ async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(
         with pytest.raises(AIError) as caught:
             validate_turn_records(invalid_records, namespace=scope.namespace, tenant_id=scope.tenant_id)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+async def test_sql_companion_decode_failure_requires_a_matching_live_lease(tmp_path, monkeypatch):
+    import json
+
+    from linktools.ai.persistence import _sql
+
+    async with _open_store("sql", tmp_path / "sql") as store:
+        authority = _backend(store)
+        retired = await _claim(authority, session="retired", request="retired", execution="retired")
+        assert retired is not None and retired.lease is not None
+        assert await authority.release_turn(retired.lease)
+        current = await _claim(authority)
+        assert current is not None and current.lease is not None
+        real_decode = _sql._record_from_row
+
+        def decode(row):
+            if row["kind"] == "turn_request":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "controlled companion decode error")
+            return real_decode(row)
+
+        monkeypatch.setattr(_sql, "_record_from_row", decode)
+        missing = json.loads(current.lease.key)
+        missing[5] = "absent-execution"
+        for lease in (
+            retired.lease,
+            replace(current.lease, key=json.dumps(missing)),
+            replace(current.lease, token="different-token"),
+        ):
+            assert await authority.renew_turn(lease, lease_seconds=60) is None
+            assert not await authority.release_turn(lease)
+        for operation in (
+            lambda: authority.renew_turn(current.lease, lease_seconds=60),
+            lambda: authority.release_turn(current.lease),
+        ):
+            with pytest.raises(AIError) as caught:
+                await operation()
+            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

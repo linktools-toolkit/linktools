@@ -1397,6 +1397,7 @@ class StateCommands:
                 source_agent_run_id=source_agent_run_id,
                 pending_tools=pending_tools,
             )
+            confirmed = None
             if current_recovery.recovery_state is ExecutionRecoveryState.ACTIVE:
                 updated_execution = await self._execution.transition_recovery_in_transaction(
                     execution_transaction, current_execution,
@@ -1410,13 +1411,14 @@ class StateCommands:
             elif prepared_input_context is not None:
                 if type(self._execution) is not ExecutionRepositoryImpl:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                updated_execution = await self._execution.claim_prepared_agent_run_in_transaction(
+                confirmed = await self._execution.claim_prepared_agent_run_in_transaction(
                     execution_transaction, claim.execution_id, tenant_id=self._tenant_id,
                     expected_revision=claim.expected_execution_revision,
                     expected_agent_run_seq=claim.expected_agent_run_seq,
                     input_context=prepared_input_context, producer_claim_id=producer_claim_id,
                     recovery=updated_recovery, observed=current_observed,
                 )
+                updated_execution = confirmed.value
             else:
                 updated_execution = await self._execution.claim_next_agent_run_in_transaction(
                     execution_transaction,
@@ -1433,9 +1435,10 @@ class StateCommands:
                 await operations.append_in_transaction(
                     group.transaction(operations.state_store), recovery_operation,
                 )
-            confirmed = await self._execution.get_observed_in_transaction(
-                execution_transaction, claim.execution_id, tenant_id=self._tenant_id,
-            )
+            if confirmed is None:
+                confirmed = await self._execution.get_observed_in_transaction(
+                    execution_transaction, claim.execution_id, tenant_id=self._tenant_id,
+                )
             if confirmed is None or confirmed.value != updated_execution:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return confirmed

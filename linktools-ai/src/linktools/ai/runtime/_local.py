@@ -5478,12 +5478,17 @@ class LocalExecutionBackend:
         owner = self._turn_owners.get(execution.execution_id)
         capture = self._owned_attempt_capture(execution)
         observed = None if owner is None else owner.observed
-        current = (observed.value if owner is not None and not owner.stopping
-                   and owner.tool_admission is not None and owner.tool_terminal is not None
-                   and producer_generation is not None and owner.producer_generation == producer_generation
-                   and capture is not None and observed is not None
-                   and observed.value == capture.execution else None)
-        if current is None:
+        same_attempt = (owner is not None and not owner.stopping
+                        and producer_generation is not None and owner.producer_generation == producer_generation
+                        and capture is not None and observed is not None and observed.value == capture.execution)
+        repository = self._execution.executions
+        if same_attempt and owner.tool_admission is not None and owner.tool_terminal is not None:
+            current = observed.value
+        elif (same_attempt and type(repository) is ExecutionRepositoryImpl
+                and self._pending_turns.get(execution.execution_id, tenant_id=self._tenant_id) is None):
+            latest = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id, previous=observed)
+            current = None if latest is None else latest.value
+        else:
             current = await self.load_execution(execution.execution_id, tenant_id=self._tenant_id)
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
