@@ -1043,6 +1043,11 @@ class LocalExecutionBackend:
         local = await self._pending_turns.read_execution(execution_id, tenant_id=tenant_id)
         if local is not None:
             return local
+        owner = self._turn_owners.get(execution_id) if tenant_id == self._tenant_id else None
+        if owner is not None and owner.observed is not None and not owner.stopping:
+            # This owner has already committed the execution identity to the
+            # source; the event reader still authorizes the current source header.
+            return None
         return await self._pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
 
     def require_pending_producer(
