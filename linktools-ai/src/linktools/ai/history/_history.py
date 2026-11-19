@@ -41,7 +41,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe.stream import await_stream_cleanup
-from ..storage import CacheBackend, ObjectRef, ObjectStore, StoredPayload, read_object
+from ..storage import CacheBackend, ObjectRef, ObjectStore, StoredPayload, read_object, sql_observation_phase, sql_observation_scope
 from ..session import SessionDetail, SessionManager, SessionPendingExecutionLookup
 from ..spec import CapabilityRef
 from ..task import (
@@ -1208,10 +1208,11 @@ class History:
                     active = pending.execution_id
                 else:
                     sessions, _ = self._require_session_reader()
-                    current = (await sessions.state_store.read(
-                        lambda _transaction: sessions.get(record.session_id, tenant_id=principal.tenant_id)
-                    ) if isinstance(sessions, SessionRepositoryImpl) else
-                        await sessions.get(record.session_id, tenant_id=principal.tenant_id))
+                    with sql_observation_scope("history.session.pending_is_canonical"):
+                        current = (await sessions.state_store.read(
+                            lambda _transaction: sessions.get(record.session_id, tenant_id=principal.tenant_id)
+                        ) if isinstance(sessions, SessionRepositoryImpl) else
+                            await sessions.get(record.session_id, tenant_id=principal.tenant_id))
                     if current is None or current.owner_principal_id != header.owner_principal_id:
                         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                     observed = SessionManager.validate_admission(
@@ -1240,6 +1241,7 @@ class History:
             return None
         return pending
 
+    @sql_observation_phase("history.session.detail")
     async def session_detail(
         self,
         session_id: str,
@@ -1354,6 +1356,7 @@ class History:
             self._session_transcript_store, session_id, execution_id, principal=principal,
         )
 
+    @sql_observation_phase("history.session.inspect")
     async def inspect_session(
         self,
         session_id: str,

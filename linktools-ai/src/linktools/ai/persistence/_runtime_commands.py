@@ -28,7 +28,7 @@ from ..core import (
     agent_run_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+from ..storage import StoredPayload, sql_observation_phase
 from ..steps import native_store_key
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from ..model.messages import encode_model_messages
@@ -2403,6 +2403,7 @@ class StateCommands:
             if actual != tuple(operations):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    @sql_observation_phase("persistence.terminal.receipt_lookup")
     async def read_pending_turn(
         self, reservation: ExecutionStartReservation, *, expected_session: SessionRecord | None,
         tool_operations: Sequence[ToolOperationRecord] = (),
@@ -2680,6 +2681,7 @@ class StateCommands:
         assert resolved is not None
         return resolved
 
+    @sql_observation_phase("persistence.terminal.pending_commit")
     async def commit_pending_turn(
         self, reservation: ExecutionStartReservation, commit: ExecutionTerminalCommit, *,
         expected_session: SessionRecord | None = None, next_cursor: ConversationCursor | None = None,
@@ -3044,6 +3046,7 @@ class StateCommands:
             checkpoint_sequence=cursor.checkpoint_sequence, prepared=prepared, archive_records=archive_records,
         )
 
+    @sql_observation_phase("persistence.terminal.checkpoint_prepare")
     async def _prepare_conversation_checkpoint(
         self,
         owner: StateStepArchive,
@@ -3145,6 +3148,7 @@ class StateCommands:
                     matches.append(reference)
         return matches[0] if len(matches) == 1 else None
 
+    @sql_observation_phase("persistence.terminal.durable_commit")
     async def commit_terminal_checkpoint(
         self,
         commit: ExecutionTerminalCommit,

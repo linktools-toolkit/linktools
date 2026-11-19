@@ -170,7 +170,7 @@ from ..persistence.repositories import operation_identity_matches
 from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
 from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction, StateStore, StoredRecord
 from ..persistence import NativeToolErrorReference, SqlStepStore, StepWriteReceipt
-from ..storage import SqlStorageContext
+from ..storage import SqlStorageContext, sql_observation_phase
 
 
 class _SubagentDispatcher(Protocol):
@@ -4134,6 +4134,7 @@ class LocalExecutionBackend:
                 return observed
         return None
 
+    @sql_observation_phase("runtime.execution.worker", inherit=False)
     async def _run(
         self,
         request: ExecutionRequest,

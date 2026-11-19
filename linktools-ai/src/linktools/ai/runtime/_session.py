@@ -31,7 +31,7 @@ from ..core import (
     validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, TurnCoordination
+from ..storage import CacheBackend, TurnCoordination, sql_observation_scope
 from ..history import SessionDisplayCache
 from ..history import (
     capture_session_refresh,
@@ -398,30 +398,31 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             while True:
                 await channel.changed.wait()
                 channel.changed.clear()
-                await self.require_available()
-                record = await self._read_session_record(session_id,
-                    tenant_id=self._runtime_conversation.sessions.tenant_id)
-                if record is None:
-                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                active = record.active_execution_id
-                if active is not None:
-                    executions = self._runtime_executions
-                    memberships = await executions.read_content(lambda _group: executions.get_membership_many(
-                        (active,), tenant_id=self._runtime_conversation.sessions.tenant_id))
+                with sql_observation_scope("runtime.session.watch", inherit=False):
+                    await self.require_available()
+                    record = await self._read_session_record(session_id,
+                        tenant_id=self._runtime_conversation.sessions.tenant_id)
+                    if record is None:
+                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    active = record.active_execution_id
+                    if active is not None:
+                        executions = self._runtime_executions
+                        memberships = await executions.read_content(lambda _group: executions.get_membership_many(
+                            (active,), tenant_id=self._runtime_conversation.sessions.tenant_id))
+                        if channel.changed.is_set():
+                            continue
+                        self.validate_admission(record, memberships.get(active))
+                    if self._observe_local_session is not None:
+                        pending, _epoch = self._observe_local_session(session_id,
+                            tenant_id=self._runtime_conversation.sessions.tenant_id)
+                        if pending is not None:
+                            if (pending.session_id != session_id or pending.parent_execution_id is not None
+                                    or active is not None and active != pending.execution_id):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            active = pending.execution_id
                     if channel.changed.is_set():
                         continue
-                    self.validate_admission(record, memberships.get(active))
-                if self._observe_local_session is not None:
-                    pending, _epoch = self._observe_local_session(session_id,
-                        tenant_id=self._runtime_conversation.sessions.tenant_id)
-                    if pending is not None:
-                        if (pending.session_id != session_id or pending.parent_execution_id is not None
-                                or active is not None and active != pending.execution_id):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        active = pending.execution_id
-                if channel.changed.is_set():
-                    continue
-                self._publish_watch(channel, (record, active))
+                    self._publish_watch(channel, (record, active))
         except asyncio.CancelledError:
             raise
         except Exception as error:

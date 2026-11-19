@@ -12,6 +12,7 @@ from typing import Literal
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
+from ._sql_observation import sql_observation_scope
 from ._turn import TurnCoordination, TurnCoordinationBackend, TurnScopeIdentity
 
 _logger = environ.get_logger("ai.storage.turn")
@@ -65,16 +66,17 @@ class RenewingTurnScope:
         loop = asyncio.get_running_loop()
         self._deadline = loop.time() + self._lease_seconds
         # A failure here remains an unknown claim outcome, never a busy result.
-        claim = asyncio.create_task(self._backend.claim_turn(
-            self._scope, **self._identity, lease_seconds=self._lease_seconds,
-        ))
-        cancelled = False
-        while not claim.done():
-            try:
-                await asyncio.shield(claim)
-            except asyncio.CancelledError:
-                cancelled = True
-        result = claim.result()
+        with sql_observation_scope("storage.turn.claim"):
+            claim = asyncio.create_task(self._backend.claim_turn(
+                self._scope, **self._identity, lease_seconds=self._lease_seconds,
+            ))
+            cancelled = False
+            while not claim.done():
+                try:
+                    await asyncio.shield(claim)
+                except asyncio.CancelledError:
+                    cancelled = True
+            result = claim.result()
         self._coordination = result
         if cancelled:
             await self.__aexit__(asyncio.CancelledError, asyncio.CancelledError(), None)
@@ -146,7 +148,8 @@ class RenewingTurnScope:
                     self._lose()
                     return
                 deadline = loop.time() + self._lease_seconds
-                renewed = await self._backend.renew_turn(owned.lease, lease_seconds=self._lease_seconds)
+                with sql_observation_scope("storage.turn.renew", inherit=False):
+                    renewed = await self._backend.renew_turn(owned.lease, lease_seconds=self._lease_seconds)
                 # A late response must not resurrect expired local authority.
                 if self._closed or self._lost or loop.time() >= self._deadline:
                     self._lose()
@@ -189,7 +192,8 @@ class RenewingTurnScope:
         owned = self._coordination
         if owned is not None and owned.lease is not None:
             try:
-                await self._backend.release_turn(owned.lease)
+                with sql_observation_scope("storage.turn.release", inherit=False):
+                    await self._backend.release_turn(owned.lease)
             except (Exception, asyncio.CancelledError):
                 _logger.warning("Turn lease release failed; expiry retains the cleanup bound", exc_info=True)
 

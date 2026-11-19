@@ -82,6 +82,7 @@ from ..spec import RepositoryInstructions
 from ..inputs import RepositoryInstructionPayload
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution
+from ..storage import sql_observation_phase
 from ..storage import (
     ObjectRef,
     ObjectStore,
@@ -2422,6 +2423,7 @@ class DefaultExecutionService(TaskExecutionService):
 
 
     @_observed_query
+    @sql_observation_phase("runtime.execution.inspect")
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView:
@@ -2453,6 +2455,7 @@ class DefaultExecutionService(TaskExecutionService):
 
 
     @consumed_terminal_query
+    @sql_observation_phase("runtime.execution.wait")
     async def wait(
         self,
         execution_id: str,

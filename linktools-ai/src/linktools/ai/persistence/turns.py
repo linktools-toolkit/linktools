@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from ..core import JsonValue, canonical_json_bytes, validate_persistence_namespace, validate_tenant_id, validate_resource_id
 from ..errors import AIError, ErrorCode
-from ..storage import Lease, TurnCoordination, TurnScope, TurnScopeIdentity, RenewingTurnScope
+from ..storage import Lease, TurnCoordination, TurnScope, TurnScopeIdentity, RenewingTurnScope, sql_observation_phase, sql_observation_scope
 from .state import (
     RecordLeaseTransition, RecordReplacement, StateGroupTransaction, StateStore, StateTransaction, StateTransactionNestingError,
     StoredRecord, active_state_scope, record_key, scope_key,
@@ -352,7 +352,8 @@ class StateTurnCoordination:
             # The receipt fixed the snapshot before the lazy clock sample. A
             # pre-expiry renewal may already have committed outside that view.
             previous = graph
-            receipt, graph, expired = await group.read_many(stores, capture)
+            with sql_observation_scope("coordination.admission.recheck_expiry"):
+                receipt, graph, expired = await group.read_many(stores, capture)
             if graph is not None and expired and (
                 graph.session.key != previous.session.key
                 or graph.session.storage_revision != previous.session.storage_revision
@@ -364,6 +365,7 @@ class StateTurnCoordination:
         graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
         return None if graph is None else self._coordination(graph)
 
+    @sql_observation_phase("coordination.session.verify_cached_fence")
     async def matches_session_generation(
         self, scope: TurnScopeIdentity, session_key: str, execution_id: str, owner_id: str, fence: int,
     ) -> bool:
