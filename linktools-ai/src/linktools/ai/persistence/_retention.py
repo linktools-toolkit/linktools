@@ -4,6 +4,8 @@
 
 from ..storage import StorageRetentionMode
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
@@ -52,6 +54,7 @@ class RuntimeRetentionController:
         )
         self._closed = False
         self._terminal_publications: dict[str, ExecutionRecord | ExecutionTerminalPublication] = {}
+        self._publication_observers: dict[str, set[Callable[[ExecutionTerminalPublication], None]]] = {}
 
     def confirm_terminal_publication(self, publication: "ExecutionRecord | ExecutionTerminalPublication") -> None:
         """Retain a publication receipt only after its complete commit is confirmed."""
@@ -61,6 +64,36 @@ class RuntimeRetentionController:
         }:
             raise ValueError("publication confirmation requires a terminal execution")
         self._terminal_publications[execution.execution_id] = publication
+        if isinstance(publication, ExecutionTerminalPublication):
+            for observer in self._publication_observers.get(execution.execution_id, ()):
+                observer(publication)
+
+    @contextmanager
+    def capture_terminal_publication(self, execution_id: str, *, tenant_id: str,
+    ) -> Iterator[Callable[[], ExecutionTerminalPublication | None]]:
+        """Hold an owner receipt only for an active caller, across handoff cleanup."""
+        captured = self.terminal_publication(execution_id, tenant_id=tenant_id)
+
+        def record(publication: ExecutionTerminalPublication) -> None:
+            nonlocal captured
+            if captured is None:
+                captured = publication
+
+        def read() -> ExecutionTerminalPublication | None:
+            return captured
+
+        if tenant_id != self._execution.executions.tenant_id:
+            yield read
+            return
+        observers = self._publication_observers.setdefault(execution_id, set())
+        observers.add(record)
+        try:
+            yield read
+        finally:
+            observers.remove(record)
+            if not observers:
+                self._publication_observers.pop(execution_id, None)
+            captured = None
 
     def terminal_publication_confirmed(self, execution: "ExecutionRecord") -> bool:
         """A source snapshot can reuse this process's exact confirmed publication."""

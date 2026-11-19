@@ -28,7 +28,7 @@ from ..core import (
     agent_run_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+from ..storage import StoredPayload, sql_observation_phase
 from ..steps import native_store_key
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from ..model.messages import encode_model_messages
@@ -74,6 +74,7 @@ from .contracts import (
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
     SessionRecord,
+    SessionTurnAfterImage,
     SessionRepository,
     ToolOperationAdmission,
     ToolBoundaryReceipt,
@@ -2402,6 +2403,7 @@ class StateCommands:
             if actual != tuple(operations):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    @sql_observation_phase("persistence.terminal.receipt_lookup")
     async def read_pending_turn(
         self, reservation: ExecutionStartReservation, *, expected_session: SessionRecord | None,
         tool_operations: Sequence[ToolOperationRecord] = (),
@@ -2679,6 +2681,7 @@ class StateCommands:
         assert resolved is not None
         return resolved
 
+    @sql_observation_phase("persistence.terminal.pending_commit")
     async def commit_pending_turn(
         self, reservation: ExecutionStartReservation, commit: ExecutionTerminalCommit, *,
         expected_session: SessionRecord | None = None, next_cursor: ConversationCursor | None = None,
@@ -2689,8 +2692,14 @@ class StateCommands:
         capability_run_id: str | None = None,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         tool_operations: Sequence[ToolOperationRecord] = (),
+        include_publication: bool = False,
     ) -> ExecutionTerminalCommitResult:
-        """Materialize one volatile turn and its replay-safe outcomes atomically."""
+        """Materialize one volatile turn and its replay-safe outcomes atomically.
+
+        The committing owner can request evidence for its own confirmed write.
+        A prior winner or an uncertain commit readback is still a source result,
+        not evidence that this caller published that write.
+        """
         tool_operations = tuple(tool_operations)
         audit_events = tuple(audit_events)
         execution_projections = tuple(execution_projections)
@@ -2876,6 +2885,7 @@ class StateCommands:
 
         async def mutate(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
             nonlocal final_cursor, candidate_published
+            after_image = None
             candidate_published = False
             if context_write is not None:
                 content_archive, archive_records = context_write
@@ -2932,11 +2942,21 @@ class StateCommands:
                         group.transaction(archive.state_store), conversation_agent_run, prepared[0],
                     )
                     final_cursor = await self._pin_conversation_cursor(archive, final_cursor, prepared[0], sequence)
-                await self._conversation.commit_pending_turn_in_transaction(
+                final_session, turn_commit = await self._conversation.commit_pending_turn_in_transaction(
                     conversation_transaction, expected=expected_session, execution_id=execution.execution_id,
                     next_cursor=final_cursor, start_message_index=start, end_message_index=end,
                     successful=successful,
                 )
+                if include_publication:
+                    messages = (prepared.session_turn_messages(turn_commit,
+                                inherited_message_count=history.inherited_message_count)
+                                if prepared is not None and history is not None else
+                                () if turn_commit.start_message_index == turn_commit.end_message_index else None)
+                    if messages is not None:
+                        after_image = SessionTurnAfterImage(
+                            turn_commit, final_session.owner_principal_id, final_session.revision,
+                            messages, commit.result.output,
+                        )
             elif prepared is not None:
                 assert archive is not None and conversation_agent_run is not None
                 await archive.materialize_checkpoint_in_transaction(
@@ -2949,7 +2969,13 @@ class StateCommands:
             if capability_prefix is not None:
                 await capability_prefix.apply(group)
             candidate_published = True
-            return final
+            if not include_publication:
+                return final
+            return ExecutionTerminalPublication(
+                final.execution, final.result,
+                observed=Observed(final.execution, insertion.record.storage_revision),
+                session_released=expected_session is not None, history_seal=seal, turn_after_image=after_image,
+            )
 
         async def operation() -> object:
             nonlocal resolved, publication_confirmed
@@ -3020,6 +3046,7 @@ class StateCommands:
             checkpoint_sequence=cursor.checkpoint_sequence, prepared=prepared, archive_records=archive_records,
         )
 
+    @sql_observation_phase("persistence.terminal.checkpoint_prepare")
     async def _prepare_conversation_checkpoint(
         self,
         owner: StateStepArchive,
@@ -3121,6 +3148,7 @@ class StateCommands:
                     matches.append(reference)
         return matches[0] if len(matches) == 1 else None
 
+    @sql_observation_phase("persistence.terminal.durable_commit")
     async def commit_terminal_checkpoint(
         self,
         commit: ExecutionTerminalCommit,
@@ -3376,6 +3404,7 @@ class StateCommands:
                         await group.get_records(fresh_record_keys)
                     execution_transaction = group.transaction(self._execution.state_store)
                     closed_result = None
+                    final_session = turn_commit = None
                     if (type(self._execution) is ExecutionRepositoryImpl
                             and not commit.execution.durable_trace and execution_run is None):
                         effective_commit = await self._effective_terminal_commit(
@@ -3407,14 +3436,14 @@ class StateCommands:
                         conversation_transaction = group.transaction(self._conversation.state_store)
                         if conversation_agent_run is None or conversation_checkpoint is None:
                             if publish_turn:
-                                await self._conversation.commit_timeline_turn_in_transaction(
+                                turn_commit = await self._conversation.commit_timeline_turn_in_transaction(
                                     conversation_transaction, session_id, tenant_id=self._tenant_id,
                                     execution_id=commit.execution.execution_id,
                                     start_message_index=0 if timeline_range is None else timeline_range[0],
                                     end_message_index=0 if timeline_range is None else timeline_range[1],
                                     allow_unadmitted=commit.execution.started_at is None, admitted_turn=session_turn,
                                 )
-                            await self._conversation.release_execution_in_transaction(
+                            final_session = await self._conversation.release_execution_in_transaction(
                                 conversation_transaction,
                                 session_id,
                                 tenant_id=self._tenant_id,
@@ -3443,7 +3472,7 @@ class StateCommands:
                                 session,
                                 prepared_conversation[0],
                             )
-                            await self._conversation.complete_execution_in_transaction(
+                            final_session = await self._conversation.complete_execution_in_transaction(
                                 conversation_transaction,
                                 session_id,
                                 tenant_id=self._tenant_id,
@@ -3454,7 +3483,7 @@ class StateCommands:
                             )
                             if timeline_range is None:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            await self._conversation.commit_timeline_turn_in_transaction(
+                            turn_commit = await self._conversation.commit_timeline_turn_in_transaction(
                                 conversation_transaction,
                                 session_id,
                                 tenant_id=self._tenant_id,
@@ -3542,9 +3571,23 @@ class StateCommands:
                         ))
                     if observed is None or observed.value != closed_result.execution:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    after_image = None
+                    if (isinstance(closed_result, ExecutionTerminalWriteReceipt)
+                            and type(self._conversation) is SessionRepositoryImpl and final_session is not None
+                            and turn_commit is not None and final_session.active_execution_id is None):
+                        messages = (() if turn_commit.start_message_index == turn_commit.end_message_index else
+                            prepared_conversation.session_turn_messages(
+                                turn_commit, inherited_message_count=timeline_history.inherited_message_count,
+                            ) if isinstance(prepared_conversation, PreparedAgentRunCheckpointBatch)
+                            and timeline_history is not None else None)
+                        if messages is not None:
+                            after_image = SessionTurnAfterImage(
+                                turn_commit, final_session.owner_principal_id, final_session.revision,
+                                messages, commit.result.output,
+                            )
                     return ExecutionTerminalPublication(
                         closed_result.execution, closed_result.result, observed=observed,
-                        session_released=session_id is not None, history_seal=seal,
+                        session_released=session_id is not None, history_seal=seal, turn_after_image=after_image,
                     )
 
                 async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:

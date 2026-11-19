@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """Plural Runtime domain entry points."""
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
-from ..session import SessionAdmission
+from ..session import SessionAdmission, PublishedSessionTurn
 from ..agent import AgentBindingContract
 from ..core import BudgetUsage, Principal
 from ..observe import WaitResult, RuntimeMetricsControl
@@ -285,6 +286,22 @@ class RuntimeSessions(Generic[AppT]):
         """Read current session state without constructing a bound handle."""
         self._ensure_open()
         return await self._service.get(session_id, principal=principal)
+
+    @contextmanager
+    def capture_published_turn(
+        self, session_id: str, execution_id: str, *, principal: Principal,
+    ) -> Iterator[Callable[[], Awaitable[PublishedSessionTurn | None]]]:
+        """Enroll before draining the local execution stream, then read after wait.
+
+        None means no complete publication was captured. Fetch the exact
+        committed turn through History when needed. This is not current state.
+        """
+        self._ensure_open()
+        with self._service.capture_published_turn(session_id, execution_id, principal=principal) as captured:
+            async def read() -> PublishedSessionTurn | None:
+                self._ensure_open()
+                return await captured()
+            yield read
 
     def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
         """Observe this Runtime's session changes; external writes need explicit refresh."""

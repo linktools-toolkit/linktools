@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, ClassVar, NoReturn, TypeVar
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
+from ._sql_observation import attach_sql_observation
 from ._sqlite_owner import _LOCAL_PROFILE, _SqliteFileOwner, _connection_file, _finish_owned_io, require_sqlite_write
 from ._dialects import (
     _SQLITE_BUSY_TIMEOUT_MS,
@@ -65,6 +66,8 @@ class SqlStorageContext:
             if self._closed:
                 raise AIError(ErrorCode.STORAGE_CLOSED)
             if not self._engine_configured:
+                if self.owns_engine:
+                    attach_sql_observation(self.engine)
                 await self.dialect.configure_engine(self.engine)
                 self._engine_configured = True
             if metadata is not None and metadata is not self._validated_metadata:

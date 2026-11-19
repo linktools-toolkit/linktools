@@ -26,7 +26,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistencePlan, PersistenceStorage
 from linktools.ai.runtime._factory import _RuntimeCloseCoordinator
 from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
@@ -46,7 +46,7 @@ from linktools.ai.persistence._step_archive import InMemoryStepArchive, StagingA
 from linktools.ai.persistence._retention import RuntimeRetentionController
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import FilesystemObjectStore, InMemoryCacheBackend, SqlObjectStore, StoredPayload
+from linktools.ai.storage import FilesystemObjectStore, InMemoryCacheBackend, SqlObjectStore, StorageRoute, StoredPayload
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskEvent,
@@ -347,20 +347,19 @@ async def test_execution_retention_releases_objects_after_execution_lookup() -> 
     async def execution_get_in_transaction(transaction, execution_id, *, tenant_id):
         return await execution_get(execution_id, tenant_id=tenant_id)
 
-    controller = object.__new__(RuntimeRetentionController)
-    controller._execution = SimpleNamespace(
-        executions=SimpleNamespace(
+
+    controller = RuntimeRetentionController(
+        execution=SimpleNamespace(executions=SimpleNamespace(
             close_retention=close_retention,
             get=execution_get,
             get_in_transaction=execution_get_in_transaction,
             state_store=SimpleNamespace(read=read_source),
-        ),
+        )),
+        conversation=SimpleNamespace(),
+        namespace="runtime",
+        objects=SimpleNamespace(release_object_scope=release_object_scope),
+        plan=PersistencePlan(trace=StorageRoute.transient()),
     )
-    controller._conversation = SimpleNamespace()
-    controller._namespace = "runtime"
-    controller._terminal_publications = {}
-    controller._objects = SimpleNamespace(release_object_scope=release_object_scope)
-    controller._transient_domains = frozenset({PersistenceDomain.TRACE})
 
     await controller.release_execution_handoff("execution", tenant_id="tenant")
 

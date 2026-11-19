@@ -9,6 +9,7 @@ from ._cache import (
     TieredCacheBackend,
 )
 from ._route import StorageRoute, StorageRetentionMode
+from ._sql_observation import current_sql_observation, sql_observation_phase, sql_observation_scope
 from ..core import WriteBufferBackend, WriteBufferEntry
 from ._composition import (
     ContentCache,
@@ -129,6 +130,9 @@ from ._turn_scope import RenewingTurnScope
 from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteScopeFactory, BatchWriteStatus
 
 __all__ = [
+    "current_sql_observation",
+    "sql_observation_phase",
+    "sql_observation_scope",
     "StorageRoute",
     "StorageRetentionMode",
     "WriteBufferBackend",

@@ -115,11 +115,14 @@ def _pending_turn(
     )
 
 
-async def _commit(state: _TurnState, turn: _PendingTurn) -> ExecutionTerminalCommitResult:
+async def _commit(
+    state: _TurnState, turn: _PendingTurn, *, include_publication: bool = False,
+) -> ExecutionTerminalCommitResult:
     return await state.commands.commit_pending_turn(
         turn.reservation, turn.commit, expected_session=state.session,
         next_cursor=turn.cursor, conversation_agent_run=turn.run,
         conversation_checkpoint=turn.checkpoint, audit_events=turn.audit_events,
+        include_publication=include_publication,
     )
 
 
@@ -268,12 +271,19 @@ async def test_pending_turn_has_one_atomic_write_and_replay_has_no_durable_growt
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_same_request_returns_first_execution_and_result(tmp_path: Path, backend: str) -> None:
+    from linktools.ai.persistence.contracts import ExecutionTerminalPublication
+
     async with _turn_state(backend, tmp_path) as state:
         winner = _pending_turn(state)
-        committed = await _commit(state, winner)
+        committed = await _commit(state, winner, include_publication=True)
+        assert isinstance(committed, ExecutionTerminalPublication)
+        assert committed.observed.value == committed.execution
+        assert committed.session_released
         before = await _snapshot(state)
         loser = _pending_turn(state, execution_id="loser", answer="duplicate model answer")
-        assert await _commit(state, loser) == committed
+        replay = await _commit(state, loser, include_publication=True)
+        assert not isinstance(replay, ExecutionTerminalPublication)
+        assert replay == ExecutionTerminalCommitResult(committed.execution, committed.result)
         assert await state.storage.execution.executions.get("loser", tenant_id="tenant") is None
         assert await _snapshot(state) == before
 

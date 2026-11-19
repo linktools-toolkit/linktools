@@ -15,6 +15,7 @@ from ..session import (
     SessionHistoryItem,
     SessionTurnItem,
     SessionTurn,
+    PublishedSessionTurn,
     SessionAdmission,
     SessionHistoryReader,
     CreateSessionRequest,
@@ -27,7 +28,8 @@ from ..session import (
     SessionDetail,
 )
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1337,6 +1339,10 @@ class ExecutionService(Protocol):
 
 
 class SessionService(Protocol):
+    def capture_published_turn(
+        self, session_id: str, execution_id: str, *, principal: Principal,
+    ) -> AbstractContextManager[Callable[[], Awaitable[PublishedSessionTurn | None]]]: ...
+
     def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]: ...
 
     async def wait_inactive(

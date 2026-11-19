@@ -33,14 +33,18 @@ pytestmark = pytest.mark.asyncio
 
 
 @asynccontextmanager
-async def _runtimes(tmp_path, *, cache, shared=True, source_authority=False):
+async def _runtimes(tmp_path, *, cache, shared=True, source_authority=False, fail_next=False):
     entered, finish = asyncio.Event(), asyncio.Event()
     pause = False
 
     async def model(messages, info):
+        nonlocal fail_next
         if pause:
             entered.set()
             await finish.wait()
+            if fail_next:
+                fail_next = False
+                raise RuntimeError("controlled model failure")
         return ModelResponse(parts=[TextPart("answer")])
 
     def group():
@@ -418,3 +422,113 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
         assert current.active_execution_id == ("other-execution" if keep_active else None)
     finally:
         await storage.close()
+
+
+@pytest.mark.parametrize("transition", ("complete", "cancel", "promote", "lost_ack", "fail"))
+async def test_local_committed_turn_capture_matches_canonical_and_never_claims_occupancy(
+    tmp_path: Path, transition: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = InMemoryCacheBackend(max_bytes=2**24)
+    async with _runtimes(
+        tmp_path, cache=cache, source_authority=True, fail_next=(transition == "fail"),
+    ) as (runtimes, entered, finish, block):
+        owner, persistence = runtimes[0]
+        reader, _ = runtimes[1]
+        session = await owner.agents.get().create_session("session")
+        warm = await session.start("previous")
+        assert (await warm.wait()).result.status is ExecutionStatus.SUCCEEDED
+        block()
+        execution = await session.start("current")
+        await asyncio.wait_for(entered.wait(), 5)
+        with (owner.sessions.capture_published_turn(
+                  "session", execution.execution_id, principal=owner.default_principal,
+              ) as captured,
+              owner.sessions.capture_published_turn(
+                  "different-session", execution.execution_id, principal=owner.default_principal,
+              ) as wrong_session,
+              reader.sessions.capture_published_turn(
+                  "session", execution.execution_id, principal=reader.default_principal,
+              ) as remote):
+            assert await captured() is None
+            lost = False
+            if transition == "lost_ack":
+                from linktools.ai.persistence.contracts import ExecutionTerminalPublication
+
+                group = persistence.execution.executions.state_store.storage_group
+                mutate = group.mutate
+
+                async def lose_terminal_ack(stores, callback):
+                    nonlocal lost
+                    value = await mutate(stores, callback)
+                    if not lost and isinstance(value, ExecutionTerminalPublication):
+                        lost = True
+                        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+                    return value
+
+                monkeypatch.setattr(group, "mutate", lose_terminal_ack)
+            if transition == "cancel":
+                await execution.cancel(idempotency_key="cancel")
+            if transition == "promote":
+                assert await owner.executions._service.acquire_dependency_hold(
+                    execution.execution_id, tenant_id=owner.tenant_id, hold_id="hold",
+                )
+                await owner.executions._service.release_dependency_hold(
+                    execution.execution_id, tenant_id=owner.tenant_id, hold_id="hold",
+                )
+            finish.set()
+            result = (await execution.wait(timeout_seconds=5)).result
+            from sqlalchemy import event
+            from sqlalchemy.engine import Engine
+            source_statements = []
+
+            def capture_sql(conn, cursor, statement, parameters, context, executemany):
+                source_statements.append(statement)
+
+            event.listen(Engine, "after_cursor_execute", capture_sql)
+            try:
+                local = await captured()
+            finally:
+                event.remove(Engine, "after_cursor_execute", capture_sql)
+            assert not source_statements
+            assert await wrong_session() is None
+            assert await remote() is None
+            expected = await reader.history.session_detail(
+                "session", principal=reader.default_principal, limit=1, max_age=0,
+            )
+            if transition == "lost_ack":
+                assert lost and local is None
+                assert expected.timeline.items[0].execution_id == execution.execution_id
+                assert expected.timeline.items[0].status is result.status
+                return
+            assert local is not None
+            assert expected.timeline.items == (local.turn,)
+            assert expected.session.revision == local.session_revision
+            assert local.turn_seq == 2
+            assert local.turn.status == result.status
+            if transition == "fail":
+                assert result.status is ExecutionStatus.FAILED
+                assert local.turn.items == () and local.turn.output is None
+
+            class RevokedSessionRead:
+                async def authorize(self, principal, action, resource):
+                    from linktools.ai.core import AuthorizationAction
+                    assert action is AuthorizationAction.SESSION_READ and resource.id == "session"
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+            with monkeypatch.context() as scoped:
+                scoped.setattr(owner.sessions._service, "_runtime_authorization", RevokedSessionRead())
+                with pytest.raises(AIError) as denied:
+                    await captured()
+                assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+            finish.clear()
+            entered.clear()
+            later = await session.start("later")
+            await asyncio.wait_for(entered.wait(), 5)
+            state = await reader.history.inspect_session("session", principal=reader.default_principal)
+            assert state.active_execution_id == later.execution_id
+            assert await captured() == local
+            finish.set()
+            await later.wait(timeout_seconds=5)
+        assert await captured() is None

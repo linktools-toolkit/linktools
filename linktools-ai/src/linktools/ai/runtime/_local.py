@@ -170,7 +170,7 @@ from ..persistence.repositories import operation_identity_matches
 from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
 from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction, StateStore, StoredRecord
 from ..persistence import NativeToolErrorReference, SqlStepStore, StepWriteReceipt
-from ..storage import SqlStorageContext
+from ..storage import SqlStorageContext, sql_observation_phase
 
 
 class _SubagentDispatcher(Protocol):
@@ -4134,6 +4134,7 @@ class LocalExecutionBackend:
                 return observed
         return None
 
+    @sql_observation_phase("runtime.execution.worker", inherit=False)
     async def _run(
         self,
         request: ExecutionRequest,
@@ -7386,6 +7387,7 @@ class LocalExecutionBackend:
                     or not current.restart_checkpoints and not current.durable_trace) else None),
                 execution_projections=() if plan is None else plan.projections,
                 audit_events=pending_audit, tool_operations=tool_operations,
+                include_publication=True,
             )
             if not await accept(committed):
                 assert turn.failure is not None

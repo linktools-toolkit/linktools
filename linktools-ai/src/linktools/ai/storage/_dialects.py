@@ -253,13 +253,18 @@ class SQLiteDialect:
     def _database_current_time_expression(self) -> "ColumnElement[str] | ColumnElement[datetime]":
         return self._database_now_expression()
 
+    def read_snapshot_time_expression(self) -> "ColumnElement[str] | ColumnElement[datetime]":
+        return self._database_now_expression()
+
     async def _read_database_time(
         self, session: "AsyncSession", expression: "ColumnElement[str] | ColumnElement[datetime]",
     ) -> datetime:
         from sqlalchemy import select
 
         _logger.debug("SQL authoritative time queried: dialect=%s", self.name)
-        value = await session.scalar(select(expression))
+        return self.decode_database_time(await session.scalar(select(expression)))
+
+    def decode_database_time(self, value: object) -> datetime:
         if isinstance(value, str):
             try:
                 value = datetime.fromisoformat(value)
@@ -535,6 +540,11 @@ class PostgreSQLDialect(SQLiteDialect):
         from sqlalchemy import func
 
         return func.clock_timestamp()
+
+    def read_snapshot_time_expression(self) -> "ColumnElement[datetime]":
+        from sqlalchemy import func
+
+        return func.statement_timestamp()
 
     def _insert(self, table: "Table") -> "PostgreSQLInsert":
         from sqlalchemy.dialects.postgresql import insert

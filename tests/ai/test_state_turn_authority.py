@@ -225,22 +225,51 @@ async def test_state_turn_reachable_broken_edges_are_never_idle(tmp_path, backen
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 async def test_state_turn_renews_during_observation_without_combining_generations(tmp_path, monkeypatch, backend):
+    from contextvars import Context
+
+    from sqlalchemy import text
+
+    from linktools.ai.persistence._sql import _SqlTransaction
+
     async with _open_store(backend, tmp_path / backend) as store:
         authority = _backend(store)
         first = await _claim(authority)
-        read = store.read
-        calls = 0
-        async def racing(callback):
-            nonlocal calls
-            calls += 1
-            result = await read(callback)
-            if calls == 2:
-                assert await authority.renew_turn(first.lease, lease_seconds=90) is not None
-            return result
-        with monkeypatch.context() as patch:
-            patch.setattr(store, "read", racing)
-            assert await authority.read_turn_by_session(_SCOPE, "s") == replace(first, lease=None)
-        assert calls == 6
+        if backend == "sql":
+            async with store.context.engine.connect() as connection:
+                await connection.execute(text("PRAGMA journal_mode=WAL"))
+            observe = _SqlTransaction.observe_record
+            calls = 0
+
+            async def racing(tx, key):
+                nonlocal calls
+                result = await observe(tx, key)
+                calls += 1
+                # An independent writer must not inherit the reader's snapshot.
+                assert await asyncio.create_task(
+                    authority.renew_turn(first.lease, lease_seconds=90), context=Context(),
+                ) is not None
+                return result
+
+            with monkeypatch.context() as patch:
+                patch.setattr(_SqlTransaction, "observe_record", racing)
+                assert await authority.read_turn_by_session(_SCOPE, "s") == replace(first, lease=None)
+            assert calls == 1
+        else:
+            read = store.read
+            calls = 0
+
+            async def racing(callback):
+                nonlocal calls
+                calls += 1
+                result = await read(callback)
+                if calls == 2:
+                    assert await authority.renew_turn(first.lease, lease_seconds=90) is not None
+                return result
+
+            with monkeypatch.context() as patch:
+                patch.setattr(store, "read", racing)
+                assert await authority.read_turn_by_session(_SCOPE, "s") == replace(first, lease=None)
+            assert calls == 6
 
 
 async def test_state_turn_independent_sql_connections_choose_one_session_winner(tmp_path):
@@ -376,20 +405,53 @@ async def test_state_turn_sql_observation_clock_expiry_and_failure_preserve_sour
         await _claim(authority)
         before = await store.read(lambda tx: tx.scan_records())
         session = next(record for record in before if record.kind == "turn_session")
-        async def expired(connection):
-            return session.lease_expires_at
+        from sqlalchemy import literal
+        from sqlalchemy.ext.asyncio import AsyncSession
+
         with monkeypatch.context() as patch:
-            patch.setattr(store.context.dialect, "database_now", expired)
+            patch.setattr(store.context.dialect, "read_snapshot_time_expression",
+                          lambda: literal(session.lease_expires_at.isoformat()))
             assert await authority.read_turn_by_session(_SCOPE, "s") is None
         unavailable = AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        async def failed(connection):
-            raise unavailable
+        execute = AsyncSession.execute
+        async def failed(connection, statement, *args, **kwargs):
+            if "observed_at" in str(statement):
+                raise unavailable
+            return await execute(connection, statement, *args, **kwargs)
         with monkeypatch.context() as patch:
-            patch.setattr(store.context.dialect, "database_now", failed)
+            patch.setattr(AsyncSession, "execute", failed)
             with pytest.raises(AIError) as caught:
                 await authority.read_turn_by_request(_SCOPE, "r")
         assert caught.value is unavailable
         assert await store.read(lambda tx: tx.scan_records()) == before
+
+
+async def test_postgres_snapshot_clock_uses_the_anchor_statement_time():
+    from sqlalchemy import select
+    from sqlalchemy.dialects import postgresql
+
+    from linktools.ai.storage import PostgreSQLDialect
+
+    clock = PostgreSQLDialect()
+    statement = select(clock.read_snapshot_time_expression().label("observed_at"))
+    assert str(statement.compile(dialect=postgresql.dialect())) == "SELECT statement_timestamp() AS observed_at"
+
+
+async def test_sql_observation_respects_a_custom_dialect_clock(tmp_path, monkeypatch):
+    from linktools.ai.storage import SQLiteDialect
+
+    class CustomClockDialect(SQLiteDialect):
+        async def database_now(self, session):
+            return datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+        def read_snapshot_time_expression(self):
+            pytest.fail("a custom dialect must not be opted into the built-in snapshot clock")
+
+    async with _open_store("sql", tmp_path / "sql") as store:
+        authority = _backend(store)
+        assert await _claim(authority) is not None
+        monkeypatch.setattr(store.context, "dialect", CustomClockDialect())
+        assert await authority.read_turn_by_session(_SCOPE, "s") is None
 
 
 async def test_state_turn_sql_observer_cancellation_waits_for_clock_and_releases_connection(tmp_path, monkeypatch):
@@ -397,15 +459,18 @@ async def test_state_turn_sql_observer_cancellation_waits_for_clock_and_releases
         authority = _backend(store)
         await _claim(authority)
         before = await store.read(lambda tx: tx.scan_records())
-        clock = store.context.dialect.database_now
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        execute = AsyncSession.execute
         entered, release = asyncio.Event(), asyncio.Event()
-        async def delayed(connection):
-            entered.set()
-            await release.wait()
-            return await clock(connection)
+        async def delayed(connection, statement, *args, **kwargs):
+            if "observed_at" in str(statement):
+                entered.set()
+                await release.wait()
+            return await execute(connection, statement, *args, **kwargs)
         observer = None
         with monkeypatch.context() as patch:
-            patch.setattr(store.context.dialect, "database_now", delayed)
+            patch.setattr(AsyncSession, "execute", delayed)
             try:
                 observer = asyncio.create_task(authority.read_turn_by_session(_SCOPE, "s"))
                 await asyncio.wait_for(entered.wait(), 5)
@@ -423,6 +488,52 @@ async def test_state_turn_sql_observer_cancellation_waits_for_clock_and_releases
                         observer.cancel()
                     await asyncio.gather(observer, return_exceptions=True)
         assert await store.read(lambda tx: tx.scan_records()) == before
+
+
+async def test_sql_admission_rechecks_an_expired_snapshot_after_concurrent_renewal(tmp_path, monkeypatch):
+    from sqlalchemy import text
+
+    async with _open_store("sql", tmp_path / "sql") as store:
+        async with store.context.engine.connect() as connection:
+            await connection.execute(text("PRAGMA journal_mode=WAL"))
+        authority = _backend(store)
+        initial = datetime.now(timezone.utc)
+        sampled = initial
+        _clock(monkeypatch, store, "sql", lambda: sampled)
+
+        async def clock(session):
+            return sampled
+
+        monkeypatch.setattr(store.context.dialect, "database_now", clock)
+        claim = await _claim(authority, seconds=60)
+        snapshotted, proceed = asyncio.Event(), asyncio.Event()
+        receipt_reads = 0
+
+        class MissingReceipt:
+            state_store = store
+
+            async def get(self, scope, key, *, tenant_id):
+                nonlocal receipt_reads
+                await store.read(lambda tx: tx.scan_records())
+                receipt_reads += 1
+                if receipt_reads == 1:
+                    snapshotted.set()
+                    await proceed.wait()
+
+        lookup = asyncio.create_task(authority.read_admission_request(
+            MissingReceipt(), _SCOPE, idempotency_scope="session.resume", idempotency_key="r", request_key="r",
+        ))
+        try:
+            await asyncio.wait_for(snapshotted.wait(), 5)
+            sampled = initial + timedelta(seconds=30)
+            assert await authority.renew_turn(claim.lease, lease_seconds=60) == claim
+            sampled = initial + timedelta(seconds=61)
+            assert receipt_reads == 1
+        finally:
+            proceed.set()
+            receipt, observed = await asyncio.wait_for(lookup, 5)
+        assert receipt is None and observed == replace(claim, lease=None)
+        assert receipt_reads == 2
 
 
 async def test_state_turn_sql_cross_session_reclamation_with_two_initial_snapshots(tmp_path, monkeypatch):
@@ -578,7 +689,7 @@ async def test_state_turn_sqlite_known_graph_statement_budgets(tmp_path):
             assert counts["SELECT"] <= 3 and counts["INSERT"] <= 2 and counts["UPDATE"] <= 2
             counts.clear()
             assert await authority.read_turn_by_session(_SCOPE, "s") == replace(first, lease=None)
-            assert counts["SELECT"] <= 5 and counts["UPDATE"] == 0
+            assert counts["SELECT"] == 2 and counts["BEGIN"] == 1 and counts["UPDATE"] == 0
             counts.clear()
             assert await authority.release_turn(first.lease)
             assert counts["SELECT"] <= 4 and counts["UPDATE"] <= 2

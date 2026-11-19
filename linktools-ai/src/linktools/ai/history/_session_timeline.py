@@ -5,6 +5,7 @@
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Literal, Protocol, cast
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
@@ -341,9 +342,15 @@ async def capture_session_timeline(
                     or root.active_execution_id is not None
                     or pending_execution.session_id != root.session_id
                     or pending_execution.parent_execution_id is not None
-                    or pending_execution.created_at < root.created_at
-                    or pending_execution.execution_id in await executions.get_timeline_many((pending_execution.execution_id,), tenant_id=tenant_id)):
+                    or pending_execution.created_at < root.created_at):
                 pending_execution = None
+            else:
+                execution_id = pending_execution.execution_id
+                # A source miss is the normal case for a cache-only pending
+                # turn. No payload or native message is needed to prove it.
+                if (not shared_native_scope or await executions.get_header(execution_id, tenant_id=tenant_id) is not None):
+                    if execution_id in await executions.get_timeline_many((execution_id,), tenant_id=tenant_id):
+                        pending_execution = None
         page_limit = validate_page_limit(limit)
         coordinate = _decode_timeline_cursor(
             cursor, tenant_id=tenant_id, session_id=session_id, signer=cursor_signer,
@@ -704,16 +711,11 @@ async def project_captured_session_timeline(
     turns: list[SessionTurn] = []
     for ref in refs:
         commit = commits.get((ref.session_id, ref.turn_seq))
-        items: tuple[SessionTurnItem, ...] = ()
-        output: JsonValue = None
         execution = execution_records[ref.execution_id]
-        if execution.session_id != ref.session_id or execution.parent_execution_id is not None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        updated_at = _turn_updated_at(ref, execution, commit)
+        transcript: tuple[ModelMessage, ...] = ()
+        output: JsonValue = None
         if commit is not None:
-            if (commit.execution_id != ref.execution_id or commit.session_id != ref.session_id
-                    or execution.completed_at is None
-                    or execution.result is None):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if commit.end_message_index > commit.start_message_index:
                 base = message_bases[ref.session_id]
                 source = messages[ref.session_id]
@@ -721,44 +723,15 @@ async def project_captured_session_timeline(
                 end = commit.end_message_index - base
                 if start < 0 or end > len(source) or end <= start:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                items = _timeline_items(source[start:end])
-            if execution.status is ExecutionStatus.SUCCEEDED:
-                if execution.result.output is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                output = await _committed_output(execution.result.output, transcript_store)
-            elif execution.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            updated_at = execution.completed_at
-        else:
-            if execution.conversation and execution.status in {
-                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-            }:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            if execution.status is ExecutionStatus.SUCCEEDED:
-                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            updated_at = execution.updated_at
-        status, created_at = execution.status, execution.created_at
-        user_input = execution.stored_user_input
-        error_code, safe_error_details = execution.error_code, execution.safe_error_details
-        turns.append(
-            SessionTurn(
-                ref.execution_id,
-                status,
-                created_at,
-                updated_at,
-                stored_user_input_view(user_input)
-                if user_input.view is not None or (user_input.payload.kind == "inline"
-                    and user_input.payload.encoding != "json-attachments")
-                else await load_stored_input_view(
-                    user_input, transcript_store.read_execution_payload,
-                ),
-                commit is not None,
-                items,
-                error_code,
-                safe_error_details,
-                output=output,
-            )
-        )
+                transcript = source[start:end]
+            payload = _committed_output_payload(execution)
+            if payload is not None:
+                output = await _committed_output(payload, transcript_store)
+        stored_input = execution.stored_user_input
+        user_input = (stored_user_input_view(stored_input)
+                      if _has_materialized_input_view(stored_input)
+                      else await load_stored_input_view(stored_input, transcript_store.read_execution_payload))
+        turns.append(_format_session_turn(ref, execution, updated_at, user_input, commit is not None, transcript, output))
     next_cursor = (
         None
         if next_coordinate is None
@@ -771,6 +744,86 @@ async def project_captured_session_timeline(
         )
     )
     return Page(tuple(turns), next_cursor)
+
+
+def _turn_updated_at(
+    ref: SessionTurnRef,
+    execution: ExecutionRecord | ExecutionTimelineRecord,
+    commit: SessionTurnCommit | None,
+) -> datetime:
+    if execution.session_id != ref.session_id or execution.parent_execution_id is not None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if commit is not None:
+        if (commit.execution_id != ref.execution_id or commit.session_id != ref.session_id
+                or execution.completed_at is None or execution.result is None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return execution.completed_at
+    if execution.conversation and execution.status in {
+        ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+    }:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+    if execution.status is ExecutionStatus.SUCCEEDED:
+        raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+    return execution.updated_at
+
+
+def _committed_output_payload(execution: ExecutionRecord | ExecutionTimelineRecord) -> StoredPayload | None:
+    if execution.status is ExecutionStatus.SUCCEEDED:
+        if execution.result is None or execution.result.output is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return execution.result.output
+    if execution.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return None
+
+
+def _format_session_turn(
+    ref: SessionTurnRef,
+    execution: ExecutionRecord | ExecutionTimelineRecord,
+    updated_at: datetime,
+    user_input: JsonValue,
+    committed: bool,
+    messages: tuple[ModelMessage, ...],
+    output: JsonValue,
+) -> SessionTurn:
+    return SessionTurn(
+        ref.execution_id, execution.status, execution.created_at, updated_at, user_input, committed,
+        _timeline_items(messages), execution.error_code, execution.safe_error_details, output=output,
+    )
+
+
+def project_materialized_session_turn(
+    ref: SessionTurnRef,
+    commit: SessionTurnCommit,
+    execution: ExecutionRecord | ExecutionTimelineRecord,
+    messages: tuple[ModelMessage, ...],
+    *,
+    inline_output: StoredPayload | None = None,
+) -> SessionTurn | None:
+    """Project a confirmed exact local turn, or leave projection to the source reader."""
+    if (commit.turn_seq != ref.turn_seq or execution.execution_id != ref.execution_id
+            or len(messages) != commit.end_message_index - commit.start_message_index):
+        return None
+    updated_at = _turn_updated_at(ref, execution, commit)
+    payload = _committed_output_payload(execution)
+    if payload is not None and payload.kind != "inline":
+        if (inline_output is None or inline_output.kind != "inline" or inline_output.encoding != "json"
+                or (inline_output.digest, inline_output.size) != (payload.digest, payload.size)):
+            return None
+        payload = inline_output
+    if payload is not None and payload.encoding not in {"utf-8", "json"}:
+        return None
+    user_input = execution.stored_user_input
+    if not _has_materialized_input_view(user_input):
+        return None
+    return _format_session_turn(
+        ref, execution, updated_at, stored_user_input_view(user_input), True, messages,
+        None if payload is None else normalize_json_value(payload.decode()),
+    )
+
+
+def _has_materialized_input_view(value: StoredUserInput) -> bool:
+    return value.view is not None or (value.payload.kind == "inline" and value.payload.encoding != "json-attachments")
 
 
 async def load_stored_input_view(
@@ -816,6 +869,7 @@ __all__ = [
     "capture_session_timeline",
     "project_captured_session_timeline",
     "project_session_timeline",
+    "project_materialized_session_turn",
     "project_session_turn",
 ]
 

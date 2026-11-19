@@ -56,6 +56,7 @@ from ._agent_binding_resolver import _AgentBindingResolver
 from ..observe.stream import ObservationSession, await_stream_cleanup
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
 from ..core import ExecutionContext
+from ..storage import sql_observation_scope
 from ..model import UserPromptInput, normalize_input_files
 from ..inputs import CanonicalUserInput
 from ..observe import (MetricRecorderProvider, MetricRecorderStatus, MetricFlushResult, MetricsControl,
@@ -648,7 +649,8 @@ class Runtime(Generic[AppT]):
                 idempotency_key=key, mode="run", planning=None, thinking=None,
                 correlation=correlation, _resume=resume)
 
-        return await self._session_service.start_existing(session_id, principal, key, start)
+        with sql_observation_scope("runtime.session.start"):
+            return await self._session_service.start_existing(session_id, principal, key, start)
 
     def _session_handle(self, view: SessionView, principal: Principal) -> Session[AppT]:
         return Session(self, view.agent_id, None, view.session_id, principal)
