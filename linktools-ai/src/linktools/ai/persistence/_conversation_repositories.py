@@ -1565,7 +1565,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         execution_id: str, next_cursor: ConversationCursor | None,
         start_message_index: int, end_message_index: int,
         successful: bool,
-    ) -> SessionRecord:
+    ) -> tuple[SessionRecord, SessionTurnCommit]:
         _require_tenant(expected, self._tenant_id)
         record = await transaction.get_record(self._key("session", (expected.session_id,)))
         if record is None:
@@ -1592,10 +1592,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             stream, sequence, record.key, "session_turn",
             execution_id, None, {"version": 1, "execution_id": execution_id},
         ))
-        await transaction.insert_record(self._stored_timeline_commit(SessionTurnCommit(
-            current.session_id, sequence, execution_id, start_message_index, end_message_index,
-        )))
-        return final
+        commit = SessionTurnCommit(current.session_id, sequence, execution_id, start_message_index, end_message_index)
+        await transaction.insert_record(self._stored_timeline_commit(commit))
+        return final, commit
 
     async def advance_continuation_in_transaction(
         self,

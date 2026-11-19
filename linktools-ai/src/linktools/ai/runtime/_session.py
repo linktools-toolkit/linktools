@@ -7,7 +7,8 @@ import json
 import math
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Protocol, TypeVar
 
@@ -35,6 +36,7 @@ from ..history import SessionDisplayCache
 from ..history import (
     capture_session_refresh,
     project_captured_session_timeline,
+    project_materialized_session_turn,
     project_session_timeline,
 )
 from ..inputs import InputFileSource, stored_user_input_view
@@ -53,8 +55,8 @@ from ..execution import (
     SessionView,
 )
 from ..persistence.objects import runtime_object_source_reads
-from ..session import ConversationCursor, SessionRecord, SessionAdmission
-from ..persistence.contracts import ConversationRepositories, ExecutionRepository
+from ..session import ConversationCursor, SessionRecord, SessionAdmission, SessionTurnRef, PublishedSessionTurn
+from ..persistence.contracts import ConversationRepositories, ExecutionRepository, ExecutionTerminalPublication
 from ..execution import ExecutionRecord
 from ..persistence.repositories import SessionRepositoryImpl
 from ..persistence.repositories import ExecutionRepositoryImpl
@@ -276,6 +278,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         observe_local_session: Callable[..., tuple[ExecutionRecord | None, int]] | None = None,
         read_session_owner: Callable[..., Awaitable[TurnCoordination | None]] | None = None,
         local_waiter: LocalExecutionWaiter | None = None,
+        capture_terminal_publication: Callable[..., AbstractContextManager[Callable[[], ExecutionTerminalPublication | None]]] | None = None,
     ) -> None:
         self._watches: dict[str, _SessionWatch] = {}
         self._watches_closed = False
@@ -289,6 +292,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         self._observe_local_session = observe_local_session
         self._read_session_owner = read_session_owner
         self._local_waiter = local_waiter
+        self._capture_terminal_publication = capture_terminal_publication
         super().__init__(
             conversation, executions, authorization, _SessionExecutionAdapter(execution), cursor_signer,
             enabled=enabled, release_terminal=release_terminal,
@@ -304,6 +308,43 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             conversation, executions, transcript_store, cursor_signer, self._cache,
             now=lambda: time.time(),
         )
+
+    @contextmanager
+    def capture_published_turn(
+        self, session_id: str, execution_id: str, *, principal: Principal,
+    ) -> Iterator[Callable[[], Awaitable[PublishedSessionTurn | None]]]:
+        """Capture a local terminal after-image while consuming a live turn."""
+        capture = self._capture_terminal_publication
+        if capture is None or not isinstance(self._admission_execution, DefaultExecutionService):
+            async def unavailable() -> None:
+                return None
+            yield unavailable
+            return
+
+        with capture(execution_id, tenant_id=principal.tenant_id) as publication:
+            async def read() -> PublishedSessionTurn | None:
+                receipt = publication()
+                if receipt is None or receipt.turn_after_image is None:
+                    return None
+                image = receipt.turn_after_image
+                commit = image.commit
+                execution = receipt.execution
+                if (commit.session_id != session_id or commit.execution_id != execution_id
+                        or execution.session_id != session_id):
+                    return None
+                await self._admission_execution.authorize_loaded_execution(
+                    execution, principal, AuthorizationAction.EXECUTION_READ, owner_principal_id=None,
+                )
+                await self._runtime_authorization.authorize(
+                    principal, AuthorizationAction.SESSION_READ,
+                    ResourceRef(ResourceKind.SESSION, session_id, principal.tenant_id, image.owner_principal_id),
+                )
+                turn = project_materialized_session_turn(
+                    SessionTurnRef(session_id, commit.turn_seq, execution_id), commit, execution,
+                    tuple(image.messages), inline_output=image.inline_output,
+                )
+                return None if turn is None else PublishedSessionTurn(turn, commit.turn_seq, image.session_revision)
+            yield read
 
     async def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
         """Observe local Runtime session changes without polling.

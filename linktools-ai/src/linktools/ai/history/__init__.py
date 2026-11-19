@@ -8,7 +8,7 @@ from ._service import (DefaultExecutionHistoryService)
 from ._artifact import (DefaultArtifactService)
 from ._transient import (TransientExecutionHistoryStore)
 from ._session_display_cache import (SessionDisplayCache)
-from ._session_timeline import (SessionTimelineCapture, SessionTimelineTranscriptStore, capture_session_refresh, capture_session_timeline, project_captured_session_timeline, project_session_timeline)
+from ._session_timeline import (SessionTimelineCapture, SessionTimelineTranscriptStore, capture_session_refresh, capture_session_timeline, project_captured_session_timeline, project_session_timeline, project_materialized_session_turn)
 from ..execution.events import project_event_payload
 
-__all__ = ['ExecutionDetail', 'ExecutionInfo', 'History', 'StepExecutionHistoryReader', 'StepSessionHistoryReader', 'DefaultExecutionHistoryService', 'DefaultArtifactService', 'TransientExecutionHistoryStore', 'SessionDisplayCache', 'SessionTimelineCapture', 'SessionTimelineTranscriptStore', 'capture_session_refresh', 'capture_session_timeline', 'project_captured_session_timeline', 'project_session_timeline', 'project_event_payload']
+__all__ = ['ExecutionDetail', 'ExecutionInfo', 'History', 'StepExecutionHistoryReader', 'StepSessionHistoryReader', 'DefaultExecutionHistoryService', 'DefaultArtifactService', 'TransientExecutionHistoryStore', 'SessionDisplayCache', 'SessionTimelineCapture', 'SessionTimelineTranscriptStore', 'capture_session_refresh', 'capture_session_timeline', 'project_captured_session_timeline', 'project_session_timeline', 'project_materialized_session_turn', 'project_event_payload']

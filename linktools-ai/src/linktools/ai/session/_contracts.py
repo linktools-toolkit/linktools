@@ -217,6 +217,15 @@ class SessionTurn:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
 
 
+@dataclass(frozen=True, slots=True)
+class PublishedSessionTurn:
+    """One committed transcript delta, not current session or occupancy state."""
+
+    turn: SessionTurn
+    turn_seq: int
+    session_revision: int
+
+
 class SessionHistoryReader(Protocol):
     async def history(
         self,

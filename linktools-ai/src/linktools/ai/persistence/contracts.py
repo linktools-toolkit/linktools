@@ -1326,12 +1326,24 @@ class ExecutionTerminalWriteReceipt(ExecutionTerminalCommitResult):
     observed: Observed[ExecutionRecord]
 
 
+@dataclass(frozen=True, slots=True)
+class SessionTurnAfterImage:
+    """Ephemeral transcript coordinates and bodies from a confirmed same-group write."""
+
+    commit: SessionTurnCommit
+    owner_principal_id: str
+    session_revision: int
+    messages: Sequence[ModelMessage] = field(repr=False)
+    inline_output: StoredPayload | None = field(repr=False)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ExecutionTerminalPublication(ExecutionTerminalWriteReceipt):
     """Full publication confirmed by its owner, including any Session release."""
 
     session_released: bool = False
     history_seal: ExecutionHistorySealRecord | None = None
+    turn_after_image: SessionTurnAfterImage | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

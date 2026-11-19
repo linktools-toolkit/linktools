@@ -846,6 +846,7 @@ async def _build_local_components(
                                 runtime_bridge.pending_turns.coordination.read_session_owner),
             local_waiter=backend,
             workspace_access=input_materializer.access,
+            capture_terminal_publication=state.retention.capture_terminal_publication,
         )
         lifecycle.session = session
         runtime_bridge.pending_turns.session_changed = state.conversation.sessions.notify_session_change

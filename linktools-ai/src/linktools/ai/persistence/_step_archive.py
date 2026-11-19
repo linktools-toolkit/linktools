@@ -23,6 +23,7 @@ from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeS
 from ..core import ExecutionStatus, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest
+from ..session import SessionTurnCommit
 from ..storage import CacheBackend, ObjectRef, ObjectStore, StoredPayload
 from ..model.messages import decode_model_messages, encode_model_messages
 from ._transcript_staging import MessageArchive, MessageSnapshot, StagedTranscript
@@ -186,6 +187,7 @@ class PreparedAgentRunCheckpoint:
     history_quality: HistoryQuality = HistoryQuality.COMPLETE
     archive: PreparedArchive = field(default_factory=PreparedArchive)
     context_messages: Sequence[ModelMessage] = ()
+    transcript_delta: MessageSnapshot | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +206,29 @@ class PreparedAgentRunCheckpointBatch:
 
     def __getitem__(self, index: int) -> PreparedAgentRunCheckpoint:
         return self.checkpoints[index]
+
+    def session_turn_messages(
+        self, commit: SessionTurnCommit, *, inherited_message_count: int,
+    ) -> MessageSnapshot | None:
+        """Return only locally prepared raw messages covering the exact committed range."""
+        if len(self.checkpoints) != 1:
+            return None
+        checkpoint = self.checkpoints[0]
+        if checkpoint.transcript_delta is None or not checkpoint.chunks:
+            return None
+        first = checkpoint.chunks[0].first_message_index
+        end = first
+        for chunk in checkpoint.chunks:
+            if (chunk.owner_id != checkpoint.owner_id or chunk.origin is not TranscriptOrigin.RAW
+                    or chunk.first_message_index != end or chunk.message_count <= 0):
+                return None
+            end += chunk.message_count
+        if (end != self.target_transcript_message_count
+                or inherited_message_count + first != commit.start_message_index
+                or inherited_message_count + end != commit.end_message_index
+                or len(checkpoint.transcript_delta) != end - first):
+            return None
+        return checkpoint.transcript_delta
 
 
 @dataclass(frozen=True, slots=True)
@@ -2670,6 +2695,7 @@ class StateStepArchive(AgentRunStore):
                     head.quality,
                     archive,
                     projection_messages,
+                    delta if self._runtime_domain is PersistenceDomain.CONVERSATION and delta else None,
                 )
             )
             target_message_count += len(delta)
