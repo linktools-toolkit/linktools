@@ -2689,8 +2689,14 @@ class StateCommands:
         capability_run_id: str | None = None,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         tool_operations: Sequence[ToolOperationRecord] = (),
+        include_publication: bool = False,
     ) -> ExecutionTerminalCommitResult:
-        """Materialize one volatile turn and its replay-safe outcomes atomically."""
+        """Materialize one volatile turn and its replay-safe outcomes atomically.
+
+        The committing owner can request evidence for its own confirmed write.
+        A prior winner or an uncertain commit readback is still a source result,
+        not evidence that this caller published that write.
+        """
         tool_operations = tuple(tool_operations)
         audit_events = tuple(audit_events)
         execution_projections = tuple(execution_projections)
@@ -2949,7 +2955,13 @@ class StateCommands:
             if capability_prefix is not None:
                 await capability_prefix.apply(group)
             candidate_published = True
-            return final
+            if not include_publication:
+                return final
+            return ExecutionTerminalPublication(
+                final.execution, final.result,
+                observed=Observed(final.execution, insertion.record.storage_revision),
+                session_released=expected_session is not None, history_seal=seal,
+            )
 
         async def operation() -> object:
             nonlocal resolved, publication_confirmed

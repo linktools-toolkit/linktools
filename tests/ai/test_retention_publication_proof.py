@@ -244,7 +244,9 @@ async def test_same_runtime_confirmed_terminal_reuses_publication_receipt(tmp_pa
             assert result.status is ExecutionStatus.SUCCEEDED
             assert len(confirmed) == 1
             receipt = confirmed[0]
-            terminal = receipt.execution if isinstance(receipt, ExecutionTerminalPublication) else receipt
+            assert isinstance(receipt, ExecutionTerminalPublication)
+            terminal = receipt.execution
+            assert receipt.session_released and receipt.observed.value == terminal
             assert terminal.execution_id == result.execution_id
             assert receipt_reads == []
             assert not retention.terminal_publication_confirmed(terminal)

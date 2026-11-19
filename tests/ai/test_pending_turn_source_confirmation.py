@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.persistence import Persistence
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionRecord
-from linktools.ai.persistence.contracts import PersistenceDomain, RuntimePayloadRef
+from linktools.ai.persistence.contracts import ExecutionTerminalPublication, PersistenceDomain, RuntimePayloadRef
 from linktools.ai.storage import StoredPayload
 from linktools.ai.persistence.state import active_state_scope
 
@@ -51,12 +51,13 @@ async def test_terminal_unknown_can_later_confirm_source_without_mutation(tmp_pa
                 raise RuntimeError("source temporarily unavailable")
             return await read_many(self, stores, callback)
 
+        publish = _commit_standalone if standalone else _commit
         assert await state.commands.read_pending_turn(turn.reservation, expected_session=expected) is None
         with monkeypatch.context() as patch:
             patch.setattr(type(group), "mutate", lost_ack)
             patch.setattr(type(group), "read_many", unavailable)
             with pytest.raises(AIError) as raised:
-                await (_commit_standalone(state, turn) if standalone else _commit(state, turn))
+                await publish(state, turn, include_publication=True)
             assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         before = await _snapshot(state)
 
@@ -67,6 +68,8 @@ async def test_terminal_unknown_can_later_confirm_source_without_mutation(tmp_pa
             patch.setattr(type(group), "mutate", forbidden)
             result = await state.commands.read_pending_turn(turn.reservation, expected_session=expected)
             assert result is not None and result.result == turn.commit.result
+            assert not isinstance(result, ExecutionTerminalPublication)
+            assert await publish(state, turn, include_publication=True) == result
             assert await state.commands.read_pending_turn(turn.reservation, expected_session=expected) == result
             if expected is not None:
                 current = await state.storage.conversation.sessions.get(expected.session_id, tenant_id="tenant")

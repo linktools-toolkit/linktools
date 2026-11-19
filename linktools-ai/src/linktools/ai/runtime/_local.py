@@ -7386,6 +7386,7 @@ class LocalExecutionBackend:
                     or not current.restart_checkpoints and not current.durable_trace) else None),
                 execution_projections=() if plan is None else plan.projections,
                 audit_events=pending_audit, tool_operations=tool_operations,
+                include_publication=True,
             )
             if not await accept(committed):
                 assert turn.failure is not None
