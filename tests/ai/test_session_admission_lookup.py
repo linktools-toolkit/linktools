@@ -383,3 +383,23 @@ async def test_same_source_lookup_authorizes_before_checking_receipt(tmp_path, m
                 "conversation", principal=Principal("other", "other"), idempotency_key="request",
             )
         assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+
+async def test_builtin_session_inspection_reuses_its_authorized_row(tmp_path, monkeypatch):
+    async with _runtimes(tmp_path, cache=None, shared=False) as (runtimes, *_):
+        runtime, storage = runtimes[0]
+        session = await runtime.agents.get().create_session("inspection")
+        repository = storage.conversation.sessions
+        get = repository.get
+        reads = 0
+
+        async def count(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            return await get(*args, **kwargs)
+
+        monkeypatch.setattr(repository, "get", count)
+        view = await runtime.history.inspect_session(session.session_id, principal=runtime.default_principal)
+        assert view.session_id == session.session_id
+        assert reads == 1

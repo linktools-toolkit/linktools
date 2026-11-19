@@ -426,6 +426,23 @@ async def test_state_turn_sql_observation_clock_expiry_and_failure_preserve_sour
         assert await store.read(lambda tx: tx.scan_records()) == before
 
 
+async def test_sql_observation_respects_a_custom_dialect_clock(tmp_path, monkeypatch):
+    from linktools.ai.storage import SQLiteDialect
+
+    class CustomClockDialect(SQLiteDialect):
+        async def database_now(self, session):
+            return datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+        def read_snapshot_time_expression(self):
+            pytest.fail("a custom dialect must not be opted into the built-in snapshot clock")
+
+    async with _open_store("sql", tmp_path / "sql") as store:
+        authority = _backend(store)
+        assert await _claim(authority) is not None
+        monkeypatch.setattr(store.context, "dialect", CustomClockDialect())
+        assert await authority.read_turn_by_session(_SCOPE, "s") is None
+
+
 async def test_state_turn_sql_observer_cancellation_waits_for_clock_and_releases_connection(tmp_path, monkeypatch):
     async with _open_store("sql", tmp_path / "sql") as store:
         authority = _backend(store)

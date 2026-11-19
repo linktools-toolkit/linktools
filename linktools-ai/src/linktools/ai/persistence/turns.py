@@ -353,7 +353,10 @@ class StateTurnCoordination:
             # pre-expiry renewal may already have committed outside that view.
             previous = graph
             receipt, graph, expired = await group.read_many(stores, capture)
-            if graph is not None and expired and graph.session.storage_revision != previous.session.storage_revision:
+            if graph is not None and expired and (
+                graph.session.key != previous.session.key
+                or graph.session.storage_revision != previous.session.storage_revision
+            ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         return receipt, None if graph is None or expired else self._coordination(graph)
 
