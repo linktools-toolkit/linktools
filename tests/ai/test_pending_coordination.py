@@ -13,10 +13,12 @@ from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.coordination import PendingTurnCoordination
 from linktools.ai.persistence.codec import encode_domain
+from linktools.ai.persistence.turns import StateTurnCoordination
 from linktools.ai.storage import InMemoryCacheBackend, TurnCoordination
 from linktools.ai.storage import _cache as cache_module
 
 from .test_history_projection_conformance import _record
+from .test_state_batch_delete_backends import _open_store
 
 
 class _ObservedCache(InMemoryCacheBackend):
@@ -545,3 +547,68 @@ async def test_existing_coordination_backend_remains_selected_without_admission_
         await helper.read_request_execution("request", tenant_id="tenant")
     assert unsupported.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert unsupported.value.safe_details == {"reason": "admission_lookup_not_supported"}
+
+
+@pytest.mark.asyncio
+async def test_state_session_display_requires_cache_and_authority_fence(tmp_path, monkeypatch) -> None:
+    async with _open_store("sql", tmp_path / "sql") as store:
+        cache = _ObservedCache()
+        authority = StateTurnCoordination(store, namespace="namespace", tenant_id="tenant")
+        reader = PendingTurnCoordination.for_state(cache, authority, namespace="namespace", tenant_id="tenant")
+
+        async def claim(owner_id):
+            lease = await authority.claim_turn(
+                reader._scope, session_key="session:session", request_key="request",
+                request_digest="digest", execution_id="execution", owner_id=owner_id, lease_seconds=60,
+            )
+            assert lease is not None and lease.lease is not None
+            return lease
+
+        record = replace(_record(ExecutionStatus.STARTED, 1), session_id="session")
+        first = await claim("A")
+        await reader.publish(record, first)
+        assert await reader.read_session_execution("session", tenant_id="tenant") is not None
+        assert await reader.read_session_execution("session", tenant_id="other") is None
+        index_key, body_key = cache.session_key(), cache.record_key()
+        old_index, old_body = cache.writes[index_key], cache.writes[body_key]
+
+        cache.paused_key = body_key
+        stale_read = asyncio.create_task(reader.read_session_execution("session", tenant_id="tenant"))
+        await asyncio.wait_for(cache.read_started.wait(), timeout=5)
+        assert await authority.release_turn(first.lease)
+        successor = await claim("B")
+        assert await authority.release_turn(successor.lease)
+        newest = await claim("A")
+        cache.read_continue.set()
+        assert await stale_read is None
+        cache.paused_key = None
+
+        await reader.publish(record, newest)
+        assert await reader.read_session_execution("session", tenant_id="tenant") is not None
+        current_index, current_body = cache.writes[index_key], cache.writes[body_key]
+        await cache.put(body_key, old_body)
+        assert await reader.read_session_execution("session", tenant_id="tenant") is None
+        await cache.put(body_key, current_body)
+        await cache.put(index_key, old_index)
+        assert await reader.read_session_execution("session", tenant_id="tenant") is None
+        await cache.put(index_key, current_index)
+        assert await reader.read_session_execution("session", tenant_id="tenant") is not None
+
+        legacy_index = json.loads(current_index)
+        del legacy_index["fence"]
+        await cache.put(index_key, canonical_json_bytes(legacy_index))
+        assert await reader.read_session_execution("session", tenant_id="tenant") is not None
+        await cache.put(index_key, current_index)
+
+        original_get = cache.get
+
+        async def unavailable(key):
+            if key == body_key:
+                raise OSError("cache unavailable")
+            return await original_get(key)
+
+        monkeypatch.setattr(cache, "get", unavailable)
+        with pytest.raises(OSError, match="cache unavailable"):
+            await reader.read_session_execution("session", tenant_id="tenant")
+        assert await authority.release_turn(newest.lease)
+        assert await reader.read_session_execution("session", tenant_id="tenant") is None

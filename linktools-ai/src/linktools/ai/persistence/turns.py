@@ -364,6 +364,16 @@ class StateTurnCoordination:
         graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
         return None if graph is None else self._coordination(graph)
 
+    async def matches_session_generation(
+        self, scope: TurnScopeIdentity, session_key: str, execution_id: str, owner_id: str, fence: int,
+    ) -> bool:
+        """Validate a display hint without exposing its owner's lease."""
+        graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
+        if graph is None:
+            return False
+        data = graph.execution.data
+        return data["execution_id"] == execution_id and data["owner_id"] == owner_id and data["fence"] == fence
+
     async def _replace(self, tx: StateTransaction, record: StoredRecord, **changes: object) -> StoredRecord:
         candidate = replace(record, storage_revision=record.storage_revision + 1, **changes)
         if not await tx.replace_record(candidate, expected_storage_revision=record.storage_revision):

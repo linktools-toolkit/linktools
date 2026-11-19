@@ -116,6 +116,9 @@ class PendingTurnCoordination:
             "request_identity_version": request_identity_version,
             "record": encode_domain(replace(record, input_context=None)),
         }
+        state_fence = ({"fence": coordination.lease.fence}
+                       if type(self._state_authority) is StateTurnCoordination else {})
+        envelope.update(state_fence)
         await self._cache.put(self._record_key(coordination), canonical_json_bytes(envelope))
         if record.session_id is not None:
             # This index is deliberately not deleted on release: a delayed old
@@ -128,6 +131,7 @@ class PendingTurnCoordination:
                     "session_id": record.session_id,
                     "execution_id": coordination.execution_id,
                     "owner_id": coordination.owner_id,
+                    **state_fence,
                 }),
             )
 
@@ -257,8 +261,28 @@ class PendingTurnCoordination:
                 return None
         except (TypeError, ValueError):
             return None
-        current = await self._read_execution(pointer["execution_id"], owner_id=pointer["owner_id"])
-        record = None if current is None else current[0]
+        authority = self._state_authority
+        fence = pointer.get("fence")
+        if type(authority) is StateTurnCoordination and type(fence) is int and fence > 0:
+            # Cache supplies only an address. Confirm the scoped, live session
+            # generation after the read; the fence also rejects owner-ID reuse.
+            hint = TurnCoordination(pointer["execution_id"], pointer["owner_id"], False, None)
+            cache_error = None
+            try:
+                pending = await self._read_pending_bytes(hint, fence=fence)
+            except Exception as error:
+                cache_error = error
+                pending = None
+            if not await authority.matches_session_generation(
+                self._scope, f"session:{session_id}", hint.execution_id, hint.owner_id, fence,
+            ):
+                return None
+            if cache_error is not None:
+                raise cache_error
+            record = None if pending is None else pending[0]
+        else:
+            current = await self._read_execution(pointer["execution_id"], owner_id=pointer["owner_id"])
+            record = None if current is None else current[0]
         return record if record is not None and record.session_id == session_id else None
 
     async def _read_execution(
@@ -279,7 +303,9 @@ class PendingTurnCoordination:
         record, identity_version = pending
         return record, confirmed, identity_version
 
-    async def _read_pending_bytes(self, current: TurnCoordination) -> tuple[ExecutionRecord, int] | None:
+    async def _read_pending_bytes(
+        self, current: TurnCoordination, *, fence: int | None = None,
+    ) -> tuple[ExecutionRecord, int] | None:
         if self._cache is None:
             return None
         content = await self._cache.get(self._record_key(current))
@@ -292,6 +318,7 @@ class PendingTurnCoordination:
                 or envelope.get("scope") != self._scope_payload
                 or envelope.get("execution_id") != current.execution_id
                 or envelope.get("owner_id") != current.owner_id
+                or (fence is not None and (type(envelope.get("fence")) is not int or envelope["fence"] != fence))
             ):
                 return None
             identity_version = envelope.get("request_identity_version", 1)
