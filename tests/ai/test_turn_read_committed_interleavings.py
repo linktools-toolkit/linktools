@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from linktools.ai.persistence.state import (
+        RecordLeaseTransition,
         StateStore,
         StateTransaction,
         StoredRecord,
@@ -36,6 +37,7 @@ class _StatementReads:
         self.corrupt: str | None = None
         self.after_error: Callable[[], Awaitable[None]] | None = None
         self.advances = 0
+        self.lease_transition_matches: list[bool] = []
 
     async def read(
         self, callback: Callable[[StateTransaction], Awaitable[_Value]]
@@ -78,6 +80,17 @@ class _StatementReads:
             async def now(inner) -> datetime:
                 return await self.store.read(lambda tx: tx.now())
 
+            async def transition_record_lease(
+                inner, key: bytes, *, expected_storage_revision: int,
+                transition: RecordLeaseTransition,
+            ) -> StoredRecord | None:
+                row = await self.store.mutate(lambda tx: tx.transition_record_lease(
+                    key, expected_storage_revision=expected_storage_revision,
+                    transition=transition,
+                ))
+                self.lease_transition_matches.append(row is not None)
+                return row
+
         try:
             return await callback(Reader())
         except AIError as error:
@@ -93,7 +106,8 @@ class _StatementReads:
         self, callback: Callable[[StateTransaction], Awaitable[_Value]]
     ) -> _Value:
         if self.after_anchor is not None or self.after_batch is not None:
-            # A mixed graph must be rejected before any write is attempted.
+            # Force per-statement snapshots. The fake delegates lease CAS to
+            # the real store, which must reject an outdated batch revision.
             return await self.read(callback)
         return await self.store.mutate(callback)
 
@@ -229,7 +243,10 @@ async def test_release_before_mutation_validation_preserves_released_authority(
         async def release() -> None:
             assert await writer.release_turn(lease)
 
-        sampled.after_anchor = release
+        if operation == "cancel":
+            sampled.after_anchor = release
+        else:
+            sampled.after_batch = release
         contender = StateTurnCoordination(
             sampled, namespace=persistence.namespace, tenant_id=persistence.tenant_id
         )
@@ -239,6 +256,7 @@ async def test_release_before_mutation_validation_preserves_released_authority(
             assert await contender.cancel_turn(_SCOPE, "execution") is False
         else:
             assert await contender.release_turn(lease) is False
+        assert sampled.lease_transition_matches == ([] if operation == "cancel" else [False])
         assert await writer.read_turn_by_session(_SCOPE, "session") is None
         replacement = await writer.claim_turn(
             _SCOPE,
