@@ -74,7 +74,9 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
             assert result.status is terminal.status
             assert result.output == terminal.output
             remote = await reader.executions.get(first.execution_id, principal=principal)
-            assert (await asyncio.wait_for(remote.wait(), 1)).result.status is terminal.status
+            # The observation cache's frozen clock keeps the stale view live
+            # regardless of how long the runner takes to read the source.
+            assert (await asyncio.wait_for(remote.wait(), 10)).result.status is terminal.status
             if not cancel:
                 assert await reader._execution_service.result_payload_size(first.execution_id, principal=principal) > 0
             # The captured session continuation also remains hot; admission must read its source.

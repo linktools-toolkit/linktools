@@ -593,19 +593,21 @@ class RecordLeaseTransition:
             if delta <= timedelta(0):
                 raise ValueError("lease_seconds must remain positive at microsecond precision")
 
-    def apply(self, record: StoredRecord, now: datetime) -> StoredRecord | None:
-        """Calculate a candidate while the backend protects the record's revision."""
-        if now.tzinfo is None:
+    def matches(self, record: StoredRecord, now: datetime | None) -> bool:
+        """Check lease conditions; unowned records do not need a clock sample."""
+        if now is None and record.lease_owner is not None or now is not None and now.tzinfo is None:
             raise ValueError("lease time must be timezone aware")
         if record.lease_fence != self.fence:
-            return None
+            return False
         live = (record.lease_owner is not None
-                and (record.lease_expires_at is None or record.lease_expires_at > now))
+                and (record.lease_expires_at is None or now is not None and record.lease_expires_at > now))
         if self.operation in ("acquire", "guard_available"):
-            if live or (self.operation == "guard_available" and record.lease_owner != self.owner):
-                return None
-        elif (not live or record.lease_owner != self.owner
-              or record.lease_expires_at is None):
+            return not live and (self.operation != "guard_available" or record.lease_owner == self.owner)
+        return live and record.lease_owner == self.owner and record.lease_expires_at is not None
+
+    def apply(self, record: StoredRecord, now: datetime) -> StoredRecord | None:
+        """Calculate a candidate while the backend protects the record's revision."""
+        if not self.matches(record, now):
             return None
         if self.operation in ("guard", "guard_available"):
             return replace(record, storage_revision=record.storage_revision + 1)

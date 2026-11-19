@@ -12,17 +12,20 @@ from typing import TYPE_CHECKING
 from ..core import (
     ExecutionStatus,
     canonical_json_bytes,
+    canonical_sha256,
     validate_persistence_namespace,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import CacheBackend, StreamBackend, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader, TurnScopeIdentity
 from .codec import decode_domain, encode_domain
+from .turns import StateTurnCoordination
 from ..execution import ExecutionRecord
 
 
 if TYPE_CHECKING:
     from ..storage import TurnScope
+    from .contracts import IdempotencyRecord, IdempotencyRepository
 
 
 _PROMOTION_INTENT = b"promote"
@@ -37,6 +40,7 @@ class PendingTurnCoordination:
     """
 
     def __init__(self, cache: CacheBackend | None, backend: TurnCoordinationBackend, *, namespace: str, tenant_id: str) -> None:
+        self._state_authority: StateTurnCoordination | None = None
         self._cache = cache
         self._backend = backend
         self._namespace = validate_persistence_namespace(namespace)
@@ -54,6 +58,14 @@ class PendingTurnCoordination:
             cache if isinstance(cache, CacheBackend) else None, cache,
             namespace=namespace, tenant_id=tenant_id,
         )
+
+    @classmethod
+    def for_state(
+        cls, cache: CacheBackend | None, backend: StateTurnCoordination, *, namespace: str, tenant_id: str,
+    ) -> PendingTurnCoordination:
+        bound = cls(cache, backend, namespace=namespace, tenant_id=tenant_id)
+        bound._state_authority = backend
+        return bound
 
     @property
     def supports_pending_views(self) -> bool:
@@ -131,25 +143,17 @@ class PendingTurnCoordination:
         self, request_key: str, *, tenant_id: str,
     ) -> ExecutionRecord | None:
         """Read an admitted request without turning an unavailable view into absence."""
-        if tenant_id != self._tenant_id:
-            return None
-        if not isinstance(self._backend, TurnAdmissionReader):
-            raise AIError(
-                ErrorCode.REQUEST_FIELD_INVALID,
-                safe_details={"reason": "admission_lookup_not_supported"},
-            )
-        owner = await self._backend.read_turn_by_request(self._scope, request_key)
-        if owner is None:
-            return None
-        current = await self._read_execution(owner.execution_id, owner_id=owner.owner_id)
-        if current is None:
-            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        return current[0]
+        current = await self._read_request(request_key, tenant_id=tenant_id)
+        return None if current is None else current[0]
 
-    async def read_request_identity_version(
+    async def read_request_identity_version(self, request_key: str, *, tenant_id: str) -> int | None:
+        """Read the live owner's projection version without inferring absence from a lost view."""
+        current = await self._read_request(request_key, tenant_id=tenant_id)
+        return None if current is None else current[2]
+
+    async def _read_request(
         self, request_key: str, *, tenant_id: str,
-    ) -> int | None:
-        """Read the live owner's projection version, never infer absence from a lost view."""
+    ) -> tuple[ExecutionRecord, TurnCoordination, int] | None:
         if tenant_id != self._tenant_id:
             return None
         if not isinstance(self._backend, TurnAdmissionReader):
@@ -161,7 +165,30 @@ class PendingTurnCoordination:
         current = await self._read_execution(owner.execution_id, owner_id=owner.owner_id)
         if current is None:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        return current[2]
+        return current
+
+    async def _read_state_admission(
+        self, authority: StateTurnCoordination, requests: IdempotencyRepository, *,
+        idempotency_scope: str, idempotency_key: str, request_key: str,
+    ) -> tuple[IdempotencyRecord | None, ExecutionRecord | None]:
+        async def capture() -> tuple[IdempotencyRecord | None, TurnCoordination | None]:
+            return await authority.read_admission_request(
+                requests, self._scope, idempotency_scope=idempotency_scope,
+                idempotency_key=idempotency_key, request_key=request_key,
+            )
+
+        receipt, owner = await capture()
+        if receipt is not None or owner is None:
+            return receipt, None
+        # Do not hold the storage snapshot across a disposable cache read;
+        # a fresh source capture confirms the generation or finds its durable receipt.
+        pending = await self._read_pending_bytes(owner)
+        receipt, confirmed = await capture()
+        if receipt is not None:
+            return receipt, None
+        if pending is None or not self._same_generation(confirmed, owner):
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        return None, pending[0]
 
     async def read_session_owner(
         self, session_id: str, *, tenant_id: str,
@@ -243,6 +270,16 @@ class PendingTurnCoordination:
             or (owner_id is not None and current.owner_id != owner_id)
         ):
             return None
+        pending = await self._read_pending_bytes(current)
+        if pending is None:
+            return None
+        confirmed = await self._backend.read_turn(self._scope, execution_id)
+        if confirmed is None or not self._same_generation(confirmed, current):
+            return None
+        record, identity_version = pending
+        return record, confirmed, identity_version
+
+    async def _read_pending_bytes(self, current: TurnCoordination) -> tuple[ExecutionRecord, int] | None:
         if self._cache is None:
             return None
         content = await self._cache.get(self._record_key(current))
@@ -270,12 +307,7 @@ class PendingTurnCoordination:
                 return None
         except (AIError, TypeError, ValueError):
             return None
-        # The byte read may suspend past release, expiry, or replacement. Its
-        # captured owner is only an observation until authority is read again.
-        confirmed = await self._backend.read_turn(self._scope, execution_id)
-        if confirmed is None or not self._same_generation(confirmed, current):
-            return None
-        return record, confirmed, identity_version
+        return record, identity_version
 
     async def cancel(self, execution_id: str, *, tenant_id: str) -> bool:
         if tenant_id != self._tenant_id:
@@ -352,4 +384,36 @@ class PendingTurnCoordination:
 
 
 
-__all__ = ["PendingTurnCoordination"]
+async def read_admission_request(
+    requests: IdempotencyRepository, coordination: PendingTurnCoordination | None, *,
+    scope: str, key: str, tenant_id: str, local_pending: bool = False,
+) -> tuple[IdempotencyRecord | None, ExecutionRecord | None]:
+    """Resolve one request without reserving, settling, or recovering a turn."""
+    if coordination is not None and coordination._tenant_id == tenant_id and not local_pending:
+        request_key = canonical_sha256([scope, key])
+        if coordination._state_authority is not None:
+            return await coordination._read_state_admission(
+                coordination._state_authority, requests, idempotency_scope=scope,
+                idempotency_key=key, request_key=request_key,
+            )
+    else:
+        coordination = None
+    receipt = await requests.get(scope, key, tenant_id=tenant_id)
+    if receipt is not None or coordination is None:
+        return receipt, None
+    try:
+        observed = await coordination._read_request(request_key, tenant_id=tenant_id)
+    except AIError as error:
+        if error.code is not ErrorCode.EXECUTION_START_UNKNOWN:
+            raise
+        receipt = await requests.get(scope, key, tenant_id=tenant_id)
+        if receipt is None:
+            raise
+        return receipt, None
+    if observed is not None:
+        return None, observed[0]
+    # Independent authorities cannot prove absence from one consistent read.
+    return await requests.get(scope, key, tenant_id=tenant_id), None
+
+
+__all__ = ["PendingTurnCoordination", "read_admission_request"]

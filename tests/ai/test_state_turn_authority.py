@@ -69,6 +69,32 @@ async def test_state_turn_claim_replay_renew_cancel_release(tmp_path, backend):
         validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
 
 
+async def test_sql_idle_turn_claim_samples_clock_only_for_the_new_expiry(tmp_path, monkeypatch):
+    async with _open_store("sql", tmp_path / "sql") as store:
+        authority = _backend(store)
+        first = await _claim(authority)
+        assert first is not None and first.lease is not None
+        assert await authority.release_turn(first.lease)
+
+        clock_reads = 0
+        stamp = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+        def clock():
+            nonlocal clock_reads
+            clock_reads += 1
+            return stamp
+
+        _clock(monkeypatch, store, "sql", clock)
+        second = await _claim(authority, request="second", execution="second", seconds=60)
+        assert second is not None and second.lease is not None
+        assert second.lease.fence == first.lease.fence + 1
+        assert clock_reads == 1
+        records = await store.read(lambda tx: tx.scan_records())
+        session = next(record for record in records if record.kind == "turn_session")
+        assert session.lease_expires_at == stamp + timedelta(seconds=60)
+        validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+
+
 async def _expire(store, *, session):
     async def expire(tx):
         for record in await tx.scan_records():

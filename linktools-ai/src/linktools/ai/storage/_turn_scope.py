@@ -50,6 +50,7 @@ class RenewingTurnScope:
         self._renewal: asyncio.Task[None] | None = None
         self._timer: asyncio.TimerHandle | None = None
         self._signal = asyncio.Event()
+        self._stop_renewal = asyncio.Event()
         self._deadline = 0.0
         self._lost = False
         self._failure: Exception | None = None
@@ -135,7 +136,12 @@ class RenewingTurnScope:
         loop = asyncio.get_running_loop()
         try:
             while not self._lost and not self._closed:
-                await asyncio.sleep(self._renew_seconds)
+                try:
+                    async with asyncio.timeout(self._renew_seconds):
+                        await self._stop_renewal.wait()
+                    return
+                except TimeoutError:
+                    pass
                 if self._closed or self._lost or loop.time() >= self._deadline:
                     self._lose()
                     return
@@ -170,7 +176,12 @@ class RenewingTurnScope:
         if self._timer is not None:
             self._timer.cancel()
         if self._renewal is not None:
-            self._renewal.cancel()
+            # Let a sent renewal settle before release; the old authority's
+            # deadline bounds the grace period for an unresponsive backend.
+            remaining = max(0.0, self._deadline - asyncio.get_running_loop().time())
+            done, _ = await asyncio.wait((self._renewal,), timeout=remaining)
+            if not done:
+                self._renewal.cancel()
             try:
                 await self._renewal
             except asyncio.CancelledError:
@@ -189,6 +200,7 @@ class RenewingTurnScope:
         if self._owner is None or asyncio.current_task() is not self._owner or self._closed:
             raise RuntimeError("turn scope must exit once in its entering task")
         self._closed = True
+        self._stop_renewal.set()
         self._signal.set()
         cleanup = asyncio.create_task(self._cleanup())
         cancelled = False

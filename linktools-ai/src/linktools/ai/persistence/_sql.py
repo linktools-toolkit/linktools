@@ -1979,18 +1979,22 @@ class _SqlTransaction:
         if current is None or current.storage_revision != expected_storage_revision:
             return None
         protected = key in self._guarded_record_revisions
-        now = await self._context.run_statement(
+        # An unowned revision is available independently of the clock.
+        # Should a concurrent holder change it, the CAS below must lose.
+        now = (await self._context.run_statement(
             self._context.dialect.database_current_time(self._session)
-        )
-        if transition.apply(current, now) is None:
+        ) if current.lease_owner is not None else None)
+        if not transition.matches(current, now):
             return None
         guarded = await self.guard_record(key, expected_storage_revision=expected_storage_revision)
         if guarded is None:
             return None
         try:
-            if not protected:
-                # A new CAS may wait past expiry. Already protected records were
-                # sampled after their earlier write, not from tx.now() or the UPDATE.
+            if now is None and transition.operation == "guard_available":
+                return guarded
+            if now is None or not protected:
+                # A new CAS may wait past expiry. For an unowned acquisition
+                # the only sample needed is the one used for its fresh expiry.
                 now = await self._context.run_statement(
                     self._context.dialect.database_current_time(self._session)
                 )
