@@ -12,7 +12,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionEvent, ExecutionObservationEvent, ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView, ModelInteractionItem, TaskModelProjection
 from linktools.ai.execution.handle import Execution, ExecutionBinding
 from linktools.ai.execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer, _ExecutionTreeSubscription
-from linktools.ai.observe.cursors import ExecutionWatchPositions, encode_execution_watch_cursor
+from linktools.ai.observe.cursors import ExecutionWatchPositions, encode_execution_observation_cursor, encode_execution_watch_cursor
 
 from .test_execution_model_observation import _History
 from .test_subagent_execution_tree import _ExecutionReader
@@ -88,7 +88,7 @@ def _handle():
     streamer = ExecutionTreeStreamer(reader, events, broker)
     active = set()
     binding = ExecutionBinding(_NAMESPACE, reader, lambda: None, active.add, active.discard,
-        streamer.capture, streamer.replay, history=_History())
+        streamer.capture, streamer.replay, history=_History(), share_tree_capture=True)
     return Execution(binding, "execution", _PRINCIPAL, streamer.stream), reader, events, broker, active
 
 
@@ -114,6 +114,68 @@ async def test_root_watch_keeps_events_preview_models_and_resume_without_child_w
     assert reader.children_reads == broker.subscriptions == 0
     assert set(events.opened) == set(events.closed) == {"execution"}
     assert not active
+
+
+class _ScopedHistory(_History):
+    async def read_model_interaction_metadata(self, execution_id: str, *, principal: Principal,
+            agent_run_seq: int, after_model_request_seq: int, through_model_request_seq: int, limit: int) -> tuple[ModelInteractionItem, ...]:
+        rows = await super().read_model_interaction_metadata(
+            execution_id, principal=principal, agent_run_seq=agent_run_seq,
+            after_model_request_seq=after_model_request_seq,
+            through_model_request_seq=through_model_request_seq, limit=limit,
+        )
+        return tuple(replace(row, execution_id=execution_id) for row in rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("descendants", [False, True])
+@pytest.mark.parametrize("share_tree_capture", [False, True])
+async def test_live_models_share_prepared_tree_but_final_drain_still_captures(
+    descendants: bool, share_tree_capture: bool,
+) -> None:
+    handle, _, _, broker, active = _handle()
+    captured = []
+    capture = handle._binding.capture_tree
+
+    async def record_capture(*args, **kwargs):
+        result = await capture(*args, **kwargs)
+        captured.append(result)
+        return result
+
+    handle = replace(handle, _binding=replace(handle._binding,
+        capture_tree=record_capture, history=_ScopedHistory(), share_tree_capture=share_tree_capture))
+    watch = handle.watch(include_descendants=descendants, include_model_interactions=True)
+    expected = {("execution", 0, 4)}
+    if descendants:
+        expected.add(("child", 1, 4))
+    try:
+        first = await anext(watch)
+        assert isinstance(first.event, TaskModelProjection)
+        assert len(captured) == (0 if share_tree_capture else 1)
+        rest = [value async for value in watch]
+        assert {value.event.execution_id for value in rest if isinstance(value.event, ExecutionTreeEvent)} == {
+            execution_id for execution_id, _, _ in expected
+        }
+        assert len(captured) == (1 if share_tree_capture else 2)
+        assert {(view.execution_id, depth, cutoff) for view, depth, cutoff in captured[-1]} == expected
+    finally:
+        await watch.aclose()
+    assert not active
+    assert not broker._subscriptions
+
+
+@pytest.mark.asyncio
+async def test_live_model_startup_rejects_cursor_ahead_of_tree_before_subscribing() -> None:
+    handle, _, _, broker, active = _handle()
+    cursor = encode_execution_observation_cursor(_NAMESPACE, "tenant", "execution",
+        include_content=False, event_seqs={"execution": 5})
+    with pytest.raises(AIError) as caught:
+        _ = [value async for value in handle.watch(cursor=cursor,
+            include_descendants=False, include_model_interactions=True)]
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert not handle._binding.history.subscriptions
+    assert not active
+    assert not broker._subscriptions
 
 
 @pytest.mark.asyncio
@@ -155,16 +217,7 @@ async def test_root_watch_rejects_descendant_cursor_scope(preview_only: bool) ->
 @pytest.mark.parametrize("models", [False, True])
 async def test_root_checkpoint_can_expand_to_tree_without_repeating_root_events(models: bool) -> None:
     handle, reader, events, broker, active = _handle()
-
-    class ScopedHistory(_History):
-        async def read_model_interaction_metadata(self, execution_id: str, *, principal: Principal,
-                agent_run_seq: int, after_model_request_seq: int, through_model_request_seq: int, limit: int) -> tuple[ModelInteractionItem, ...]:
-            rows = await super().read_model_interaction_metadata(execution_id, principal=principal,
-                agent_run_seq=agent_run_seq, after_model_request_seq=after_model_request_seq,
-                through_model_request_seq=through_model_request_seq, limit=limit)
-            return tuple(replace(row, execution_id=execution_id) for row in rows)
-
-    history = ScopedHistory()
+    history = _ScopedHistory()
     handle = replace(handle, _binding=replace(handle._binding, history=history))
     root = [item async for item in handle.watch(include_descendants=False,
         include_output_preview=True, include_model_interactions=models)]

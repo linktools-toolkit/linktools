@@ -12,6 +12,7 @@ from typing import Protocol
 from ..core import ExecutionLineageKind, Page, Principal
 from ..errors import AIError, ErrorCode
 from .events import project_event_payload
+from ._tree_ready import ExecutionTreeReady
 from ..execution.stream import shared_stream_positions
 from ..observe.cursors import ExecutionWatchPositions, get_preview_positions
 from ..observe.stream import is_observation_cleanup, drain_stream_tasks, await_stream_cleanup, report_observation_error
@@ -125,6 +126,22 @@ class ExecutionTreeBroker:
             self._subscriptions.pop(parent_execution_id, None)
 
 
+def _capture_views(
+    views: dict[str, ExecutionView], depths: dict[str, int], sequences: Mapping[str, int],
+) -> tuple[tuple[ExecutionView, int, int], ...]:
+    captured = []
+    for view in views.values():
+        cutoff = view.event_seq
+        if (
+            isinstance(cutoff, bool)
+            or not isinstance(cutoff, int)
+            or cutoff < sequences.get(view.execution_id, 0)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        captured.append((view, depths[view.execution_id], cutoff))
+    return tuple(captured)
+
+
 class ExecutionTreeStreamer:
     """Merge an execution subtree with relative depths and per-stream ordering."""
 
@@ -211,17 +228,7 @@ class ExecutionTreeStreamer:
                 add_child(current_id, view)
                 current_id = view.execution_id
             await discover(tuple(view.execution_id for view in reversed(chain)))
-        captured = []
-        for view in views.values():
-            cutoff = view.event_seq
-            if (
-                isinstance(cutoff, bool)
-                or not isinstance(cutoff, int)
-                or cutoff < sequences.get(view.execution_id, 0)
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            captured.append((view, depths[view.execution_id], cutoff))
-        return tuple(captured)
+        return _capture_views(views, depths, sequences)
 
     async def replay(
         self,
@@ -311,6 +318,7 @@ class ExecutionTreeStreamer:
         discovery_wait: asyncio.Task[None] | None = None
         discovery: asyncio.Task[None] | None = None
         observing = False
+        shared = ready if isinstance(ready, ExecutionTreeReady) and ready.positions is not None else None
         preparation_failure: ExecutionStreamFailure | None = None
 
         def start(view: ExecutionView) -> None:
@@ -439,11 +447,22 @@ class ExecutionTreeStreamer:
                     wait_for_children(parent_id)
 
             if discovery_wait in done:
-                added = await discover_persisted_children(tuple(views))
-                discovery_backoff = (
-                    _DISCOVERY_BACKOFF_INITIAL if added
-                    else min(_DISCOVERY_BACKOFF_MAX, discovery_backoff * 2)
-                )
+                if shared is not None:
+                    assert shared.positions is not None
+                    snapshot = await self.capture(
+                        execution_id, principal=principal, after_event_seqs=shared.positions(),
+                        include_descendants=include_descendants,
+                    )
+                    for view, depth, _ in snapshot:
+                        add_view(view, depth)
+                    shared.snapshot = snapshot
+                    shared.sampled.set()
+                else:
+                    added = await discover_persisted_children(tuple(views))
+                    discovery_backoff = (
+                        _DISCOVERY_BACKOFF_INITIAL if added
+                        else min(_DISCOVERY_BACKOFF_MAX, discovery_backoff * 2)
+                    )
                 discovery_wait = asyncio.create_task(
                     asyncio.sleep(discovery_backoff),
                     name=f"execution-tree-discovery-{execution_id}",
@@ -459,6 +478,8 @@ class ExecutionTreeStreamer:
                 if ready is not None:
                     ready.set()
                 raise preparation_failure
+            if isinstance(ready, ExecutionTreeReady):
+                ready.views = _capture_views(views, depths, after_event_seqs)
             for view in tuple(views.values()):
                 start(view)
                 wait_for_children(view.execution_id)

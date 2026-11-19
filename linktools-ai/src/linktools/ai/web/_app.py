@@ -240,6 +240,10 @@ class _Console:
         include_timeline = request.query_params.get("include_timeline", "true")
         if include_timeline not in {"true", "false"}:
             raise ValueError("include_timeline must be true or false")
+        if include_timeline == "true" and self.runtime is not None and type(history) is History:
+            if environ.debug:
+                request.state.phase = "session.timeline"
+            return _json(await history.session_detail(identity, principal=self.principal, **_paging(request)))
         if environ.debug:
             request.state.phase = "session.metadata"
         session = await history.inspect_session(identity, principal=self.principal)

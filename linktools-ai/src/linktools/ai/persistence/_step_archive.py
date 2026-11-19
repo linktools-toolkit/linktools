@@ -2957,6 +2957,9 @@ class StateStepArchive(AgentRunStore):
                 *prefetch_keys,
                 *(key for checkpoint in checkpoints for key in
                   self._history.checkpoint_record_keys(checkpoint.owner_id, checkpoint.chunks)),
+                *(self._history.checkpoint_record_keys(observation.owner_id, observation.chunks)
+                  if type(self._history) is TranscriptRepository
+                  and isinstance(observation, PreparedTranscriptObservation) else ()),
             ),
         )
         if observation is not None:
