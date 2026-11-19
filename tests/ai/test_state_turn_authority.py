@@ -426,6 +426,17 @@ async def test_state_turn_sql_observation_clock_expiry_and_failure_preserve_sour
         assert await store.read(lambda tx: tx.scan_records()) == before
 
 
+async def test_postgres_snapshot_clock_uses_the_anchor_statement_time():
+    from sqlalchemy import select
+    from sqlalchemy.dialects import postgresql
+
+    from linktools.ai.storage import PostgreSQLDialect
+
+    clock = PostgreSQLDialect()
+    statement = select(clock.read_snapshot_time_expression().label("observed_at"))
+    assert str(statement.compile(dialect=postgresql.dialect())) == "SELECT statement_timestamp() AS observed_at"
+
+
 async def test_sql_observation_respects_a_custom_dialect_clock(tmp_path, monkeypatch):
     from linktools.ai.storage import SQLiteDialect
 

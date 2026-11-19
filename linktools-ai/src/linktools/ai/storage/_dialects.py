@@ -541,6 +541,11 @@ class PostgreSQLDialect(SQLiteDialect):
 
         return func.clock_timestamp()
 
+    def read_snapshot_time_expression(self) -> "ColumnElement[datetime]":
+        from sqlalchemy import func
+
+        return func.statement_timestamp()
+
     def _insert(self, table: "Table") -> "PostgreSQLInsert":
         from sqlalchemy.dialects.postgresql import insert
 
