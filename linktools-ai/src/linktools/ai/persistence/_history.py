@@ -52,6 +52,7 @@ from ._conversation_repositories import ConversationHistoryRepositoryImpl
 from ._plan import PersistenceDomain
 from .state import (
     FactQuery,
+    FactReader,
     RecordQuery,
     RecordReplacement,
     StateStore,
@@ -1985,6 +1986,41 @@ class TranscriptRepository:
 
         return load
 
+    async def _read_captured_tail(
+        self,
+        transaction: StateTransaction,
+        owner_id: str,
+        *,
+        start: int,
+        end: int,
+        head: TranscriptHeadRecord | None,
+    ) -> tuple[StoredFact, ...] | None:
+        width = end - start
+        if (head is None or head.message_count != end or not 0 < width < _TRANSCRIPT_PAGE_SIZE
+                or head.chunk_count <= width or not isinstance(transaction, FactReader)):
+            return None
+
+        # The append-only stream allocates one sequence per nonempty chunk;
+        # at most width chunks can intersect the captured suffix.
+        sequences = range(head.chunk_count - width + 1, head.chunk_count + 1)
+        stream = self._transcript_stream(owner_id)
+        facts = await transaction.get_facts(stream, sequences)
+        if len(facts) != len(sequences):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        previous_end = None
+        for sequence, fact in zip(sequences, facts, strict=True):
+            chunk = self.decode_chunk(fact)
+            if (fact.sequence != sequence or fact.stream_key != stream or fact.kind != "transcript_chunk"
+                    or fact.owner_key != self._owner_key(owner_id) or chunk.owner_id != owner_id
+                    or chunk.message_count <= 0
+                    or (previous_end is None and chunk.first_message_index > start)
+                    or (previous_end is not None and chunk.first_message_index != previous_end)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous_end = chunk.first_message_index + chunk.message_count
+        if previous_end != end:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return facts
+
     async def _read_range_start(
         self,
         transaction: StateTransaction,
@@ -2185,10 +2221,15 @@ class TranscriptRepository:
             # Only the first segment is prefetched; later segments and pages stay lazy.
             if segments and self._store is self._history_repository.state_store:
                 first = segments[0]
-                facts = await self._read_range_start(
+                facts = (None if history_capture is None else await self._read_captured_tail(
                     transaction, first.history_id, start=first.start, end=first.end,
-                    observed_head=first.observed_head,
-                )
+                    head=first.observed_head,
+                ))
+                if facts is None:
+                    facts = await self._read_range_start(
+                        transaction, first.history_id, start=first.start, end=first.end,
+                        observed_head=first.observed_head,
+                    )
                 ranges = self._chunk_ranges(facts, first.start, first.end)
                 load = await self._capture_chunk_ranges(ranges)
                 segments = (replace(first, initial_facts=facts, initial_load=load), *segments[1:])
