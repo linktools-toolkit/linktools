@@ -462,123 +462,134 @@ class StateTurnCoordination:
         token = uuid4().hex
 
         async def claim(tx: StateTransaction) -> TurnCoordination | None:
-            keys = {"turn_session": self._records.key(local_scope, "turn_session", session_key),
-                    "turn_request": self._records.key(local_scope, "turn_request", request_key),
-                    "turn_execution": self._records.key(local_scope, "turn_execution", execution_id)}
-            found = await tx.get_records(tuple(keys.values()))
-            records = {kind: None if found.get(key) is None else self._records.validate(found[key])
-                       for kind, key in keys.items()}
-            session, request, proposed = (records[kind] for kind in ("turn_session", "turn_request", "turn_execution"))
-            if session is None and request is None and proposed is None:
-                common: dict[str, JsonValue] = {
-                    "format": 1, "scope": local_scope, "session_key": session_key, "request_key": request_key,
-                    "request_digest": request_digest, "execution_id": execution_id,
-                }
-                session = self._records.make("turn_session", {
-                    "format": 1, "scope": local_scope, "session_key": session_key,
-                    "execution_id": execution_id, "request_key": request_key,
-                }, state="ACTIVE")
-                execution = self._records.make("turn_execution", {
-                    **common, "owner_id": owner_id, "token": token, "fence": 1,
-                    "cancel_requested": False, "receipt_id": token, "receipt_kind": "claim",
-                }, state="ACTIVE")
-                request = self._records.make("turn_request", common, state="ACTIVE")
-                # The complete graph and acquired lease become visible in one commit.
-                await tx.insert_records((session, execution, request))
-                acquired = await tx.transition_record_lease(
-                    session.key, expected_storage_revision=session.storage_revision,
-                    transition=RecordLeaseTransition("acquire", token, session.lease_fence, duration),
-                )
-                if acquired is None:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                return self._coordination(self._records.graph(execution, request, acquired), owned=True)
-            graphs: dict[bytes, _Graph] = {}
-            for kind, anchor in (("turn_session", session), ("turn_request", request)):
-                if anchor is not None and anchor.state == "ACTIVE":
-                    graph = await self._anchor(tx, local_scope, kind, _text(anchor.data[_IDENTITIES[kind]]))
-                    if graph is None:
-                        raise _TurnGraphReadError(anchor)
-                    graphs[graph.session.key] = graph
-                elif kind == "turn_request" and anchor is not None:
-                    await self._anchor(tx, local_scope, kind, request_key)
-            protected: dict[bytes, tuple[StoredRecord, bool]] = {}
-            sessions = {key: graph.session for key, graph in graphs.items()}
-            if session is not None:
-                sessions[session.key] = session
-            for key, current in sorted(sessions.items()):
-                live = (current.lease_owner is not None and current.lease_expires_at is not None
-                        and current.lease_expires_at > await tx.now())
-                guarded = await tx.transition_record_lease(
-                    key, expected_storage_revision=current.storage_revision,
-                    transition=RecordLeaseTransition("guard" if live else "guard_available",
-                                                     current.lease_owner, current.lease_fence),
-                )
-                if guarded is None:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                protected[key] = guarded, live
-            if request is not None and request.state == "ACTIVE":
-                graph = graphs[self._records.key(local_scope, "turn_session", _text(request.data["session_key"]))]
-                guarded, live = protected[graph.session.key]
-                if live:
-                    if request.data["session_key"] != session_key or request.data["request_digest"] != request_digest:
-                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-                    return self._coordination(replace(graph, session=guarded))
-            if session is not None and protected[session.key][1]:
-                return None
-            if proposed is not None:
-                if (proposed.data["session_key"] != session_key
-                        or proposed.data["request_key"] != request_key
-                        or proposed.data["request_digest"] != request_digest
-                        or proposed.data["owner_id"] == owner_id):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-            for key, graph in sorted(graphs.items()):
-                guarded, live = protected[key]
-                if live:
-                    raise _integrity()
-                retired = await self._retire(tx, replace(graph, session=guarded), receipt=token, kind="expire")
-                if key == self._records.key(local_scope, "turn_session", session_key):
-                    session = retired
-            if session is None:
-                session = self._records.make("turn_session", {
-                    "format": 1, "scope": local_scope, "session_key": session_key,
-                    "execution_id": None, "request_key": None,
-                }, state="IDLE")
-                await tx.insert_record(session)
-            elif session.key not in graphs:
-                session = protected[session.key][0]
+            return await self._claim_in_transaction(
+                tx, local_scope, session_key=session_key, request_key=request_key,
+                request_digest=request_digest, execution_id=execution_id,
+                owner_id=owner_id, duration=duration, token=token,
+            )
+
+        return await self._mutation(claim, lambda: self._confirmed(
+            local_scope, execution_id, receipt=token, kind="claim",
+        ))
+
+    async def _claim_in_transaction(
+        self, tx: StateTransaction, local_scope: str, *,
+        session_key: str, request_key: str, request_digest: str,
+        execution_id: str, owner_id: str, duration: float, token: str,
+    ) -> TurnCoordination | None:
+        keys = {"turn_session": self._records.key(local_scope, "turn_session", session_key),
+                "turn_request": self._records.key(local_scope, "turn_request", request_key),
+                "turn_execution": self._records.key(local_scope, "turn_execution", execution_id)}
+        found = await tx.get_records(tuple(keys.values()))
+        records = {kind: None if found.get(key) is None else self._records.validate(found[key])
+                   for kind, key in keys.items()}
+        session, request, proposed = (records[kind] for kind in ("turn_session", "turn_request", "turn_execution"))
+        if session is None and request is None and proposed is None:
+            common: dict[str, JsonValue] = {
+                "format": 1, "scope": local_scope, "session_key": session_key, "request_key": request_key,
+                "request_digest": request_digest, "execution_id": execution_id,
+            }
+            session = self._records.make("turn_session", {
+                "format": 1, "scope": local_scope, "session_key": session_key,
+                "execution_id": execution_id, "request_key": request_key,
+            }, state="ACTIVE")
+            execution = self._records.make("turn_execution", {
+                **common, "owner_id": owner_id, "token": token, "fence": 1,
+                "cancel_requested": False, "receipt_id": token, "receipt_kind": "claim",
+            }, state="ACTIVE")
+            request = self._records.make("turn_request", common, state="ACTIVE")
+            # The complete graph and acquired lease become visible in one commit.
+            await tx.insert_records((session, execution, request))
             acquired = await tx.transition_record_lease(
                 session.key, expected_storage_revision=session.storage_revision,
                 transition=RecordLeaseTransition("acquire", token, session.lease_fence, duration),
             )
             if acquired is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            common: dict[str, JsonValue] = {
-                "format": 1, "scope": local_scope, "session_key": session_key, "request_key": request_key,
-                "request_digest": request_digest, "execution_id": execution_id,
-            }
-            execution = self._records.make("turn_execution", {
-                **common, "owner_id": owner_id, "token": token, "fence": acquired.lease_fence,
-                "cancel_requested": False, "receipt_id": token, "receipt_kind": "claim",
-            }, state="ACTIVE")
-            previous_execution = await self._load(tx, local_scope, "turn_execution", execution_id) if proposed is not None else None
-            if previous_execution is None:
-                await tx.insert_record(execution)
-            else:
-                execution = await self._replace(tx, previous_execution, data=execution.data, state="ACTIVE")
-            request = await self._load(tx, local_scope, "turn_request", request_key)
-            if request is None:
-                request = self._records.make("turn_request", common, state="ACTIVE")
-                await tx.insert_record(request)
-            else:
-                request = await self._replace(tx, request, data=common, state="ACTIVE")
-            session = await self._replace(tx, acquired, state="ACTIVE", data={
-                **acquired.data, "execution_id": execution_id, "request_key": request_key,
-            })
-            return self._coordination(self._records.graph(execution, request, session), owned=True)
-
-        return await self._mutation(claim, lambda: self._confirmed(
-            local_scope, execution_id, receipt=token, kind="claim",
-        ))
+            return self._coordination(self._records.graph(execution, request, acquired), owned=True)
+        graphs: dict[bytes, _Graph] = {}
+        for kind, anchor in (("turn_session", session), ("turn_request", request)):
+            if anchor is not None and anchor.state == "ACTIVE":
+                graph = await self._anchor(tx, local_scope, kind, _text(anchor.data[_IDENTITIES[kind]]))
+                if graph is None:
+                    raise _TurnGraphReadError(anchor)
+                graphs[graph.session.key] = graph
+            elif kind == "turn_request" and anchor is not None:
+                await self._anchor(tx, local_scope, kind, request_key)
+        protected: dict[bytes, tuple[StoredRecord, bool]] = {}
+        sessions = {key: graph.session for key, graph in graphs.items()}
+        if session is not None:
+            sessions[session.key] = session
+        for key, current in sorted(sessions.items()):
+            live = (current.lease_owner is not None and current.lease_expires_at is not None
+                    and current.lease_expires_at > await tx.now())
+            guarded = await tx.transition_record_lease(
+                key, expected_storage_revision=current.storage_revision,
+                transition=RecordLeaseTransition("guard" if live else "guard_available",
+                                                 current.lease_owner, current.lease_fence),
+            )
+            if guarded is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            protected[key] = guarded, live
+        if request is not None and request.state == "ACTIVE":
+            graph = graphs[self._records.key(local_scope, "turn_session", _text(request.data["session_key"]))]
+            guarded, live = protected[graph.session.key]
+            if live:
+                if request.data["session_key"] != session_key or request.data["request_digest"] != request_digest:
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                return self._coordination(replace(graph, session=guarded))
+        if session is not None and protected[session.key][1]:
+            return None
+        if proposed is not None:
+            if (proposed.data["session_key"] != session_key
+                    or proposed.data["request_key"] != request_key
+                    or proposed.data["request_digest"] != request_digest
+                    or proposed.data["owner_id"] == owner_id):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        for key, graph in sorted(graphs.items()):
+            guarded, live = protected[key]
+            if live:
+                raise _integrity()
+            retired = await self._retire(tx, replace(graph, session=guarded), receipt=token, kind="expire")
+            if key == self._records.key(local_scope, "turn_session", session_key):
+                session = retired
+        if session is None:
+            session = self._records.make("turn_session", {
+                "format": 1, "scope": local_scope, "session_key": session_key,
+                "execution_id": None, "request_key": None,
+            }, state="IDLE")
+            await tx.insert_record(session)
+        elif session.key not in graphs:
+            session = protected[session.key][0]
+        acquired = await tx.transition_record_lease(
+            session.key, expected_storage_revision=session.storage_revision,
+            transition=RecordLeaseTransition("acquire", token, session.lease_fence, duration),
+        )
+        if acquired is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        common: dict[str, JsonValue] = {
+            "format": 1, "scope": local_scope, "session_key": session_key, "request_key": request_key,
+            "request_digest": request_digest, "execution_id": execution_id,
+        }
+        execution = self._records.make("turn_execution", {
+            **common, "owner_id": owner_id, "token": token, "fence": acquired.lease_fence,
+            "cancel_requested": False, "receipt_id": token, "receipt_kind": "claim",
+        }, state="ACTIVE")
+        previous_execution = await self._load(tx, local_scope, "turn_execution", execution_id) if proposed is not None else None
+        if previous_execution is None:
+            await tx.insert_record(execution)
+        else:
+            execution = await self._replace(tx, previous_execution, data=execution.data, state="ACTIVE")
+        request = await self._load(tx, local_scope, "turn_request", request_key)
+        if request is None:
+            request = self._records.make("turn_request", common, state="ACTIVE")
+            await tx.insert_record(request)
+        else:
+            request = await self._replace(tx, request, data=common, state="ACTIVE")
+        session = await self._replace(tx, acquired, state="ACTIVE", data={
+            **acquired.data, "execution_id": execution_id, "request_key": request_key,
+        })
+        return self._coordination(self._records.graph(execution, request, session), owned=True)
 
     def _lease_identity(self, lease: Lease) -> tuple[str, str, str, str] | None:
         try:

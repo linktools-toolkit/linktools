@@ -98,7 +98,7 @@ from ..storage import (
 from ..execution import tool_operation_id, tool_operation_references
 
 from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
-from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
+from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _GroupedTurnStart, _TerminalMetricDelivery
 from ..observe.service import (
     capture_execution_terminal,
     record_metric_observation,
@@ -1226,6 +1226,7 @@ class LocalExecutionBackend:
     async def run_turn(
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
+        grouped: _GroupedTurnStart | None = None,
     ) -> ExecutionHandle:
         parent = self._parent_turn(reservation)
         admission = asyncio.get_running_loop().create_future()
@@ -1233,7 +1234,7 @@ class LocalExecutionBackend:
         if parent is not None:
             parent.admissions.add(entered)
         task = asyncio.create_task(
-            self._turn_lifetime(reservation, principal, admit, admission, parent, entered),
+            self._turn_lifetime(reservation, principal, admit, admission, parent, entered, grouped),
             name=f"ai-turn-owner-{reservation.execution.execution_id}",
         )
         self._track_checkpoint_task(task, "turn_lifetime")
@@ -1360,7 +1361,7 @@ class LocalExecutionBackend:
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
         admission: asyncio.Future[ExecutionHandle], parent: _OwnedExecutionTurn | None,
-        entered: asyncio.Future[None] | None,
+        entered: asyncio.Future[None] | None, grouped: _GroupedTurnStart | None,
     ) -> None:
         execution = reservation.execution
         identity = reservation.idempotency
@@ -1375,6 +1376,11 @@ class LocalExecutionBackend:
 
         async def execute(coordination: TurnCoordination | None, scope: TurnScope | None) -> None:
             nonlocal owner
+            if grouped is not None and grouped.receipt is not None and not grouped.receipt.created:
+                result = await admit(coordination)
+                if not admission.done():
+                    admission.set_result(result)
+                return
             if coordinator is not None and coordination is None:
                 raise AIError(ErrorCode.SESSION_BUSY)
             if parent is not None:
@@ -1391,6 +1397,8 @@ class LocalExecutionBackend:
             owner = _OwnedExecutionTurn(reservation, coordination, principal, scope=scope,
                                         lifetime=asyncio.current_task(), admission=admission)
             self._turn_owners[execution.execution_id] = owner
+            if grouped is not None:
+                self._capture_reserved_start(owner, grouped.receipt)
             if parent is not None:
                 parent.children[execution.execution_id] = owner
                 parent.delegated_children.add(execution.execution_id)
@@ -1419,13 +1427,21 @@ class LocalExecutionBackend:
                 # One compact composite fits Turn's request/session limits and preserves
                 # boundaries when either raw identity contains a colon.
                 request_key = canonical_sha256([identity.scope, identity.idempotency_key])
-                scope = coordinator.enter(
-                    session_key=(f"session:{execution.session_id}" if execution.session_id is not None else
-                                 f"request:{request_key}"),
-                    request_key=request_key,
-                    request_digest=identity.request_digest, execution_id=execution.execution_id,
-                    owner_id=uuid.uuid4().hex,
-                )
+                session_key = (f"session:{execution.session_id}" if execution.session_id is not None
+                               else f"request:{request_key}")
+                owner_id = uuid.uuid4().hex
+                if grouped is None:
+                    scope = coordinator.enter(
+                        session_key=session_key, request_key=request_key, request_digest=identity.request_digest,
+                        execution_id=execution.execution_id, owner_id=owner_id,
+                    )
+                else:
+                    def capture(receipt: ExecutionStartReservationResult) -> None:
+                        grouped.receipt = receipt
+                    scope = coordinator.enter_grouped_start(
+                        self._runtime_commands, reservation, grouped.session, session_key=session_key,
+                        request_key=request_key, owner_id=owner_id, capture=capture,
+                    )
                 # A context may own ContextVars or a TaskGroup. Its task never changes.
                 async with scope as coordination:
                     await execute(coordination, scope)
@@ -1764,6 +1780,27 @@ class LocalExecutionBackend:
             await asyncio.sleep(pause)
             pause = min(1.0, pause * 2)
 
+    async def can_group_start(
+        self, request: ExecutionRequest, reservation: ExecutionStartReservation, session: SessionRecord,
+    ) -> bool:
+        coordinator = self._pending_turns.coordination
+        if (type(self) is not LocalExecutionBackend or coordinator is None
+                or not coordinator.can_group_start(self._runtime_commands, reservation, session)):
+            return False
+        await self._validate_start(request, reservation.execution)
+        return await self._expected_session_cursor(reservation.execution, session=session) == session.continuation
+
+    @staticmethod
+    def _capture_reserved_start(
+        owner: _OwnedExecutionTurn, result: ExecutionStartReservationResult | None,
+    ) -> None:
+        if result is not None and result.created and result.execution.recovery is not None:
+            owner.attempt = _InitialAttemptCapture(result.execution, result.session)
+            if isinstance(result, ExecutionStartReceipt):
+                owner.observed = result.observed
+                owner.reservation = replace(owner.reservation, idempotency=result.idempotency)
+                owner.session_turn = result.turn
+
     async def prepare_reserved_start(
         self, request: ExecutionRequest, reservation: ExecutionStartReservation,
         session: SessionRecord | None,
@@ -1777,13 +1814,8 @@ class LocalExecutionBackend:
             reservation, expected_cursor=expected, expected_session=session,
         )
         owner = self._turn_owners.get(reservation.execution.execution_id)
-        if (owner is not None and result is not None and result.created
-                and result.execution.recovery is not None):
-            owner.attempt = _InitialAttemptCapture(result.execution, result.session)
-            if isinstance(result, ExecutionStartReceipt):
-                owner.observed = result.observed
-                owner.reservation = replace(owner.reservation, idempotency=result.idempotency)
-                owner.session_turn = result.turn
+        if owner is not None:
+            self._capture_reserved_start(owner, result)
         return result
 
     async def prepare_start(

@@ -306,6 +306,20 @@ class _SessionStartRead:
     identity: IdempotencyRecord | None
 
 
+@dataclass(slots=True)
+class _GroupedTurnStart:
+    session: "SessionRecord"
+    receipt: ExecutionStartReservationResult | None = None
+
+
+class _RunTurn(Protocol):
+    async def __call__(
+        self, reservation: ExecutionStartReservation, principal: Principal,
+        admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
+        grouped: _GroupedTurnStart | None = None,
+    ) -> ExecutionHandle: ...
+
+
 class _ExecutionRuntimeBridge:
     def __init__(self) -> None:
         self._port: _ExecutionRuntimePort | None = None
@@ -318,9 +332,9 @@ class _ExecutionRuntimeBridge:
             [ExecutionRequest, ExecutionStartReservation, "SessionRecord | None", TurnCoordination | None],
             Awaitable[str | None],
         ] | None = None
-        self.run_turn: Callable[
-            [ExecutionStartReservation, Principal, Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]]],
-            Awaitable[ExecutionHandle],
+        self.run_turn: _RunTurn | None = None
+        self.can_group_start: Callable[
+            [ExecutionRequest, ExecutionStartReservation, "SessionRecord"], Awaitable[bool],
         ] | None = None
         self.run_existing_turn: Callable[
             [ExecutionRecord, int | None, Callable[[], Awaitable[None]]], Awaitable[None],
@@ -1729,10 +1743,17 @@ class DefaultExecutionService(TaskExecutionService):
         execution = proposed_reservation.execution
         policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
 
+        grouped = None
+        can_group = self._runtime_bridge.can_group_start
+        run_turn = self._runtime_bridge.run_turn
+        if (policy.execution.commit.mode == "sync" and session is not None and can_group is not None
+                and run_turn is not None and await can_group(request, proposed_reservation, session)):
+            grouped = _GroupedTurnStart(session)
+
         async def admit(coordination: TurnCoordination | None) -> ExecutionHandle:
             if not self._accepting:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            if coordination is not None and coordination.lease is None:
+            if coordination is not None and coordination.lease is None and (grouped is None or grouped.receipt is None):
                 if coordinator is None:
                     raise RuntimeError("duplicate turn admission requires coordination")
                 return await self._join_coordinated_start(
@@ -1776,15 +1797,17 @@ class DefaultExecutionService(TaskExecutionService):
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 budget_scope_id=budget_scope_id,
                 capture_metric=capture_metric,
+                coordinated_receipt=None if grouped is None else grouped.receipt,
             )
 
-        run_turn = self._runtime_bridge.run_turn
         if run_turn is None:
             if coordinator is not None:
                 raise RuntimeError("coordinated admission requires a turn lifecycle owner")
             return await admit(None)
+        turn = (run_turn(proposed_reservation, request.principal, admit) if grouped is None else
+                run_turn(proposed_reservation, request.principal, admit, grouped))
         task = asyncio.create_task(
-            run_turn(proposed_reservation, request.principal, admit),
+            turn,
             name=f"execution-admission-{execution.execution_id}",
         )
         self._admission_tasks.add(task)
@@ -1863,11 +1886,13 @@ class DefaultExecutionService(TaskExecutionService):
         requires_task_invocation_capture: bool,
         budget_scope_id: str | None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
+        coordinated_receipt: ExecutionStartReservationResult | None = None,
     ) -> ExecutionHandle:
-        proposed_reservation = replace(proposed_reservation, execution=await _materialize_execution_payloads(
-            proposed_reservation.execution, input_materializer=self._input_materializer,
-            tenant_id=request.principal.tenant_id,
-        ))
+        if coordinated_receipt is None:
+            proposed_reservation = replace(proposed_reservation, execution=await _materialize_execution_payloads(
+                proposed_reservation.execution, input_materializer=self._input_materializer,
+                tenant_id=request.principal.tenant_id,
+            ))
         prepared_context = None
         captured_context = proposed_reservation.execution.input_context
         if captured_context is not None:
@@ -1883,8 +1908,8 @@ class DefaultExecutionService(TaskExecutionService):
         scope = identity.scope
         idempotency_key = identity.idempotency_key
         request_digest = identity.request_digest
-        reservation = None
-        if prepared_context is None and self._runtime_bridge.prepare_reserved_start is not None:
+        reservation = coordinated_receipt
+        if reservation is None and prepared_context is None and self._runtime_bridge.prepare_reserved_start is not None:
             reservation = await self._runtime_bridge.prepare_reserved_start(request, proposed_reservation, session)
         if reservation is not None:
             pass

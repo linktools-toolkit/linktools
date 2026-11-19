@@ -817,6 +817,7 @@ async def _build_local_components(
         runtime_bridge.prepare_reserved_start = backend.prepare_reserved_start
         runtime_bridge.pending_start = backend.start_pending
         runtime_bridge.run_turn = backend.run_turn
+        runtime_bridge.can_group_start = backend.can_group_start
         runtime_bridge.run_existing_turn = backend.run_existing_turn
         runtime_bridge.resume_subagent = backend.resume_subagent
         runtime_bridge.pending_promote = backend.promote_pending_execution

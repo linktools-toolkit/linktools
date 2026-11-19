@@ -28,7 +28,7 @@ from ..core import (
     agent_run_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload, sql_observation_phase
+from ..storage import StoredPayload, TurnCoordination, TurnScopeIdentity, sql_observation_phase
 from ..steps import native_store_key
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from ..model.messages import encode_model_messages
@@ -89,6 +89,7 @@ from .durability import (
 )
 from ._execution_commands import _execution_history_seal
 from ._execution_repositories import ExecutionRepositoryImpl, IdempotencyRepositoryImpl
+from .turns import StateTurnCoordination, _duration, _TurnGraphReadError
 from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._conversation_repositories import (
     ConversationHistoryRepositoryImpl,
@@ -169,6 +170,13 @@ def _timeline_turn_message_range(
 
 if TYPE_CHECKING:
     from .capabilities import RuntimeCapabilityWrites, PreparedCapabilityWrites
+
+
+class _GroupedStartUnavailable(AIError):
+    """The transaction body explicitly declined this route; nothing may commit."""
+
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.STORAGE_CONFLICT)
 
 
 class StateCommands:
@@ -1044,6 +1052,197 @@ class StateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from outcome.error
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
 
+    def can_claim_and_reserve_start(
+        self, authority: StateTurnCoordination, reservation: ExecutionStartReservation, expected_session: SessionRecord,
+    ) -> bool:
+        return self._grouped_start_stores(authority, reservation, expected_session) is not None
+
+    def _grouped_start_stores(
+        self, authority: StateTurnCoordination, reservation: ExecutionStartReservation, expected_session: SessionRecord,
+    ) -> tuple[StateStore, ...] | None:
+        initial = reservation.execution
+        if (type(authority) is not StateTurnCoordination
+                or type(self._conversation) is not SessionRepositoryImpl
+                or type(self._execution) is not ExecutionRepositoryImpl
+                or initial.session_id is None or initial.session_id != expected_session.session_id
+                or not initial.conversation or initial.parent_execution_id is not None or initial.input_context is not None
+                or initial.stored_user_input is None or initial.stored_user_input.codec != "text"
+                or initial.budget_scope_id is not None or reservation.budget is not None
+                or reservation.idempotency.request_identity_version != 2):
+            return None
+        execution_store = self._execution.state_store
+        session_store = self._conversation.state_store
+        stores = _dedupe_stores((authority._store, execution_store, session_store,
+                                self._execution._idempotency.state_store, self._events.state_store))
+        return stores if _same_group(stores) else None
+
+    async def claim_and_reserve_start(
+        self, authority: StateTurnCoordination, scope: TurnScopeIdentity, reservation: ExecutionStartReservation, *,
+        expected_session: SessionRecord, session_key: str, request_key: str, owner_id: str, lease_seconds: float,
+    ) -> tuple[TurnCoordination | None, ExecutionStartReservationResult | None] | None:
+        """Return coordinated local admission or a rollback-proven unsupported route.
+
+        The original coordination and reservation APIs remain the paths for split
+        storage and deferred publication. Only this command owns the combined
+        commit and its readback.
+        """
+        initial, identity = reservation.execution, reservation.idempotency
+        stores = self._grouped_start_stores(authority, reservation, expected_session)
+        if stores is None:
+            return None
+        execution_store = self._execution.state_store
+        session_store = self._conversation.state_store
+        authority._writable()
+        local_scope = authority._local_scope(scope)
+        if (session_key != f"session:{initial.session_id}"
+                or request_key != canonical_sha256([identity.scope, identity.idempotency_key])):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        duration = _duration(lease_seconds)
+        token = uuid4().hex
+        await self._execution.prepare_content(initial)
+        claim = ExecutionStartClaim(initial.execution_id, initial.revision, initial.event_seq,
+                                    identity.scope, identity.idempotency_key, identity.request_digest,
+                                    initial.created_at, identity.request_identity_version)
+
+        async def find_receipt() -> ExecutionStartReservationResult | None:
+            existing = await self._execution.get_start_idempotency(claim)
+            if existing is None:
+                return None
+            if (existing.request_digest != identity.request_digest
+                    or existing.request_identity_version != identity.request_identity_version
+                    or existing.resource_kind is not identity.resource_kind):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            record = await self._execution.get(existing.resource_id, tenant_id=self._tenant_id)
+            if (record is None or record.session_id != initial.session_id
+                    or record.parent_execution_id is not None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return ExecutionStartReservationResult(record, existing, False)
+
+        async def mutate(group: StateGroupTransaction) -> tuple[TurnCoordination | None, ExecutionStartReservationResult | None]:
+            execution_tx = group.transaction(execution_store)
+            session_tx = group.transaction(session_store)
+            authority_tx = group.transaction(authority._store)
+            if isinstance(group, GroupRecordReader):
+                keys: dict[StateStore, tuple[bytes, ...]] = {}
+                for store, key in (
+                    (execution_store, self._execution.execution_record_key(initial.execution_id)),
+                    (self._execution._idempotency.state_store, self._execution.start_idempotency_record_key(identity)),
+                    (session_store, self._conversation.session_record_key(initial.session_id)),
+                    (authority._store, authority._records.key(local_scope, "turn_session", session_key)),
+                    (authority._store, authority._records.key(local_scope, "turn_request", request_key)),
+                    (authority._store, authority._records.key(local_scope, "turn_execution", initial.execution_id)),
+                ):
+                    keys[store] = (*keys.get(store, ()), key)
+                try:
+                    await group.get_records(keys)
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                        raise
+                    # Preserve receipt priority if a companion failed eager decoding.
+            session = await self._conversation.get_in_transaction(session_tx, initial.session_id, tenant_id=self._tenant_id)
+            if session is None:
+                raise AIError(ErrorCode.SESSION_NOT_FOUND)
+            _require_session_capture(session, expected_session)
+            if session.status is not SessionStatus.OPEN:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            replay = await find_receipt()
+            if replay is not None:
+                if (replay.idempotency.status is IdempotencyStatus.START_UNKNOWN
+                        or replay.execution.status is ExecutionStatus.START_UNKNOWN):
+                    raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+                if (replay.idempotency.status is IdempotencyStatus.RESERVED
+                        or (replay.execution.status is ExecutionStatus.STARTED and replay.execution.agent_run_seq == 0)):
+                    # Original replay/launch owns these incomplete start paths.
+                    raise _GroupedStartUnavailable()
+                return None, replay
+            if session.continuation != expected_session.continuation:
+                raise AIError(ErrorCode.SESSION_BUSY)
+            if session.history_quality == "unavailable":
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            stale = None
+            if session.active_execution_id is not None:
+                stale = await self._execution.get_in_transaction(execution_tx, session.active_execution_id, tenant_id=self._tenant_id)
+                if (stale is None or stale.session_id != initial.session_id
+                        or stale.parent_execution_id is not None):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if stale.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                    # Leave guarded recovery/old actor replay to its established entry point.
+                    raise AIError(ErrorCode.SESSION_BUSY)
+            coordinated = await authority._claim_in_transaction(
+                authority_tx, local_scope, session_key=session_key, request_key=request_key,
+                request_digest=identity.request_digest, execution_id=initial.execution_id,
+                duration=duration, owner_id=owner_id, token=token,
+            )
+            if coordinated is None:
+                raise AIError(ErrorCode.SESSION_BUSY)
+            if coordinated.lease is None:
+                return coordinated, None
+            if stale is not None:
+                await self._conversation.release_execution_in_transaction(
+                    session_tx, initial.session_id, tenant_id=self._tenant_id, execution_id=stale.execution_id,
+                    history_unavailable=stale.invalidates_session_history, require_turn_commit=stale.conversation,
+                )
+            saved = await self._reserve_start_in_transaction(
+                group, reservation, claim, expected_cursor=expected_session.continuation, expected_session=expected_session,
+            )
+            if saved is None:
+                raise _GroupedStartUnavailable()
+            if not saved.created or saved.execution.execution_id != coordinated.execution_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return coordinated, saved
+
+        async def readback(group: StateGroupTransaction) -> tuple[TurnCoordination | None, ExecutionStartReservationResult | None] | None:
+            replay = await find_receipt()
+            graph = await authority._anchor(group.transaction(authority._store), local_scope, "turn_execution", initial.execution_id)
+            if (graph is None or graph.execution.data["token"] != token
+                    or graph.execution.data["owner_id"] != owner_id
+                    or graph.execution.data["request_key"] != request_key
+                    or graph.execution.data["request_digest"] != identity.request_digest
+                    or graph.execution.data["session_key"] != session_key
+                    or replay is None or replay.execution.execution_id != initial.execution_id):
+                return None
+            session = await self._conversation.get_in_transaction(
+                group.transaction(session_store), initial.session_id, tenant_id=self._tenant_id,
+            )
+            if (session is None or session.active_execution_id != initial.execution_id
+                    or session.continuation != expected_session.continuation
+                    or replay.idempotency.status is not IdempotencyStatus.STARTED
+                    or replay.execution.status is not ExecutionStatus.STARTED
+                    or replay.execution.agent_run_seq != 0
+                    or graph.session.lease_expires_at <= await group.transaction(authority._store).now()):
+                return None
+            reconciled = await self._reconcile_start_unknown(
+                claim, session_id=initial.session_id, expected_cursor=expected_session.continuation,
+                expected_session=expected_session,
+            )
+            if reconciled != replay.execution:
+                return None
+            return authority._coordination(graph, owned=True), replace(replay, session=session, created=True)
+
+        for attempt in range(3):
+            try:
+                return await execution_store.storage_group.mutate(stores, mutate)
+            except _GroupedStartUnavailable:
+                return None
+            except _TurnGraphReadError as error:
+                if not await authority._anchor_advanced(error):
+                    raise
+                if attempt == 2:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    try:
+                        confirmed = await execution_store.storage_group.read_many(stores, readback)
+                    except Exception as read_error:
+                        raise error from read_error
+                    if confirmed is not None:
+                        return confirmed
+                    raise
+                if error.code is not ErrorCode.STORAGE_CONFLICT or attempt == 2:
+                    raise
+            await asyncio.sleep(0)
+        raise AssertionError("unreachable grouped admission attempt")
+
     async def reserve_start_checkpoint(
         self, reservation: ExecutionStartReservation, *,
         expected_cursor: ConversationCursor | None,
@@ -1069,56 +1268,8 @@ class StateCommands:
                                     identity.request_digest, initial.created_at, identity.request_identity_version)
 
         async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult | None:
-            if initial.session_id is not None and isinstance(group, GroupRecordReader):
-                keys = {self._execution.state_store: (
-                    self._execution.execution_record_key(initial.execution_id),
-                    self._execution.start_idempotency_record_key(identity),
-                )}
-                store = self._conversation.state_store
-                keys[store] = (*keys.get(store, ()), self._conversation.session_record_key(initial.session_id))
-                await group.get_records(keys)
-            # Busy, stale-owner and changed-cursor admissions retain the existing
-            # reservation/rejection path, including durable failed request keys.
-            if initial.session_id is not None:
-                session = await self._conversation.get_in_transaction(
-                    group.transaction(self._conversation.state_store), initial.session_id,
-                    tenant_id=self._tenant_id,
-                )
-                if session is not None and expected_session is not None:
-                    _require_session_capture(session, expected_session)
-                if (session is None or session.status is not SessionStatus.OPEN
-                        or session.active_execution_id is not None
-                        or session.continuation != expected_cursor
-                        or session.history_quality == "unavailable"):
-                    return None
-            reserved = await self._execution.reserve_started(reservation)
-            if not reserved.created:
-                return reserved
-            turns: list[SessionTurnRef] = []
-            started = reserved.execution
-            if initial.session_id is not None:
-                await self._conversation.admit_execution_in_transaction(
-                    group.transaction(self._conversation.state_store), initial.session_id,
-                    tenant_id=self._tenant_id, execution_id=claim.execution_id,
-                    expected=expected_cursor, expected_session=expected_session,
-                    admitted_turn=turns.append,
-                )
-            started_identity = await self._execution.get_start_idempotency(claim)
-            if started_identity is None or started_identity.status is not IdempotencyStatus.STARTED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            admitted_session = (None if initial.session_id is None else
-                await self._conversation.get_in_transaction(
-                    group.transaction(self._conversation.state_store), initial.session_id,
-                    tenant_id=self._tenant_id,
-                ))
-            observed = await self._execution.get_observed_in_transaction(
-                group.transaction(self._execution.state_store), initial.execution_id, tenant_id=self._tenant_id,
-            )
-            if observed is None or observed.value != started:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ExecutionStartReceipt(
-                started, started_identity, True, session=admitted_session,
-                observed=observed, turn=turns[0] if turns else None,
+            return await self._reserve_start_in_transaction(
+                group, reservation, claim, expected_cursor=expected_cursor, expected_session=expected_session,
             )
 
         for attempt in range(2):
@@ -1156,6 +1307,63 @@ class StateCommands:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 return ExecutionStartReservationResult(started, observed_identity, True, session=session)
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+    async def _reserve_start_in_transaction(
+        self, group: StateGroupTransaction, reservation: ExecutionStartReservation, claim: ExecutionStartClaim, *,
+        expected_cursor: ConversationCursor | None, expected_session: SessionRecord | None,
+    ) -> ExecutionStartReservationResult | None:
+        initial, identity = reservation.execution, reservation.idempotency
+        if initial.session_id is not None and isinstance(group, GroupRecordReader):
+            keys = {self._execution.state_store: (
+                self._execution.execution_record_key(initial.execution_id),
+                self._execution.start_idempotency_record_key(identity),
+            )}
+            store = self._conversation.state_store
+            keys[store] = (*keys.get(store, ()), self._conversation.session_record_key(initial.session_id))
+            await group.get_records(keys)
+        # Busy, stale-owner and changed-cursor admissions retain the existing
+        # reservation/rejection path, including durable failed request keys.
+        if initial.session_id is not None:
+            session = await self._conversation.get_in_transaction(
+                group.transaction(self._conversation.state_store), initial.session_id,
+                tenant_id=self._tenant_id,
+            )
+            if session is not None and expected_session is not None:
+                _require_session_capture(session, expected_session)
+            if (session is None or session.status is not SessionStatus.OPEN
+                    or session.active_execution_id is not None
+                    or session.continuation != expected_cursor
+                    or session.history_quality == "unavailable"):
+                return None
+        reserved = await self._execution.reserve_started(reservation)
+        if not reserved.created:
+            return reserved
+        turns: list[SessionTurnRef] = []
+        started = reserved.execution
+        if initial.session_id is not None:
+            await self._conversation.admit_execution_in_transaction(
+                group.transaction(self._conversation.state_store), initial.session_id,
+                tenant_id=self._tenant_id, execution_id=claim.execution_id,
+                expected=expected_cursor, expected_session=expected_session,
+                admitted_turn=turns.append,
+            )
+        started_identity = await self._execution.get_start_idempotency(claim)
+        if started_identity is None or started_identity.status is not IdempotencyStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        admitted_session = (None if initial.session_id is None else
+            await self._conversation.get_in_transaction(
+                group.transaction(self._conversation.state_store), initial.session_id,
+                tenant_id=self._tenant_id,
+            ))
+        observed = await self._execution.get_observed_in_transaction(
+            group.transaction(self._execution.state_store), initial.execution_id, tenant_id=self._tenant_id,
+        )
+        if observed is None or observed.value != started:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return ExecutionStartReceipt(
+            started, started_identity, True, session=admitted_session,
+            observed=observed, turn=turns[0] if turns else None,
+        )
 
     async def commit_start_checkpoint(
         self,
