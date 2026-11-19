@@ -20,6 +20,9 @@ from ..errors import AIError, ErrorCode
 from ..storage import (
     CacheBackend,
     IntegrityViolationKind,
+    MySQLDialect,
+    PostgreSQLDialect,
+    SQLiteDialect,
     SqlStorageContext,
     create_sql_storage_context,
     sql_audit_now,
@@ -120,6 +123,15 @@ class _SqlGroupTransaction:
                 "store was not enlisted in the StateStorageGroup transaction"
             ) from error
 
+    def supports_clocked_records(self) -> bool:
+        return type(self._group.context.dialect) in (SQLiteDialect, MySQLDialect, PostgreSQLDialect)
+
+    async def observe_record(self, store: StateStore, key: bytes) -> tuple[StoredRecord, datetime] | None:
+        active = active_state_scope()
+        if active is None or active.writable or active.record_reader is not self:
+            raise StateTransactionNestingError("record observations require an active read snapshot")
+        return await self.transaction(store).observe_record(key)
+
     async def get_records(
         self, requests: Mapping[StateStore, Sequence[bytes]],
     ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]]:
@@ -201,7 +213,26 @@ class _SqlGroupTransaction:
                 or owner_query.scope_key is None and owner_query.parent_key is None):
             raise ValueError("content owner queries require one scoped tool selection")
         namespace, tenant = archive_scope_parts(content_scope_key)
+        typed_payloads = (content._store_key == STATE_GROUP_ARCHIVE_KEY
+                          and any(path[-1] == "$execution_payload" for path in paths))
+
+        def reference_keys(record: StoredRecord) -> tuple[bytes, ...]:
+            references = []
+            for path in paths:
+                value = record.data
+                for part in path:
+                    value = value.get(part) if isinstance(value, Mapping) else None
+                if not isinstance(value, str):
+                    continue
+                try:
+                    identity = validate_archive_content_identity(value)
+                except AIError:
+                    continue  # Typed decoding rejects malformed references.
+                references.append(record_key(namespace, tenant, "archive", "archive_content", (identity,)))
+            return tuple(references)
+
         required = []
+        warm_references: dict[bytes, tuple[bytes, ...]] = {}
         for key in keys:
             if key not in owner._record_cache:
                 required.append(key)
@@ -230,20 +261,7 @@ class _SqlGroupTransaction:
             if native_missing:
                 required.append(key)
                 continue
-            for path in paths:
-                value = record.data
-                for part in path:
-                    value = value.get(part) if isinstance(value, Mapping) else None
-                if not isinstance(value, str):
-                    continue
-                try:
-                    identity = validate_archive_content_identity(value)
-                except AIError:
-                    continue
-                target = record_key(namespace, tenant, "archive", "archive_content", (identity,))
-                if target not in content._record_cache:
-                    required.append(key)
-                    break
+            warm_references[key] = reference_keys(record)
         extras = {store: tuple(dict.fromkeys(validate_record_key(key) for key in requested
                     if key not in self.transaction(store)._record_cache))
                   for store, requested in (additional_records or {}).items()}
@@ -269,8 +287,7 @@ class _SqlGroupTransaction:
             statement = content_reference_statement(
                 self._group.metadata, dialect=dialect, owner_store_key=owner._store_key, owner_keys=batch,
                 content_store_key=content._store_key, content_scope_key=content_scope_key, content_paths=paths,
-                typed_payloads=(content._store_key == STATE_GROUP_ARCHIVE_KEY
-                    and any(path[-1] == "$execution_payload" for path in paths)),
+                typed_payloads=typed_payloads,
                 additional_records={self.transaction(store)._store_key: requested for store, requested in extras.items()} if offset == 0 else None,
                 owner_statement=(_record_query_statement(self._group.metadata, owner._store_key, owner_query)
                                  if owner_query is not None else None),
@@ -347,21 +364,22 @@ class _SqlGroupTransaction:
             for store, requested in extras.items():
                 for key in requested:
                     self.transaction(store)._record_cache.setdefault(key, None)
-        elif extras:
-            await self.get_records(extras)
+        # Warm owners already belong to this snapshot. Route their unresolved
+        # bodies through the canonical keyed reader, after the cold join has
+        # seeded any shared content and without reloading the owner rows.
+        body_keys = tuple(dict.fromkeys(
+            key for addresses in warm_references.values() for key in addresses
+            if key not in content._record_cache and (typed_payloads or not content._is_payload_key(key))
+        ))
+        reads = dict(extras) if not required else {}
+        if body_keys:
+            reads[content_store] = (*reads.get(content_store, ()), *body_keys)
+        if reads:
+            await self.get_records(reads)
         found[owner_store].update((key, record) for key in keys if (record := owner._record_cache.get(key)) is not None)
         for record in tuple(found[owner_store].values()):
-            for path in paths:
-                value = record.data
-                for part in path:
-                    value = value.get(part) if isinstance(value, Mapping) else None
-                if not isinstance(value, str):
-                    continue
-                try:
-                    identity = validate_archive_content_identity(value)
-                except AIError:
-                    continue
-                target = record_key(namespace, tenant, "archive", "archive_content", (identity,))
+            addresses = warm_references.get(record.key)
+            for target in reference_keys(record) if addresses is None else addresses:
                 if (source := content._record_cache.get(target)) is not None:
                     found[content_store][target] = source
         return found
@@ -1419,6 +1437,26 @@ class _SqlTransaction:
         value = _record_from_row(row)
         self._record_cache[key] = value
         return value
+
+    async def observe_record(self, key: bytes) -> tuple[StoredRecord, datetime] | None:
+        """Observe a control record and its clock in the first consistent read."""
+        from sqlalchemy import select
+
+        validate_record_key(key)
+        table = record_owner_rows(self._metadata, keys=(key,))
+        dialect = self._context.dialect
+        row = (await self._execute(
+            select(*record_owner_columns(table), dialect.read_snapshot_time_expression().label("observed_at")).where(
+                table.c.store_key == self._store_key, _locator_column(table.c.key) == _key_locator(key),
+            )
+        )).mappings().one_or_none()
+        if row is None:
+            return None
+        if row["key"] != key:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value = _record_from_row(row)
+        self._record_cache[key] = value
+        return value, dialect.decode_database_time(row["observed_at"])
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         from sqlalchemy import select

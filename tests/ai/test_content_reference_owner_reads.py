@@ -87,3 +87,50 @@ async def test_large_additional_batch_keeps_typed_payload_route(tmp_path: Path) 
                 record.key: record for record in owners}
 
         await first.storage_group.read_many((archive,), read)
+
+
+@pytest.mark.asyncio
+async def test_cached_owner_reads_declared_payload_by_key_in_same_snapshot(tmp_path: Path) -> None:
+    from sqlalchemy import event
+
+    async with _database(tmp_path / "warm.db") as (engine, owner, _):
+        _, archive = await owner.storage_group.open_archive(create=True)
+        scope = archive_scope_key("overlap", "tenant")
+        body = b"canonical payload"
+        content = ContentRecord("execution-payload", hashlib.sha256(body).hexdigest(), len(body), "raw", body=body)
+        key = record_key("overlap", "tenant", "archive", "archive_content", (content.identity,))
+        payload = StoredRecord(key, scope, None, "archive_content", content.identity.encode(), None,
+                               0, None, 0, None, content.to_json(), payload_bytes=body)
+        missing_identity = "execution-payload:" + hashlib.sha256(b"missing").hexdigest()
+        record = replace(_record("owner"), data={
+            "argument": {"$execution_payload": content.identity},
+            "result": {"$execution_payload": content.identity},
+            "missing": {"$execution_payload": missing_identity},
+        })
+        await owner.mutate(lambda tx: tx.insert_record(record))
+        await archive.mutate(lambda tx: tx.insert_record(payload))
+        statements = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _many) -> None:
+            if statement.startswith(("SELECT", "WITH")):
+                statements.append(statement)
+
+        async def read(group):
+            assert await group.transaction(owner).get_record(record.key) == record
+            event.listen(engine.sync_engine, "before_cursor_execute", capture)
+            try:
+                kwargs = dict(
+                    owner_store=owner, owner_keys=(record.key,),
+                    content_store=archive, content_scope_key=scope,
+                    content_paths=tuple((name, "$execution_payload") for name in ("argument", "result", "missing")),
+                )
+                reader = active_state_scope().record_reader
+                assert await reader.read_content_references(**kwargs) == {owner: {record.key: record}, archive: {key: payload}}
+                assert await reader.read_content_references(**kwargs) == {owner: {record.key: record}, archive: {key: payload}}
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+        await owner.storage_group.read_many((owner, archive), read)
+        assert len(statements) == 1
+        assert "FROM ai_step_messages" in statements[0]
+        assert "ai_state_records" not in statements[0]

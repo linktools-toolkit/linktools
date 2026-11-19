@@ -1361,21 +1361,19 @@ class History:
         principal: Principal,
     ) -> SessionView:
         sessions, authorization = self._require_session_reader()
-        header = await sessions.get_header(
-            session_id,
-            tenant_id=principal.tenant_id,
-        )
+        if type(sessions) is SessionRepositoryImpl:
+            record = await sessions.get(session_id, tenant_id=principal.tenant_id)
+            header = None if record is None else ResourceRef(
+                ResourceKind.SESSION, session_id, principal.tenant_id, record.owner_principal_id,
+            )
+        else:
+            record = None
+            header = await sessions.get_header(session_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await authorization.authorize(
-            principal,
-            AuthorizationAction.SESSION_READ,
-            header,
-        )
-        record = await sessions.get(
-            session_id,
-            tenant_id=principal.tenant_id,
-        )
+        await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+        if record is None:
+            record = await sessions.get(session_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return await self._observed_session_view(record, principal)

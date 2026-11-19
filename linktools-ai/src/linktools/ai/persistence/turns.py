@@ -10,7 +10,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 from uuid import uuid4
 
 from ..core import JsonValue, canonical_json_bytes, validate_persistence_namespace, validate_tenant_id, validate_resource_id
@@ -22,6 +22,8 @@ from .state import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from .contracts import IdempotencyRecord, IdempotencyRepository
 
 
@@ -147,6 +149,15 @@ class _Graph:
         ])
 
 
+@runtime_checkable
+class _ClockedRecordReader(Protocol):
+    """Read the first snapshot row and current source time as one statement."""
+
+    def supports_clocked_records(self) -> bool: ...
+
+    async def observe_record(self, store: StateStore, key: bytes) -> tuple[StoredRecord, datetime] | None: ...
+
+
 class _TurnGraphReadError(AIError):
     def __init__(self, anchor: StoredRecord) -> None:
         super().__init__(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -231,7 +242,11 @@ class StateTurnCoordination:
             raise
 
     async def _anchor(self, tx: StateTransaction, scope: str, kind: str, identity: str) -> _Graph | None:
-        anchor = await self._load(tx, scope, kind, identity)
+        return await self._resolve_anchor(tx, scope, kind, await self._load(tx, scope, kind, identity))
+
+    async def _resolve_anchor(
+        self, tx: StateTransaction, scope: str, kind: str, anchor: StoredRecord | None,
+    ) -> _Graph | None:
         if anchor is None or anchor.state == "IDLE":
             return None
         if anchor.state == "RETIRED":
@@ -258,11 +273,26 @@ class StateTurnCoordination:
         self._outside_transaction()
         _text(scope)
         _text(identity)
+
+        async def anchor_observation(tx: StateTransaction) -> tuple[_Graph | None, datetime | None]:
+            active = active_state_scope()
+            reader = None if active is None else active.record_reader
+            if not isinstance(reader, _ClockedRecordReader) or not reader.supports_clocked_records():
+                return await self._anchor(tx, scope, kind, identity), None
+            observation = await reader.observe_record(self._store, self._records.key(scope, kind, identity))
+            if observation is None:
+                return None, None
+            anchor, sampled = observation
+            return await self._resolve_anchor(tx, scope, kind, self._records.validate(anchor)), sampled
+
         for attempt in range(3):
             try:
-                first = await self._store.read(lambda tx: self._anchor(tx, scope, kind, identity))
+                first, sampled = await self._store.read(anchor_observation)
                 if first is None:
                     return None
+                if sampled is not None:
+                    return None if first.session.lease_expires_at <= sampled else first
+                # Backends without a coupled clock retain the bracketed read.
                 sampled = await self._store.read(lambda tx: tx.now())
                 second = await self._store.read(lambda tx: self._anchor(tx, scope, kind, identity))
                 if second is None:
@@ -308,18 +338,24 @@ class StateTurnCoordination:
 
         async def capture(
             transaction: StateGroupTransaction,
-        ) -> tuple[IdempotencyRecord | None, TurnCoordination | None]:
+        ) -> tuple[IdempotencyRecord | None, _Graph | None, bool]:
             receipt = await requests.get(idempotency_scope, idempotency_key, tenant_id=scope.tenant_id)
             if receipt is not None:
-                return receipt, None
+                return receipt, None, False
             turn = transaction.transaction(self._store)
             graph = await self._anchor(turn, local_scope, "turn_request", request_key)
-            if graph is None or graph.session.lease_expires_at <= await turn.now():
-                return None, None
-            return None, self._coordination(graph)
+            return None, graph, graph is not None and graph.session.lease_expires_at <= await turn.now()
 
         stores = tuple(dict.fromkeys((self._store, requests.state_store)))
-        return await group.read_many(stores, capture)
+        receipt, graph, expired = await group.read_many(stores, capture)
+        if graph is not None and expired:
+            # The receipt fixed the snapshot before the lazy clock sample. A
+            # pre-expiry renewal may already have committed outside that view.
+            previous = graph
+            receipt, graph, expired = await group.read_many(stores, capture)
+            if graph is not None and expired and graph.session.storage_revision != previous.session.storage_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return receipt, None if graph is None or expired else self._coordination(graph)
 
     async def read_turn_by_session(self, scope: TurnScopeIdentity, session_key: str) -> TurnCoordination | None:
         graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
