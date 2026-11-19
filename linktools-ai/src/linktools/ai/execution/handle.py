@@ -62,6 +62,7 @@ class ExecutionBinding:
     list_events: Callable[..., Awaitable[Page[ExecutionEvent]]] | None = None
     retry: Callable[..., Awaitable[Execution[object]]] | None = None
     fork: Callable[..., Awaitable[Execution[object]]] | None = None
+    share_tree_capture: bool = False
 
 
 @dataclass(frozen=True, slots=True)

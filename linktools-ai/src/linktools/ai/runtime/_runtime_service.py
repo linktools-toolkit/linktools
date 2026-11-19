@@ -25,6 +25,7 @@ from ..agent import (
 )
 from ._features import RuntimeFeatures, RuntimeFeaturesSource
 from ..execution.handle import ExecutionBinding
+from ..execution.tree import ExecutionTreeStreamer
 from ..core import (
     RunBudget,
     CorrelationData,
@@ -438,6 +439,7 @@ class Runtime(Generic[AppT]):
             capture_tree=self._capture_execution_tree, replay_tree=self._replay_execution_tree,
             history=history, list_events=None if history is None else history.list_execution_events,
             retry=self._retry_execution, fork=self._fork_execution,
+            share_tree_capture=type(tree_streamer) is ExecutionTreeStreamer,
         )
         self._agent_ready = True
 

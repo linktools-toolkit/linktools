@@ -1331,6 +1331,7 @@ class ExecutionTerminalPublication(ExecutionTerminalWriteReceipt):
     """Full publication confirmed by its owner, including any Session release."""
 
     session_released: bool = False
+    history_seal: ExecutionHistorySealRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)

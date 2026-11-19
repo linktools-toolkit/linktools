@@ -56,7 +56,32 @@ globalThis.location={get hash(){return hash;},set hash(value){hash=value;hashCha
 let counter=0;Object.defineProperty(globalThis,"crypto",{value:{randomUUID:()=>`request-${++counter}`},configurable:true});globalThis.confirm=()=>true;globalThis.prompt=()=> 'Retry prompt';
 const networkFailures=new Set(),calls=[],delays=new Map(),timelineOverrides=new Map(),streamBlocks=new Map(),detailResponses=new Map(),unavailableTimelines=new Set();
 const info=(id,session_id=id[0])=>({execution_id:id,agent_id:'default',session_id,status:'SUCCEEDED',binding_kind:'agent',lineage_kind:'ROOT',created_at:'2026-01-01T00:00:00Z',started_at:'2026-01-01T00:00:00Z',terminal_at:'2026-01-01T00:00:01Z'});
-const sessions=new Map(['a','b'].map(id=>[id,{session_id:id,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:id==='a'?'Alpha':'Beta'}}]));
+const sessionSources=[];
+function notifySession(id) {
+  queueMicrotask(()=>sessionSources.filter(source=>!source.closed && source.id===id).forEach(source=>source.snapshot()));
+}
+class SessionFixtures extends Map {
+  set(id,value) {
+    const record={...value,active_execution_id:value.active_execution_id ?? null};
+    for(const key of Object.keys(record)) {
+      let field=record[key];
+      Object.defineProperty(record,key,{enumerable:true,configurable:true,
+        get(){return field;},set(value){field=value;notifySession(id);}});
+    }
+    super.set(id,record);
+    notifySession(id);return this;
+  }
+}
+const sessions=new SessionFixtures(['a','b'].map(id=>[id,{session_id:id,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:id==='a'?'Alpha':'Beta'}}]));
+globalThis.EventSource=class {
+  constructor(url) {
+    this.id=new URL(url,'http://localhost').searchParams.get('session_id');this.listeners=new Map();
+    sessionSources.push(this);queueMicrotask(()=>{if(!this.closed)this.snapshot();});
+  }
+  addEventListener(name,callback){this.listeners.set(name,callback);}
+  snapshot(){const value=sessions.get(this.id);if(value)this.onmessage?.({data:JSON.stringify({status:value.status,revision:value.revision,active_execution_id:value.active_execution_id ?? null})});}
+  close(){this.closed=true;}
+};
 const executions=new Map([['a-run',info('a-run')],['b-run',info('b-run')]]);
 const timeline=id=>timelineOverrides.get(id) || ({items:[{execution_id:`${id}-run`,status:'SUCCEEDED',created_at:'2026-01-01T00:00:00Z',user_input:`${id} question`,conversation_committed:true,items:[{item_kind:'assistant',content:`${id} answer`}]}],next_cursor:null});
 function response(value,status=200){return new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});}
@@ -157,6 +182,332 @@ async function detail(name,pattern){
 }
 await until('initial session list',()=>node('list').children.length===2);
 assert.equal(node('list').children.length,2);
+if(process.argv[3]==='snapshot-tail') {
+  const id='a-tail';
+  executions.set(id,{...info(id,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(id,{});sessions.get('a').active_execution_id=id;
+  await select('#session=a&execution=a-run');
+  await until('tail watch opened',()=>Boolean(streamBlocks.get(id).controller));
+  node('prompt').value='Keep local draft';node('prompt').focus();
+  const reads=()=>calls.filter(call=>call.method==='GET' && call.key===`/api/executions/${id}`).length;
+  const sessionReads=()=>calls.filter(call=>call.method==='GET' && call.key==='/api/sessions/a').length;
+  const before=reads(),beforeSession=sessionReads();
+  executions.set(id,info(id,'a'));
+  const stream=streamBlocks.get(id).controller;
+  stream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));stream.close();
+  await until('successful tail reads timeline',()=>sessionReads()>beforeSession);await settle();
+  assert.equal(reads(),before,'authorized final SSE snapshot replaces the redundant execution GET');
+  assert.equal(sessionReads(),beforeSession+1,'committed session timeline still refreshes');
+  assert.equal(node('prompt').value,'Keep local draft');assert.equal(document.activeElement,node('prompt'));
+  assert.equal(node('detail-turn').value,'a-run','tail does not select the observed execution');
+  assert.equal(node('send').disabled,true,'execution completion cannot release the session owner');
+
+  const failed='a-broken';executions.set(failed,{...info(failed,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(failed,{});sessions.get('a').active_execution_id=failed;
+  await until('broken watch opened',()=>Boolean(streamBlocks.get(failed).controller));
+  const failures=()=>calls.filter(call=>call.method==='GET' && call.key===`/api/executions/${failed}`).length;
+  const beforeFailure=failures(),old=streamBlocks.get(failed).controller;
+  old.close();
+  await until('transport failure reads current execution',()=>failures()>beforeFailure);
+  await until('transport reconnect opens new stream',()=>streamBlocks.get(failed).controller!==old);
+  const reconnected=streamBlocks.get(failed).controller,beforeTyped=failures();
+  executions.set(failed,{...info(failed,'a'),status:'FAILED'});
+  reconnected.enqueue(new TextEncoder().encode('event: observation_error\ndata: {"error_code":"STORAGE_NOT_FOUND","origin":"stream"}\n\n'));
+  await until('observation error reads final state',()=>failures()>beforeTyped);
+  assert.equal(node('prompt').value,'Keep local draft');assert.equal(node('detail-turn').value,'a-run');
+  const terminalFailure='a-failed-snapshot';
+  executions.set(terminalFailure,{...info(terminalFailure,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(terminalFailure,{});sessions.get('a').active_execution_id=terminalFailure;
+  await until('failed snapshot watch opened',()=>Boolean(streamBlocks.get(terminalFailure).controller));
+  const failureReads=()=>calls.filter(call=>call.method==='GET' && call.key===`/api/executions/${terminalFailure}`).length;
+  const beforeFinalFailure=failureReads(),failedSnapshot={...info(terminalFailure,'a'),status:'FAILED'};
+  executions.set(terminalFailure,failedSnapshot);
+  const failedStream=streamBlocks.get(terminalFailure).controller;
+  failedStream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(failedSnapshot)+'\n\n'));failedStream.close();
+  await until('failed terminal snapshot keeps metadata readback',()=>failureReads()>beforeFinalFailure);
+  console.log('Successful SSE tail reuses metadata; transport/reconnect and observation errors reread authority');
+  process.exit(0);
+}
+if(process.argv[3]==='session-sync') {
+  await select('#session=a&execution=a-run');
+  await until('session initial snapshot',()=>!node('send').disabled);
+  let first=sessionSources.at(-1);
+  node('prompt').value='My private draft';node('planning').checked=true;node('thinking').value='3';
+  node('prompt').focus();
+  executions.set('a-live',{...info('a-live','a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set('a-live',{});
+  sessions.get('a').active_execution_id='a-live';
+  await until('other client admission',()=>node('send').disabled && node('current-status').textContent.includes('occupied'));
+  assert.equal(node('prompt').disabled,false);assert.equal(node('planning').disabled,false);assert.equal(node('thinking').disabled,false);
+  assert.equal(node('prompt').value,'My private draft');assert.equal(node('planning').checked,true);assert.equal(node('thinking').value,'3');
+  assert.equal(document.activeElement,node('prompt'));
+  assert.equal(node('detail-turn').value,'a-run','a remote start cannot select another history turn');
+  await settle();
+  const before=calls.length;
+  first.snapshot();first.snapshot();await settle();
+  assert.equal(calls.length,before,'duplicate session frames do not trigger reads');
+  const posts=calls.filter(call=>call.method==='POST').length;
+  await node('composer').requestSubmit();
+  assert.equal(calls.filter(call=>call.method==='POST').length,posts,'keyboard/programmatic submit obeys authoritative occupancy');
+  detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),active_execution_id:null},timeline:timeline('a')});
+  await refresh();
+  assert.equal(node('send').disabled,true,'HTTP metadata cannot release the SSE owner');
+  detailResponses.delete('/api/sessions/a');
+  first=sessionSources.at(-1);
+  executions.set('a-live',{...info('a-live','a')});
+  sessions.get('a').active_execution_id=null;
+  await until('authoritative release',()=>!node('send').disabled);
+  assert.equal(node('prompt').value,'My private draft');
+  first.onerror();assert.equal(node('send').disabled,true);
+  assert.equal(node('prompt').disabled,false);
+  first.snapshot();assert.equal(node('send').disabled,false);
+
+  const historyReads=()=>calls.filter(call=>call.method==='GET' && call.key==='/api/sessions/a').length;
+  const priorReads=historyReads();
+  const oldTimeline=timeline('a');
+  timelineOverrides.set('a',{...oldTimeline,items:[...oldTimeline.items,{...oldTimeline.items[0],execution_id:'a-coalesced',user_input:'Fast remote turn'}]});
+  sessions.get('a').revision+=2;
+  await until('coalesced idle turn appears',()=>node('conversation').textContent.includes('Fast remote turn'));
+  assert.equal(historyReads(),priorReads+1,'changed idle revision performs one timeline read');
+  assert.equal(node('detail-turn').value,'a-run');assert.equal(node('prompt').value,'My private draft');
+  assert.equal(node('planning').checked,true);assert.equal(node('thinking').value,'3');assert.equal(document.activeElement,node('prompt'));
+  const afterFast=calls.length;
+  first.snapshot();first.snapshot();await settle();assert.equal(calls.length,afterFast,'same revision has no read cost');
+  first.onmessage({data:JSON.stringify({status:'OPEN',active_execution_id:null,revision:0})});
+  await settle();assert.equal(calls.length,afterFast,'stale revisions do not refresh history');
+  first.onerror();sessions.get('a').revision+=2;
+  await settle();assert.equal(historyReads(),priorReads+2,'reconnect snapshot catches an idle turn missed while disconnected');
+
+  // The remote turn can commit before our first execution GET finishes.
+  for(const stale of [false,true]){
+    const quick=`a-released-before-observation-${stale}`,late=deferred(`GET /api/executions/${quick}`);
+    const beforeReleaseReads=historyReads(),answer=`Committed before observation ${stale}`;
+    sessions.get('a').active_execution_id=quick;
+    await late.requested;
+    assert.equal(node('send').disabled,true);
+    const quickTimeline=timeline('a');
+    timelineOverrides.set('a',{...quickTimeline,items:[...quickTimeline.items,{...quickTimeline.items[0],execution_id:quick,user_input:answer}]});
+    sessions.get('a').active_execution_id=null;sessions.get('a').revision++;
+    await until('remote release enables sending',()=>!node('send').disabled);
+    late(stale?{...info(quick,'a'),status:'STARTED',terminal_at:null}:info(quick,'a'));
+    await until('released turn without execution stream appears',()=>node('conversation').textContent.includes(answer));
+    await settle();
+    assert.equal(historyReads(),beforeReleaseReads+1,'release without stream reads the timeline once');
+    assert.equal(calls.filter(call=>call.key===`/api/executions/${quick}/events`).length,0);
+    assert.equal(node('detail-turn').value,'a-run');assert.equal(node('prompt').value,'My private draft');
+    assert.equal(node('planning').checked,true);assert.equal(node('thinking').value,'3');assert.equal(document.activeElement,node('prompt'));
+  }
+
+  const streamed='a-released-before-tail',beforeStreamReads=historyReads();
+  executions.set(streamed,{...info(streamed,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(streamed,{});sessions.get('a').active_execution_id=streamed;
+  await until('remote execution stream starts',()=>Boolean(streamBlocks.get(streamed).controller));
+  const streamedTimeline=timeline('a');
+  timelineOverrides.set('a',{...streamedTimeline,items:[...streamedTimeline.items,{...streamedTimeline.items[0],execution_id:streamed,user_input:'Committed with execution stream'}]});
+  sessions.get('a').active_execution_id=null;sessions.get('a').revision++;
+  await until('release while streaming enables sending',()=>!node('send').disabled);await settle();
+  assert.equal(historyReads(),beforeStreamReads,'release leaves the timeline read to the open stream');
+  executions.set(streamed,info(streamed,'a'));
+  const remoteStream=streamBlocks.get(streamed).controller;
+  remoteStream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(streamed,'a'))+'\n\n'));remoteStream.close();
+  await until('stream tail loads committed turn',()=>node('conversation').textContent.includes('Committed with execution stream'));await settle();
+  assert.equal(historyReads(),beforeStreamReads+1,'normal tail and release share one timeline read');
+
+  for(const metadataOnly of [false,true]){
+    const marker=`Retry committed history ${metadataOnly}`, prior=historyReads();
+    const old=timeline('a');
+    timelineOverrides.set('a',{...old,items:[...old.items,{...old.items[0],execution_id:`a-retry-${metadataOnly}`,user_input:marker}]});
+    if(metadataOnly)unavailableTimelines.add('a');else networkFailures.add('GET /api/sessions/a');
+    sessions.get('a').revision++;
+    await until('failed history read attempted',()=>historyReads()>prior);await settle();
+    assert.ok(!node('conversation').textContent.includes(marker));
+    const failedReads=historyReads(),source=sessionSources.at(-1);
+    source.snapshot();source.snapshot();await settle();
+    assert.equal(historyReads(),failedReads,'duplicate frames do not retry failed reads');
+    unavailableTimelines.delete('a');networkFailures.delete('GET /api/sessions/a');
+    source.onerror();source.snapshot();
+    await until('same revision reconnect retries history',()=>node('conversation').textContent.includes(marker));await settle();
+    assert.equal(historyReads(),failedReads+1,'reconnect retries the missing history once');
+    source.onerror();source.snapshot();await settle();
+    assert.equal(historyReads(),failedReads+1,'successful history is not reread on reconnect');
+    assert.equal(node('prompt').value,'My private draft');
+  }
+
+  for(const newerMetadata of [false,true]){
+    const marker=`Reconnect while history pending ${newerMetadata}`,old=timeline('a');
+    timelineOverrides.set('a',{...old,items:[...old.items,{...old.items[0],execution_id:`a-pending-${newerMetadata}`,user_input:marker}]});
+    const delayed=deferred('GET /api/sessions/a'),source=sessionSources.at(-1);
+    sessions.get('a').revision++;await delayed.requested;
+    const pendingReads=historyReads();
+    source.onerror();source.snapshot();source.snapshot();await settle();
+    assert.equal(historyReads(),pendingReads,'in-flight history request remains deduplicated');
+    if(newerMetadata){
+      const record=sessions.get('a');
+      // Advance the HTTP view without publishing that SSE revision yet.
+      Object.defineProperty(record,'revision',{value:record.revision+1,writable:true,configurable:true,enumerable:true});
+      delayed({session:{...record},timeline:null,timeline_error:'History temporarily unavailable'});
+    }else delayed.reject(new Error('transient history failure'));
+    await until('pending failure recovers after reconnect',()=>node('conversation').textContent.includes(marker));await settle();
+    assert.equal(historyReads(),pendingReads+1,'one retry satisfies reconnect during pending request');
+    assert.equal(node('prompt').value,'My private draft');
+    if(newerMetadata){sessions.set('a',{...sessions.get('a')});await settle();}
+  }
+
+  // A local stream may not observe another process's writes. Explicit HTTP
+  // refresh must take newer metadata without treating HTTP idle as a release.
+  const staleSource=sessionSources.at(-1),httpRevision=sessions.get('a').revision+1;
+  detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),revision:httpRevision,status:'CLOSING',active_execution_id:'a-live'},timeline:timeline('a')});
+  await refresh();
+  const refreshedSource=sessionSources.at(-1);
+  assert.notEqual(refreshedSource,staleSource);assert.equal(staleSource.closed,true);
+  assert.equal(node('send').disabled,true);
+  assert.match(node('session-details').textContent,/CLOSING/);
+  assert.match(node('session-details').textContent,/a-live/);
+  assert.equal(node('prompt').value,'My private draft');
+  const staleCalls=calls.length;
+  staleSource.onmessage({data:JSON.stringify({revision:httpRevision+1,status:'OPEN',active_execution_id:null})});
+  refreshedSource.onmessage({data:JSON.stringify({revision:httpRevision-1,status:'OPEN',active_execution_id:null})});
+  await settle();assert.equal(node('send').disabled,true);assert.equal(calls.length,staleCalls);
+  detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),revision:httpRevision+1,status:'OPEN',active_execution_id:null},timeline:timeline('a')});
+  await refresh();assert.equal(node('send').disabled,true,'newer HTTP idle alone cannot authorize sending');
+  detailResponses.delete('/api/sessions/a');
+  sessions.get('a').revision=httpRevision+1;
+  await until('fresh SSE confirms HTTP idle',()=>!node('send').disabled);
+
+  const beforeExternal=sessionSources.at(-1),sameRevision=sessions.get('a').revision;
+  const realSnapshot=EventSource.prototype.snapshot;
+  EventSource.prototype.snapshot=function(){
+    if(this.id==='a')this.onmessage?.({data:JSON.stringify({status:'OPEN',active_execution_id:'a-live',revision:sameRevision})});
+    else realSnapshot.call(this);
+  };
+  detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),active_execution_id:'a-live'},timeline:timeline('a')});
+  await refresh();
+  assert.notEqual(sessionSources.at(-1),beforeExternal,'explicit Refresh resubscribes even at unchanged admission revision');
+  assert.equal(beforeExternal.closed,true);assert.equal(node('send').disabled,true);
+  assert.equal(node('prompt').value,'My private draft');
+  EventSource.prototype.snapshot=realSnapshot;detailResponses.delete('/api/sessions/a');
+  sessionSources.at(-1).snapshot();await settle();assert.equal(node('send').disabled,false);
+
+  const admissionSource=sessionSources.at(-1);
+  const rejected=deferred('POST /api/sessions/a/messages');
+  const sending=node('composer').requestSubmit();await rejected.requested;
+  const attempts=calls.filter(call=>call.key==='/api/sessions/a/messages').length;
+  await node('composer').requestSubmit();
+  assert.equal(calls.filter(call=>call.key==='/api/sessions/a/messages').length,attempts,'in-flight send guard precedes network admission');
+  node('prompt').value='Edited while another client won';
+  sessions.get('a').active_execution_id='a-live';
+  rejected({code:'SESSION_BUSY'},409);await sending;
+  assert.equal(node('send').disabled,true);assert.equal(node('prompt').value,'Edited while another client won');
+  const replacement=sessionSources.at(-1);
+  assert.equal(replacement,admissionSource,'observed busy owner avoids an unnecessary reconnect');
+  await select('#session=b');
+  assert.equal(replacement.closed,true);
+  replacement.onmessage({data:JSON.stringify({status:'CLOSED',active_execution_id:'a-live'})});
+  assert.equal(node('conversation-title').textContent,'Beta');assert.equal(node('send').disabled,false);
+  node('prompt').value='Other tab/session draft';
+  await select('#session=a');
+  assert.equal(node('prompt').value,'Edited while another client won');assert.equal(node('send').disabled,true);
+  const current=sessionSources.at(-1);
+  current.listeners.get('session_error')({data:'{"error_code":"AUTHORIZATION_DENIED"}'});
+  assert.equal(current.closed,true);assert.equal(node('send').disabled,true);
+  current.onmessage({data:JSON.stringify({status:'OPEN',active_execution_id:null})});
+  assert.equal(node('send').disabled,true,'late frames after a terminal error cannot reopen sending');
+  sessions.get('a').active_execution_id=null;
+  await refresh();await until('explicit refresh resubscribes',()=>!node('send').disabled);
+  assert.equal(node('prompt').value,'Edited while another client won');
+  const synchronized=sessionSources.at(-1);
+  const accepted=deferred('POST /api/sessions/a/messages');
+  const acceptedSend=node('composer').requestSubmit();await accepted.requested;
+  executions.set('a-fast',info('a-fast','a'));
+  sessions.get('a').active_execution_id='a-fast';await settle();
+  sessions.get('a').active_execution_id=null;await settle();
+  assert.equal(node('send').disabled,true,'an unfinished POST stays fenced even after observed release');
+  accepted({execution_id:'a-fast'},202);await acceptedSend;
+  assert.equal(sessionSources.at(-1),synchronized,'observed admission and release reuse the existing subscription');
+  assert.equal(node('send').disabled,false);
+  node('prompt').value='No observed owner transition';
+  const fast=deferred('POST /api/sessions/a/messages');
+  const fastSend=node('composer').requestSubmit();await fast.requested;
+  executions.set('a-instant',info('a-instant','a'));
+  fast({execution_id:'a-instant'},202);await fastSend;
+  assert.notEqual(sessionSources.at(-1),synchronized,'idle without an observed admission needs one fresh authoritative snapshot');
+  assert.equal(node('send').disabled,false);
+  // Admission reuses only its current observation, whether SSE wins or loses
+  // the POST race. Ordinary navigation must retain fresh execution reads.
+  for(const order of ['observed','pending','post-first','terminal']) {
+    await select('#session=b');await select('#session=a');await until('admission ready',()=>!node('send').disabled);
+    const id=`a-admission-${order}`,before=calls.length;
+    executions.set(id,{...info(id,'a'),status:order==='terminal'?'SUCCEEDED':'STARTED',terminal_at:null});
+    streamBlocks.set(id,{});
+    const accepted=deferred('POST /api/sessions/a/messages');node('prompt').value=`Send ${order}`;
+    const sending=node('composer').requestSubmit();await accepted.requested;
+    if(order==='pending') {
+      const pending=deferred(`GET /api/executions/${id}`);
+      sessions.get('a').active_execution_id=id;await pending.requested;
+      accepted({execution_id:id});await settle();pending(executions.get(id));await sending;
+    } else if(order==='post-first') {
+      const source=sessionSources.at(-1),snapshot=source.snapshot;
+      source.snapshot=()=>{};sessions.get('a').active_execution_id=id;
+      accepted({execution_id:id});await sending;source.snapshot=snapshot;source.snapshot();
+    } else if(order==='terminal') {
+      sessions.get('a').active_execution_id=id;sessions.get('a').active_execution_id=null;
+      accepted({execution_id:id});await sending;
+    } else {
+      sessions.get('a').active_execution_id=id;
+      await until('admission observer opens',()=>Boolean(streamBlocks.get(id).controller));
+      accepted({execution_id:id});await sending;
+    }
+    if(order!=='terminal') {
+      await until('admission live stream opens',()=>Boolean(streamBlocks.get(id).controller));
+      const snapshot=info(id,'a');executions.set(id,snapshot);
+      const controller=streamBlocks.get(id).controller;
+      controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(snapshot)+'\n\n'));controller.close();
+      sessions.get('a').active_execution_id=null;
+    }
+    await until('admission released',()=>!node('send').disabled);await settle();
+    const reads=calls.slice(before);
+    assert.equal(reads.filter(call=>call.method==='GET' && call.key===`/api/executions/${id}`).length,1,order);
+    assert.equal(reads.filter(call=>call.method==='GET' && call.key==='/api/sessions').length,0,order);
+    assert.ok(reads.some(call=>call.method==='GET' && call.key==='/api/sessions/a'),'admission still reads committed/pending timeline');
+  }
+
+  // A successful POST does not authorize a late read to select a different
+  // history turn, navigate back to this session, or overwrite another draft.
+  for(const destination of ['history','session','session-denied']) {
+    await select('#session=b');await select('#session=a');await until('selection race ready',()=>!node('send').disabled);
+    const accepted=deferred('POST /api/sessions/a/messages');node('prompt').value='Accepted message';
+    const sending=node('composer').requestSubmit();await accepted.requested;
+    const timelineRead=deferred('GET /api/sessions/a');accepted({execution_id:'a-instant'});await timelineRead.requested;
+    if(destination==='history') {
+      if(node('inspector').hidden)node('inspector-toggle').click();
+      node('detail-turn').value='a-run';await node('detail-turn').onchange();
+    } else {await select('#session=b');node('prompt').value='Private B draft';node('prompt').focus();}
+    const before=calls.length;
+    if(destination==='session-denied')timelineRead({code:'AUTHORIZATION_DENIED'},403);
+    else timelineRead({session:sessions.get('a'),timeline:timeline('a')});
+    await sending;
+    assert.equal(calls.slice(before).filter(call=>call.key==='/api/executions/a-instant').length,0);
+    if(destination==='history')assert.equal(node('detail-turn').value,'a-run');
+    else {
+      assert.equal(location.hash,'#session=b');assert.equal(node('conversation-title').textContent,'Beta');
+      assert.equal(node('prompt').value,'Private B draft');assert.equal(document.activeElement,node('prompt'));
+    }
+  }
+  const beforeNavigation=calls.length;await select('#session=a&execution=a-run');
+  assert.ok(calls.slice(beforeNavigation).some(call=>call.key==='/api/executions/a-run'),'navigation retains authority read');
+
+  // Losing session access after admission must erase stale content and keep
+  // controls disabled, just as a normal selection read failure does.
+  await until('denial case ready',()=>!node('send').disabled);
+  const acceptedAfterRevocation=deferred('POST /api/sessions/a/messages');node('prompt').value='Accepted before revocation';
+  const deniedSend=node('composer').requestSubmit();await acceptedAfterRevocation.requested;
+  const deniedTimeline=deferred('GET /api/sessions/a');acceptedAfterRevocation({execution_id:'a-instant'});await deniedTimeline.requested;
+  deniedTimeline({code:'AUTHORIZATION_DENIED'},403);await deniedSend;
+  assert.equal(node('send').disabled,true);assert.equal(node('conversation-title').textContent,'Conversation unavailable');
+  assert.doesNotMatch(node('conversation').textContent,/a answer/);
+  console.log('Session synchronization preserves drafts, focus and selected history; admission, reconnect, stale frames and typed errors remain fenced');
+  process.exit(0);
+}
 if(process.argv[3]==='unavailable') {
   const denied=()=>response({error_code:'AUTHORIZATION_DENIED'},404);
   await until('restored unavailable session',()=>node('conversation-title').textContent==='Conversation unavailable');
@@ -597,11 +948,11 @@ if(process.argv[3]==='streaming') {
   assert.equal(node('conversation').scrollTop,0,'Streaming respects a reader away from the bottom');node('conversation').clientHeight=300;
   await copy.click();assert.equal(copied,expected);
   // A final snapshot flushes pending text even while animation frames are paused.
-  const release=deferred(`GET /api/executions/${id}`);emit('ASSISTANT_TEXT_DELTA',' terminal');expected+=' terminal';
+  const release=deferred('GET /api/sessions/a');emit('ASSISTANT_TEXT_DELTA',' terminal');expected+=' terminal';
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
   timelineOverrides.set('a',{items:[{...timeline('a').items[0],execution_id:id,items:[{item_kind:'assistant',content:expected}]}],next_cursor:null});
   stream.controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));stream.controller.close();
-  await release.requested;assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(frames.size,0);release(info(id,'a'));
+  await release.requested;assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(frames.size,0);release({session:sessions.get('a'),timeline:timeline('a')});
   await until('canonical final Markdown',()=>node('connection').textContent==='Observation: Complete');assert.equal(node('live').textContent,'');assert.match(node('conversation').textContent,/terminal/);
   // Navigation cancels an old pending preview instead of repainting it elsewhere.
   const next='smooth-next';sessions.get('a').active_execution_id=next;executions.set(next,{...info(next,'a'),status:'STARTED'});streamBlocks.set(next,{});

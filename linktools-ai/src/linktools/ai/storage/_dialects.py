@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 class InsertResult:
     inserted: bool
     row_id: "int | None" = None
+    conflict_row: "Mapping[str, object] | None" = None
 
 
 class IntegrityViolationKind(str, Enum):
@@ -119,6 +120,7 @@ class SqlAlchemyDialect(Protocol):
         table: "Table",
         values: "Mapping[str, SqlValue]",
         index_elements: "Sequence[str]",
+        conflict_columns: "Sequence[str]" = (),
     ) -> InsertResult: ...
 
     async def insert_ignore_conflict_many(
@@ -288,6 +290,7 @@ class SQLiteDialect:
         table: "Table",
         values: "Mapping[str, SqlValue]",
         index_elements: "Sequence[str]",
+        conflict_columns: "Sequence[str]" = (),
     ) -> InsertResult:
         statement = (
             self._insert(table)
@@ -583,6 +586,7 @@ class MySQLDialect(SQLiteDialect):
         table: "Table",
         values: "Mapping[str, SqlValue]",
         index_elements: "Sequence[str]",
+        conflict_columns: "Sequence[str]" = (),
     ) -> InsertResult:
         from sqlalchemy import select
         from sqlalchemy.dialects.mysql import insert
@@ -600,6 +604,13 @@ class MySQLDialect(SQLiteDialect):
                 table.c[column] == values[column]
                 for column in index_elements
             ]
+            if conflict_columns:
+                existing = (await session.execute(
+                    select(*(table.c[column] for column in conflict_columns)).where(*predicates).limit(1)
+                )).mappings().first()
+                if existing is None:
+                    raise
+                return InsertResult(False, None, dict(existing))
             existing = await session.scalar(
                 select(table.c.id).where(*predicates).limit(1)
             )

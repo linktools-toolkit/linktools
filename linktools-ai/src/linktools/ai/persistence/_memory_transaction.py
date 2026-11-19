@@ -11,7 +11,7 @@ from ..core import canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ._run_counters import RUN_COUNTER_COLUMNS, run_counter_address, run_counter_streams
 from .state import (
-    RecordLeaseTransition, FactQuery,
+    RecordLeaseTransition, FactQuery, active_state_scope, is_active_state_transaction, StateTransactionNestingError,
     FactScanCursor,
     OperationQuery,
     OperationScanCursor,
@@ -107,6 +107,13 @@ class _MemoryTransaction:
         self.guarded_record_keys: set[bytes] = set()
         self._now = now
         self.mutation_error: BaseException | None = None
+        self.mutation_observers: list[Callable[[bool], None]] = []
+
+    def observe_mutation(self, callback: Callable[[bool], None]) -> None:
+        scope = active_state_scope()
+        if not is_active_state_transaction(self) or scope is None or not scope.writable:
+            raise StateTransactionNestingError("commit observer requires its active writable boundary")
+        self.mutation_observers.append(callback)
 
     async def now(self) -> datetime:
         if self._now is None:

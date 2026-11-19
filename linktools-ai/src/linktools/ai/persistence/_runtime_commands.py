@@ -3544,7 +3544,7 @@ class StateCommands:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     return ExecutionTerminalPublication(
                         closed_result.execution, closed_result.result, observed=observed,
-                        session_released=session_id is not None,
+                        session_released=session_id is not None, history_seal=seal,
                     )
 
                 async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:

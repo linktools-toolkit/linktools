@@ -80,7 +80,7 @@ from ._native_event_reference import NativeEventReferences
 from ._step_store import SqlStepStore, StepWriteReceipt
 from ..steps import NativeStepSource
 from ._sql import SqlStateStore
-from .state import StateGroupTransaction, StateTransaction, StateStore
+from .state import StateGroupTransaction, StateTransaction, StateStore, StoredRecord
 
 if TYPE_CHECKING:
     from .capabilities import RuntimeCapabilityWrites
@@ -156,6 +156,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._execution_producers: dict[str, tuple[str, int]] = {}
         self._step_boundaries: dict[str, Callable[..., Awaitable[StepWriteReceipt | None]]] = {}
         self._step_boundary_guards: dict[str, Callable[[], None]] = {}
+        self._projection_confirmations: dict[str, Callable[[StateStore, StoredRecord, StoredRecord], None]] = {}
         self._atomic_step_runs: set[str] = set()
         self._execution_persistence: dict[str, tuple[bool, bool, bool]] = {}
         self._checkpoint_transcript_starts: dict[str, int] = {}
@@ -214,13 +215,18 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     def bind_step_boundary(
         self, run_id: str, commit: Callable[..., Awaitable[StepWriteReceipt | None]],
-        require_active: Callable[[], None],
+        require_active: Callable[[], None], *,
+        confirm_projection: Callable[[StateStore, StoredRecord, StoredRecord], None] | None = None,
     ) -> None:
         """Bind the admitted Runtime's single short-transaction boundary."""
         if run_id not in self._execution_producers:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         self._step_boundaries[run_id] = commit
         self._step_boundary_guards[run_id] = require_active
+        if confirm_projection is not None:
+            self._projection_confirmations[run_id] = confirm_projection
+        else:
+            self._projection_confirmations.pop(run_id, None)
 
     def activate_step_boundary(self, run_id: str) -> None:
         """Use local prechecks only when the actual model/leaf writer fences dispatch."""
@@ -458,6 +464,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._run_sources.clear()
         self._step_boundaries.clear()
         self._step_boundary_guards.clear()
+        self._projection_confirmations.clear()
         self._atomic_step_runs.clear()
         self._checkpoint_transcript_starts.clear()
         self._checkpoint_transcript_runs.clear()
@@ -1189,32 +1196,15 @@ class RuntimeAgentRunStore(AgentRunStore):
                         break
                     await asyncio.shield(completion)
             prepared: list[PreparedExecutionProjection] = []
-            durable_heads = await archive.execution_history_heads(
-                tuple(projection.run.agent_run_id for _seal, projection in captured)
+            durable_heads, preparations = await archive.capture_terminal_projection_preparations(
+                tuple(projection for _seal, projection in captured)
             )
-            for _seal, projection in captured:
+            for (_seal, projection), prepare in zip(captured, preparations, strict=True):
                 projection = replace(projection, run=self._canonical_trace_run(projection.run))
                 durable_head = durable_heads.get(projection.run.agent_run_id)
                 if durable_head is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                observation = None
-                interaction_archive = PreparedArchive()
-                if projection.transcript is not None:
-                    observation = await archive.transcript_repository.prepare_observation(
-                        projection.run.agent_run_id,
-                        projection.transcript.messages,
-                        first_message_index=projection.base_message_index,
-                        pending=projection.transcript.pending,
-                        pending_keys=projection.transcript.pending_keys,
-                        archive=interaction_archive,
-                    )
-                await archive.prepare_run_registration(projection.run)
-                batch = await archive.prepare_checkpoints_after_seal(
-                    projection.run,
-                    projection.checkpoints,
-                    observed_message_count=None if observation is None else observation.target_message_count,
-                    archive=interaction_archive,
-                )
+                batch, observation, interaction_archive = await prepare(projection.run)
                 local_base = 0
                 local_count = (projection.target_message_index if projection.transcript is not None
                                else batch.target_transcript_message_count)
@@ -1676,6 +1666,8 @@ class RuntimeAgentRunStore(AgentRunStore):
         *,
         target_transcript_message_count: int | None = None,
         request_projection: ContextProjection | None = None,
+        confirmed_interactions: tuple[ModelInteractionRecord, ...] = (),
+        confirmed_interaction_producer: tuple[str, int] | None = None,
     ) -> None:
         """FINALIZE: advance offsets and clear dirty state after durable success."""
         self._confirm_native_event_projection(captured.events)
@@ -1689,6 +1681,13 @@ class RuntimeAgentRunStore(AgentRunStore):
             )
             if request_projection is not None:
                 offset.request_projection = request_projection
+            if (confirmed_interaction_producer is not None
+                    and self._execution_producers.get(flight.agent_run_id) == confirmed_interaction_producer):
+                offset.confirmed_interactions = confirmed_interactions
+                offset.confirmed_interaction_producer = confirmed_interaction_producer
+            else:
+                offset.confirmed_interactions = ()
+                offset.confirmed_interaction_producer = None
             offset.events = max(offset.events, captured.target_event_offset)
             offset.checkpoints = max(offset.checkpoints, captured.target_checkpoint_offset)
             offset.interactions = max(
@@ -1862,46 +1861,17 @@ class RuntimeAgentRunStore(AgentRunStore):
             return
         started = monotonic()
         try:
-            observation = None
-            interaction_archive = PreparedArchive()
-            if captured.transcript is not None:
-                observation = await archive.transcript_repository.prepare_observation(
-                    captured.run.agent_run_id,
-                    captured.transcript.messages,
-                    first_message_index=captured.base_message_index,
-                    pending=captured.transcript.pending,
-                    pending_keys=captured.transcript.pending_keys,
-                    archive=interaction_archive,
-                )
-            await archive.prepare_run_registration(captured.run)
-            prepared = await archive.prepare_checkpoints(
-                captured.run,
-                captured.checkpoints,
-                observed_message_count=None if observation is None else observation.target_message_count,
-                archive=interaction_archive,
+            offset = self.trace_persistence.offsets.get(captured.run.agent_run_id, _ProjectionOffset())
+            confirmed_interactions = (offset.confirmed_interactions
+                if captured.producer_generation is not None
+                and offset.confirmed_interaction_producer == (execution_id, captured.producer_generation) else ())
+            # Consume the preparation baseline; any failed/unknown publication
+            # leaves no retained hint for the next attempt.
+            offset.confirmed_interactions = ()
+            prepared, observation, interactions, interaction_archive, durable_head = await archive.prepare_captured_projection(
+                captured, baseline=offset.request_projection,
+                confirmed_interactions=confirmed_interactions,
             )
-            local_count = (captured.target_message_index if captured.transcript is not None
-                           else prepared.target_transcript_message_count)
-            payloads = dict(captured.payloads)
-            interactions = await archive.prepare_interactions(
-                captured.run,
-                captured.interactions,
-                payloads.__getitem__,
-                local_message_base=0,
-                local_message_count=local_count,
-                local_messages=captured.local_messages,
-                prepared=interaction_archive,
-                replay=any(value.model_request_seq <= captured.base_interaction_offset
-                           for value in captured.interactions),
-                baseline=self.trace_persistence.offsets.get(
-                    captured.run.agent_run_id, _ProjectionOffset(),
-                ).request_projection,
-            )
-            checkpoint_values, observation, interaction_archive = archive.combine_projection_archives(
-                prepared.checkpoints, observation, interaction_archive,
-            )
-            prepared = replace(prepared, checkpoints=checkpoint_values)
-            durable_head = await archive.execution_history_head_record(captured.run.agent_run_id)
             expected_head = ExecutionRunSealHead(
                 captured.run.agent_run_id,
                 durable_head.event_count + len(captured.events),
@@ -1914,6 +1884,9 @@ class RuntimeAgentRunStore(AgentRunStore):
             await self.abandon_execution_projection(flight)
             raise
 
+        confirmation = self._projection_confirmations.get(captured.run.agent_run_id) if write is None else None
+        projection_receipt = None
+
         async def operation() -> ExecutionRunSealHead:
             async def commit(group: StateGroupTransaction) -> ExecutionRunSealHead:
                 async def publish_projection() -> None:
@@ -1923,8 +1896,25 @@ class RuntimeAgentRunStore(AgentRunStore):
                         producer_generation=captured.producer_generation, execution_id=execution_id,
                         archive=interaction_archive,
                     )
+                nonlocal projection_receipt
+                projection_receipt = None
+                repository = self._execution_repository
                 if write is None:
+                    core = None
+                    before = None
+                    if (confirmation is not None and execution_id is not None
+                            and type(repository) is ExecutionRepositoryImpl
+                            and repository.state_store in archive.transaction_stores
+                            and repository.state_store.storage_group is archive.state_store.storage_group):
+                        core = group.transaction(repository.state_store)
+                        key = repository.execution_record_key(execution_id)
+                        before = await core.get_record(key)
                     await publish_projection()
+                    if before is not None:
+                        after = await core.get_record(key)
+                        if (after is not None and after.storage_revision > before.storage_revision
+                                and replace(after, storage_revision=before.storage_revision) == before):
+                            projection_receipt = repository.state_store, before, after
                 else:
                     await write(group, publish_projection)
                 head = await archive.execution_history_head_record(captured.run.agent_run_id)
@@ -2026,7 +2016,17 @@ class RuntimeAgentRunStore(AgentRunStore):
                 target_transcript_message_count=result.value.transcript_message_count,
                 request_projection=next((value.request_context for value in reversed(interactions)
                                          if value.request_context is not None), None),
+                confirmed_interactions=(tuple(interactions) or confirmed_interactions)
+                    if result.error is None else (),
+                confirmed_interaction_producer=(execution_id, captured.producer_generation)
+                    if execution_id is not None and captured.producer_generation is not None else None,
             )
+            if (result.error is None and projection_receipt is not None and confirmation is not None
+                    and self._projection_confirmations.get(captured.run.agent_run_id) is confirmation):
+                try:
+                    confirmation(*projection_receipt)
+                except Exception:
+                    _logger.warning("projection receipt consumer failed", exc_info=True)
             if result.cancelled:
                 raise asyncio.CancelledError
         elif result.state is DurableCommitState.NOT_COMMITTED:
@@ -2330,6 +2330,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         producer = self._execution_producers.pop(agent_run_id, None)
                         self._step_boundaries.pop(agent_run_id, None)
                         self._step_boundary_guards.pop(agent_run_id, None)
+                        self._projection_confirmations.pop(agent_run_id, None)
                         self._atomic_step_runs.discard(agent_run_id)
                         self.invalidate_step_run(agent_run_id)
                         if producer is not None and self.capability_writes is not None:
@@ -2592,6 +2593,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self.checkpoint_persistence.reader.clear_confirmed_runs()
         self._step_boundaries.clear()
         self._step_boundary_guards.clear()
+        self._projection_confirmations.clear()
         self._atomic_step_runs.clear()
         self._checkpoint_transcript_starts.clear()
         self._checkpoint_transcript_runs.clear()

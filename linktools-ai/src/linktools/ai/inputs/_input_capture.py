@@ -769,10 +769,19 @@ class InputCaptures:
         return await self._materializer.restore(record.stored_user_input)
 
     async def read_dependency(self, reference: TaskInvocationInputRef, name: str, *, principal: Principal) -> JsonValue:
+        found, value = await self.find_dependency(reference, name, principal=principal)
+        if not found:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return value
+
+    async def find_dependency(
+        self, reference: TaskInvocationInputRef, name: str, *, principal: Principal,
+    ) -> tuple[bool, JsonValue]:
+        """Read an authorized dependency with explicit name presence, not payload truthiness."""
         contract = await self.read_task(reference, principal=principal)
         item = next((item for item in contract.dependencies if item.name == name), None)
         if item is None:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            return False, None
         if item.state.status is not TaskStatus.SUCCEEDED:
             raise AIError(ErrorCode.TASK_DEPENDENCY_FAILED)
         key = self._key(principal.tenant_id, "result", item.body_digest)
@@ -781,7 +790,7 @@ class InputCaptures:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         if canonical_sha256(value) != item.body_digest:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
-        return value
+        return True, value
 
     def _captured_original_input(
         self, original: Mapping[str, JsonValue], accepted: CanonicalUserInput,

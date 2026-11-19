@@ -8,7 +8,7 @@ import math
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Protocol, TypeVar
 
 
@@ -156,6 +156,13 @@ class _SessionExecutionAdapter:
 _AdmissionT = TypeVar("_AdmissionT")
 
 
+@dataclass
+class _SessionWatch:
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+    subscribers: set[asyncio.Queue] = field(default_factory=set)
+    task: asyncio.Task[None] | None = None
+
+
 class RuntimeSessionService(SessionManager[ExecutionHandle]):
     """Enforce session ownership, Agent identity immutability, and revision CAS."""
 
@@ -270,6 +277,8 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         read_session_owner: Callable[..., Awaitable[TurnCoordination | None]] | None = None,
         local_waiter: LocalExecutionWaiter | None = None,
     ) -> None:
+        self._watches: dict[str, _SessionWatch] = {}
+        self._watches_closed = False
         self._current_policy = current_policy
         self._admission_execution = execution
         self._runtime_conversation = conversation
@@ -295,6 +304,108 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             conversation, executions, transcript_store, cursor_signer, self._cache,
             now=lambda: time.time(),
         )
+
+    async def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
+        """Observe local Runtime session changes without polling.
+
+        Values are observations, not admission reservations. Other processes'
+        writes require an explicit refresh. Hints are subscribed before reading;
+        one shared read serves concurrent observers of this session.
+        """
+        repository = self._runtime_conversation.sessions
+        if (type(repository) is not SessionRepositoryImpl
+                or type(self._runtime_executions) is not ExecutionRepositoryImpl):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        if principal.tenant_id != repository.tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if self._watches_closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if active_state_scope() is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        channel = self._watches.setdefault(session_id, _SessionWatch())
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        channel.subscribers.add(queue)
+        if channel.task is None:
+            unsubscribe = repository.observe_changes(session_id, channel.changed.set)
+            channel.task = asyncio.create_task(self._observe_changes(session_id, channel, unsubscribe))
+        channel.changed.set()
+        previous: SessionView | None = None
+        try:
+            while True:
+                item = await queue.get()
+                if isinstance(item, BaseException):
+                    raise item
+                record, active = item
+                await self._runtime_authorization.authorize(principal, AuthorizationAction.SESSION_READ,
+                    ResourceRef(ResourceKind.SESSION, session_id, principal.tenant_id, record.owner_principal_id))
+                view = await self.project_view(record, principal, active=active)
+                if view != previous:
+                    previous = view
+                    yield view
+        finally:
+            channel.subscribers.discard(queue)
+            if not channel.subscribers:
+                if self._watches.get(session_id) is channel:
+                    self._watches.pop(session_id, None)
+                channel.task.cancel()
+                await asyncio.gather(channel.task, return_exceptions=True)
+
+    async def _observe_changes(
+        self, session_id: str, channel: _SessionWatch, unsubscribe: Callable[[], None],
+    ) -> None:
+        try:
+            while True:
+                await channel.changed.wait()
+                channel.changed.clear()
+                await self.require_available()
+                record = await self._read_session_record(session_id,
+                    tenant_id=self._runtime_conversation.sessions.tenant_id)
+                if record is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                active = record.active_execution_id
+                if active is not None:
+                    executions = self._runtime_executions
+                    memberships = await executions.read_content(lambda _group: executions.get_membership_many(
+                        (active,), tenant_id=self._runtime_conversation.sessions.tenant_id))
+                    if channel.changed.is_set():
+                        continue
+                    self.validate_admission(record, memberships.get(active))
+                if self._observe_local_session is not None:
+                    pending, _epoch = self._observe_local_session(session_id,
+                        tenant_id=self._runtime_conversation.sessions.tenant_id)
+                    if pending is not None:
+                        if (pending.session_id != session_id or pending.parent_execution_id is not None
+                                or active is not None and active != pending.execution_id):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        active = pending.execution_id
+                if channel.changed.is_set():
+                    continue
+                self._publish_watch(channel, (record, active))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._publish_watch(channel, error)
+            if self._watches.get(session_id) is channel:
+                self._watches.pop(session_id, None)
+        finally:
+            unsubscribe()
+
+    @staticmethod
+    def _publish_watch(channel: _SessionWatch, value: object) -> None:
+        for queue in channel.subscribers:
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(value)
+
+    async def close_watches(self) -> None:
+        self._watches_closed = True
+        tasks = []
+        for channel in self._watches.values():
+            self._publish_watch(channel, AIError(ErrorCode.STORAGE_CLOSED))
+            if channel.task is not None:
+                channel.task.cancel()
+                tasks.append(channel.task)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def wait_inactive(
         self, session_id: str, *, principal: Principal,

@@ -13,6 +13,7 @@ from ..errors import AIError, ErrorCode, ObservationError
 from .projection import ModelProjection
 from ..observe.stream import await_stream_cleanup, drain_stream_tasks, is_observation_cleanup, report_observation_error
 from .stream import SharedStreamEvent
+from ._tree_ready import ExecutionTreeReady
 from ..observe.cursors import get_preview_positions, ExecutionWatchPositions, decode_execution_observation_cursor, encode_execution_observation_cursor, encode_execution_watch_cursor
 from ._service_api import ExecutionObservationEvent, ExecutionTreeEvent, ExecutionView, TaskModelProjection
 from ..observe.stream import ExecutionStreamFailure
@@ -85,8 +86,20 @@ class _ExecutionModelObservation:
                 self.cursor = self.checkpoint()
                 yield ExecutionObservationEvent(projection, self.cursor)
 
-    async def reconcile(self, discovered: asyncio.Event) -> AsyncIterator[TaskModelProjection]:
-        tick = asyncio.create_task(asyncio.sleep(1.0))
+    async def reconcile(
+        self, discovered: asyncio.Event, startup: ExecutionTreeReady | None,
+    ) -> AsyncIterator[TaskModelProjection]:
+        sample = (
+            startup if startup is not None and startup.views is not None and startup.positions is not None else None
+        )
+
+        async def poll() -> None:
+            if sample is None:
+                await asyncio.sleep(1.0)
+            else:
+                await sample.sampled.wait()
+
+        tick = asyncio.create_task(poll())
         discovery = asyncio.create_task(discovered.wait())
         try:
             while True:
@@ -97,11 +110,16 @@ class _ExecutionModelObservation:
                 dirty = self.models.changed(done)
                 if tick in done or discovery in done:
                     discovered.clear()
-                    await self.capture()
+                    if sample is not None and tick in done:
+                        sample.sampled.clear()
+                        for view, depth, _ in sample.snapshot:
+                            await self.models.add(self.execution_id, view, depth)
+                    else:
+                        await self.capture()
                     dirty.update(self.models.views)
                     if tick in done:
                         tick.result()
-                        tick = asyncio.create_task(asyncio.sleep(1.0))
+                        tick = asyncio.create_task(poll())
                     if discovery in done:
                         discovery.result()
                         discovery = asyncio.create_task(discovered.wait())
@@ -112,7 +130,13 @@ class _ExecutionModelObservation:
             await drain_stream_tasks((tick, discovery))
 
     async def live(self, ready: asyncio.Event | None) -> AsyncIterator[ExecutionObservationEvent]:
-        tree_ready = asyncio.Event()
+        # A mixed Task binding can route watch and capture to distinct stores.
+        startup = None
+        if self.owner.share_tree_capture:
+            startup = ExecutionTreeReady(
+                (lambda: ExecutionWatchPositions(self.sequences, self.previews)) if self.include_descendants else None,
+            )
+        tree_ready = startup if startup is not None else asyncio.Event()
         stream = self.watch_tree(
             self.execution_id, principal=self.principal, after_event_seqs=self.sequences,
             include_content=self.include_content, ready=tree_ready,
@@ -122,7 +146,7 @@ class _ExecutionModelObservation:
         pending = asyncio.create_task(stream.__anext__())
         prepared = asyncio.create_task(tree_ready.wait())
         discovered = asyncio.Event()
-        reconciliation = self.reconcile(discovered)
+        reconciliation = self.reconcile(discovered, startup)
         metadata: asyncio.Task[TaskModelProjection] | None = None
         try:
             done, _ = await asyncio.wait({pending, prepared}, return_when=asyncio.FIRST_COMPLETED)
@@ -130,7 +154,11 @@ class _ExecutionModelObservation:
                 error = None if pending.cancelled() else pending.exception()
                 if error is not None and not isinstance(error, StopAsyncIteration):
                     raise error
-            await self.capture()
+            if startup is None or startup.views is None:
+                await self.capture()
+            else:
+                for view, depth, _ in startup.views:
+                    await self.models.add(self.execution_id, view, depth)
             if ready is not None:
                 ready.set()
             async for event in self.refresh(self.models.views):

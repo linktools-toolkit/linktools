@@ -165,9 +165,10 @@ from ..execution import (
 )
 from ..persistence.runs import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
 from ..persistence.commands import RuntimeRecoveryCommands
+from ..persistence.codec import decode_execution_control
 from ..persistence.repositories import operation_identity_matches
 from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
-from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction
+from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction, StateStore, StoredRecord
 from ..persistence import NativeToolErrorReference, SqlStepStore, StepWriteReceipt
 from ..storage import SqlStorageContext
 
@@ -4085,7 +4086,7 @@ class LocalExecutionBackend:
 
     async def _persist_input_context(
         self, execution: ExecutionRecord, context: ExecutionInputContext,
-        loaded: LoadedModelContext | None = None,
+        loaded: LoadedModelContext | None = None, *, owner: _OwnedExecutionTurn | None = None,
     ) -> tuple[ExecutionRecord, ExecutionInputContext]:
         prepared = await self._context_archive.prepare(context,
             history_root=None if loaded is None else loaded.archive_root,
@@ -4097,11 +4098,19 @@ class LocalExecutionBackend:
                 async def publish_context(transaction):
                     del transaction
                     await prepared.publish()
-                    return await self._execution.executions.compare_and_swap(current.execution_id, tenant_id=self._tenant_id,
+                    repository = self._execution.executions
+                    compare = (repository.compare_and_swap_observed
+                               if type(repository) is ExecutionRepositoryImpl and owner is not None
+                               else repository.compare_and_swap)
+                    return await compare(current.execution_id, tenant_id=self._tenant_id,
                         expected_revision=current.revision,
                         next_record=replace(current, input_context=reference, repository_instructions=None,
                                             revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
                 committed = await self._execution.executions.state_store.mutate(publish_context)
+                if isinstance(committed, Observed):
+                    if self._turn_owners.get(current.execution_id) is owner:
+                        owner.observed = committed
+                    return committed.value, context
                 return committed, context
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -4482,7 +4491,7 @@ class LocalExecutionBackend:
                         context_write = (prepared.archive, prepared.records)
                 else:
                     current, accepted_context = await self._persist_input_context(
-                        current, accepted_context, loaded_context,
+                        current, accepted_context, loaded_context, owner=owner,
                     )
                     if accepted_context is not proposed_context and accepted_context.digest != proposed_context.digest:
                         history = list(accepted_context.model_messages())
@@ -5770,8 +5779,38 @@ class LocalExecutionBackend:
         owner.tool_admission = admit_tool
         owner.tool_terminal = settle_tool
         owner.tool_unknown = unknown_tool
+        def confirm_projection(store: StateStore, before: StoredRecord, after: StoredRecord) -> None:
+            self._confirm_execution_projection(
+                execution.execution_id, owner, generation, claim_id, store, before, after,
+            )
+
         self._run_store.bind_step_boundary(agent_run_id, commit_boundary,
-                                           lambda: self._require_turn_dispatch(owner))
+                                           lambda: self._require_turn_dispatch(owner),
+                                           confirm_projection=confirm_projection)
+
+    def _confirm_execution_projection(
+        self, execution_id: str, owner: _OwnedExecutionTurn, generation: int, claim_id: str,
+        store: StateStore, before: StoredRecord, after: StoredRecord,
+    ) -> None:
+        repository = self._execution.executions
+        observed = owner.observed
+        if (store is not repository.state_store or self._turn_owners.get(execution_id) is not owner
+                or observed is None or observed.storage_revision != before.storage_revision
+                or before.key != repository.execution_record_key(execution_id)
+                or after.storage_revision <= before.storage_revision
+                or replace(after, storage_revision=before.storage_revision) != before
+                or observed.value.producer_generation != generation
+                or observed.value.producer_claim_id != claim_id):
+            return
+        control = decode_execution_control(before.data)
+        value = observed.value
+        if (control.execution_id != execution_id or control.producer_generation != generation
+                or control.producer_claim_id != claim_id or control.status is not value.status
+                or control.history_seal_digest != value.history_seal_digest
+                or control.budget_scope_id != value.budget_scope_id
+                or control.retention_closed != value.retention_closed):
+            return
+        owner.observed = replace(observed, storage_revision=after.storage_revision)
 
     def _owned_attempt_capture(self, execution: ExecutionRecord) -> _InitialAttemptCapture | None:
         owner = self._turn_owners.get(execution.execution_id)

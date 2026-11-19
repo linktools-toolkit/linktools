@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Agent and Session behavior with independently owned Execution handles."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
 
@@ -44,6 +44,11 @@ class Session(Generic[AppT]):
         return await self._runtime.sessions.inspect(
             self.session_id, principal=self.principal if principal is None else principal,
         )
+
+    def watch(self, *, principal: Principal | None = None) -> AsyncIterator[SessionView]:
+        """Observe occupancy changes made by this Runtime without polling."""
+        return self._runtime.sessions.watch(self.session_id,
+            principal=self.principal if principal is None else principal)
 
     def _definition(self) -> "Agent[AppT]":
         return Agent(self._runtime, self.agent_id, self._agent_revision,

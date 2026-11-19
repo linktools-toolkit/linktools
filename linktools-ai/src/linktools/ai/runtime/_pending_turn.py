@@ -180,6 +180,7 @@ class _PendingExecutionTurns:
         self._requests: dict[tuple[str, str, str], _PendingExecutionTurn] = {}
         self._sessions: dict[tuple[str, str], _PendingExecutionTurn] = {}
         self._session_membership_epoch = 0
+        self.session_changed: Callable[..., None] | None = None
 
     def bind_coordination(self, coordination: PendingTurnCoordination | None) -> None:
         self.coordination = coordination
@@ -251,6 +252,8 @@ class _PendingExecutionTurns:
         if session_key is not None:
             self._sessions[session_key] = turn
             self._session_membership_epoch += 1
+            if self.session_changed is not None:
+                self.session_changed(session.session_id, tenant_id=tenant_id)
         return turn, True
 
     def observe_session(
@@ -310,6 +313,8 @@ class _PendingExecutionTurns:
         turn.uncertain = error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         if not turn.uncertain:
             self._release_admission(turn)
+        elif turn.session is not None and self.session_changed is not None:
+            self.session_changed(turn.session.session_id, tenant_id=turn.tenant_id)
 
     def peek_request(
         self, *, tenant_id: str, scope: str, idempotency_key: str,
@@ -346,6 +351,8 @@ class _PendingExecutionTurns:
             if self._sessions.get(session_key) is turn:
                 self._sessions.pop(session_key)
                 self._session_membership_epoch += 1
+                if self.session_changed is not None:
+                    self.session_changed(turn.session.session_id, tenant_id=turn.tenant_id)
 
 
 __all__: list[str] = []

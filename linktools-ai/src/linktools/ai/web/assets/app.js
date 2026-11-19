@@ -80,7 +80,8 @@ function renderCurrentState() {
   const owner=state.view==='sessions'?state.session?.active_execution_id:null,info=owner===state.observedExecution?state.observedInfo:state.execution;
   let label='No execution selected';
   if(state.session && state.view==='sessions') {
-    if(state.session.status!=='OPEN')label=`Session ${state.session.status}${owner?' · occupied':''}`;
+    if(!state.config?.read_only && !sessionWatch?.ready)label='Session availability unknown · synchronizing';
+    else if(state.session.status!=='OPEN')label=`Session ${state.session.status}${owner?' · occupied':''}`;
     else if(owner)label=`Session occupied${owner===info?.execution_id?' · '+info.status:''}`;
     else label='Session available';
   } else if(info)label=`Selected execution: ${info.status}`;
@@ -129,6 +130,7 @@ function setDisabled() {
   $('open-recovery').disabled=readonly || !state.selectedExecution;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
   ['send','planning','thinking','prompt'].forEach(id => $(id).disabled=readonly || !state.session || state.session.status === 'CLOSED' || !state.selectedSession);
+  $('send').disabled ||= sessionSendBlocked();
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
@@ -281,6 +283,95 @@ function renderList() {
   if(focus)[...$('list').children].find(node=>node.dataset.listKey===focus)?.focus({preventScroll:true});
 }
 function stopStream() { state.stream?.abort(); state.stream=null;cancelLiveRender(); }
+let sessionWatch=null;
+let observationRead=null;
+const sessionSubmissions=new Set();
+function sessionSendBlocked() {
+  return state.session?.status!=='OPEN' || sessionSubmissions.has(state.selectedSession) || Boolean(state.session?.active_execution_id)
+    || !state.config?.read_only && (!sessionWatch || !sessionWatch.ready);
+}
+function stopSessionWatch() {
+  sessionWatch?.source.close();sessionWatch=null;
+}
+function watchSession(id, {restart=false}={}) {
+  if(state.config?.read_only || !id){stopSessionWatch();return;}
+  if(sessionWatch?.id===id && !restart)return;
+  const prior=sessionWatch?.id===id?sessionWatch:null;
+  stopSessionWatch();
+  const source=new EventSource(sessionURL(id,'events'));
+  const watch={id,source,ready:false,snapshot:prior?.snapshot || null,revision:prior?.revision ?? null,releasedExecution:null,refresh:prior?.refresh || {revision:null,failed:false,reconnect:0}};
+  if(prior)watch.refresh.reconnect++;
+  sessionWatch=watch;
+  const current=()=>sessionWatch===watch && state.selectedSession===id && !watch.failed;
+  source.addEventListener('session_error',()=>{
+    if(current()){source.close();watch.failed=true;watch.ready=false;setDisabled();}
+  });
+  source.onerror=()=>{if(current()){watch.ready=false;watch.refresh.reconnect++;setDisabled();}};
+  source.onmessage=event=>{
+    if(!current())return;
+    let value;
+    try {value=JSON.parse(event.data);} catch {watch.ready=false;setDisabled();return;}
+    if(!value || !['OPEN','CLOSING','CLOSED','CLEANUP_REQUIRED'].includes(value.status)
+      || !Number.isSafeInteger(value.revision) || value.revision<0
+      || !Object.hasOwn(value,'active_execution_id')
+      || value.active_execution_id!==null && (typeof value.active_execution_id!=='string' || !value.active_execution_id)
+      || value.session_id!==undefined && value.session_id!==id) {
+      watch.ready=false;setDisabled();return;
+    }
+    if(watch.revision!==null && value.revision<watch.revision)return;
+    const previous=watch.snapshot,previousRevision=watch.revision,reconnected=!watch.ready;
+    watch.revision=value.revision;
+    if(previous?.active_execution_id && previous.active_execution_id!==value.active_execution_id)
+      watch.releasedExecution=previous.active_execution_id;
+    watch.snapshot={status:value.status,active_execution_id:value.active_execution_id};
+    watch.ready=true;
+    if(state.session)Object.assign(state.session,watch.snapshot);
+    setDisabled();
+    const previousOwner=previous?.active_execution_id;
+    const timelineRevision=previousOwner ? state.session?.revision : previousRevision ?? state.session?.revision;
+    // An open execution stream reads the timeline at its tail. A fast turn
+    // may release before that stream opens, leaving the session watch to catch up.
+    const streamWillRefresh=previousOwner && state.observedExecution===previousOwner && state.stream;
+    if(state.session && !value.active_execution_id && !streamWillRefresh
+      && (reconnected && watch.refresh.failed || Number.isSafeInteger(timelineRevision) && value.revision>timelineRevision))refreshSessionTimeline(watch);
+    if(!state.session || previous && previous.status===value.status
+      && previous.active_execution_id===value.active_execution_id)return;
+    if(value.active_execution_id)void syncObservation().catch(error=>{if(current())showError(error);});
+  };
+}
+function refreshSessionTimeline(watch) {
+  const refresh=watch.refresh;
+  if(refresh.revision===watch.revision)return;
+  refresh.revision=watch.revision;refresh.failed=false;
+  const generation=state.generation,revision=watch.revision,reconnect=refresh.reconnect;
+  const current=()=>sessionWatch?.refresh===refresh && state.selectedSession===watch.id && generation===state.generation;
+  const failed=()=>{
+    if(refresh.revision!==revision)return;
+    refresh.revision=null;refresh.failed=true;
+    // A reconnect can arrive before the failed HTTP request finishes.
+    if(refresh.reconnect!==reconnect && sessionWatch.ready && !sessionWatch.snapshot?.active_execution_id)
+      refreshSessionTimeline(sessionWatch);
+  };
+  void readSession(watch.id).then(payload=>{
+    if(!current())return;
+    // acceptSession may replace the watch when HTTP sees a newer revision.
+    if(refresh.revision===revision && !payload.timeline){refresh.revision=null;refresh.failed=true;}
+    if(!acceptSession(payload))return;
+    state.timelineError=payload.timeline_error || '';renderSessionHeader();
+    if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
+    renderConversation();setDisabled();
+    if(refresh.failed && refresh.reconnect!==reconnect && sessionWatch.ready && !sessionWatch.snapshot?.active_execution_id)refreshSessionTimeline(sessionWatch);
+  }).catch(error=>{if(current()){failed();showError(error);}});
+}
+function reconcileAdmissionWatch(id, executionId=null) {
+  if(state.selectedSession!==id)return;
+  const watch=sessionWatch;
+  // An observed owner (or this admitted execution's release) is already enough.
+  // Idle without that evidence can be an initial snapshot taken before admission.
+  if(watch?.id===id && watch.ready && (watch.snapshot?.active_execution_id
+    || watch.snapshot?.status!=='OPEN' || executionId && watch.releasedExecution===executionId))return;
+  watchSession(id,{restart:true});
+}
 function navigate(sessionId, executionId) {
   const params=new URLSearchParams();
   if(!sessionId && executionId)params.set('view','executions');
@@ -340,7 +431,22 @@ function unavailableSelection(error) {
 }
 function acceptSession(payload) {
   if(payload.session.session_id!==state.selectedSession || payload.readGeneration<state.sessionAppliedGeneration)return false;
-  state.session={...payload.session};state.sessionError=false;state.sessionAppliedGeneration=payload.readGeneration;return true;
+  const watch=sessionWatch?.id===state.selectedSession?sessionWatch:null;
+  const revision=payload.session.revision;
+  if(watch && Number.isSafeInteger(revision) && (watch.revision===null || revision>watch.revision)) {
+    // HTTP can observe another process's update before this process's stream.
+    // Keep that newer owner/status, but only a fresh SSE may authorize release.
+    const stale=watch.snapshot!==null;
+    watch.revision=revision;watch.snapshot=null;watch.ready=false;
+    if(stale)watchSession(state.selectedSession,{restart:true});
+  }
+  state.session={...payload.session,...(sessionWatch?.id===state.selectedSession?sessionWatch.snapshot:null)};state.sessionError=false;state.sessionAppliedGeneration=payload.readGeneration;
+  // Initial/reconnected SSE can overtake the HTTP timeline snapshot. Never
+  // stamp its revision onto that snapshot: fetch the newer committed history.
+  if(sessionWatch?.id===state.selectedSession && !sessionWatch.snapshot?.active_execution_id
+    && Number.isSafeInteger(payload.session.revision) && sessionWatch.revision>payload.session.revision)
+    refreshSessionTimeline(sessionWatch);
+  return true;
 }
 function renderSessionHeader() {
   if(!state.session)return;
@@ -371,6 +477,7 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
   const generation=++state.generation,focusComposer=state.focusComposerSession===sessionId;state.focusComposerSession=null;
   if(!preserveObservation)clearObservation();
   state.selectedSession=sessionId || null; state.selectedExecution=executionId || null;
+  watchSession(state.selectedSession);
   restoreDraft(state.selectedSession);
   state.nativeTimeline=null;
   state.session=null;state.sessionError=false;state.executionError=false; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
@@ -637,7 +744,7 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
   if(terminal(info.status))for(const request of state.liveAttempts.values())if(request.execution_id===info.execution_id && request.status==='SUCCEEDED')readLiveResponse(request);
   return info;
 }
-async function selectExecution(id, generation=state.generation) {
+async function selectExecution(id, generation=state.generation, {reuseObservation=false}={}) {
   const executionGeneration=++state.executionGeneration,executionReadGeneration=++state.executionReadGeneration,selectionChanged=id!==state.selectedExecution;
   const readGeneration=id===state.observedExecution?++state.observationReadGeneration:state.observationReadGeneration;
   if(state.nativeTimeline?.id!==id){state.nativeTimeline=null;state.readerSelection=null;state.readerRaw=false;state.readerCache=null;state.readerExpanded.clear();}
@@ -646,7 +753,9 @@ async function selectExecution(id, generation=state.generation) {
   $('execution-meta').textContent=`Loading ${id}…`;
   if(selectionChanged && state.view==='sessions' && state.conversationMode==='original')renderConversation();
   try {
-  let info=await api(`/api/executions/${enc(id)}`);
+  const captured=reuseObservation && id===state.observedExecution ? state.observedInfo : null;
+  const pending=reuseObservation && observationRead?.id===id && observationRead.generation===state.observationGeneration ? observationRead.promise : null;
+  let info=captured || await (pending || api(`/api/executions/${enc(id)}`));
   if (generation!==state.generation || executionGeneration!==state.executionGeneration || executionReadGeneration!==state.executionReadGeneration || id!==state.selectedExecution) return;
   info=observedInfo(info,readGeneration);
   state.execution=info;state.executionError=false; renderExecution();
@@ -1197,11 +1306,20 @@ async function syncObservation({refresh=false}={}) {
   let info=state.observedInfo;
   if(refresh || !info){
     const readGeneration=++state.observationReadGeneration;
-    try {info=id===state.selectedExecution?state.execution:await api(`/api/executions/${enc(id)}`);}
+    try {
+      if(id===state.selectedExecution)info=state.execution;
+      else {
+        const read={id,generation,promise:api(`/api/executions/${enc(id)}`)};observationRead=read;
+        try {info=await read.promise;} finally {if(observationRead===read)observationRead=null;}
+      }
+    }
     catch(error){if(generation===state.observationGeneration && id===state.observedExecution && readGeneration===state.observationReadGeneration && view===state.view){unavailableSelection(error);throw error;}return;}
     if(generation!==state.observationGeneration || id!==state.observedExecution || readGeneration!==state.observationReadGeneration)return;
   }
   if(!info)return;
+  // An execution GET in flight may describe the owner before its SSE release.
+  const watch=state.view==='sessions'?sessionWatch:null;
+  if(!terminal(info.status) && watch?.id===state.selectedSession && watch.releasedExecution===id && watch.snapshot?.active_execution_id!==id)return;
   info=observedInfo(info);setDisabled();
   if(info && !terminal(info.status) && !state.config.read_only && !state.stream)watchExecution(id,generation).catch(showError);
 }
@@ -1211,11 +1329,12 @@ function reconcileCancellation(info, session, revision) {
   const occupied=session?.active_execution_id===info.execution_id;
   notice(`${outcome}${occupied?' Session release is not yet confirmed.':session?.active_execution_id?' Another execution now owns the session.':session?' Session released.':''}`,occupied?info.execution_id:null,revision);
 }
-async function refreshObservation(id, generation) {
+async function refreshObservation(id, generation, snapshot=null) {
   const sessionId=state.observedInfo?.session_id===state.selectedSession?state.selectedSession:null, refreshGeneration=++state.refreshGeneration, readGeneration=++state.observationReadGeneration, noticeRevision=state.noticeRevision;
   const current=()=>generation===state.observationGeneration && id===state.observedExecution && refreshGeneration===state.refreshGeneration && readGeneration===state.observationReadGeneration;
   let info,payload;
-  try {info=await api(`/api/executions/${enc(id)}`);if(!current())return;payload=sessionId ? await readSession(sessionId) : null;}
+  // Only the unchanged snapshot from this successful stream tail is reusable.
+  try {info=snapshot?.status==='SUCCEEDED' && snapshot===state.observedInfo ? snapshot : await api(`/api/executions/${enc(id)}`);if(!current())return;payload=sessionId ? await readSession(sessionId) : null;}
   catch(error){if(current()){unavailableSelection(error);throw error;}return;}
   if(!current())return;
   info=observedInfo(info,readGeneration);
@@ -1251,11 +1370,11 @@ async function watchExecution(id,generation) {
       if(!response.ok){const payload=await response.json();const error=new Error(payload.error_code || payload.code || 'Observation unavailable');error.code=payload.error_code || payload.code;error.path=`/api/executions/${enc(id)}/events`;error.reconnect=response.status>=500;throw error;}
       if(!current())return;
       connection('Live');
-      let ended=false;
+      let ended=false,endingSnapshot=null;
       await readSSE(response,async frame=>{
         if(!current())return;
         if(frame.event==='snapshot') {
-          ++state.observationReadGeneration;const info=observedInfo(frame.data);ended=true;
+          ++state.observationReadGeneration;const info=observedInfo(frame.data);ended=true;endingSnapshot=info;
           renderLive();
           if(id===state.selectedExecution){state.execution=info;state.executionError=false;renderExecution();}
           setDisabled();return;
@@ -1290,7 +1409,7 @@ async function watchExecution(id,generation) {
       if(ended) {
         // A competing readback is not a broken stream; retain incomplete live content.
         let refreshed=false;
-        while(current() && !refreshed)refreshed=await refreshObservation(id,generation);
+        while(current() && !refreshed)refreshed=await refreshObservation(id,generation,endingSnapshot);
         if(!current())return;
         if(state.view==='sessions' && state.session?.active_execution_id && state.session.active_execution_id!==id){await syncObservation();if(!current())return;}
         const status=state.observedInfo?.status;
@@ -1315,19 +1434,32 @@ async function watchExecution(id,generation) {
   } finally {if(state.stream===controller){state.stream=null;if(current())renderLive();}}
 }
 async function sendMessage(event) {
-  event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,promptValue=$('prompt').value;
-  if(!sessionId || !state.session || state.session.status==='CLOSED' || state.config?.read_only || !promptValue.trim())return;
+  event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,executionGeneration=state.executionGeneration,promptValue=$('prompt').value;
+  if(!sessionId || !state.session || state.session.status!=='OPEN' || state.config?.read_only || !promptValue.trim() || sessionSendBlocked())return;
+  sessionSubmissions.add(sessionId);
   $('send').disabled=true;notice('');
   try {
     // Rejected admission is terminal for its key; another explicit send is a new attempt.
     const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:$('planning').checked,thinking:readThinking()}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
     if(generation!==state.generation){const draft=state.drafts.get(sessionId);if(draft?.prompt===promptValue)draft.prompt='';if(state.selectedSession===sessionId && $('prompt').value===promptValue)$('prompt').value='';return;}
-    if($('prompt').value===promptValue)$('prompt').value=''; await openSelection(sessionId,result.execution_id,{preserveInspector:true}); await loadList();
+    if($('prompt').value===promptValue)$('prompt').value='';
+    reconcileAdmissionWatch(sessionId,result.execution_id);
+    // Keep the current page and draft; refresh only the admitted turn's projection.
+    const payload=await readSession(sessionId);
+    if(generation!==state.generation || sessionId!==state.selectedSession)return;
+    if(acceptSession(payload)) {
+      state.timelineError=payload.timeline_error || '';renderSessionHeader();
+      if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
+      renderConversation();renderList();
+    }
+    if(executionGeneration===state.executionGeneration)await selectExecution(result.execution_id,generation,{reuseObservation:true});
   } catch(error){
     if(generation!==state.generation || sessionId!==state.selectedSession)return;
+    unavailableSelection(error);
+    reconcileAdmissionWatch(sessionId);
     if(['SESSION_BUSY','SESSION_CONFLICT'].includes(error.code))error.message+='; this message was not started. Check the current execution, then send again when the session is available.';
     showError(error);
-  } finally {if(generation===state.generation)setDisabled();}
+  } finally {sessionSubmissions.delete(sessionId);setDisabled();}
 }
 function openNew() {
   if(!state.config || state.config.read_only)return;
@@ -1555,7 +1687,7 @@ $('chat-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');$('actio
 $('activity-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();return loadDetail().catch(showError);};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
-$('refresh').onclick=()=>{if(!state.cancellationNoticeId)notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
+$('refresh').onclick=()=>{if(state.selectedSession)watchSession(state.selectedSession,{restart:true});if(!state.cancellationNoticeId)notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
 let settingsRequest=null;
 $('settings').onclick=()=>{
   if(!settingsRequest)settingsRequest=api('/api/config').then(config=>{state.config=config;showSettings();}).catch(showError).finally(()=>{settingsRequest=null;});

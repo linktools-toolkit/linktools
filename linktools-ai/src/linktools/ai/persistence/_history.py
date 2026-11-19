@@ -485,110 +485,125 @@ class TranscriptRepository:
         archive: PreparedArchive | None = None,
     ) -> PreparedTranscriptObservation:
         require_no_run_history_lock("TranscriptRepository.prepare_observation")
+        async def capture(transaction: StateTransaction):
+            record = await transaction.get_record(self.head_key(owner_id))
+            return await self.capture_observation(
+                transaction, owner_id, messages, first_message_index=first_message_index,
+                pending=pending, pending_keys=pending_keys, archive=archive, head_record=record,
+            )
+
+        prepare = await self._store.read(capture)
+        return await prepare()
+
+    async def capture_observation(
+        self, transaction: StateTransaction, owner_id: str, messages: Sequence[ModelMessage], *,
+        first_message_index: int, pending: ModelMessage | None, pending_keys: tuple[str, ...],
+        archive: PreparedArchive | None, head_record: StoredRecord | None,
+    ) -> Callable[[], Awaitable[PreparedTranscriptObservation]]:
+        """Capture pending facts before preparing bytes outside the source scope."""
         scope = active_state_scope()
         committed_read = scope is None or not scope.writable
-
-        async def capture(transaction: StateTransaction):
-            entry = await self.get_head_in_transaction(transaction, owner_id)
-            head = self.empty_head(owner_id) if entry is None else entry[0]
-            storage_revision = -1 if entry is None else entry[1].storage_revision
-            cache = self._pending_cache.get(owner_id)
-            previous = ()
-            if (cache is not None and cache.message_index == head.message_count
-                    and cache.storage_revision <= storage_revision and cache.pending == head.pending
-                    and len(cache.parts) <= head.pending_part_count):
-                previous = cache.parts
-            chunks, keys = await self._capture_pending_suffix(
-                transaction, head, tuple(part.key for part in previous),
-            )
-            return head, storage_revision, previous, chunks, keys
-
-        head, base_storage_revision, cached, previous_chunks, previous_keys = await self._store.read(capture)
-        if head.message_count != first_message_index:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        loaded = list(cached)
-        for key, chunk in zip(previous_keys, previous_chunks, strict=True):
-            values = await self._decode_chunk_messages(chunk)
-            if len(values) != 1 or len(values[0].parts) != 1:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            loaded.append(_PendingPart.from_message(key, values[0], chunk))
-        previous = tuple(loaded)
-        values = tuple(messages)
-        if values and previous:
-            completed_parts = self._completed_parts(values[0])
-            for part in previous:
-                if part.key not in completed_parts:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                final = self._part_message(values[0], completed_parts[part.key])
-                if not part.matches(final):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            previous = ()
-        if pending is None:
-            if pending_keys or previous:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        else:
-            for key in pending_keys:
-                self._require_pending_key(key)
-            if len(pending.parts) != len(pending_keys) or len(set(pending_keys)) != len(pending_keys) or not pending_keys:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        archive = PreparedArchive() if archive is None else archive
-        chunks = await self.prepare_chunks(owner_id, values, first_message_index=first_message_index, prepared=archive)
-        target = first_message_index + len(values)
-        shell = None
-        next_parts: list[_PendingPart] = []
-        additions: list[StoredFact] = []
-        if pending is not None:
-            if len(pending_keys) < len(previous):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            shell = head.pending if previous else RuntimePayloadRef(
-                StoredPayload.inline_bytes(encode_model_messages((replace(pending, parts=[]),))),
-                self._runtime_domain,
-            )
-            for index, (key, part) in enumerate(zip(pending_keys, pending.parts, strict=True)):
-                if key.startswith("part:"):
-                    if not isinstance(pending, ModelResponse):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                else:
-                    _, _, call_id = key.partition(":")
-                    if (not isinstance(pending, ModelRequest) or not isinstance(part, ToolReturnPart)
-                            or part.tool_call_id != call_id):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if index < len(previous):
-                    existing = previous[index]
-                    if existing.key != key:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if existing.source_part is not part:
-                        candidate = self._part_message(pending, part)
-                        if not existing.matches(candidate):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    next_parts.append(replace(existing, source_part=part))
-                    continue
-                message = self._part_message(pending, part)
-                chunk = await self._make_chunk(owner_id, target, (message,), TranscriptOrigin.RAW, archive)
-                next_parts.append(_PendingPart(
-                    key, part, chunk, chunk.raw_size, bytes.fromhex(chunk.raw_digest),
-                ))
-                additions.append(StoredFact(
-                    self._pending_stream(owner_id, target), index + 1,
-                    self._head_key(owner_id), "transcript_pending_part", None, None,
-                    encode_envelope({
-                        "type": "transcript_chunk", "payload": _encode_persisted_domain(chunk),
-                        "pending_key": key,
-                    }),
-                ))
-        if committed_read:
-            # Only the prefix read from durable facts is safe to reuse after rollback.
-            if previous:
-                self._pending_cache[owner_id] = _PendingCache(
-                    head.message_count, base_storage_revision, head.pending,
-                    tuple(next_parts[:len(previous)]),
-                )
-            else:
-                self._pending_cache.pop(owner_id, None)
-        return PreparedTranscriptObservation(
-            owner_id, first_message_index, target, chunks, base_storage_revision,
-            shell, tuple(next_parts), tuple(additions), archive,
+        head = self.empty_head(owner_id) if head_record is None else self.decode_head(head_record)
+        base_storage_revision = -1 if head_record is None else head_record.storage_revision
+        cache = self._pending_cache.get(owner_id)
+        cached = ()
+        if (cache is not None and cache.message_index == head.message_count
+                and cache.storage_revision <= base_storage_revision and cache.pending == head.pending
+                and len(cache.parts) <= head.pending_part_count):
+            cached = cache.parts
+        previous_chunks, previous_keys = await self._capture_pending_suffix(
+            transaction, head, tuple(part.key for part in cached),
         )
+        prepared_archive = PreparedArchive() if archive is None else archive
+
+        async def prepare() -> PreparedTranscriptObservation:
+            if head.message_count != first_message_index:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            loaded = list(cached)
+            for key, chunk in zip(previous_keys, previous_chunks, strict=True):
+                values = await self._decode_chunk_messages(chunk)
+                if len(values) != 1 or len(values[0].parts) != 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                loaded.append(_PendingPart.from_message(key, values[0], chunk))
+            previous = tuple(loaded)
+            values = tuple(messages)
+            if values and previous:
+                completed_parts = self._completed_parts(values[0])
+                for part in previous:
+                    if part.key not in completed_parts:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    final = self._part_message(values[0], completed_parts[part.key])
+                    if not part.matches(final):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                previous = ()
+            if pending is None:
+                if pending_keys or previous:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                for key in pending_keys:
+                    self._require_pending_key(key)
+                if len(pending.parts) != len(pending_keys) or len(set(pending_keys)) != len(pending_keys) or not pending_keys:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            archive = prepared_archive
+            chunks = await self.prepare_chunks(owner_id, values, first_message_index=first_message_index, prepared=archive)
+            target = first_message_index + len(values)
+            shell = None
+            next_parts: list[_PendingPart] = []
+            additions: list[StoredFact] = []
+            if pending is not None:
+                if len(pending_keys) < len(previous):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                shell = head.pending if previous else RuntimePayloadRef(
+                    StoredPayload.inline_bytes(encode_model_messages((replace(pending, parts=[]),))),
+                    self._runtime_domain,
+                )
+                for index, (key, part) in enumerate(zip(pending_keys, pending.parts, strict=True)):
+                    if key.startswith("part:"):
+                        if not isinstance(pending, ModelResponse):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    else:
+                        _, _, call_id = key.partition(":")
+                        if (not isinstance(pending, ModelRequest) or not isinstance(part, ToolReturnPart)
+                                or part.tool_call_id != call_id):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if index < len(previous):
+                        existing = previous[index]
+                        if existing.key != key:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if existing.source_part is not part:
+                            candidate = self._part_message(pending, part)
+                            if not existing.matches(candidate):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        next_parts.append(replace(existing, source_part=part))
+                        continue
+                    message = self._part_message(pending, part)
+                    chunk = await self._make_chunk(owner_id, target, (message,), TranscriptOrigin.RAW, archive)
+                    next_parts.append(_PendingPart(
+                        key, part, chunk, chunk.raw_size, bytes.fromhex(chunk.raw_digest),
+                    ))
+                    additions.append(StoredFact(
+                        self._pending_stream(owner_id, target), index + 1,
+                        self._head_key(owner_id), "transcript_pending_part", None, None,
+                        encode_envelope({
+                            "type": "transcript_chunk", "payload": _encode_persisted_domain(chunk),
+                            "pending_key": key,
+                        }),
+                    ))
+            if committed_read:
+                # Only the prefix read from durable facts is safe to reuse after rollback.
+                if previous:
+                    self._pending_cache[owner_id] = _PendingCache(
+                        head.message_count, base_storage_revision, head.pending,
+                        tuple(next_parts[:len(previous)]),
+                    )
+                else:
+                    self._pending_cache.pop(owner_id, None)
+            return PreparedTranscriptObservation(
+                owner_id, first_message_index, target, chunks, base_storage_revision,
+                shell, tuple(next_parts), tuple(additions), archive,
+            )
+
+        return prepare
 
     async def commit_observation(
         self,
