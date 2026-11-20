@@ -177,8 +177,16 @@ async def test_host_binds_source_once_and_borrows_cache(
         assert await cache.get("display") == b"content"
         claimed = await _claim(bound)
         assert claimed is not None and claimed.lease is not None
-        rows = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
-        assert {row.kind for row in rows} == {"turn_session", "turn_request", "turn_execution"}
+        store = state.execution.executions.state_store
+        rows = await store.read(lambda tx: tx.scan_records())
+        if backend == "memory":
+            assert {row.kind for row in rows} == {"turn_session", "turn_request", "turn_execution"}
+        else:
+            from .test_state_turn_authority import _authority_records
+            assert not rows
+            assert {row.kind for row in await _authority_records(store, namespace="source-turns")} == {
+                "turn_slot", "turn_admission",
+            }
         assert not state.capability_stores and not state.durable_capability_ids
         assert await bound.read_turn_by_session(_SCOPE, "session") == replace(claimed, lease=None)
         assert await bound.release_turn(claimed.lease)
@@ -315,11 +323,12 @@ async def test_snapshot_rejects_broken_source_turn_graph(tmp_path: Path, defect:
     cache = _BorrowedCache()
     async with _opened("sqlite", tmp_path, cache) as state:
         await _claim(state.coordination_backend)
-        records = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
+        from .test_state_turn_authority import _authority_records
+        records = await _authority_records(state.execution.executions.state_store, namespace="source-turns")
     namespace = "source-turns"
     domain = PersistenceDomain.EXECUTION
     if defect == "missing_execution":
-        records = tuple(record for record in records if record.kind != "turn_execution")
+        records = tuple(record for record in records if record.kind != "turn_admission")
     elif defect == "foreign_namespace":
         namespace = "wrong"
     elif defect == "wrong_domain":

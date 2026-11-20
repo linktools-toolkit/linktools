@@ -27,6 +27,42 @@ def _backend(store):
     return StateTurnCoordination(store, namespace="turn-authority", tenant_id="tenant")
 
 
+async def _authority_records(store, *, namespace="turn-authority", tenant_id="tenant"):
+    from sqlalchemy import select
+    from linktools.ai.persistence._sql import SqlStateStore
+    from linktools.ai.persistence._turn_snapshot import turn_snapshot_record
+    from linktools.ai.persistence._turn_sql_schema import TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
+
+    if not isinstance(store, SqlStateStore):
+        return await store.read(lambda tx: tx.scan_records())
+    async with store.context.engine.begin() as conn:
+        records = []
+        for name in (TURN_SLOT_TABLE, TURN_ADMISSION_TABLE):
+            table = store.storage_group.metadata.tables[name]
+            values = await conn.execute(select(table).where(table.c.store_key == store.store_key).order_by(table.c.id))
+            records.extend(turn_snapshot_record(name, row, namespace=namespace, tenant_id=tenant_id)
+                           for row in values.mappings())
+        return tuple(records)
+
+
+def _validate_authority(records, *, namespace="turn-authority", tenant_id="tenant"):
+    from linktools.ai.persistence._turn_snapshot import TURN_SNAPSHOT_KINDS, decode_turn_snapshot
+
+    if any(record.kind in TURN_SNAPSHOT_KINDS for record in records):
+        decode_turn_snapshot(records, namespace=namespace, tenant_id=tenant_id)
+    else:
+        validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
+
+
+async def _damage_sql(store, table_name, *, delete=False, **changes):
+    from sqlalchemy import delete as remove, update
+
+    table = store.storage_group.metadata.tables[table_name]
+    stmt = remove(table) if delete else update(table).values(**changes)
+    async with store.context.engine.begin() as conn:
+        return await conn.execute(stmt.where(table.c.store_key == store.store_key))
+
+
 async def _claim(backend, *, session="s", request="r", execution="e", owner="o", digest="d", seconds=60):
     return await backend.claim_turn(_SCOPE, session_key=session, request_key=request, request_digest=digest,
                                     execution_id=execution, owner_id=owner, lease_seconds=seconds)
@@ -65,8 +101,8 @@ async def test_state_turn_claim_replay_renew_cancel_release(tmp_path, backend):
         assert successor is not None and successor.lease.fence == first.lease.fence + 1
         assert not await authority.release_turn(first.lease)
         assert await authority.cancel_turn(_SCOPE, "e2")
-        records = await store.read(lambda tx: tx.scan_records())
-        validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+        records = await _authority_records(store)
+        _validate_authority(records, namespace="turn-authority", tenant_id="tenant")
 
 
 async def test_sql_idle_turn_claim_samples_clock_only_for_the_new_expiry(tmp_path, monkeypatch):
@@ -89,16 +125,27 @@ async def test_sql_idle_turn_claim_samples_clock_only_for_the_new_expiry(tmp_pat
         assert second is not None and second.lease is not None
         assert second.lease.fence == first.lease.fence + 1
         assert clock_reads == 1
-        records = await store.read(lambda tx: tx.scan_records())
-        session = next(record for record in records if record.kind == "turn_session")
+        records = await _authority_records(store)
+        session = next(record for record in records if record.kind in {"turn_session", "turn_slot"})
         assert session.lease_expires_at == stamp + timedelta(seconds=60)
-        validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+        _validate_authority(records, namespace="turn-authority", tenant_id="tenant")
 
 
 async def _expire(store, *, session):
+    from sqlalchemy import update
+    from linktools.ai.persistence._sql import SqlStateStore
+    from linktools.ai.persistence._turn_sql_schema import TURN_SLOT_TABLE
+
+    if isinstance(store, SqlStateStore):
+        slot = store.storage_group.metadata.tables[TURN_SLOT_TABLE]
+        async with store.context.engine.begin() as conn:
+            await conn.execute(update(slot).where(
+                slot.c.store_key == store.store_key, slot.c.session_key == session.encode("utf-8"),
+            ).values(lease_expires_at=datetime(2000, 1, 1, tzinfo=timezone.utc)))
+        return
     async def expire(tx):
         for record in await tx.scan_records():
-            if record.kind == "turn_session" and record.data["session_key"] == session:
+            if record.kind in {"turn_session", "turn_slot"} and record.data["session_key"] == session:
                 assert await tx.replace_record(replace(record, storage_revision=record.storage_revision + 1,
                                                        lease_expires_at=datetime(2000, 1, 1, tzinfo=timezone.utc)),
                                                expected_storage_revision=record.storage_revision)
@@ -123,9 +170,9 @@ async def test_state_turn_cross_session_request_reclamation_retires_both_old_gen
         assert await authority.read_turn(_SCOPE, "e2") is None
         assert not await authority.release_turn(old1.lease)
         assert not await authority.release_turn(old2.lease)
-        records = await store.read(lambda tx: tx.scan_records())
-        assert len(records) == 7
-        validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+        records = await _authority_records(store)
+        assert len(records) == (5 if backend == "sql" else 7)
+        _validate_authority(records, namespace="turn-authority", tenant_id="tenant")
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -135,10 +182,10 @@ async def test_state_turn_milliseconds_are_rounded_up_without_renewing_reads(tmp
         stamp = datetime(2030, 1, 1, tzinfo=timezone.utc)
         _clock(monkeypatch, store, backend, lambda: stamp)
         claim = await _claim(authority, seconds=60.0001)
-        before = await store.read(lambda tx: tx.scan_records())
+        before = await _authority_records(store)
         await authority.read_turn_by_session(_SCOPE, "s")
-        assert await store.read(lambda tx: tx.scan_records()) == before
-        session = next(record for record in before if record.kind == "turn_session")
+        assert await _authority_records(store) == before
+        session = next(record for record in before if record.kind in {"turn_session", "turn_slot"})
         assert session.lease_expires_at == stamp + timedelta(seconds=60, milliseconds=1)
         assert claim.lease is not None
 
@@ -170,9 +217,9 @@ async def test_state_turn_commit_unknown_is_confirmed_by_original_receipt(tmp_pa
             else:
                 assert await authority.release_turn(first.lease) is True
         assert attempted == 1
-        records = await store.read(lambda tx: tx.scan_records())
-        assert len(records) == 3
-        validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+        records = await _authority_records(store)
+        assert len(records) == (2 if backend == "sql" else 3)
+        _validate_authority(records, namespace="turn-authority", tenant_id="tenant")
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -181,7 +228,7 @@ async def test_state_turn_unknown_without_matching_receipt_stays_unknown(tmp_pat
     async with _open_store(backend, tmp_path / backend) as store:
         authority = _backend(store)
         first = await _claim(authority)
-        before = await store.read(lambda tx: tx.scan_records())
+        before = await _authority_records(store)
         mutation = store.mutate
         unknown = AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         attempted = 0
@@ -197,7 +244,7 @@ async def test_state_turn_unknown_without_matching_receipt_stays_unknown(tmp_pat
                 await _claim(authority, request="other", execution="other", owner="other")
         assert caught.value is unknown and attempted == 1
         assert await authority.read_turn_by_session(_SCOPE, "s") == replace(first, lease=None)
-        after = await store.read(lambda tx: tx.scan_records())
+        after = await _authority_records(store)
         assert tuple(replace(record, storage_revision=0) for record in after) == tuple(
             replace(record, storage_revision=0) for record in before
         )
@@ -212,14 +259,22 @@ async def test_state_turn_reachable_broken_edges_are_never_idle(tmp_path, backen
         async def damage(tx):
             record = next(record for record in await tx.scan_records() if record.kind == missing)
             await tx.delete_record(record.key)
-        await store.mutate(damage)
+        if backend == "sql":
+            if missing == "turn_session":
+                await _damage_sql(store, "ai_turn_slots", delete=True)
+            elif missing == "turn_execution":
+                await _damage_sql(store, "ai_turn_admissions", delete=True)
+            else:
+                await _damage_sql(store, "ai_turn_admissions", live_request_key=None)
+        else:
+            await store.mutate(damage)
         reader, identity = ((authority.read_turn_by_request, "r") if missing == "turn_session"
                             else (authority.read_turn_by_session, "s"))
         with pytest.raises(AIError) as caught:
             await reader(_SCOPE, identity)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         with pytest.raises(AIError):
-            validate_turn_records(await store.read(lambda tx: tx.scan_records()),
+            _validate_authority(await _authority_records(store),
                                   namespace="turn-authority", tenant_id="tenant")
 
 
@@ -237,12 +292,12 @@ async def test_state_turn_renews_during_observation_without_combining_generation
         if backend == "sql":
             async with store.context.engine.connect() as connection:
                 await connection.execute(text("PRAGMA journal_mode=WAL"))
-            observe = _SqlTransaction.observe_record
+            observe = _SqlTransaction.capture_turn_admission
             calls = 0
 
-            async def racing(tx, key):
+            async def racing(tx, scope, **kwargs):
                 nonlocal calls
-                result = await observe(tx, key)
+                result = await observe(tx, scope, **kwargs)
                 calls += 1
                 # An independent writer must not inherit the reader's snapshot.
                 assert await asyncio.create_task(
@@ -251,7 +306,7 @@ async def test_state_turn_renews_during_observation_without_combining_generation
                 return result
 
             with monkeypatch.context() as patch:
-                patch.setattr(_SqlTransaction, "observe_record", racing)
+                patch.setattr(_SqlTransaction, "capture_turn_admission", racing)
                 assert await authority.read_turn_by_session(_SCOPE, "s") == replace(first, lease=None)
             assert calls == 1
         else:
@@ -286,8 +341,8 @@ async def test_state_turn_independent_sql_connections_choose_one_session_winner(
             assert sum(result is not None for result in results) == 1
             winner = next(result for result in results if result is not None)
             assert await right.read_turn_by_session(_SCOPE, "s") == replace(winner, lease=None)
-            records = await store.read(lambda tx: tx.scan_records())
-            assert len(records) == 3
+            records = await _authority_records(store)
+            assert len(records) == 2
         finally:
             await other.close()
 
@@ -334,11 +389,11 @@ async def test_state_turn_sql_commit_then_lost_transport_confirms_exact_receipt(
             else:
                 assert await authority.release_turn(first.lease)
         assert commits == 1
-        records = await store.read(lambda tx: tx.scan_records())
-        assert len(records) == 3
-        execution = next(record for record in records if record.kind == "turn_execution")
+        records = await _authority_records(store)
+        assert len(records) == 2
+        execution = next(record for record in records if record.kind in {"turn_execution", "turn_admission"})
         assert execution.data["receipt_kind"] == ("claim" if operation == "reclaim" else operation)
-        validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+        _validate_authority(records, namespace="turn-authority", tenant_id="tenant")
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -348,7 +403,7 @@ async def test_state_turn_impossible_receipts_are_never_absence(tmp_path, backen
         authority = _backend(store)
         await _claim(authority)
         async def corrupt(tx):
-            record = next(record for record in await tx.scan_records() if record.kind == "turn_execution")
+            record = next(record for record in await tx.scan_records() if record.kind in {"turn_execution", "turn_admission"})
             data = dict(record.data)
             state = record.state
             if damage == "state":
@@ -364,12 +419,24 @@ async def test_state_turn_impossible_receipts_are_never_absence(tmp_path, backen
             assert await tx.replace_record(replace(record, storage_revision=record.storage_revision + 1,
                                                    data=data, state=state),
                                            expected_storage_revision=record.storage_revision)
-        await store.mutate(corrupt)
+        if backend == "sql":
+            if damage == "state":
+                await _damage_sql(store, "ai_turn_admissions", live_request_key=None)
+            elif damage == "receipt_kind":
+                await _damage_sql(store, "ai_turn_admissions", receipt_kind="release")
+            elif damage == "claim_receipt":
+                await _damage_sql(store, "ai_turn_admissions", receipt_id="unrelated")
+            elif damage == "cancel_without_flag":
+                await _damage_sql(store, "ai_turn_admissions", receipt_kind="cancel")
+            else:
+                await _damage_sql(store, "ai_turn_admissions", lease_fence=0)
+        else:
+            await store.mutate(corrupt)
         with pytest.raises(AIError) as caught:
             await authority.read_turn(_SCOPE, "e")
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         with pytest.raises(AIError):
-            validate_turn_records(await store.read(lambda tx: tx.scan_records()),
+            _validate_authority(await _authority_records(store),
                                   namespace="turn-authority", tenant_id="tenant")
 
 
@@ -381,7 +448,7 @@ async def test_state_turn_failed_dual_retirement_rolls_back_every_old_edge(tmp_p
         await _claim(authority, session="s2", request="r2", execution="e2", owner="o2")
         await _expire(store, session="s1")
         await _expire(store, session="s2")
-        before = await store.read(lambda tx: tx.scan_records())
+        before = await _authority_records(store)
         retire = authority._retire
         attempted = 0
         unavailable = AIError(ErrorCode.STORAGE_UNAVAILABLE)
@@ -392,19 +459,33 @@ async def test_state_turn_failed_dual_retirement_rolls_back_every_old_edge(tmp_p
                 raise unavailable
             return await retire(tx, graph, **changes)
         with monkeypatch.context() as patch:
-            patch.setattr(authority, "_retire", failed)
+            if backend == "sql":
+                from linktools.ai.persistence._sql import _SqlTransaction
+                original = _SqlTransaction._execute
+
+                async def failed_sql(tx, statement, parameters=None):
+                    nonlocal attempted
+                    if statement.is_update and statement.table.name == "ai_turn_admissions":
+                        attempted += 1
+                        if attempted == 2:
+                            raise unavailable
+                    return await original(tx, statement, parameters)
+
+                patch.setattr(_SqlTransaction, "_execute", failed_sql)
+            else:
+                patch.setattr(authority, "_retire", failed)
             with pytest.raises(AIError) as caught:
                 await _claim(authority, session="s1", request="r2", execution="e3", owner="o3")
         assert caught.value is unavailable
-        assert await store.read(lambda tx: tx.scan_records()) == before
+        assert await _authority_records(store) == before
 
 
 async def test_state_turn_sql_observation_clock_expiry_and_failure_preserve_source(tmp_path, monkeypatch):
     async with _open_store("sql", tmp_path / "sql") as store:
         authority = _backend(store)
         await _claim(authority)
-        before = await store.read(lambda tx: tx.scan_records())
-        session = next(record for record in before if record.kind == "turn_session")
+        before = await _authority_records(store)
+        session = next(record for record in before if record.kind in {"turn_session", "turn_slot"})
         from sqlalchemy import literal
         from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -423,7 +504,7 @@ async def test_state_turn_sql_observation_clock_expiry_and_failure_preserve_sour
             with pytest.raises(AIError) as caught:
                 await authority.read_turn_by_request(_SCOPE, "r")
         assert caught.value is unavailable
-        assert await store.read(lambda tx: tx.scan_records()) == before
+        assert await _authority_records(store) == before
 
 
 async def test_postgres_snapshot_clock_uses_the_anchor_statement_time():
@@ -458,7 +539,7 @@ async def test_state_turn_sql_observer_cancellation_waits_for_clock_and_releases
     async with _open_store("sql", tmp_path / "sql") as store:
         authority = _backend(store)
         await _claim(authority)
-        before = await store.read(lambda tx: tx.scan_records())
+        before = await _authority_records(store)
         from sqlalchemy.ext.asyncio import AsyncSession
 
         execute = AsyncSession.execute
@@ -487,7 +568,7 @@ async def test_state_turn_sql_observer_cancellation_waits_for_clock_and_releases
                     if not observer.done():
                         observer.cancel()
                     await asyncio.gather(observer, return_exceptions=True)
-        assert await store.read(lambda tx: tx.scan_records()) == before
+        assert await _authority_records(store) == before
 
 
 async def test_sql_admission_rechecks_an_expired_snapshot_after_concurrent_renewal(tmp_path, monkeypatch):
@@ -505,6 +586,8 @@ async def test_sql_admission_rechecks_an_expired_snapshot_after_concurrent_renew
             return sampled
 
         monkeypatch.setattr(store.context.dialect, "database_now", clock)
+        from sqlalchemy import literal
+        monkeypatch.setattr(store.context.dialect, "read_snapshot_time_expression", lambda: literal(sampled))
         claim = await _claim(authority, seconds=60)
         snapshotted, proceed = asyncio.Event(), asyncio.Event()
         receipt_reads = 0
@@ -548,13 +631,11 @@ async def test_state_turn_sql_cross_session_reclamation_with_two_initial_snapsho
         await other.initialize()
         ready = asyncio.Event()
         arrived = set()
-        keys = {record.key for record in await store.read(lambda tx: tx.scan_records())
-                if record.kind == "turn_session"}
-        read = _SqlTransaction.get_record
-        async def initial_snapshot(tx, key):
-            value = await read(tx, key)
+        read = _SqlTransaction._execute
+        async def initial_snapshot(tx, statement, parameters=None):
+            value = await read(tx, statement, parameters)
             task = asyncio.current_task()
-            if key in keys and task not in arrived:
+            if "target__session_key" in str(statement) and task not in arrived:
                 arrived.add(task)
                 if len(arrived) == 2:
                     ready.set()
@@ -563,16 +644,16 @@ async def test_state_turn_sql_cross_session_reclamation_with_two_initial_snapsho
         tasks = []
         try:
             with monkeypatch.context() as patch:
-                patch.setattr(_SqlTransaction, "get_record", initial_snapshot)
+                patch.setattr(_SqlTransaction, "_execute", initial_snapshot)
                 tasks = [asyncio.create_task(_claim(authority, session="s1", request="r2", execution="e3", owner="o3")),
                          asyncio.create_task(_claim(_backend(other), session="s2", request="r1", execution="e4", owner="o4"))]
                 results = await asyncio.wait_for(asyncio.gather(*tasks), 10)
             assert all(result is not None and result.lease is not None for result in results)
             assert await authority.read_turn_by_session(_SCOPE, "s1") == replace(results[0], lease=None)
             assert await authority.read_turn_by_session(_SCOPE, "s2") == replace(results[1], lease=None)
-            records = await store.read(lambda tx: tx.scan_records())
-            assert len(records) == 8
-            validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+            records = await _authority_records(store)
+            assert len(records) == 6
+            _validate_authority(records, namespace="turn-authority", tenant_id="tenant")
         finally:
             ready.set()
             for task in tasks:
@@ -588,11 +669,11 @@ async def test_state_turn_expiry_never_renews_cancels_or_releases_old_owner(tmp_
         authority = _backend(store)
         first = await _claim(authority)
         await _expire(store, session="s")
-        before = await store.read(lambda tx: tx.scan_records())
+        before = await _authority_records(store)
         assert await authority.renew_turn(first.lease, lease_seconds=60) is None
         assert await authority.cancel_turn(_SCOPE, "e") is False
         assert await authority.release_turn(first.lease) is False
-        assert await store.read(lambda tx: tx.scan_records()) == before
+        assert await _authority_records(store) == before
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -633,7 +714,7 @@ async def test_state_turn_never_borrows_an_existing_read_or_mutation_scope(tmp_p
     async with _open_store(backend, tmp_path / backend) as store:
         authority = _backend(store)
         await _claim(authority)
-        before = await store.read(lambda tx: tx.scan_records())
+        before = await _authority_records(store)
         async def rejected(tx):
             with pytest.raises(StateTransactionNestingError):
                 await authority.read_turn_by_session(_SCOPE, "s")
@@ -641,7 +722,7 @@ async def test_state_turn_never_borrows_an_existing_read_or_mutation_scope(tmp_p
                 await authority.cancel_turn(_SCOPE, "e")
         for invoke in (store.read, store.mutate):
             await invoke(rejected)
-            assert await store.read(lambda tx: tx.scan_records()) == before
+            assert await _authority_records(store) == before
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -650,7 +731,7 @@ async def test_state_turn_retirement_batch_failure_preserves_every_edge(tmp_path
     async with _open_store(backend, tmp_path / backend) as store:
         authority = _backend(store)
         claimed = await _claim(authority)
-        before = await store.read(lambda tx: tx.scan_records())
+        before = await _authority_records(store)
         async def transaction_type(tx):
             return type(tx)
         cls = await store.mutate(transaction_type)
@@ -669,13 +750,35 @@ async def test_state_turn_retirement_batch_failure_preserves_every_edge(tmp_path
                 raise asyncio.CancelledError
             return await original(tx, values)
         with monkeypatch.context() as patch:
-            patch.setattr(cls, "replace_records", fail_retirement)
+            if backend == "sql":
+                from linktools.ai.persistence._turn_sql import SqlTurnRows
+
+                original_retire = SqlTurnRows.retire_admission
+                execute = cls._execute
+
+                def fail_cas(rows, **kwargs):
+                    kwargs["request_key"] = "never-matches"
+                    return original_retire(rows, **kwargs)
+
+                async def fail_cancel(tx, statement, parameters=None):
+                    result = await execute(tx, statement, parameters)
+                    if statement.is_update and statement.table.name == "ai_turn_admissions":
+                        raise asyncio.CancelledError
+                    return result
+
+                if failure == "cas":
+                    patch.setattr(SqlTurnRows, "retire_admission", fail_cas)
+                else:
+                    patch.setattr(cls, "_execute", fail_cancel)
+            else:
+                patch.setattr(cls, "replace_records", fail_retirement)
             with pytest.raises(AIError if failure == "cas" else asyncio.CancelledError) as caught:
                 await authority.release_turn(claimed.lease)
         if failure == "cas":
-            assert caught.value.code is ErrorCode.STORAGE_CONFLICT
-        assert batches
-        assert await store.read(lambda tx: tx.scan_records()) == before
+            assert caught.value.code is (ErrorCode.STORAGE_INTEGRITY_ERROR if backend == "sql" else ErrorCode.STORAGE_CONFLICT)
+        if backend != "sql":
+            assert batches
+        assert await _authority_records(store) == before
         assert await authority.read_turn(_SCOPE, "e") == replace(claimed, lease=None)
         assert await authority.release_turn(claimed.lease)
 
@@ -697,14 +800,14 @@ async def test_state_turn_sqlite_known_graph_statement_budgets(tmp_path):
             assert counts["SELECT"] <= 3 and counts["INSERT"] <= 2 and counts["UPDATE"] <= 2
             counts.clear()
             assert await authority.read_turn_by_session(_SCOPE, "s") == replace(first, lease=None)
-            assert counts["SELECT"] == 2 and counts["BEGIN"] == 1 and counts["UPDATE"] == 0
+            assert counts["SELECT"] == 1 and counts["BEGIN"] == 1 and counts["UPDATE"] == 0
             counts.clear()
             assert await authority.renew_turn(first.lease, lease_seconds=60) == first
-            # One indexed graph read plus both clocks around the lease CAS.
-            assert counts["SELECT"] == 3 and counts["BEGIN"] == 1
+            # One indexed authority read with clock after the slot guard.
+            assert counts["SELECT"] == 1 and counts["BEGIN"] == 1
             counts.clear()
             assert await authority.release_turn(first.lease)
-            assert counts["SELECT"] == 3 and counts["BEGIN"] == 1 and counts["UPDATE"] <= 2
+            assert counts["SELECT"] == 0 and counts["BEGIN"] == 1 and counts["UPDATE"] == 3
         finally:
             event.remove(engine, "before_cursor_execute", count)
 
@@ -736,8 +839,8 @@ async def test_recover_logical_turn_with_fresh_owner_after_release_or_expiry(
         assert cancelled is not None and cancelled.cancel_requested
         assert cancelled.owner_id == recovered.owner_id
         assert not await authority.release_turn(first.lease)
-        records = await store.read(lambda tx: tx.scan_records())
-        validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+        records = await _authority_records(store)
+        _validate_authority(records, namespace="turn-authority", tenant_id="tenant")
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -754,9 +857,11 @@ async def test_state_turn_sort_reuses_identity_across_pages_and_snapshot(tmp_pat
                                  execution=f"e{index}", owner=f"o{index}")
             assert claim is not None and claim.lease is not None
             assert await authority.read_turn_by_request(_SCOPE, f"r{index}") == replace(claim, lease=None)
-        records = await store.read(lambda tx: tx.scan_records())
+        records = await _authority_records(store)
         assert all(record.sort_key == record.key for record in records)
-        for kind in ("turn_session", "turn_request", "turn_execution"):
+        if backend == "sql":
+            assert await store.read(lambda tx: tx.scan_records()) == ()
+        for kind in (() if backend == "sql" else ("turn_session", "turn_request", "turn_execution")):
             expected = tuple(sorted((record for record in records if record.kind == kind),
                                     key=lambda record: record.key))
             observed = []
@@ -808,7 +913,7 @@ async def test_state_turn_rejects_foreign_scope_without_mutation(tmp_path, backe
             with pytest.raises(AIError) as caught:
                 await action()
             assert caught.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
-        assert await store.read(lambda tx: tx.scan_records()) == ()
+        assert await _authority_records(store) == ()
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -824,10 +929,10 @@ async def test_pending_turn_uses_local_scope_with_maximum_namespace_and_compound
         lifetime = coordinator.enter(session_key=session_key, request_key=request_key, request_digest="digest",
                                      execution_id="e" * 128, owner_id="owner")
         async with lifetime as owner:
-            records = await store.read(lambda tx: tx.scan_records())
-            assert len(records) == 3
+            records = await _authority_records(store, namespace=namespace, tenant_id=tenant)
+            assert len(records) == (2 if backend == "sql" else 3)
             assert {record.data["scope"] for record in records} == {"runtime-pending-turn"}
-            validate_turn_records(records, namespace=namespace, tenant_id=tenant)
+            _validate_authority(records, namespace=namespace, tenant_id=tenant)
             assert await coordinator.read_owner("e" * 128, tenant_id=tenant) == replace(owner, lease=None)
             assert await authority.renew_turn(owner.lease, lease_seconds=60) == owner
         assert await coordinator.read_owner("e" * 128, tenant_id=tenant) is None
@@ -844,13 +949,13 @@ async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(
                                           request_key="r" * 257, request_digest="digest",
                                           execution_id="e", owner_id="o", lease_seconds=60)
         assert await authority.read_turn(scope, "e") == replace(owner, lease=None)
-        records = await store.read(lambda tx: tx.scan_records())
-        validate_turn_records(records, namespace=scope.namespace, tenant_id=scope.tenant_id)
+        records = await _authority_records(store)
+        _validate_authority(records, namespace=scope.namespace, tenant_id=scope.tenant_id)
         invalid_scope = scope.scope + "x"
         invalid_records = []
         for record in records:
-            identity = record.data[{"turn_session": "session_key", "turn_request": "request_key",
-                                    "turn_execution": "execution_id"}[record.kind]]
+            identity = record.data[{"turn_session": "session_key", "turn_request": "request_key", "turn_slot": "session_key",
+                                    "turn_execution": "execution_id", "turn_admission": "execution_id"}[record.kind]]
             key = record_key(scope.namespace, scope.tenant_id, "execution", record.kind,
                                     [invalid_scope, identity])
             invalid_records.append(replace(
@@ -859,14 +964,12 @@ async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(
                 data={**record.data, "scope": invalid_scope},
             ))
         with pytest.raises(AIError) as caught:
-            validate_turn_records(invalid_records, namespace=scope.namespace, tenant_id=scope.tenant_id)
+            _validate_authority(invalid_records, namespace=scope.namespace, tenant_id=scope.tenant_id)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 async def test_sql_companion_decode_failure_requires_a_matching_live_lease(tmp_path, monkeypatch):
     import json
-
-    from linktools.ai.persistence import _sql
 
     async with _open_store("sql", tmp_path / "sql") as store:
         authority = _backend(store)
@@ -875,14 +978,10 @@ async def test_sql_companion_decode_failure_requires_a_matching_live_lease(tmp_p
         assert await authority.release_turn(retired.lease)
         current = await _claim(authority)
         assert current is not None and current.lease is not None
-        real_decode = _sql._record_from_row
-
-        def decode(row):
-            if row["kind"] == "turn_request":
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "controlled companion decode error")
-            return real_decode(row)
-
-        monkeypatch.setattr(_sql, "_record_from_row", decode)
+        from sqlalchemy import update
+        table = store.storage_group.metadata.tables["ai_turn_admissions"]
+        async with store.context.engine.begin() as conn:
+            await conn.execute(update(table).where(table.c.execution_id == b"e").values(receipt_kind="release"))
         missing = json.loads(current.lease.key)
         missing[5] = "absent-execution"
         for lease in (

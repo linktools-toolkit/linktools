@@ -1094,6 +1094,7 @@ class StateCommands:
         session_store = self._conversation.state_store
         authority._writable()
         local_scope = authority._local_scope(scope)
+        sql_coordination = authority._sql_source
         if (session_key != f"session:{initial.session_id}"
                 or request_key != canonical_sha256([identity.scope, identity.idempotency_key])):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -1124,13 +1125,16 @@ class StateCommands:
             authority_tx = group.transaction(authority._store)
             if isinstance(group, GroupRecordReader):
                 keys: dict[StateStore, tuple[bytes, ...]] = {}
+                coordinates = () if sql_coordination is not None else (
+                    (authority._store, authority._records.key(local_scope, "turn_session", session_key)),
+                    (authority._store, authority._records.key(local_scope, "turn_request", request_key)),
+                    (authority._store, authority._records.key(local_scope, "turn_execution", initial.execution_id)),
+                )
                 for store, key in (
                     (execution_store, self._execution.execution_record_key(initial.execution_id)),
                     (self._execution._idempotency.state_store, self._execution.start_idempotency_record_key(identity)),
                     (session_store, self._conversation.session_record_key(initial.session_id)),
-                    (authority._store, authority._records.key(local_scope, "turn_session", session_key)),
-                    (authority._store, authority._records.key(local_scope, "turn_request", request_key)),
-                    (authority._store, authority._records.key(local_scope, "turn_execution", initial.execution_id)),
+                    *coordinates,
                 ):
                     keys[store] = (*keys.get(store, ()), key)
                 try:
@@ -1193,14 +1197,25 @@ class StateCommands:
 
         async def readback(group: StateGroupTransaction) -> tuple[TurnCoordination | None, ExecutionStartReservationResult | None] | None:
             replay = await find_receipt()
-            graph = await authority._anchor(group.transaction(authority._store), local_scope, "turn_execution", initial.execution_id)
-            if (graph is None or graph.execution.data["token"] != token
-                    or graph.execution.data["owner_id"] != owner_id
-                    or graph.execution.data["request_key"] != request_key
-                    or graph.execution.data["request_digest"] != identity.request_digest
-                    or graph.execution.data["session_key"] != session_key
-                    or replay is None or replay.execution.execution_id != initial.execution_id):
+            if replay is None or replay.execution.execution_id != initial.execution_id:
                 return None
+            graph = None
+            if sql_coordination is not None:
+                coordinated = await sql_coordination.confirm_turn_admission(
+                    scope, execution_id=initial.execution_id, receipt=token, kind="claim",
+                    expected_claim=(session_key, request_key, identity.request_digest, owner_id),
+                )
+                if not isinstance(coordinated, TurnCoordination) or coordinated.lease is None:
+                    return None
+            else:
+                graph = await authority._anchor(group.transaction(authority._store), local_scope, "turn_execution", initial.execution_id)
+                if (graph is None or graph.execution.data["token"] != token
+                        or graph.execution.data["owner_id"] != owner_id
+                        or graph.execution.data["request_key"] != request_key
+                        or graph.execution.data["request_digest"] != identity.request_digest
+                        or graph.execution.data["session_key"] != session_key):
+                    return None
+                coordinated = authority._coordination(graph, owned=True)
             session = await self._conversation.get_in_transaction(
                 group.transaction(session_store), initial.session_id, tenant_id=self._tenant_id,
             )
@@ -1209,7 +1224,7 @@ class StateCommands:
                     or replay.idempotency.status is not IdempotencyStatus.STARTED
                     or replay.execution.status is not ExecutionStatus.STARTED
                     or replay.execution.agent_run_seq != 0
-                    or graph.session.lease_expires_at <= await group.transaction(authority._store).now()):
+                    or graph is not None and graph.session.lease_expires_at <= await group.transaction(authority._store).now()):
                 return None
             reconciled = await self._reconcile_start_unknown(
                 claim, session_id=initial.session_id, expected_cursor=expected_session.continuation,
@@ -1217,7 +1232,7 @@ class StateCommands:
             )
             if reconciled != replay.execution:
                 return None
-            return authority._coordination(graph, owned=True), replace(replay, session=session, created=True)
+            return coordinated, replace(replay, session=session, created=True)
 
         for attempt in range(3):
             try:

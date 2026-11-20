@@ -518,11 +518,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise TypeError("execution_ids must be a sequence")
         keys = {identity: self.execution_record_key(identity) for identity in dict.fromkeys(execution_ids)}
         async def read(_group: object) -> Mapping[str, ExecutionMembershipRecord]:
-            await self._execution_content.prefetch_projection_owners(tuple(keys.values()))
             rows = await self._store.read_records(tuple(keys.values())) if keys else {}
-            expanded = await self._execution_content.expand_policies(tuple(rows.values()))
             values = {}
-            for row in expanded:
+            for row in rows.values():
                 value = decode_execution_membership(row.data)
                 if row.kind != "execution" or keys.get(value.execution_id) != row.key:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

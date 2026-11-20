@@ -316,6 +316,7 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
         "ai_state_records", "ai_execution_records", "ai_state_facts",
         "ai_state_counters", "ai_state_operations", "ai_step_runs", "ai_step_messages", "ai_step_sequences",
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
+        "ai_turn_slots", "ai_turn_admissions",
     } | ({"ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
 
     def compile_ddl(metadata: MetaData) -> list[str]:
@@ -485,7 +486,10 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
         "ai_state_operations", "ai_state_records", "ai_execution_records", "ai_state_counters", "ai_step_events",
         "ai_step_messages", "ai_step_runs", "ai_step_sequences", "ai_step_snapshots", "ai_trace_events",
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
+        "ai_turn_slots", "ai_turn_admissions",
     }
+    turn_widths = {("ai_turn_slots", "scope_key"): 390, ("ai_turn_slots", "session_key"): 265,
+                   ("ai_turn_admissions", "scope_key"): 390, ("ai_turn_admissions", "live_request_key"): 257}
     for table in metadata.tables.values():
         assert table.comment and all(column.comment for column in table.c)
         assert tuple(column.name for column in table.c)[-2:] == ("updated_at", "created_at")
@@ -497,9 +501,13 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
             assert 1 <= len(index.columns) <= 3, (table.name, index.name)
             for column in index.columns:
                 if isinstance(column.type, (LargeBinary, String)):
-                    assert column.type.length is not None and column.type.length <= 128, (table.name, column.name)
+                    assert column.type.length is not None and column.type.length <= turn_widths.get(
+                        (table.name, column.name), 128,
+                    ), (table.name, column.name)
                 if unique:
-                    assert not column.nullable, (table.name, index.name, column.name)
+                    assert column.nullable == ((table.name, column.name) == ("ai_turn_admissions", "live_request_key")), (
+                        table.name, index.name, column.name,
+                    )
         for index in table.indexes:
             assert not index.dialect_options["mysql"].get("length"), (table.name, index.name)
 

@@ -40,6 +40,10 @@ from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 from ._native_event_reference import NativeEventReferences
 from ._sql import SqlStateStore
+from ._turn_snapshot import (
+    GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, turn_snapshot_record,
+)
+from ._turn_sql_schema import TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
 from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
 from ..model.messages import decode_model_message_payloads
@@ -138,11 +142,13 @@ class _SnapshotReader(Protocol):
 
 class _StateSnapshotReader:
     def __init__(self, store: StateStore, *, native_run_scope: tuple[str, str] | None = None,
-                 trace_scope: tuple[str, str] | None = None) -> None:
+                 trace_scope: tuple[str, str] | None = None,
+                 turn_scope: tuple[str, str] | None = None) -> None:
         from ._trace_event_store import SqlTraceEventStore
         self._store = store
         scope = trace_scope or native_run_scope
         self._trace_scope = scope
+        self._turn_scope = turn_scope
         self._trace_events = (SqlTraceEventStore(store, namespace=scope[0], tenant_id=scope[1])
                               if scope is not None and isinstance(store, SqlStateStore) else None)
         self._native_events = (NativeEventReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
@@ -183,6 +189,38 @@ class _StateSnapshotReader:
         self, *, after: FactScanCursor | None, limit: int,
     ) -> tuple[StoredFact, ...]:
         return await self._store.read(lambda tx: tx.scan_facts_page(after=after, limit=limit))
+
+    async def capture_turn_records(
+        self, *, budget: "_SnapshotCaptureBudget", page_size: int,
+    ) -> tuple[StoredRecord, ...]:
+        store, scope = self._store, self._turn_scope
+        if scope is None or not isinstance(store, SqlStateStore):
+            return ()
+        from sqlalchemy import select
+
+        captured = []
+        for name in (TURN_SLOT_TABLE, TURN_ADMISSION_TABLE):
+            table = store.storage_group.metadata.tables[name]
+            after = 0
+            while True:
+                limit = budget.page_size(page_size)
+                statement = select(table).where(table.c.store_key == store.store_key, table.c.id > after
+                                                ).order_by(table.c.id).limit(limit)
+
+                async def read(transaction: StateTransaction):
+                    if not isinstance(transaction, SqlStateRowReader):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                    return await transaction.read_sql_rows(store.context, statement)
+
+                page = await store.read(read)
+                for row in page:
+                    value = turn_snapshot_record(name, row, namespace=scope[0], tenant_id=scope[1])
+                    budget.accept(encode_record(value))
+                    captured.append(value)
+                if len(page) < limit:
+                    break
+                after = page[-1]["id"]
+        return tuple(captured)
 
     async def capture_facts(
         self, *, budget: "_SnapshotCaptureBudget", page_size: int,
@@ -327,6 +365,8 @@ async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _Snapshot
         cursor = RecordScanCursor(page[-1].kind, page[-1].key)
     if records_only:
         return _CapturedSnapshotReader(tuple(records), (), ())
+    if type(reader) is _StateSnapshotReader:
+        records.extend(await reader.capture_turn_records(budget=budget, page_size=page_size))
     captured_facts = (await reader.capture_facts(budget=budget, page_size=page_size)
                       if type(reader) is _StateSnapshotReader else None)
     if captured_facts is not None:
@@ -567,7 +607,9 @@ class RuntimeSnapshotOperations:
                 for domain, store in members:
                     reader = _StateSnapshotReader(store,
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
-                                          if domain is PersistenceDomain.TRACE else None))
+                                          if domain is PersistenceDomain.TRACE else None),
+                        turn_scope=((self._resources.namespace, self._resources.tenant_id)
+                                    if domain is PersistenceDomain.EXECUTION else None))
                     captured = await _capture_snapshot_reader(reader, budget=capture_budget)
                     readers[domain] = captured
                     for value in (*captured.records, *captured.facts, *captured.operations):
@@ -1704,7 +1746,26 @@ async def restore_snapshot(
                         for value in facts if value.kind == "step_event")
                     await trace_events.restore(transaction, rows)
                     state_facts = tuple(value for value in facts if value.kind != "step_event")
-                await _insert_snapshot_values(transaction, records, state_facts, operations, sequences)
+                state_records = records
+                if (domain is PersistenceDomain.EXECUTION and isinstance(store, SqlStateStore)
+                        and any(row.kind in GENERIC_TURN_SNAPSHOT_KINDS for row in records)):
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Pre-release turn coordination snapshot layout")
+                if domain is PersistenceDomain.EXECUTION and any(row.kind in TURN_SNAPSHOT_KINDS for row in records):
+                    if not isinstance(store, SqlStateStore) or not isinstance(transaction, SqlStateTransaction):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                    slots, admissions = decode_turn_snapshot(
+                        records, namespace=resources.namespace, tenant_id=resources.tenant_id, store_key=store.store_key,
+                    )
+
+                    async def restore_turn_rows(session) -> None:
+                        for name, rows in ((TURN_SLOT_TABLE, slots), (TURN_ADMISSION_TABLE, admissions)):
+                            if rows:
+                                table = store.storage_group.metadata.tables[name]
+                                await session.execute(table.insert(), rows)
+
+                    await transaction.run_sql(store.context, restore_turn_rows)
+                    state_records = tuple(row for row in records if row.kind not in TURN_SNAPSHOT_KINDS)
+                await _insert_snapshot_values(transaction, state_records, state_facts, operations, sequences)
                 if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
                     from ._model_interaction_store import ModelInteractionStateStepArchive
                     from ._step_contracts import AgentRunRecord, StepEvent

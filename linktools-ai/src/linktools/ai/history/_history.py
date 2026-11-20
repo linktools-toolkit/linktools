@@ -1190,8 +1190,14 @@ class History:
             active = current.active_execution_id
             if active is not None:
                 executions, _ = self._require_direct_reader()
-                execution = (active_records.get(active) if active_records is not None and pending is None
-                             else await executions.get(active, tenant_id=principal.tenant_id))
+                if active_records is not None and pending is None:
+                    execution = active_records.get(active)
+                elif type(executions) is ExecutionRepositoryImpl:
+                    execution = (await executions.get_membership_many(
+                        (active,), tenant_id=principal.tenant_id,
+                    )).get(active)
+                else:
+                    execution = await executions.get(active, tenant_id=principal.tenant_id)
                 observed = SessionManager.validate_admission(current, execution)
                 active = None if observed is None else observed.execution_id
             elif (pending is not None and current.status is SessionStatus.OPEN
