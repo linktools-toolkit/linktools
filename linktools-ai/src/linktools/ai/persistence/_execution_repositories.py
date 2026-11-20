@@ -1845,11 +1845,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
     async def prefetch_terminal_records(
         self, execution_id: str, *, additional_records: Mapping[StateStore, Sequence[bytes]] | None = None,
+        terminal_write_sources: bool = False,
     ) -> None:
         """Read terminal control and immutable bodies in their transaction snapshot."""
         await self._execution_content.prefetch_projection_owners(
             (self._key("execution", (execution_id,)),), bindings=True,
             input_body=True, result=True, result_body=True, additional_records=additional_records,
+            terminal_write_sources=terminal_write_sources,
         )
 
     async def confirm_terminal_write_in_transaction(

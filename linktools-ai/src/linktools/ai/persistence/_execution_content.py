@@ -284,6 +284,7 @@ class ExecutionContent:
         self, keys: Sequence[bytes], *, bindings: bool = False, result: bool = False,
         result_body: bool = False,
         input_body: bool = False, additional_records: Mapping | None = None,
+        terminal_write_sources: bool = False,
     ) -> None:
         """Capture current control rows and only the immutable slots consumed next."""
         active = active_state_scope()
@@ -305,13 +306,19 @@ class ExecutionContent:
             paths.append(("result", "fields", "output", "fields", "content", "$execution_payload"))
             native_paths.append(("result", "fields", "output", "fields", "content", "$native_text"))
         archive = await self._archive()
+        from ._sql import SqlStateStorageGroup, SqlStateStore
+
+        source_options = ({"terminal_write_sources": True}
+                          if terminal_write_sources and active.writable
+                          and type(active.group) is SqlStateStorageGroup
+                          and type(self._store) is SqlStateStore else {})
         await active.record_reader.read_content_references(
             owner_store=self._store, owner_keys=keys, content_store=archive.store,
             content_scope_key=archive_scope_key(self._namespace, self._tenant_id),
             content_paths=tuple(("value", "payload", "fields", *path) for path in paths),
             native_root_paths=tuple(("value", "payload", "fields", *path) for path in native_paths),
             additional_records=additional_records,
-            fixed_projection=True,
+            fixed_projection=True, **source_options,
         )
 
     async def prefetch_configuration_owner(self, hint: StoredRecord) -> None:

@@ -323,7 +323,8 @@ async def test_refresh_idle_has_one_authority_read_and_one_metadata_snapshot(tmp
             event.remove(engine.sync_engine, "begin", begin)
         assert detail.timeline.items[0].execution_id == "active"
         assert len(begins) == 2
-        assert sum(statement.lstrip().upper().startswith("SELECT") for statement in statements) == 5
+        # The metadata snapshot reads the timeline counter and window together.
+        assert sum(statement.lstrip().upper().startswith("SELECT") for statement in statements) == 4
     finally:
         await state.close()
 

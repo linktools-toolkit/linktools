@@ -58,6 +58,7 @@ class ContentReferenceReader(Protocol):
         owner_query: "RecordQuery | None" = None,
         native_root_paths: Sequence[tuple[str, ...]] = (),
         fixed_projection: bool = False,
+        terminal_write_sources: bool = False,
     ) -> "Mapping[StateStore, Mapping[bytes, StoredRecord]] | None":
         """Capture current owners and declared references in their enlisted snapshot.
 

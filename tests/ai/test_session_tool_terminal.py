@@ -1250,7 +1250,7 @@ def unresolved_tool_source(
 
     async def prepare(destination: Path, with_cancel: bool) -> _UnresolvedToolSource:
         if with_cancel not in sources:
-            root = tmp_path_factory.mktemp("unresolved-tool")
+            root = tmp_path_factory.mktemp("unresolved-tool-cancel" if with_cancel else "unresolved-tool-resume")
             source = await _prepare_unresolved_tool_source(root, with_cancel)
             stopped = root.rename(root.with_name(root.name + "-stopped"))
             sources[with_cancel] = replace(source, directory=stopped)

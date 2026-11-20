@@ -3625,6 +3625,7 @@ class StateCommands:
                     if isinstance(self._execution, ExecutionRepositoryImpl):
                         await self._execution.prefetch_terminal_records(
                             commit.execution.execution_id, additional_records=fresh_record_keys,
+                            **({"terminal_write_sources": True} if type(self._execution) is ExecutionRepositoryImpl else {}),
                         )
                     if fresh_record_keys and isinstance(group, GroupRecordReader):
                         await group.get_records(fresh_record_keys)

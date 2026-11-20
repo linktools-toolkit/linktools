@@ -7,7 +7,7 @@ from collections.abc import Sequence, Mapping
 from typing import TYPE_CHECKING
 
 from ._content_reference_projection import EXECUTION_REFERENCE_COLUMNS, content_reference_slot
-from ._record_owner import record_owner_rows, record_owner_columns, record_owner_table
+from ._record_owner import RUN_COUNTER_COLUMNS, record_owner_rows, record_owner_columns, record_owner_table
 from ._archive import archive_scope_parts
 from ._step_payload_owner import payload_store_key, payload_store_locator
 
@@ -38,8 +38,9 @@ def content_reference_statement(
     owner_statement: "Select | None" = None,
     native_root_paths: Sequence[tuple[str, ...]] = (),
     fixed_projection: bool = False,
+    terminal_write_sources: bool = False,
 ) -> "Select":
-    from sqlalchemy import JSON, Integer, LargeBinary, String, and_, case, cast, func, literal, null, select, true, type_coerce, union_all
+    from sqlalchemy import JSON, BigInteger, Integer, LargeBinary, String, and_, case, cast, func, literal, null, select, true, type_coerce, union_all
     from sqlalchemy.dialects.mysql import BINARY
 
     content = tuple(content_reference_slot(path) for path in content_paths) if fixed_projection else ()
@@ -116,9 +117,17 @@ def content_reference_statement(
         selections.append(select(literal(2).label("source_kind"),
             *(literal(None, type_=column.type).label(column.name) for column in owner_columns),
             *(column.label("typed_" + column.name) for column in native.c)).select_from(joined_native))
+    counter_columns = (RUN_COUNTER_COLUMNS if terminal_write_sources and any(
+        record_owner_table(key) == "ai_step_run_admissions"
+        for keys in (additional_records or {}).values() for key in keys
+    ) else ())
+    counter_nulls = tuple(cast(null(), BigInteger).label(name) for name in counter_columns)
+    selections = [selection.add_columns(*counter_nulls) for selection in selections]
     for store_key, keys in (additional_records or {}).items():
-        extra = record_owner_rows(metadata, keys=keys)
-        selections.append(select(literal(3).label("source_kind"), *record_owner_columns(extra, pad_execution=pad_execution), *native_nulls).where(
+        extra = record_owner_rows(metadata, keys=keys, include_run_counters=bool(counter_columns))
+        selections.append(select(literal(3).label("source_kind"),
+            *(column for column in record_owner_columns(extra, pad_execution=pad_execution) if column.name not in RUN_COUNTER_COLUMNS),
+            *native_nulls, *(extra.c[name] for name in counter_columns)).where(
             extra.c.store_key == store_key,
             extra.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in keys)),
             extra.c.key.in_(tuple(keys))))
@@ -160,7 +169,7 @@ def content_reference_statement(
         owner_locator = tuple(native_owners.c[column.name] if column.name in {"key", "store_key"} else cast(null(),
             String(column.type.length) if isinstance(column.type, String) else column.type).label(column.name)
             for column in owner_columns)
-        selections.append(select(literal(4).label("source_kind"), *owner_locator, *native_nulls,
+        selections.append(select(literal(4).label("source_kind"), *owner_locator, *native_nulls, *counter_nulls,
             native_slots.c.slot.label("native_slot"),
             *(column.label("native_" + column.name) for column in source_columns)
         ).select_from(native_join).where(first.is_not(None)))

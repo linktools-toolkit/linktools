@@ -195,6 +195,7 @@ class _SqlGroupTransaction:
         owner_query: RecordQuery | None = None,
         native_root_paths: Sequence[tuple[str, ...]] = (),
         fixed_projection: bool = False,
+        terminal_write_sources: bool = False,
     ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]] | None:
         from ._archive import archive_scope_parts, validate_archive_content_identity
         from ._content_reference_sql import content_reference_batch_size, content_reference_statement
@@ -206,6 +207,8 @@ class _SqlGroupTransaction:
             raise StateTransactionNestingError("content source reader is outside its transaction")
         owner, content = self.transaction(owner_store), self.transaction(content_store)
         dialect = owner._context.dialect.name
+        terminal_write_sources = (terminal_write_sources and active.writable
+                                  and self.supports_clocked_records())
         if dialect not in {"sqlite", "mysql", "postgresql"}:
             return None
         paths = tuple(dict.fromkeys(content_paths))
@@ -309,8 +312,20 @@ class _SqlGroupTransaction:
                                      content_columns=content_columns)
                                  if owner_query is not None else None),
                 native_root_paths=native_paths, fixed_projection=fixed_projection,
+                terminal_write_sources=terminal_write_sources,
             )
+            capture_time = terminal_write_sources and owner._clock._now is None
+            if capture_time:
+                from sqlalchemy import func
+
+                # PostgreSQL audit time is transaction-start NOW, not the
+                # independently fresh statement clock used by lease guards.
+                clock = (func.now() if type(owner._context.dialect) is PostgreSQLDialect
+                         else owner._context.dialect.read_snapshot_time_expression())
+                statement = statement.add_columns(clock.label("terminal_source_time"))
             captured_rows = tuple((await owner._execute(statement)).mappings())
+            if capture_time and captured_rows:
+                owner._clock._now = owner._context.dialect.decode_database_time(captured_rows[0]["terminal_source_time"])
             # UNION order is unspecified; seed owner rows before decoding source locators.
             for row in captured_rows:
                 if row["source_kind"] == 0:
@@ -364,6 +379,9 @@ class _SqlGroupTransaction:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     transaction = self.transaction(target_store)
                     record = _record_from_row(row)
+                    if terminal_write_sources:
+                        for stream, column in zip(run_counter_streams(record.key, store_key=transaction._store_key), RUN_COUNTER_COLUMNS):
+                            transaction._sequence_cache.setdefault(stream, 0 if row[column] is None else _row_nonnegative_int(row[column]))
                 elif kind == 2:
                     record = payload_record_from_row({key.removeprefix("typed_"): value
                         for key, value in row.items() if key.startswith("typed_")})
@@ -382,7 +400,11 @@ class _SqlGroupTransaction:
         if required:
             for store, requested in extras.items():
                 for key in requested:
-                    self.transaction(store)._record_cache.setdefault(key, None)
+                    transaction = self.transaction(store)
+                    transaction._record_cache.setdefault(key, None)
+                    if terminal_write_sources:
+                        for stream in run_counter_streams(key, store_key=transaction._store_key):
+                            transaction._sequence_cache.setdefault(stream, 0)
         # Warm owners already belong to this snapshot. Route their unresolved
         # bodies through the canonical keyed reader, after the cold join has
         # seeded any shared content and without reloading the owner rows.
