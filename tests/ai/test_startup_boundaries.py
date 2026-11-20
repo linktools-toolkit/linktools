@@ -375,6 +375,7 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
         ExecutionRecoveryState,
         RuntimePayloadRef,
     )
+    from linktools.ai.persistence._record_owner import record_owner_table
     from linktools.ai.persistence._runtime_commands import StateCommands
     from linktools.ai.persistence._sql import _SqlTransaction
     from linktools.ai.storage import StoredPayload
@@ -398,11 +399,12 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
         async def conflict(transaction, replacements):
             target = next((item for item in replacements if item.record.kind == member), None)
             if target is not None:
-                table = transaction._table('ai_state_records')
-                await transaction._execute(update(table).where(
+                table = transaction._table(record_owner_table(target.record.key))
+                changed = await transaction._execute(update(table).where(
                     table.c.store_key == transaction._store_key,
                     table.c.key == target.record.key,
                 ).values(storage_revision=target.expected_storage_revision + 1))
+                assert changed.rowcount == 1
                 conflicts.append(member)
             return await original(transaction, replacements)
         with monkeypatch.context() as patch:

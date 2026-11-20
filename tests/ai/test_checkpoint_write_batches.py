@@ -297,6 +297,8 @@ async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_p
 async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str,
 ) -> None:
+    from linktools.ai.persistence._record_owner import record_owner_table
+
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="terminal-cas", tenant_id="tenant")
     repository = state.execution.executions
@@ -319,11 +321,12 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
     async def interleave(transaction, replacements):
         if {value.record.kind for value in replacements} == {"execution"}:
             member = next(value for value in replacements if value.record.kind == target)
-            table = transaction._table("ai_state_records")
-            await transaction._execute(update(table).where(
+            table = transaction._table(record_owner_table(member.record.key))
+            changed = await transaction._execute(update(table).where(
                 table.c.store_key == transaction._store_key,
                 table.c.key == member.record.key,
             ).values(storage_revision=member.expected_storage_revision + 1))
+            assert changed.rowcount == 1
             lost.append(target)
         return await original(transaction, replacements)
 

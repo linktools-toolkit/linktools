@@ -42,10 +42,10 @@ _TOOL_SLOTS = {
 }
 _CONTENT_SLOTS = {(*_PREFIX, *path): slot for path, slot in (_EXECUTION_SLOTS | _TOOL_SLOTS).items()}
 CONTENT_REFERENCE_COLUMNS = {
-    "ai_state_records": tuple(slot.column for slot in _CONTENT_SLOTS.values()),
+    "ai_execution_records": tuple(slot.column for slot in _EXECUTION_SLOTS.values()),
     "ai_step_tool_operations": tuple(slot.column for slot in _TOOL_SLOTS.values()),
 }
-CONTENT_REFERENCE_COLUMN_NAMES = frozenset(CONTENT_REFERENCE_COLUMNS["ai_state_records"])
+CONTENT_REFERENCE_COLUMN_NAMES = frozenset(slot.column for slot in _CONTENT_SLOTS.values())
 _SHA256 = re.compile(r"[a-f0-9]{64}")
 
 

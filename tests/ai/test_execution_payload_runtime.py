@@ -50,7 +50,7 @@ def _execution_sql_bindings(persistence: Persistence) -> Iterator[list[dict]]:
     rows: list[dict] = []
 
     def capture(connection, cursor, statement, parameters, execution_context, many) -> None:
-        if "ai_state_records" not in statement or not statement.lstrip().upper().startswith(("INSERT", "UPDATE")):
+        if "ai_execution_records" not in statement or not statement.lstrip().upper().startswith(("INSERT", "UPDATE")):
             return
         batches = parameters if many else (parameters,)
         for batch in batches:

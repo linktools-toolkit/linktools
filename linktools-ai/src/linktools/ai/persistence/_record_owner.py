@@ -53,8 +53,10 @@ def record_owner_columns(table: "FromClause") -> tuple["ColumnElement", ...]:
 
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
-RECORD_OWNER_TABLES = ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
-_KIND_OWNERS = {"task_graph": "ai_task_graphs", "tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
+RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
+SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
+_EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}
+_KIND_OWNERS = {"execution": "ai_execution_records", "idempotency": "ai_execution_records", "task_graph": "ai_task_graphs", "tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
 _CONSTANTS = {
     "ai_task_graphs": {"kind": "task_graph"},
     "ai_step_tool_operations": {"kind": "tool_operation", "payload_bytes": None},
@@ -62,7 +64,7 @@ _CONSTANTS = {
         "lease_owner": None, "lease_fence": 0, "lease_expires_at": None, "payload_bytes": None},
 }
 _EDGE_OWNERS = {"ai_task_graphs": "task_graph", "ai_state_records": "record", "ai_step_tool_operations": "tool_record",
-                "ai_step_run_admissions": "run_admission"}
+                "ai_step_run_admissions": "run_admission", "ai_execution_records": "record"}
 
 
 def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
@@ -76,12 +78,15 @@ def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
             return ("ai_step_messages" if store_key == encode_key_components(("state-group-archive",), 128)
                     else "ai_state_records")
     if len(parts) >= 6 and parts[0] == "record":
+        if parts[4] in _EXECUTION_ADDRESS_LENGTHS and (
+                parts[3] != "execution" or len(parts) != _EXECUTION_ADDRESS_LENGTHS[parts[4]]):
+            return "ai_state_records"
         return _KIND_OWNERS.get(parts[4], "ai_state_records")
     return "ai_state_records"
 
 
 def record_owner_edge(key: bytes) -> str:
-    """Keep surrogate row IDs from distinct owner tables in distinct edge domains."""
+    """Retain the logical Native owner of the exact record address."""
     return _EDGE_OWNERS[record_owner_table(key)]
 
 
@@ -107,9 +112,11 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
         raise ValueError("unknown record owner")
     names = (owner,) if owner is not None else record_owner_names(keys=keys, kind=kind)
     canonical = metadata.tables["ai_state_records"]
-    if (names == ("ai_state_records",) and keys is not None and kind is None
+    if (len(names) == 1 and names[0] in SCAN_KIND_OWNERS and keys is not None and kind is None
             and scan_kind is None and not include_run_counters):
-        return canonical
+        table = metadata.tables[names[0]]
+        if all(column in table.c for column in content_columns):
+            return table
     selections = []
     for name in names:
         table = metadata.tables[name]
@@ -131,11 +138,10 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
                 (table.c[column] if column in table.c else cast(null(), String(64)).label(column))
                 for column in content_columns
             ))
-        if name == "ai_state_records":
-            if scan_kind is not None:
-                selection = selection.where(table.c.scan_kind == literal(scan_kind, literal_execute=True))
-            elif kind is not None and kind.rstrip(" ") != "execution":
-                selection = selection.where(table.c.scan_kind == literal("k:" + kind, literal_execute=True))
+        if name in SCAN_KIND_OWNERS and scan_kind is not None:
+            selection = selection.where(table.c.scan_kind == literal(scan_kind, literal_execute=True))
+        elif name in SCAN_KIND_OWNERS and kind is not None and kind.rstrip(" ") != "execution":
+            selection = selection.where(table.c.scan_kind == literal("k:" + kind, literal_execute=True))
         selections.append(selection)
     return (selections[0] if len(selections) == 1 else union_all(*selections)).subquery("record_owners")
 
@@ -146,10 +152,10 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
         if key in values and values[key] != value:
             raise ValueError(f"{name} requires {key}={value!r}")
     return {key: value for key, value in values.items()
-            if key not in _CONSTANTS.get(name, {}) and (key != "scan_kind" or name == "ai_state_records")
+            if key not in _CONSTANTS.get(name, {}) and (key != "scan_kind" or name in SCAN_KIND_OWNERS)
             and (key not in CONTENT_REFERENCE_COLUMN_NAMES or key in CONTENT_REFERENCE_COLUMNS.get(name, ()))}
 
 
 
-__all__ = ["record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
 

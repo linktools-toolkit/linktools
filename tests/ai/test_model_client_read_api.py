@@ -418,7 +418,8 @@ async def test_selected_interaction_content_survives_concurrent_native_collectio
         task = asyncio.create_task(read())
         await asyncio.wait_for(captured_owner.wait(), timeout=5)
         async with engine.begin() as connection:
-            for table in ("ai_state_facts", "ai_state_records", "ai_step_sequences", "ai_step_messages"):
+            for table in ("ai_state_facts", "ai_state_records", "ai_execution_records",
+                          "ai_step_sequences", "ai_step_messages"):
                 await connection.execute(text(f"DELETE FROM {table}"))
         collected.set()
         await asyncio.wait_for(task, timeout=5)

@@ -39,6 +39,13 @@ idempotency keys are unchanged.
 
 ## SQL link extraction
 
+Canonical execution lifecycle and execution-domain idempotency rows share
+`ai_execution_records`, so they can still be inserted or updated in one batch.
+Canonical tool rows remain in `ai_step_tool_operations`. Opaque or unrelated
+records remain in `ai_state_records`, without built-in content lookup columns.
+Typed readers use the owning table directly; generic kind queries retain both
+physical sources.
+
 Execution and tool-history content captures use fixed same-row lookup
 projections. Nullable SHA-256 columns are derived from the canonical record
 in the same insert or compare-and-swap as its payload, without a second write
@@ -70,10 +77,12 @@ schema. Provision shared schemas explicitly through the deployment process.
 Runtime startup does not ALTER existing tables; the local SQLite state backend
 may initialize its own schema.
 
-Before opening a populated store with a release that requires the content
-lookup columns, upgrade its physical schema and populate those projections
-as part of the explicit cutover. Do not mix writers that do and do not write
-the projections. For a local SQLite store, quiesce writers, export a portable
+Before opening a populated store with this schema, move canonical execution
+and execution-domain receipt rows into their new owner and derive the content
+lookup columns as part of the explicit cutover. Preserve the exact encoded
+store and record keys, payloads, revision/lease state and timestamps. Leave
+opaque custom rows and unrelated domains in the original table. Do not mix
+writers that use different physical owners. For a local SQLite store, quiesce writers, export a portable
 snapshot with the old runtime, and restore it into a fresh root with the new
 runtime. Restore derives the columns from the canonical records; the snapshot
 wire format is unchanged. Verify the restored store before switching over.

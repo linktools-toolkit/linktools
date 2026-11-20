@@ -84,6 +84,8 @@ def build_runtime_sql_metadata(
 
     from ._record_owner_schema import build_record_owner_table
     build_record_owner_table(metadata, name="ai_state_records", comment=_RECORD_COMMENT)
+    build_record_owner_table(metadata, name="ai_execution_records",
+                             comment="Authoritative execution lifecycle, request receipts, and content references.")
     build_record_owner_table(metadata, name="ai_task_graphs",
                              comment="Authoritative TaskGraph state and recovery ordering.")
     build_record_owner_table(metadata, name="ai_step_tool_operations",
@@ -257,6 +259,7 @@ def required_runtime_sql_tables(plan: PersistencePlan) -> frozenset[str]:
         return frozenset()
     tables = {
         "ai_state_records",
+        "ai_execution_records",
         "ai_state_facts",
         "ai_state_counters",
         "ai_state_operations",

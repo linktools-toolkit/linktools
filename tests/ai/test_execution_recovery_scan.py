@@ -114,8 +114,12 @@ async def test_execution_scan_pages_use_full_sort_key_and_raw_identity(
 
 @pytest.mark.asyncio
 async def test_execution_recovery_sqlite_plan_uses_store_and_scan_bucket(tmp_path: Path) -> None:
+    from linktools.ai.persistence.state import record_key
+
     records = tuple(
         replace(_record(index), kind="execution",
+                key=(record_key("test", "tenant", "execution", "execution", (str(index),))
+                     if index % 128 == 64 else _record(index).key),
                 state="STARTED" if index % 64 == 0 else "DONE")
         for index in range(256)
     )
@@ -137,19 +141,52 @@ async def test_execution_recovery_sqlite_plan_uses_store_and_scan_bucket(tmp_pat
         assert len(statements) == 1
         statement, parameters = statements[0]
         assert "scan_kind" in statement
-        assert "UNION ALL" not in statement
+        assert statement.count("UNION ALL") == 1
         async with engine.connect() as connection:
             fresh = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)).all()
             await connection.exec_driver_sql("ANALYZE ai_state_records")
+            await connection.exec_driver_sql("ANALYZE ai_execution_records")
             analyzed = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)).all()
         for plan in (fresh, analyzed):
             details = " ".join(row[3] for row in plan)
             assert "store_key_scan_kind_sort_prefix" in details
             assert "store_key=? AND scan_kind=?" in details
             assert "SCAN ai_state_records" not in details
+            assert "SCAN ai_execution_records" not in details
+            assert "SEARCH ai_execution_records" in details
             # Full-sort and raw-key ties may require a right-part sort; the
             # candidate range must still be bounded by store and recovery bucket.
 
+
+
+def test_mysql_bounded_recovery_merge_keeps_order_limits_and_raw_key() -> None:
+    from sqlalchemy.dialects import mysql, postgresql, sqlite
+    from linktools.ai.persistence._plan import PersistenceDomain
+    from linktools.ai.persistence._schema import build_runtime_sql_metadata
+    from linktools.ai.persistence._sql import _record_query_statement
+
+    metadata = build_runtime_sql_metadata(frozenset(PersistenceDomain))
+    query = ExecutionRecoveryCandidateQuery(
+        kind="execution", after_sort_key=b"sort", after_key=b"key", limit=4,
+    )
+    mysql57 = mysql.dialect(paramstyle="format")
+    mysql57.server_version_info = (5, 7, 44)
+
+    def sql(dialect, selected=query) -> str:
+        statement = _record_query_statement(metadata, b"store", selected, dialect=dialect.name)
+        return " ".join(str(statement.compile(dialect=dialect, compile_kwargs={"literal_binds": True})).split())
+
+    direct = sql(mysql57)
+    assert direct.startswith("(SELECT")
+    assert "LIMIT 4) UNION ALL (SELECT" in direct
+    assert direct.endswith("LIMIT 4) ORDER BY sort_prefix, sort_key, `key` LIMIT 4")
+    assert "FROM ai_state_records" in direct and "FROM ai_execution_records" in direct
+    for predicate in ("scan_kind = 'e:1'", "store_key = 'store'", "sort_prefix >= 'sort'", ".sort_key > 'sort'", ".`key` > 'key'"):
+        assert direct.count(predicate) == 2
+    for dialect in (postgresql.dialect(), sqlite.dialect()):
+        assert sql(dialect).startswith("SELECT")
+    assert sql(mysql57, replace(query, limit=None)).startswith("SELECT")
+    assert sql(mysql57, RecordQuery(kind="execution", limit=4)).startswith("SELECT")
 
 
 @pytest.mark.parametrize("options", ({"kind": "other"}, {"kind": "execution", "states": frozenset({"STARTED"})}))

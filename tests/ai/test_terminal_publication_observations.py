@@ -78,7 +78,8 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                     injected = True
                     store, record = next((store, record) for store, record in records if record.kind == fault)
                     tx = self.transaction(store)
-                    table = store.storage_group.metadata.tables["ai_state_records"]
+                    from linktools.ai.persistence._record_owner import record_owner_table
+                    table = store.storage_group.metadata.tables[record_owner_table(record.key)]
                     # Execution includes recovery control under the same physical CAS.
                     # A competing physical revision must defeat the later CAS even
                     # when the transaction has already captured the previous row.

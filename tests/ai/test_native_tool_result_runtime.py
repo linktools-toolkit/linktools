@@ -192,3 +192,40 @@ async def test_cold_scoped_tool_history_batches_native_and_archived_receipts(tmp
         assert len(statements) == 2
         assert "fixed_native_nodes" in statements[0] and "content_source" in statements[0]
         assert "JSON_EXTRACT" not in statements[0].upper()
+
+
+@pytest.mark.asyncio
+async def test_tool_history_rejects_opaque_same_scope_without_content_projection(tmp_path: Path) -> None:
+    from sqlalchemy import event
+    from linktools.ai.persistence.state import RecordQuery
+
+    async with Persistence.open("native-result", tenant_id="tenant",
+                                storage=PersistenceStorage.sqlite(tmp_path / "tool.db")) as state:
+        await _prepare(state, "done", "done")
+        operation, _ = await _settle(state, "archived tool body " * 5000)
+        tools = state.checkpoint.tools
+        row = await tools.state_store.read_record(tools._tool_key(operation.tool_operation_id))
+        assert row is not None
+        opaque = replace(row, key=b"opaque-tool", sort_key=b"000-opaque")
+        await tools.state_store.mutate(lambda tx: tx.insert_record(opaque))
+
+        generic = await tools.state_store.read(lambda tx: tx.list_records(RecordQuery(
+            kind="tool_operation", parent_key=row.parent_key)))
+        assert {record.key for record in generic} == {row.key, opaque.key}
+
+        group = tools.state_store.storage_group
+        await group.open_archive()
+        statements = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _many) -> None:
+            if statement.lstrip().upper().startswith(("WITH", "SELECT")):
+                statements.append(statement)
+
+        event.listen(group.context.engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            with pytest.raises(AIError) as failure:
+                await tools.list_by_agent_run("run", tenant_id="tenant")
+        finally:
+            event.remove(group.context.engine.sync_engine, "before_cursor_execute", capture)
+        assert failure.value.code == ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert len(statements) == 1 and "JSON_EXTRACT" not in statements[0].upper()

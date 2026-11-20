@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
+from ._record_owner import SCAN_KIND_OWNERS
 
 
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
@@ -127,7 +128,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
           for column in CONTENT_REFERENCE_COLUMNS.get(name, ())),
         *sql_audit_columns(),
     ]
-    if name == "ai_state_records":
+    if name in SCAN_KIND_OWNERS:
         columns.insert(-2, Column(
             "scan_kind", String(34), nullable=False,
             comment="Write-through kind and execution recovery candidate projection; never domain authority.",
@@ -142,7 +143,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         sql_query_index(records, "store_key", "state", "sort_prefix")
         sql_audit_indexes(records)
         return
-    if name == "ai_state_records":
+    if name in SCAN_KIND_OWNERS:
         sql_query_index(records, "store_key", "scan_kind", "sort_prefix")
     elif "kind" in records.c:
         sql_query_index(records, "store_key", "kind", "sort_prefix")

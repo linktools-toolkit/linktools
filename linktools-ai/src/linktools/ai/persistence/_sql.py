@@ -2319,7 +2319,8 @@ class _SqlTransaction:
         return result.rowcount == 1
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
-        statement = _record_query_statement(self._metadata, self._store_key, query)
+        statement = _record_query_statement(self._metadata, self._store_key, query,
+                                            dialect=self._context.dialect.name)
         rows = (await self._execute(statement)).mappings().all()
         values = tuple(_record_from_row(row) for row in rows)
         if self._store_key == STATE_GROUP_ARCHIVE_KEY:
@@ -3294,8 +3295,8 @@ def _require_scan_limit(limit: int) -> None:
         raise ValueError("scan page limit must be positive")
 
 def _record_query_statement(metadata: "MetaData", store_key: bytes, query: RecordQuery,
-                            *, content_columns: Sequence[str] = ()) -> "Select":
-    from sqlalchemy import select, union_all
+                            *, content_columns: Sequence[str] = (), dialect: str | None = None) -> "Select | CompoundSelect":
+    from sqlalchemy import literal_column, select, union_all
 
     if query.kind is not None and query.kind.rstrip(" ") == "execution":
         # Each disjoint range keeps all possible members of the global page.
@@ -3311,6 +3312,12 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
         ]
         if len(branches) == 1:
             return branches[0]
+        if dialect == "mysql" and isinstance(query, ExecutionRecoveryCandidateQuery) and query.limit is not None:
+            # MySQL accepts ordered, bounded parenthesized UNION arms directly.
+            # Avoid materializing each arm as a derived table before the global merge.
+            return union_all(*branches).order_by(
+                literal_column("sort_prefix"), literal_column("sort_key"), literal_column("`key`"),
+            ).limit(query.limit)
         if branches:
             candidates = union_all(*(select(branch.subquery()) for branch in branches)).subquery()
             statement = select(candidates).order_by(

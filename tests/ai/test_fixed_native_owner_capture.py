@@ -89,7 +89,7 @@ async def test_fixed_native_capture_remains_exact_and_transaction_scoped(tmp_pat
             stored = await repository.state_store.read_record(repository.execution_record_key("execution"))
             value = deepcopy(decode_envelope(stored.data).value)
             value["payload"]["fields"]["result"]["fields"]["output"]["fields"]["content"]["$native_text"]["group_id"] = "other"
-            table = group.metadata.tables["ai_state_records"]
+            table = group.metadata.tables["ai_execution_records"]
             async with group.context.engine.begin() as connection:
                 await connection.execute(update(table).where(table.c.key == stored.key).values(
                     payload_json=canonical_json_bytes(encode_envelope(value)).decode("utf-8")))

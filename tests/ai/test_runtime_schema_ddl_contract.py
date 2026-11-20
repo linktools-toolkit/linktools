@@ -313,7 +313,7 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     )
     selected = captured[0]
     assert set(selected.tables) == {
-        "ai_state_records", "ai_state_facts",
+        "ai_state_records", "ai_execution_records", "ai_state_facts",
         "ai_state_counters", "ai_state_operations", "ai_step_runs", "ai_step_messages", "ai_step_sequences",
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
     } | ({"ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
@@ -482,7 +482,7 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
         "ai_asset_batch_receipts", "ai_asset_changes", "ai_asset_entries", "ai_asset_heads",
         "ai_metric_definitions", "ai_metric_observations",
         "ai_object_chunks", "ai_objects", "ai_state_facts",
-        "ai_state_operations", "ai_state_records", "ai_state_counters", "ai_step_events",
+        "ai_state_operations", "ai_state_records", "ai_execution_records", "ai_state_counters", "ai_step_events",
         "ai_step_messages", "ai_step_runs", "ai_step_sequences", "ai_step_snapshots", "ai_trace_events",
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
     }
@@ -513,6 +513,7 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
     metadata = build_sql_schema_metadata()
     state_raw = {
         "ai_state_records": ("key", "scope_key", "parent_key"),
+        "ai_execution_records": ("key", "scope_key", "parent_key"),
         "ai_state_facts": ("stream_key", "owner_key"),
         "ai_state_counters": ("stream_key",),
         "ai_state_operations": ("operation_key", "stream_key"),
@@ -567,17 +568,18 @@ def test_record_scan_bucket_is_write_through_and_replaces_only_generic_index(dia
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
     if dialect_name == "mysql":
         dialect.server_version_info = (5, 7, 44)
-    records = metadata.tables["ai_state_records"]
-    column = records.c.scan_kind
-    assert column.type.length == 34
-    assert column.computed is None and not column.nullable
-    ddl = str(CreateColumn(column).compile(dialect=dialect))
-    assert "GENERATED" not in ddl and "JSON_EXTRACT" not in ddl
-    assert "handoff_phase" not in ddl
-    indexes = {tuple(index.columns.keys()) for index in records.indexes}
-    assert ("store_key", "scan_kind", "sort_prefix") in indexes
-    assert ("store_key", "kind", "sort_prefix") not in indexes
+    for owner in ("ai_state_records", "ai_execution_records"):
+        records = metadata.tables[owner]
+        column = records.c.scan_kind
+        assert column.type.length == 34
+        assert column.computed is None and not column.nullable
+        ddl = str(CreateColumn(column).compile(dialect=dialect))
+        assert "GENERATED" not in ddl and "JSON_EXTRACT" not in ddl
+        assert "handoff_phase" not in ddl
+        indexes = {tuple(index.columns.keys()) for index in records.indexes}
+        assert ("store_key", "scan_kind", "sort_prefix") in indexes
+        assert ("store_key", "kind", "sort_prefix") not in indexes
     for name in RECORD_OWNER_TABLES:
-        if name != "ai_state_records":
+        if name not in {"ai_state_records", "ai_execution_records"}:
             assert "scan_kind" not in metadata.tables[name].c
 
