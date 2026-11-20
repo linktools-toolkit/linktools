@@ -10,6 +10,7 @@ from ._content_reference_projection import EXECUTION_REFERENCE_COLUMNS, content_
 from ._record_owner import RUN_COUNTER_COLUMNS, record_owner_rows, record_owner_columns, record_owner_table
 from ._archive import archive_scope_parts
 from ._step_payload_owner import payload_store_key, payload_store_locator
+from ._state_payload_sql import state_payload_document
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -40,7 +41,7 @@ def content_reference_statement(
     fixed_projection: bool = False,
     terminal_write_sources: bool = False,
 ) -> "Select":
-    from sqlalchemy import JSON, BigInteger, Integer, LargeBinary, String, and_, case, cast, func, literal, null, select, true, type_coerce, union_all
+    from sqlalchemy import BigInteger, Integer, LargeBinary, String, and_, case, cast, func, literal, null, select, true, union_all
     from sqlalchemy.dialects.mysql import BINARY
 
     content = tuple(content_reference_slot(path) for path in content_paths) if fixed_projection else ()
@@ -78,8 +79,7 @@ def content_reference_statement(
     else:
         # Custom owners have no fixed-slot write contract. Preserve the
         # snapshot guarantee rather than loading their bodies in another query.
-        encoded = type_coerce(owners.c.payload_json, JSON)[()].as_string()
-        payload = cast(encoded, JSON) if dialect == "postgresql" else type_coerce(encoded, JSON)
+        payload = state_payload_document(owners.c.payload_json, dialect)
         identities = tuple(func.coalesce(
             literal(slot.codec + ":", literal_execute=True) + owners.c[slot.column], payload[path].as_string())
             if (slot := content_reference_slot(path)) is not None and slot.codec is not None

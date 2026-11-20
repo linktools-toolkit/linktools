@@ -37,7 +37,8 @@ def test_database_content_binary_columns_have_full_dialect_capacity(dialect, exp
     messages = build_step_sql_metadata().tables["ai_step_messages"]
     assert records.c.payload_bytes.type.compile(dialect=dialect) == expected
     assert messages.c.message.type.compile(dialect=dialect) == expected
-    assert records.c.payload_json.type.compile(dialect=dialect) == "JSON"
+    assert records.c.payload_json.type.compile(dialect=dialect) == ("LONGTEXT" if dialect.name == "mysql" else "TEXT")
+    assert messages.c.payload_json.type.compile(dialect=dialect) == "JSON"
 
 
 @pytest.mark.asyncio

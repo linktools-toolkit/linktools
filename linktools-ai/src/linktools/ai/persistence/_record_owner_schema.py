@@ -24,12 +24,13 @@ if TYPE_CHECKING:
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
 from ._record_owner import SCAN_KIND_OWNERS
+from ._state_payload_sql import state_payload_text
 from ._turn_sql_schema import TURN_SESSION_MAX_BYTES
 
 
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
     """Build one physical owner with the common optimistic record contract."""
-    from sqlalchemy import TIMESTAMP, BigInteger, SmallInteger, JSON, Column, LargeBinary, String, Table, Text, text
+    from sqlalchemy import TIMESTAMP, BigInteger, SmallInteger, Column, LargeBinary, String, Table, Text, text
     from sqlalchemy.dialects import mysql
 
     if name in metadata.tables:
@@ -111,12 +112,12 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         ),
         Column(
             "payload_json",
-            JSON(),
+            state_payload_text(),
             nullable=False,
             comment=(
-                "Domain JSON string; execution reference digests are stored in typed columns."
+                "Canonical domain JSON text; execution reference digests are stored in typed columns."
                 if name == "ai_execution_records" else
-                "Canonical domain JSON encoded as a JSON string preserving numeric representations."
+                "Canonical domain JSON text preserving numeric representations."
             ),
         ),
         Column("payload_bytes", sql_blob(), nullable=True,

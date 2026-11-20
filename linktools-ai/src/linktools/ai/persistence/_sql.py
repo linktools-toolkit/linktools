@@ -36,6 +36,7 @@ from ._content_reference_projection import (
 )
 from ._record_owner import EXECUTION_SHELL_KIND, RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
+from ._state_payload_sql import state_payload_document
 from ._record_cache import StateRecordCache
 from .state import state_content_members
 from .state import (
@@ -2353,13 +2354,7 @@ class _SqlTransaction:
             yield tuple(nodes), tuple(contents)
 
     def _payload_field(self, column: "ColumnElement", field: str) -> "ColumnElement":
-        from sqlalchemy import JSON, cast, type_coerce
-
-        # The JSON scalar retains canonical text; parse only archive string links.
-        encoded = type_coerce(column, JSON)[()].as_string()
-        payload = (cast(encoded, JSON) if self._context.dialect.name == "postgresql"
-                   else type_coerce(encoded, JSON))
-        return payload[field].as_string()
+        return state_payload_document(column, self._context.dialect.name)[field].as_string()
 
     def _archive_link(self, column: "ColumnElement", field: str) -> "ColumnElement":
         from sqlalchemy import LargeBinary, cast, func

@@ -18,6 +18,7 @@ from ._record_owner import record_owner_columns, record_owner_rows
 from ._run_counters import run_counter_address, run_counter_streams
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
+from ._state_payload_sql import state_payload_document
 from ._sql import SqlStateStore
 from ._step_contracts import AgentRunRecord
 from ._step_schema import build_step_sql_metadata
@@ -129,7 +130,7 @@ class NativeRunReferences:
                   expected_start: NativeStepEvent | None = None,
                   expected_terminal: NativeStepEvent | None = None, include_run_counters: bool = False) -> "Select":
         from ._sql import _key_matches, _keys_match
-        from sqlalchemy import JSON, and_, bindparam, cast, select, type_coerce
+        from sqlalchemy import and_, bindparam, select
         from sqlalchemy import literal_column
         from sqlalchemy.sql import visitors
         from sqlalchemy.sql.elements import BindParameter
@@ -138,8 +139,7 @@ class NativeRunReferences:
                                     include_run_counters=include_run_counters,
                                     scan_kind="k:agent_run" if query is not None else None)
         runs = self._runs
-        encoded = type_coerce(records.c.payload_json, JSON)[()].as_string()
-        payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
+        payload = state_payload_document(records.c.payload_json, self._state.context.dialect.name)
         reference = payload["value"]["payload"]
         source_run = reference["run_id"].as_string()
         run_join = and_(

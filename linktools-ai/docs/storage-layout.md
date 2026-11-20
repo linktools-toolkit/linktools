@@ -22,7 +22,7 @@ hydrate these bodies.
 Accepted execution and tool payload bytes use the existing `ai_step_messages`
 content owner in a separate typed partition. Other archive families use
 `ai_state_records.payload_bytes` with content metadata in `payload_json`; ordinary
-control payloads use canonical JSON text wrapped in a JSON string. This
+control payloads are stored as canonical JSON text in SQL text columns. This
 avoids compressing, Base64-encoding and then decoding the same body just to pass
 through a JSON database column. Portable JSON snapshots still encode binary at
 the transport boundary; that is not the database representation.
@@ -63,8 +63,8 @@ production DBA approval or a deployed migration.
 | `ai_step_sequences` | Immutable message-sequence links and counts, not copied bodies. |
 | `ai_step_snapshots` | Bounded descriptor and sequence root; the descriptor is not the whole conversation. |
 
-For the seven Runtime payload columns that wrap canonical text rather than
-store native JSON objects, see [SQL state payload storage](sql-payload-storage.md).
+For the seven Runtime payload columns that store canonical text rather than
+native JSON objects, see [SQL state payload storage](sql-payload-storage.md).
 
 Identity, sequence, state, lease, CAS, revision, ordering and time columns are not
 compressed. Snapshot pruning uses the `(store_locator, run_id, pruned)` index.

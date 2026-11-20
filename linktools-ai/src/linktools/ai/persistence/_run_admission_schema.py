@@ -8,6 +8,7 @@ from ..storage import (
     sql_audit_columns, sql_audit_indexes, sql_blob, sql_id_column,
     sql_sha256, sql_table_options, sql_unique,
 )
+from ._state_payload_sql import state_payload_text
 from .state import STORE_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
 def build_run_admission_sql_metadata(metadata: "MetaData") -> None:
     """Keep local publication atomic without copying the canonical run body."""
-    from sqlalchemy import BigInteger, Column, JSON, LargeBinary, Table
+    from sqlalchemy import BigInteger, Column, LargeBinary, Table
     from sqlalchemy.dialects.mysql import VARBINARY
 
     if "ai_step_run_admissions" in metadata.tables:
@@ -35,7 +36,7 @@ def build_run_admission_sql_metadata(metadata: "MetaData") -> None:
                comment="Stable ordering by projected start time and complete admission identity."),
         Column("storage_revision", BigInteger, nullable=False,
                comment="Optimistic local publication and release fence, independent of canonical registration."),
-        Column("payload_json", JSON(), nullable=False,
+        Column("payload_json", state_payload_text(), nullable=False,
                comment="Typed canonical registration reference and actual domain projection differences; no copied run body."),
         Column("key_locator", sql_sha256(), nullable=False,
                comment="SHA-256 lookup projection of the admission key; complete identity must also match."),

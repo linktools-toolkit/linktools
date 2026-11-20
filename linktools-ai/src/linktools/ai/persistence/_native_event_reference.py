@@ -15,6 +15,7 @@ from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeS
 from ..errors import AIError, ErrorCode
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
+from ._state_payload_sql import state_payload_document
 from ._sql import SqlStateStore
 from ._step_contracts import AgentRunRecord, StepEvent
 from ._official_step_reader import OfficialStepReader
@@ -433,11 +434,10 @@ class NativeEventReferences:
                   scan: tuple[FactScanCursor | None, int] | None = None,
                   full_source: bool = False) -> "Select":
         from ._sql import _key_matches
-        from sqlalchemy import JSON, and_, cast, func, or_, select, type_coerce
+        from sqlalchemy import and_, cast, func, or_, select
 
         facts, events, runs = self._facts, self._events, self._runs
-        encoded = type_coerce(facts.c.payload_json, JSON)[()].as_string()
-        payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
+        payload = state_payload_document(facts.c.payload_json, self._state.context.dialect.name)
         reference = payload["value"]["payload"]
         replay = reference["replay"].as_string()
         if self._state.context.dialect.name == "postgresql":

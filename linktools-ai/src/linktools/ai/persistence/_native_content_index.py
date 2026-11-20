@@ -196,11 +196,11 @@ async def index_nodes(
 async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *, group_id: str | None) -> None:
     import hashlib
     import json
-    from sqlalchemy import JSON, LargeBinary, String, column, select, table
+    from sqlalchemy import LargeBinary, String, Text, column, select, table
     from .state import RECORD_KEY_MAX_BYTES, STORE_KEY_MAX_BYTES, STATE_GROUP_METADATA_KEY, record_key
     pending = session.info.pop(_PENDING, {})
     if group_id is None and any(pending.values()):
-        records = table("ai_state_records", column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", JSON()), column("key_locator", String(64)))
+        records = table("ai_state_records", column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", Text()), column("key_locator", String(64)))
         scope_key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
         wire = await session.scalar(select(records.c.payload_json).where(
             records.c.store_key == STATE_GROUP_METADATA_KEY,

@@ -1,50 +1,24 @@
 # SQL state payload storage
 
-These Runtime StateStore tables use a `payload_json` column whose **SQL
-type is JSON but whose value is a JSON string**: `ai_state_records`,
-`ai_execution_records`, `ai_task_graphs`, `ai_step_tool_operations`,
-`ai_step_run_admissions`, `ai_state_facts` and `ai_state_operations`.
-
-Each string contains the canonical JSON text of the domain payload. The SQLAlchemy
-metadata and the [MySQL schema](../migrations/init_schema.sql) declare these
-columns as JSON, not TEXT. SQLite's underlying storage does not change the
-declared schema or the encoding contract.
+These Runtime StateStore tables store canonical JSON text directly in their
+`payload_json` columns: `ai_state_records`, `ai_execution_records`,
+`ai_task_graphs`, `ai_step_tool_operations`, `ai_step_run_admissions`,
+`ai_state_facts` and `ai_state_operations`. The SQL type is `LONGTEXT` on MySQL
+and `TEXT` on PostgreSQL and SQLite. These columns are not native JSON objects.
 
 ## Encoding and reading
 
-There are two JSON layers:
+The StateStore serializes each domain mapping once to canonical UTF-8 JSON
+text, binds that text as a SQL string, and decodes it once on read. The
+database stores `{"value":1.0}` directly, not a quoted and escaped JSON string
+containing that text. This preserves the numeric spelling required by typed
+readers and hashes, including `1.0` versus `1` and signed zero, without the
+outer serialization. The StateStore rejects invalid JSON and non-mapping
+roots on read.
 
-1. The StateStore writer serializes the domain mapping with
-   `canonical_json_bytes(...).decode("utf-8")`.
-2. SQLAlchemy's JSON binding encodes that Python string as a JSON string value
-   in the column. For example, the domain payload `{"value": 1.0}` has inner
-   canonical text `{"value":1.0}` and outer JSON representation
-   `"{\"value\":1.0}"`.
-
-On a normal typed SQLAlchemy read, the JSON result processing removes the outer
-layer and returns the inner text as a Python `str`. The StateStore then decodes
-that text and requires a mapping. A raw SQL read may still expose the outer JSON
-representation; it is not the same as the typed reader's input.
-
-Do not write a native JSON object directly into these columns. The reader rejects
-a decoded mapping in place of the required string, as well as invalid inner JSON
-or an inner value that is not a mapping. Column type validation alone does not
-validate this row-level encoding.
-
-Native database JSON processing of a payload object may change the lexical
-representation of numbers. For example, turning `1.0` into `1` loses the
-distinction required by typed domain readers and generic JSON payload hashes.
-Keeping the payload as text **inside** the JSON string prevents the outer JSON
-layer from interpreting its numbers. Integers, floats, signed zero, booleans and
-null retain their existing semantics. Domain validation, semantic hashes and
-idempotency keys are unchanged.
-
-The outer SQL JSON string is the current storage representation, not what makes
-the inner text canonical. A text column could preserve the same canonical bytes
-without the outer encoding. It would still need an inner JSON decode when reading
-the domain record, and a schema change would need to update the typed bindings
-and the archive and native-reference queries below. This does not apply to real
-JSON objects or arrays elsewhere that are queried as structured data.
+True structured JSON columns, such as the native Step attachment manifest and
+Trace event metadata, retain their own representations. Raw message bytes are
+not converted to JSON text.
 
 ## SQL link extraction
 
@@ -71,14 +45,11 @@ share one SQL read without database-side JSON extraction on the normal read
 path. Full scope and integrity checks still apply; other native message ranges
 use the exact range reader.
 
-Archive traversal and native run/event reference queries unwrap the outer JSON
-string before extracting fields from the inner payload. The SQLAlchemy
-expressions first select the JSON root as a string, then access fields as JSON:
-
-- SQLite uses JSON extraction to unwrap the root and extract the inner fields.
-- MySQL uses JSON extraction/unquoting to unwrap the root and read string fields.
-- PostgreSQL extracts the root as text and explicitly casts that text to JSON
-  before accessing inner fields.
+Archive traversal and native run/event reference queries extract fields from the
+stored text only when evaluating those links. SQLite and MySQL accept the
+canonical text directly as JSON input; PostgreSQL casts to JSON inside the
+extraction expression. The normal typed payload read receives the original
+text, not a database-reserialized object.
 
 These expressions resolve links and references, not replacement payloads. Full
 StateStore payloads still pass through the typed read and inner-text decoder;
@@ -118,17 +89,14 @@ logical payloads, revision and lease state, and timestamps; preserve opaque
 custom rows in their owning store. Do not mix writers that use different
 physical owners. The v1 schema does not provide an in-place migrator.
 
-The schema validator requires the JSON type family and JSON compatibility for
-these columns. `TEXT`/`LONGTEXT` columns do not satisfy it, and PostgreSQL `JSONB`
-is not interchangeable with the declared `JSON`. A correctly declared JSON
-column containing native payload objects can pass schema validation but still
-fail payload reads. Verify both schema and newly written data through the
-supported StateStore path.
-
-There is no compatibility reader or automatic migration for superseded
-development payload shapes. This contract does not reconstruct numeric
-distinctions already lost in old data. Use the current schema and writer for
-new data rather than restoring the old text-column or native-object contract.
+The schema validator expects text for these fields and requires `LONGTEXT`
+on MySQL so payloads larger than 64 KiB continue to fit. Do not provision a
+narrower `TEXT` or `VARCHAR` column there. Existing databases that used JSON
+strings need fresh storage or an explicit deployment migration. To retain
+those rows, unwrap exactly one JSON string layer while copying them; altering
+the SQL column type alone would keep the old quotes and escapes. Verify
+the copied mappings and their canonical text before switching writers. Runtime
+does not migrate or silently read both physical shapes.
 
 ## Upgrading a released schema
 
