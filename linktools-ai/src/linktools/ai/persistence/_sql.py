@@ -30,6 +30,7 @@ from ..storage import (
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
 from ._record_query import ExecutionRecoveryCandidateQuery, record_scan_projection
+from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS, content_reference_slot, content_reference_values
 from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
@@ -208,6 +209,11 @@ class _SqlGroupTransaction:
         if (not paths or len(paths) > 16 or any(not path or len(path) > 16
                 or any(not isinstance(part, str) or not part for part in path) for path in paths)):
             raise ValueError("content references require bounded explicit JSON paths")
+        projected = tuple(content_reference_slot(path) for path in paths)
+        native_projected = tuple(content_reference_slot(path) for path in native_paths)
+        if (any(slot is None or slot.codec is None for slot in projected)
+                or any(slot is None or slot.codec is not None for slot in native_projected)):
+            return None
         keys = tuple(dict.fromkeys(validate_record_key(key) for key in owner_keys))
         if owner_query is not None and (keys or additional_records or owner_query.kind != "tool_operation"
                 or owner_query.scope_key is None and owner_query.parent_key is None):
@@ -289,7 +295,8 @@ class _SqlGroupTransaction:
                 content_store_key=content._store_key, content_scope_key=content_scope_key, content_paths=paths,
                 typed_payloads=typed_payloads,
                 additional_records={self.transaction(store)._store_key: requested for store, requested in extras.items()} if offset == 0 else None,
-                owner_statement=(_record_query_statement(self._group.metadata, owner._store_key, owner_query)
+                owner_statement=(_record_query_statement(self._group.metadata, owner._store_key, owner_query,
+                                     content_columns=tuple(slot.column for slot in (*projected, *native_projected)))
                                  if owner_query is not None else None),
                 native_root_paths=native_paths,
             )
@@ -335,6 +342,8 @@ class _SqlGroupTransaction:
                     item = root.slices[0]
                     if item.start != item.count - 1 or item.end != item.count:
                         continue
+                    if row["native_sha256"] is not None and row["native_sha256"] != item.first:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     self._native_message_rows[root] = (() if row["native_sha256"] is None else ({
                         name.removeprefix("native_"): value for name, value in row.items()
                         if name.startswith("native_") and name != "native_slot"},))
@@ -1726,26 +1735,29 @@ class _SqlTransaction:
             validate_record_identity(record)
         from sqlalchemy import insert
 
-        await self._execute(
-            insert(self._table(owners[0])).values(
-                [
-                    {
-                        **record_owner_values(owners[0], _record_values(record)),
-                        "store_key": self._store_key,
-                    }
-                    for record in sorted(values, key=lambda value: value.key)
-                ]
-            )
-        )
+        table = self._table(owners[0])
+        rows = _record_insert_rows(owners[0], sorted(values, key=lambda value: value.key), self._store_key)
+        projected = any(column in rows[0] for column in CONTENT_REFERENCE_COLUMNS.get(owners[0], ()))
+        batch_size = (_GROUP_RECORD_BIND_BUDGET // len(rows[0])
+                      if projected and self._context.dialect.name == "sqlite" else len(rows))
+        try:
+            for offset in range(0, len(rows), batch_size):
+                await self._execute(insert(table).values(rows[offset:offset + batch_size]))
+        except BaseException as error:
+            if len(rows) > batch_size:
+                self._abort_mutation(error)
+            raise
         for record in values:
             self._stage_native_record_owner(record, inserting=True)
-        self._log_batch("insert_records", len(values), 1)
+        self._log_batch("insert_records", len(values), (len(rows) + batch_size - 1) // batch_size)
         for record in values:
             self._guarded_record_revisions[record.key] = record.storage_revision
             self._record_cache[record.key] = record
 
     async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
         values = tuple(sorted(records, key=lambda record: record.key))
+        if not values:
+            return
         owners = tuple(dict.fromkeys(record_owner_table(record.key, store_key=self._store_key) for record in values))
         if len(owners) > 1:
             try:
@@ -1794,9 +1806,12 @@ class _SqlTransaction:
                 raise ValueError("insert_immutable_records contains duplicate keys")
             for record in values:
                 validate_record_identity(record)
-            for offset in range(0, len(values), _IMMUTABLE_RECORD_BATCH_SIZE):
-                rows = [{**record_owner_values(owners[0], _record_values(record)), "store_key": self._store_key}
-                        for record in values[offset:offset + _IMMUTABLE_RECORD_BATCH_SIZE]]
+            prepared = _record_insert_rows(owners[0], values, self._store_key)
+            batch_size = _IMMUTABLE_RECORD_BATCH_SIZE
+            if self._context.dialect.name == "sqlite":
+                batch_size = min(batch_size, _GROUP_RECORD_BIND_BUDGET // len(prepared[0]))
+            for offset in range(0, len(prepared), batch_size):
+                rows = prepared[offset:offset + batch_size]
                 await self._context.run_statement(self._context.dialect.insert_immutable_many(
                     self._session, table=self._table(owners[0]), rows=rows,
                     index_elements=("store_key", "key_locator"), conflict_column="storage_revision",
@@ -1923,14 +1938,18 @@ class _SqlTransaction:
         table = self._table(owners[0])
         prepared = tuple(record_owner_values(owners[0], _record_values(value.record)) for value in ordered)
         columns = ("state", "scan_kind", "storage_revision", "lease_owner", "lease_fence",
-                   "lease_expires_at", "payload_json", "payload_bytes")
+                   "lease_expires_at", "payload_json", "payload_bytes",
+                   *(column for column in CONTENT_REFERENCE_COLUMNS.get(owners[0], ())
+                     if any(column in row for row in prepared)))
         identity_columns = tuple(name for name in ("scope_key", "parent_key", "subject_id", "kind", "sort_key") if name in table.c)
         columns = tuple(name for name in columns if name in table.c)
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
-        for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
-            batch = ordered[offset:offset + _RECORD_REPLACE_BATCH_SIZE]
-            rows = prepared[offset:offset + _RECORD_REPLACE_BATCH_SIZE]
+        batch_size = (_RECORD_REPLACE_BATCH_SIZE if executemany else
+                      min(_RECORD_REPLACE_BATCH_SIZE, (_GROUP_RECORD_BIND_BUDGET - 1) // (2 * len(columns) + 10)))
+        for offset in range(0, len(ordered), batch_size):
+            batch = ordered[offset:offset + batch_size]
+            rows = prepared[offset:offset + batch_size]
             parameters = None
             if executemany:
                 statement = update(table).where(
@@ -1947,7 +1966,7 @@ class _SqlTransaction:
                     {"_replacement_key": row["key"], "_replacement_locator": row["key_locator"],
                      "_replacement_expected_storage_revision": value.expected_storage_revision,
                      **{f"_identity_{column}": row[column] for column in identity_columns},
-                     **{f"_replacement_{column}": row[column] for column in columns}}
+                     **{f"_replacement_{column}": row.get(column) for column in columns}}
                     for row, value in zip(rows, batch)
                 ]
             else:
@@ -1957,8 +1976,8 @@ class _SqlTransaction:
                     *self._record_identity_conditions(table, row),
                 ) for row, value in zip(rows, batch)]
                 updates = {
-                    column: rows[0][column] if len(rows) == 1 else case(
-                        {row["key"]: literal(row[column], type_=table.c[column].type)
+                    column: rows[0].get(column) if len(rows) == 1 else case(
+                        {row["key"]: literal(row.get(column), type_=table.c[column].type)
                          for row in rows},
                         value=table.c.key,
                         else_=table.c[column],
@@ -3014,6 +3033,7 @@ class _SqlTransaction:
 
 
 def _record_values(record: StoredRecord) -> dict[str, object]:
+    data = dict(record.data)
     values: dict[str, object] = {
         "key": validate_record_key(record.key),
         "key_locator": _key_locator(record.key),
@@ -3034,10 +3054,26 @@ def _record_values(record: StoredRecord) -> dict[str, object]:
         "lease_fence": record.lease_fence,
         "lease_expires_at": (None if record.lease_expires_at is None
                              else record.lease_expires_at.astimezone(timezone.utc)),
-        "payload_json": canonical_json_bytes(dict(record.data)).decode("utf-8"),
+        "payload_json": canonical_json_bytes(data).decode("utf-8"),
         "payload_bytes": record.payload_bytes,
     }
+    values.update(content_reference_values(record.kind, data))
     return values
+
+
+def _record_insert_rows(owner: str, records: Sequence[StoredRecord], store_key: bytes) -> list[dict[str, object]]:
+    rows = [{**record_owner_values(owner, _record_values(record)), "store_key": store_key}
+            for record in records]
+    # Unset projections have the schema's NULL default on INSERT; CAS still
+    # explicitly clears a previously populated slot when the payload changes.
+    for column in CONTENT_REFERENCE_COLUMNS.get(owner, ()):
+        if any(row.get(column) is not None for row in rows):
+            for row in rows:
+                row.setdefault(column, None)
+        else:
+            for row in rows:
+                row.pop(column, None)
+    return rows
 
 
 def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
@@ -3253,7 +3289,8 @@ def _require_scan_limit(limit: int) -> None:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("scan page limit must be positive")
 
-def _record_query_statement(metadata: "MetaData", store_key: bytes, query: RecordQuery) -> "Select":
+def _record_query_statement(metadata: "MetaData", store_key: bytes, query: RecordQuery,
+                            *, content_columns: Sequence[str] = ()) -> "Select":
     from sqlalchemy import select, union_all
 
     if query.kind is not None and query.kind.rstrip(" ") == "execution":
@@ -3294,7 +3331,8 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
         return select(candidates).order_by(
             candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
         ).limit(query.limit)
-    return _record_page_statement(record_owner_rows(metadata, kind=query.kind), store_key, query)
+    return _record_page_statement(record_owner_rows(metadata, kind=query.kind,
+                                                   content_columns=content_columns), store_key, query)
 
 
 def _record_page_statement(table: "FromClause", store_key: bytes, query: RecordQuery) -> "Select":

@@ -39,6 +39,14 @@ idempotency keys are unchanged.
 
 ## SQL link extraction
 
+Execution and tool-history content captures use fixed same-row lookup
+projections. Nullable SHA-256 columns are derived from the canonical record
+in the same insert or compare-and-swap as its payload, without a second write
+or another source of truth. This lets owner rows, archived content and eligible
+native message suffixes share one SQL read without extracting those references
+from JSON on the server. Canonical decoding and scope/integrity checks still
+apply; other native message ranges use the existing range reader.
+
 Archive traversal and native run/event reference queries unwrap the outer JSON
 string before extracting fields from the inner payload. The SQLAlchemy
 expressions first select the JSON root as a string, then access fields as JSON:
@@ -61,6 +69,14 @@ Canonical metadata and `migrations/init_schema.sql` describe the required new
 schema. Provision shared schemas explicitly through the deployment process.
 Runtime startup does not ALTER existing tables; the local SQLite state backend
 may initialize its own schema.
+
+Before opening a populated store with a release that requires the content
+lookup columns, upgrade its physical schema and populate those projections
+as part of the explicit cutover. Do not mix writers that do and do not write
+the projections. For a local SQLite store, quiesce writers, export a portable
+snapshot with the old runtime, and restore it into a fresh root with the new
+runtime. Restore derives the columns from the canonical records; the snapshot
+wire format is unchanged. Verify the restored store before switching over.
 
 The schema validator requires the JSON type family and JSON compatibility for
 these columns. `TEXT`/`LONGTEXT` columns do not satisfy it, and PostgreSQL `JSONB`

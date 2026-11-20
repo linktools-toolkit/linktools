@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
 
+from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
+
+
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
     """Build one physical owner with the common optimistic record contract."""
     from sqlalchemy import TIMESTAMP, BigInteger, JSON, Column, LargeBinary, String, Table, Text, text
@@ -120,6 +123,8 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                comment="Single SHA-256 lookup projection of the complete parent_key; raw identity must also match."),
         Column("sort_prefix", LargeBinary(128).with_variant(mysql.VARBINARY(128), "mysql"), nullable=False,
                comment="First 128 bytes of the full sort key; non-unique query projection only."),
+        *(Column(column, sql_sha256(), nullable=True, comment="Derived immutable content lookup SHA-256.")
+          for column in CONTENT_REFERENCE_COLUMNS.get(name, ())),
         *sql_audit_columns(),
     ]
     if name == "ai_state_records":

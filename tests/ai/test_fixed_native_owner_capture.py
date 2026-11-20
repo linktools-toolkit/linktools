@@ -80,6 +80,7 @@ async def test_fixed_native_capture_remains_exact_and_transaction_scoped(tmp_pat
         finally:
             event.remove(group.context.engine.sync_engine, "before_cursor_execute", observe)
         assert len(statements) == (2 if case == "nonhead" else 1)
+        assert "JSON_EXTRACT" not in statements[0].upper()
         if case in {"singleton", "head", "nonhead"}:
             return
         if case == "scope":

@@ -122,6 +122,7 @@ async def test_projection_join_uses_indexed_owners_and_counts_ctes_as_reads(tmp_
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert result is not None and result.result == expected.result
         assert len(statements) == 1
+        assert "JSON_EXTRACT" not in statements[0][0].upper()
         async with engine.connect() as connection:
             plan = await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statements[0][0], statements[0][1])
             details = tuple(row[-1] for row in plan)
@@ -150,11 +151,22 @@ async def test_content_join_batch_bound_covers_all_dialect_path_expansions(tmp_p
         repository = state.execution.executions
         group = repository.state_store.storage_group
         _, content = await group.open_archive()
-        for path_count in (1, 4, 8, 16):
+        prefix = ("value", "payload", "fields")
+        slots = (
+            ("runtime_policy", "$runtime_policy"),
+            ("binding", "$execution_binding"),
+            ("stored_user_input", "fields", "content", "$execution_payload"),
+            ("result", "fields", "content", "$execution_payload"),
+            ("result", "fields", "output", "fields", "content", "$execution_payload"),
+            ("terminal_details", "fields", "content", "$execution_payload"),
+            ("recovery", "fields", "pending_tools", "fields", "content", "$execution_payload"),
+            ("recovery", "fields", "terminal_handoff", "fields", "content", "$execution_payload"),
+            ("recovery", "fields", "terminal_handoff", "fields", "terminal_details", "fields", "content", "$execution_payload"),
+        )
+        for path_count in (1, 4, len(slots)):
             keys = tuple(repository.execution_record_key(str(index))
                          for index in range(content_reference_batch_size(path_count)))
-            paths = tuple(("value", "payload", "fields", "declared", str(index), "$execution_payload")
-                          for index in range(path_count))
+            paths = tuple((*prefix, *slot) for slot in slots[:path_count])
             for dialect in (sqlite.dialect(), postgresql.dialect(), mysql.dialect(server_version_info=(5, 7, 44))):
                 query = content_reference_statement(group.metadata, dialect=dialect.name,
                     owner_store_key=repository.state_store.store_key, owner_keys=keys,

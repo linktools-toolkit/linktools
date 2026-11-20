@@ -5,6 +5,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
 
 if TYPE_CHECKING:
@@ -48,7 +49,7 @@ def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[
 
 def record_owner_columns(table: "FromClause") -> tuple["ColumnElement", ...]:
     """Exclude physical scan projections from the common record wire shape."""
-    return tuple(column for column in table.c if column.name != "scan_kind")
+    return tuple(column for column in table.c if column.name != "scan_kind" and column.name not in CONTENT_REFERENCE_COLUMN_NAMES)
 
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
@@ -97,7 +98,8 @@ def record_owner_names(*, keys: Sequence[bytes] | None = None, kind: str | None 
 
 def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = None,
                       kind: str | None = None, owner: str | None = None,
-                      include_run_counters: bool = False, scan_kind: str | None = None) -> "FromClause":
+                      include_run_counters: bool = False, scan_kind: str | None = None,
+                      content_columns: Sequence[str] = ()) -> "FromClause":
     """Read a bounded owner set as one SQL statement, preserving global ordering."""
     from sqlalchemy import BigInteger, String, cast, literal, null, select, union_all
 
@@ -125,6 +127,9 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
             for column in record_owner_columns(canonical)), *(
                 (table.c[name] if name in table.c else cast(null(), BigInteger)).label(name)
                 for name in RUN_COUNTER_COLUMNS if include_run_counters
+            ), *(
+                (table.c[column] if column in table.c else cast(null(), String(64)).label(column))
+                for column in content_columns
             ))
         if name == "ai_state_records":
             if scan_kind is not None:
@@ -141,7 +146,8 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
         if key in values and values[key] != value:
             raise ValueError(f"{name} requires {key}={value!r}")
     return {key: value for key, value in values.items()
-            if key not in _CONSTANTS.get(name, {}) and (key != "scan_kind" or name == "ai_state_records")}
+            if key not in _CONSTANTS.get(name, {}) and (key != "scan_kind" or name == "ai_state_records")
+            and (key not in CONTENT_REFERENCE_COLUMN_NAMES or key in CONTENT_REFERENCE_COLUMNS.get(name, ()))}
 
 
 
