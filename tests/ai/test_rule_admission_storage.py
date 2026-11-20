@@ -69,6 +69,7 @@ async def test_source_first_rule_admission_survives_deleted_head_before_context(
 
                 async def source_first(
                     request: ExecutionRequest, reservation: ExecutionStartReservation, session: SessionRecord | None,
+                    *args, **kwargs,
                 ) -> ExecutionStartReservationResult | None:
                     reference = reservation.execution.repository_instructions
                     wire = reference.payload.decode()
@@ -80,7 +81,7 @@ async def test_source_first_rule_admission_survives_deleted_head_before_context(
                     assert wire["semantic_digest"] == canonical_sha256(accepted.to_payload())
                     await assets.put(key, b"CHANGED_RULE")
                     await assets.delete(key)
-                    result = await prepare(request, reservation, session)
+                    result = await prepare(request, reservation, session, *args, **kwargs)
                     record = await state.execution.executions.read_content(lambda _group: state.execution.executions.get(
                         reservation.execution.execution_id, tenant_id=runtime.tenant_id))
                     assert record is not None and record.input_context is None

@@ -154,7 +154,10 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
                 (table.c[column] if column in table.c else cast(null(), String(64)).label(column))
                 for column in content_columns
             ))
-        if name == "ai_execution_records":
+        # Execution bucket pages already apply the requested kind outside
+        # this branch. A second kind predicate can defeat the SQLite bucket index.
+        execution_bucket = scan_kind is not None and kind is not None and kind.rstrip(" ") == "execution"
+        if name == "ai_execution_records" and not execution_bucket:
             selection = selection.where(table.c.kind != literal(EXECUTION_SHELL_KIND, literal_execute=True))
         if name in SCAN_KIND_OWNERS and scan_kind is not None:
             selection = selection.where(table.c.scan_kind == literal(scan_kind, literal_execute=True))
