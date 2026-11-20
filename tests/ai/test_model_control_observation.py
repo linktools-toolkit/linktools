@@ -8,6 +8,7 @@ from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task
 from ._runtime_test_helpers import model_features
 import asyncio
+import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -281,7 +282,18 @@ async def test_missing_or_corrupt_execution_fails_closed(tmp_path: Path, backend
                                   storage_revision=stored.storage_revision + 1)
                 assert await tx.replace_record(changed, expected_storage_revision=stored.storage_revision)
 
-        await repository.state_store.mutate(mutate)
+        if backend == "sqlite" and damage == "kind":
+            # The SQL writer rejects a mismatched kind. Inject persisted corruption
+            # below that boundary to keep exercising the reader's fail-closed behavior.
+            key = repository.execution_record_key("execution")
+            with sqlite3.connect(tmp_path / "state.db") as connection:
+                cursor = connection.execute(
+                    "UPDATE ai_execution_records SET kind = ? WHERE store_key = ? AND key = ?",
+                    ("unexpected", repository.state_store.store_key, key),
+                )
+                assert cursor.rowcount == 1
+        else:
+            await repository.state_store.mutate(mutate)
         with pytest.raises(AIError) as raised:
             await state.run_store.require_active_producer("run")
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
