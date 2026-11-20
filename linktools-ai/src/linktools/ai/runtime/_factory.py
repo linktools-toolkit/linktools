@@ -200,7 +200,7 @@ async def compose_runtime_components(
     app: "AppT | None" = None,
     metrics: MetricRecorderProvider | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None" = None,
-    auto_recover: bool = True,
+    auto_recover: bool = False,
     authorization: AuthorizationPolicy | None = None,
     lifecycle: "_AgentLifecycle | None" = None,
 ) -> _RuntimeComponents:

@@ -534,7 +534,7 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
         application = _application(calls)
         application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('start-cleanup-restart', storage=reopened) as persistence_540, Runtime.attach(persistence=persistence_540, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('start-cleanup-restart', storage=reopened) as persistence_540, Runtime.attach(persistence=persistence_540, features=model_features(_ToolModels(), application), auto_recover=True) as runtime:
             checkpoint = await runtime._state.execution.executions.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
@@ -2218,7 +2218,7 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
     try:
         application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-crash', storage=state) as persistence_2161, Runtime.attach(persistence=persistence_2161, features=model_features(_ToolModels(), application)) as runtime:
+        async with Persistence.open('session-tool-crash', storage=state) as persistence_2161, Runtime.attach(persistence=persistence_2161, features=model_features(_ToolModels(), application), auto_recover=True) as runtime:
             session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")
             result = (await execution.wait(timeout_seconds=15)).result

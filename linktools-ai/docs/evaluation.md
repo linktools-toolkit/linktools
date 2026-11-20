@@ -238,9 +238,8 @@ the child Runtime's Agent, using `runtime.agents.restore(binding)` when restorin
 an admitted binding. Do not reuse a port bound to the planning Runtime. Definitions
 must match the frozen contracts used during preflight.
 
-Open child Runtimes with `auto_recover=False`. The default remains `True`; the
-flag only disables startup-wide reconciliation. Explicit graph/execution
-recovery remains available. Evaluation reconciliation restores each submission
+Leave `auto_recover` disabled (the default) for child Runtimes. Explicit
+graph/execution recovery remains available. Evaluation reconciliation restores each submission
 and invokes graph-level recovery, including its bound Agent execution recovery.
 As with explicit graph recovery, callers must confirm previous executors have
 stopped before requesting takeover.

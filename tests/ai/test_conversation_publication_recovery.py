@@ -97,7 +97,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(
             conversation=StorageRoute.sqlite(tmp_path / "c.db"),
         )
     )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_102, Runtime.attach(persistence=persistence_102, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_102, Runtime.attach(persistence=persistence_102, features=model_features(_models(), _features()), auto_recover=True) as runtime:
         recovered_commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "s", tenant_id=principal.tenant_id, start_turn_seq=seq, end_turn_seq=seq + 1
         )
@@ -227,7 +227,7 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
         expected_session = await runtime._state.conversation.sessions.get("s", tenant_id=principal.tenant_id)
     monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", old_complete)
     reopened = PersistenceStorage.from_plan(plan)
-    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_241, Runtime.attach(persistence=persistence_241, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_241, Runtime.attach(persistence=persistence_241, features=model_features(_models(), _features()), auto_recover=True) as runtime:
         page = await runtime.sessions.timeline("s", principal=principal)
         assert len(page.items) == 2
         assert page.items == expected_page.items

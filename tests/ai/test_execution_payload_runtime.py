@@ -277,7 +277,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                     assert stored.recovery.terminal_handoff.outcome.output.decode() == {"text": _OUTPUT}
                     async with Persistence.open("execution-payload-handoff", storage=_split_sqlite_storage(database)) as reader_state:
                         async with Runtime.attach(persistence=reader_state,
-                            features=model_features(models, features), metrics=None) as reader:
+                            features=model_features(models, features), metrics=None, auto_recover=True) as reader:
                             result = await reader.executions.result(execution.execution_id, principal=reader.default_principal)
                             assert result.status is ExecutionStatus.SUCCEEDED
                             assert result.output == {"text": _OUTPUT}
