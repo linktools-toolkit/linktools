@@ -1460,14 +1460,9 @@ class DefaultExecutionService(TaskExecutionService):
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
                 )
-            if existing.status is IdempotencyStatus.STARTED and started is not None and started.status in {
-                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-            }:
-                existing = await self._management.refresh_terminal_identity(
-                    existing, started, tenant_id=request.principal.tenant_id,
-                )
             replay = await self._replay_terminal_start(
-                existing, started, scope=scope, dependency_hold_id=dependency_hold_id,
+                existing, started, scope=scope, tenant_id=request.principal.tenant_id,
+                dependency_hold_id=dependency_hold_id,
             )
             if replay is not None:
                 return replay
@@ -1706,8 +1701,11 @@ class DefaultExecutionService(TaskExecutionService):
         execution: ExecutionRecord | None,
         *,
         scope: str,
+        tenant_id: str,
         dependency_hold_id: str | None,
     ) -> ExecutionHandle | None:
+        if execution is not None:
+            identity = await self._management.refresh_terminal_identity(identity, execution, tenant_id=tenant_id)
         if identity.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
             if scope != "session.resume" or execution is None or execution.started_at is None:
                 fallback = (
@@ -1929,8 +1927,8 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
             )
             replay = await self._replay_terminal_start(
-                reservation.idempotency, reservation.execution,
-                scope=scope, dependency_hold_id=dependency_hold_id,
+                reservation.idempotency, reservation.execution, scope=scope, tenant_id=request.principal.tenant_id,
+                dependency_hold_id=dependency_hold_id,
             )
             if replay is not None:
                 return replay
@@ -1974,9 +1972,6 @@ class DefaultExecutionService(TaskExecutionService):
                 in {
                     ExecutionStatus.STARTED,
                     ExecutionStatus.FINALIZING,
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
                 }
             ):
                 request = await self._request_for_execution(

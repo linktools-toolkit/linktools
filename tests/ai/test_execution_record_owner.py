@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event, select
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._record_owner import record_owner_table
 from linktools.ai.persistence.state import RecordQuery, RecordReplacement, record_key
 
@@ -67,3 +68,31 @@ async def test_execution_owner_batches_exclude_custom_and_other_domain_records(t
                 table = tables[owner]
                 physical = (await connection.execute(select(table.c.key).where(table.c.store_key == store.store_key))).scalars()
                 assert set(physical) == {record.key for record in records}
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("address_kind", "identity", "wrong_kind"), (
+    ("execution", ("run",), "probe"),
+    ("execution", ("run",), "idempotency"),
+    ("idempotency", ("scope", "request"), "execution"),
+))
+async def test_execution_owner_rejects_a_record_whose_kind_disagrees_with_its_address(
+    tmp_path: Path, address_kind: str, identity: tuple[str, ...], wrong_kind: str,
+) -> None:
+    key = _address("execution", address_kind, *identity)
+    record = replace(_record("mismatched", key=key), kind=wrong_kind)
+    async with _database(tmp_path / "owner.db") as (_, store, _):
+        with pytest.raises(AIError) as rejected:
+            await store.mutate(lambda tx: tx.insert_record(record))
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        with pytest.raises(AIError) as rejected:
+            await store.mutate(lambda tx: tx.insert_immutable_records((record,)))
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await store.read(lambda tx: tx.get_record(key)) is None
+
+        valid = replace(record, kind=address_kind)
+        await store.mutate(lambda tx: tx.insert_record(valid))
+        changed = replace(record, storage_revision=1)
+        with pytest.raises(AIError) as rejected:
+            await store.mutate(lambda tx: tx.replace_records((RecordReplacement(changed, 0),)))
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await store.read(lambda tx: tx.list_records(RecordQuery(kind=address_kind))) == (valid,)

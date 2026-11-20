@@ -5,6 +5,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
 
@@ -147,7 +148,11 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
 
 
 def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, object]:
-    """Validate omitted invariants before writing a typed Step owner."""
+    """Validate and shape values for the record's physical owner."""
+    if name == "ai_execution_records" and "key" in values and "kind" in values:
+        key = values["key"]
+        if not isinstance(key, bytes) or values["kind"] != decode_key_components(key, RECORD_KEY_MAX_BYTES)[4]:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for key, value in _CONSTANTS.get(name, {}).items():
         if key in values and values[key] != value:
             raise ValueError(f"{name} requires {key}={value!r}")

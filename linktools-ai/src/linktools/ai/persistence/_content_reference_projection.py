@@ -18,20 +18,20 @@ _HANDOFF = ("recovery", "fields", "terminal_handoff", "fields")
 _TOOL = ("fields", "content")
 _PAYLOAD = "$execution_payload"
 _EXECUTION_SLOTS = {
-    ("runtime_policy", "$runtime_policy"): ContentReferenceSlot("execution_policy_sha256", "runtime-policy"),
-    ("binding", "$execution_binding"): ContentReferenceSlot("execution_binding_sha256", "execution-binding"),
-    ("stored_user_input", "fields", "content", _PAYLOAD): ContentReferenceSlot("execution_input_sha256", "execution-payload"),
-    ("result", "fields", "content", _PAYLOAD): ContentReferenceSlot("execution_result_sha256", "execution-payload"),
-    (*_OUTPUT, _PAYLOAD): ContentReferenceSlot("execution_output_sha256", "execution-payload"),
-    ("terminal_details", "fields", "content", _PAYLOAD): ContentReferenceSlot("exec_terminal_details_sha256", "execution-payload"),
+    ("runtime_policy", "$runtime_policy"): ContentReferenceSlot("policy_sha256", "runtime-policy"),
+    ("binding", "$execution_binding"): ContentReferenceSlot("binding_sha256", "execution-binding"),
+    ("stored_user_input", "fields", "content", _PAYLOAD): ContentReferenceSlot("input_sha256", "execution-payload"),
+    ("result", "fields", "content", _PAYLOAD): ContentReferenceSlot("result_sha256", "execution-payload"),
+    (*_OUTPUT, _PAYLOAD): ContentReferenceSlot("output_sha256", "execution-payload"),
+    ("terminal_details", "fields", "content", _PAYLOAD): ContentReferenceSlot("terminal_details_sha256", "execution-payload"),
     ("recovery", "fields", "pending_tools", "fields", "content", _PAYLOAD):
-        ContentReferenceSlot("execution_pending_tools_sha256", "execution-payload"),
-    (*_HANDOFF, "content", _PAYLOAD): ContentReferenceSlot("execution_handoff_sha256", "execution-payload"),
+        ContentReferenceSlot("pending_tools_sha256", "execution-payload"),
+    (*_HANDOFF, "content", _PAYLOAD): ContentReferenceSlot("handoff_sha256", "execution-payload"),
     (*_HANDOFF, "terminal_details", "fields", "content", _PAYLOAD):
-        ContentReferenceSlot("execution_handoff_details_sha256", "execution-payload"),
-    ("stored_user_input", "fields", "content", "$native_user_input"): ContentReferenceSlot("execution_input_first_sha256", None),
-    (*_OUTPUT, "$native_text"): ContentReferenceSlot("execution_output_first_sha256", None),
-    (*_HANDOFF, "output", "fields", "content", "$native_text"): ContentReferenceSlot("exec_handoff_output_first_sha256", None),
+        ContentReferenceSlot("handoff_details_sha256", "execution-payload"),
+    ("stored_user_input", "fields", "content", "$native_user_input"): ContentReferenceSlot("input_first_sha256", None),
+    (*_OUTPUT, "$native_text"): ContentReferenceSlot("output_first_sha256", None),
+    (*_HANDOFF, "output", "fields", "content", "$native_text"): ContentReferenceSlot("handoff_output_first_sha256", None),
 }
 _TOOL_SLOTS = {
     ("arguments_payload", *_TOOL, _PAYLOAD): ContentReferenceSlot("tool_arguments_sha256", "execution-payload"),

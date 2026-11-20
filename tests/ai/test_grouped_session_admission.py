@@ -4,6 +4,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -250,7 +251,10 @@ def _pause_grouped_command(runtime, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["live_replay", "digest_conflict", "terminal_replay", "terminal_foreign"])
+@pytest.mark.parametrize("case", [
+    "live_replay", "digest_conflict", "terminal_replay", "terminal_foreign",
+    "terminal_mixed", "terminal_corrupt",
+])
 async def test_grouped_admission_rechecks_late_winner_after_outer_read(tmp_path, monkeypatch, case):
     model_entered, finish = asyncio.Event(), asyncio.Event()
     terminal_committed, release_terminal = asyncio.Event(), asyncio.Event()
@@ -292,6 +296,19 @@ async def test_grouped_admission_rechecks_late_winner_after_outer_read(tmp_path,
                 "session", "original", principal=winner.default_principal, idempotency_key="request",
             )
             await asyncio.wait_for(model_entered.wait(), 8)
+            tenant = principal.tenant_id
+            identities = source.execution.idempotency
+            if case in {"terminal_mixed", "terminal_corrupt"}:
+                stale_identity = await identities.get("session.resume", "request", tenant_id=tenant)
+                assert stale_identity.status is IdempotencyStatus.STARTED
+
+                async def read_stale_identity(_claim):
+                    # Simulate READ COMMITTED's first read straddling terminal
+                    # commit; the execution and later receipt reads stay real.
+                    return stale_identity
+
+                repositories = contender._execution_service.runtime_backend()._runtime_commands
+                monkeypatch.setattr(repositories._execution, "get_start_idempotency", read_stale_identity)
             if case.startswith("terminal"):
                 finish.set()
                 await asyncio.wait_for(terminal_committed.wait(), 8)
@@ -301,17 +318,29 @@ async def test_grouped_admission_rechecks_late_winner_after_outer_read(tmp_path,
                     "session", tenant_id=principal.tenant_id,
                 )
                 assert live_owner.execution_id == first.execution_id
+            if case == "terminal_corrupt":
+                identity = await identities.get("session.resume", "request", tenant_id=tenant)
+                assert identity.status is IdempotencyStatus.COMPLETED
+                wrong_digest = "0" * 64
+                assert identity.result_digest != wrong_digest
+                await identities.compare_and_swap(
+                    "session.resume", "request", tenant_id=tenant, expected_status=identity.status,
+                    next_record=replace(identity, result_digest=wrong_digest),
+                )
 
             resume.set()
-            if case in {"live_replay", "terminal_replay"}:
+            if case in {"live_replay", "terminal_replay", "terminal_mixed"}:
                 replay = await task
                 assert replay.execution_id == first.execution_id
             else:
                 with pytest.raises(AIError) as rejected:
                     await task
-                assert rejected.value.code is (ErrorCode.IDEMPOTENCY_CONFLICT if case == "digest_conflict" else ErrorCode.SESSION_BUSY)
+                assert rejected.value.code is {
+                    "digest_conflict": ErrorCode.IDEMPOTENCY_CONFLICT,
+                    "terminal_foreign": ErrorCode.SESSION_BUSY,
+                    "terminal_corrupt": ErrorCode.STORAGE_INTEGRITY_ERROR,
+                }[case]
             assert len(proposed) == 1 and launched == 1
-            tenant = principal.tenant_id
             assert await source.execution.executions.get(proposed[0].execution.execution_id, tenant_id=tenant) is None
             assert await source.execution.idempotency.get("session.resume", "foreign", tenant_id=tenant) is None
         finally:

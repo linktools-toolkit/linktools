@@ -99,6 +99,17 @@ development payload shapes. This contract does not reconstruct numeric
 distinctions already lost in old data. Use the current schema and writer for
 new data rather than restoring the old text-column or native-object contract.
 
+## Upgrading a released schema
+
+Keep released logical identities, canonical content references, and the decoding
+rules needed to read retained data. Derived SQL projections may be rebuilt from
+the original references. A change to storage ownership or encoding must include
+an explicit, restartable migration and verification against data written by the
+previous supported release. If old and new application instances share storage
+during a rollout, keep the expansion compatible with both; switch write
+authority at a single cutover. Do not claim lossless rollback after the new
+owner accepts writes without a verified way to preserve those writes.
+
 ## Acceptance
 
 Use newly created data with the same SDK version for write, read, shutdown,

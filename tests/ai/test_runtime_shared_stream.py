@@ -573,7 +573,7 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
             decided_at=datetime.now(timezone.utc),
         )
     assert len(backend.open_keys) == 1
-    async with Persistence.open('resume-preview', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_535, Runtime.attach(persistence=persistence_535, features=model_features(_ToolModels(), application)) as resumed:
+    async with Persistence.open('resume-preview', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_535, Runtime.attach(persistence=persistence_535, features=model_features(_ToolModels(), application), auto_recover=True) as resumed:
         result = await resumed.executions.wait(execution.execution_id,
                                                principal=resumed.default_principal, timeout_seconds=10)
         assert result.result.status is ExecutionStatus.SUCCEEDED
