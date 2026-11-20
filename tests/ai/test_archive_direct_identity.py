@@ -6,6 +6,7 @@ import base64
 import hashlib
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
@@ -14,8 +15,9 @@ from linktools.ai.steps import native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import _archive as archive_module
 from linktools.ai.persistence._archive import (
-    ArchiveRoot, ContentArchive, ContentRecord, ImmutableSequenceNode, PreparedArchive,
+    ArchiveContentInput, ArchiveRoot, ContentArchive, ContentRecord, ImmutableSequenceNode, PreparedArchive,
     archive_content_scope, archive_scope_key, archive_scope_parts, archive_scope_token,
     decode_archive_scope, validate_archive_content_identity,
 )
@@ -81,6 +83,53 @@ def test_archive_codec_limit_applies_to_current_record_reader(codec: str) -> Non
         ContentRecord.from_json({"codec": codec, "raw_digest": "0" * 64,
             "raw_size": 0, "compression": "raw", "payload": None}, body=b"")
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize(("field", "value"), (
+    ("raw_digest", "A" * 64), ("raw_digest", None), ("raw_size", True), ("raw_size", -1),
+))
+def test_archive_content_wire_rejects_invalid_checksum_and_size(field: str, value: object) -> None:
+    content = ContentRecord("bytes", hashlib.sha256(b"raw").hexdigest(), 3, "raw", body=b"raw")
+    with pytest.raises(AIError) as error:
+        ContentRecord.from_json({**content.to_json(), field: value}, body=content.body)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("ensure", "rewrite"))
+async def test_archive_hashes_new_content_once_before_publication(operation: str, monkeypatch) -> None:
+    codec, raw = "bytes", b"new immutable content"
+    with_digest = hashlib.sha256(raw).hexdigest()
+    calls: list[bytes] = []
+    sha256 = hashlib.sha256
+
+    def count(value: bytes):
+        if value == raw:
+            calls.append(value)
+        return sha256(value)
+
+    monkeypatch.setattr(archive_module, "hashlib", SimpleNamespace(sha256=count))
+    store = InMemoryStateStore()
+    await store.initialize()
+    archive = ContentArchive(store, "group", namespace="test", tenant_id="tenant", object_store=None)
+    try:
+        if operation == "ensure":
+            value = ArchiveContentInput(codec, raw)
+            (key,) = archive.content_record_keys((value,))
+            assert await archive.ensure_content((value,)) == (value.identity,)
+            record = await store.read_record(key)
+            assert ContentRecord.from_record(record).raw_digest == with_digest
+        else:
+            initial = PreparedArchive()
+            baseline = await archive.prepare_append(archive.empty_root(), ((codec, b"old"),), initial)
+            await store.mutate(lambda tx: archive.publish(tx, initial))
+            prepared = PreparedArchive()
+            result = await archive.rewrite(baseline, ((codec, b"old"), (codec, raw)), prepared)
+            await store.mutate(lambda tx: archive.publish(tx, prepared))
+            assert await archive.read_ranges((result,), codec=codec) == ((b"old", raw),)
+        assert calls == [raw]
+    finally:
+        await store.close()
 
 
 def test_archive_and_native_sequence_readers_keep_distinct_content_owners() -> None:

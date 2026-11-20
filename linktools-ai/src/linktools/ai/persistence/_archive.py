@@ -292,7 +292,7 @@ class ContentRecord:
     def from_json(cls, value: Mapping[str, JsonValue], *, body: bytes | None = None) -> "ContentRecord":
         try:
             payload = value["payload"]
-            return cls(value["codec"], _digest(value["raw_digest"]), _count(value["raw_size"]),
+            return cls(value["codec"], value["raw_digest"], value["raw_size"],
                        value["compression"], None if payload is None else StoredPayload.from_json(dict(payload)), body)
         except (KeyError, TypeError, ValueError) as error:
             raise _integrity() from error
@@ -318,6 +318,23 @@ class ContentRecord:
                        row["compression"], None if payload is None else StoredPayload.from_json(payload), row["message"])
         except (KeyError, TypeError, ValueError) as error:
             raise _integrity() from error
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveContentInput:
+    """An identity computed from immutable caller bytes, not supplied separately."""
+
+    codec: str
+    raw: bytes = field(repr=False)
+    digest: str = field(init=False)
+    identity: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.raw) is not bytes:
+            raise _integrity()
+        digest = hashlib.sha256(self.raw).hexdigest()
+        object.__setattr__(self, "digest", digest)
+        object.__setattr__(self, "identity", archive_content_identity(self.codec, digest))
 
 
 @dataclass(slots=True)
@@ -421,9 +438,11 @@ class ContentArchive:
         return StoredRecord(self._key(kind, identity), self._scope_key, None, kind, identity.encode("utf-8"),
                             None, 0, None, 0, None, data, payload_bytes=payload_bytes)
 
-    def content_record_keys(self, values: Sequence[tuple[str, bytes]]) -> tuple[bytes, ...]:
-        return tuple(dict.fromkeys(self._key("archive_content", archive_content_identity(
-            codec, hashlib.sha256(raw).hexdigest())) for codec, raw in values))
+    def content_record_keys(self, values: Sequence[tuple[str, bytes] | ArchiveContentInput]) -> tuple[bytes, ...]:
+        return self._content_keys(self._content_inputs(values))
+
+    def _content_keys(self, values: Sequence[ArchiveContentInput]) -> tuple[bytes, ...]:
+        return tuple(dict.fromkeys(self._key("archive_content", value.identity) for value in values))
 
     def observe_content(
         self, prepared: PreparedArchive, requested_keys: Sequence[bytes],
@@ -448,24 +467,30 @@ class ContentArchive:
                 raise _integrity()
         prepared._observed_content.update(observed)
 
-    async def prepare_content(self, values: Sequence[tuple[str, bytes]],
-                              prepared: PreparedArchive) -> tuple[str, ...]:
-        return await self._prepare_content(values, prepared)
+    @staticmethod
+    def _content_inputs(values: Sequence[tuple[str, bytes] | ArchiveContentInput]) -> tuple[ArchiveContentInput, ...]:
+        return tuple(value if isinstance(value, ArchiveContentInput) else ArchiveContentInput(*value)
+                     for value in values)
 
-    async def ensure_content(self, values: Sequence[tuple[str, bytes]]) -> tuple[str, ...]:
+    async def prepare_content(self, values: Sequence[tuple[str, bytes] | ArchiveContentInput],
+                              prepared: PreparedArchive) -> tuple[str, ...]:
+        return await self._prepare_content(self._content_inputs(values), prepared)
+
+    async def ensure_content(self, values: Sequence[tuple[str, bytes] | ArchiveContentInput]) -> tuple[str, ...]:
         """Publish typed payloads by address; retain other immutable content contracts."""
-        keys = self.content_record_keys(values)
+        inputs = self._content_inputs(values)
         opened = self.store.storage_group.opened_archive
         typed_owner = opened is not None and opened[1] is self.store
 
         async def ensure(transaction: StateTransaction) -> tuple[str, ...]:
             prepared = PreparedArchive()
-            if typed_owner and all(codec == EXECUTION_PAYLOAD_CODEC for codec, _ in values):
-                identities = await self.prepare_content(values, prepared)
+            if typed_owner and all(value.codec == EXECUTION_PAYLOAD_CODEC for value in inputs):
+                identities = await self._prepare_content(inputs, prepared)
             else:
+                keys = self._content_keys(inputs)
                 existing = await transaction.get_records(keys)
                 self.observe_content(prepared, keys, existing)
-                identities = await self.prepare_content(values, prepared)
+                identities = await self._prepare_content(inputs, prepared)
                 prepared.records = {key: record for key, record in prepared.records.items() if key not in existing}
             if prepared.records:
                 await self.publish(transaction, prepared)
@@ -473,32 +498,23 @@ class ContentArchive:
 
         return await self.store.mutate(ensure)
 
-    async def _prepare_content(self, values: Sequence[tuple[str, bytes]], prepared: PreparedArchive,
+    async def _prepare_content(self, values: Sequence[ArchiveContentInput], prepared: PreparedArchive,
                                existing: Mapping[bytes, StoredRecord] | None = None) -> tuple[str, ...]:
         self._bind(prepared)
         opened = self.store.storage_group.opened_archive
         typed_owner = opened is not None and opened[1] is self.store
-        identities: list[str] = []
-        unique: dict[str, tuple[str, bytes, str]] = {}
-        for codec, raw in values:
-            digest = hashlib.sha256(raw).hexdigest()
-            identity = archive_content_identity(codec, digest)
-            identities.append(identity)
-            unique[identity] = (codec, raw, digest)
-        keys = {identity: self._key("archive_content", identity) for identity in unique}
-        missing = [key for key in keys.values() if key not in prepared.records]
-        typed_keys = {keys[identity] for identity, (codec, _, _) in unique.items()
-                      if typed_owner and codec == EXECUTION_PAYLOAD_CODEC}
-        observed = {key: prepared._observed_content.pop(key) for key in keys.values()
-                    if key in prepared._observed_content}
+        keyed = {self._key("archive_content", value.identity): value for value in values}
+        missing = [key for key in keyed if key not in prepared.records]
+        typed_keys = {key for key, value in keyed.items() if typed_owner and value.codec == EXECUTION_PAYLOAD_CODEC}
+        observed = {key: prepared._observed_content.pop(key) for key in keyed if key in prepared._observed_content}
         if existing is None:
             # Typed payloads have one immutable content address. Publication
             # keeps the first stored representation; no body pre-read is needed.
             unread = tuple(key for key in missing if key not in observed and key not in typed_keys)
             existing = dict(await self.store.read_records(unread)) if unread else {}
             existing.update((key, record) for key, record in observed.items() if record is not None)
-        for identity, (codec, raw, digest) in unique.items():
-            key = keys[identity]
+        for key, value in keyed.items():
+            identity, codec, raw, digest = value.identity, value.codec, value.raw, value.digest
             stored = existing.get(key) or prepared.records.get(key)
             if stored is not None:
                 if stored.kind != "archive_content":
@@ -516,7 +532,7 @@ class ContentArchive:
             content = ContentRecord(codec, digest, len(raw), compression, payload, encoded if payload is None else None)
             prepared.records[key] = self._record("archive_content", identity, content.to_json(), payload_bytes=content.body)
             prepared.verify_content(prepared.records[key])
-        return tuple(identities)
+        return tuple(value.identity for value in values)
 
     async def prepare_payload(
         self, raw: bytes, *, existing: ContentRecord | None = None, codec: str = "model-message",
@@ -668,15 +684,20 @@ class ContentArchive:
         prepared.nodes.update(decoded)
 
     async def prepare_append(
-        self, root: ArchiveRoot, values: Sequence[tuple[str, bytes]], prepared: PreparedArchive,
+        self, root: ArchiveRoot, values: Sequence[tuple[str, bytes] | ArchiveContentInput], prepared: PreparedArchive,
     ) -> ArchiveRoot:
         """Capture content existence and append frontier in one bounded read plan."""
+        return await self._prepare_append(root, self._content_inputs(values), prepared)
+
+    async def _prepare_append(
+        self, root: ArchiveRoot, values: Sequence[ArchiveContentInput], prepared: PreparedArchive,
+    ) -> ArchiveRoot:
         self._bind(prepared)
         if root.scope_id != self.scope_id or root.content_scope != self.content_scope:
             raise _integrity()
         if not values:
             return root
-        keys = self.content_record_keys(values)
+        keys = self._content_keys(values)
         missing = tuple(key for key in keys if key not in prepared.records)
         observed = {key: prepared._observed_content.pop(key) for key in keys
                     if key in prepared._observed_content}
@@ -764,7 +785,7 @@ class ContentArchive:
         return ArchiveRoot(self.scope_id, self.content_scope, tuple(slices))
 
     async def rewrite(
-        self, baseline: ArchiveRoot, values: Sequence[tuple[str, bytes]], prepared: PreparedArchive,
+        self, baseline: ArchiveRoot, values: Sequence[tuple[str, bytes] | ArchiveContentInput], prepared: PreparedArchive,
     ) -> ArchiveRoot:
         """Reuse ordered old occurrences as exact slices, retaining only new content."""
         self._bind(prepared)
@@ -774,9 +795,9 @@ class ContentArchive:
             positions[identity].append(index)
         selected: list[int | None] = []
         cursor = 0
-        for codec, raw in values:
-            identity = archive_content_identity(codec, hashlib.sha256(raw).hexdigest())
-            candidates = positions[identity]
+        inputs = self._content_inputs(values)
+        for value in inputs:
+            candidates = positions[value.identity]
             while candidates and candidates[0] < cursor:
                 candidates.popleft()
             position = candidates.popleft() if candidates else None
@@ -785,15 +806,15 @@ class ContentArchive:
                 cursor = position + 1
         root = self.empty_root()
         index = 0
-        while index < len(values):
+        while index < len(inputs):
             position = selected[index]
             end = index + 1
             if position is None:
-                while end < len(values) and selected[end] is None:
+                while end < len(inputs) and selected[end] is None:
                     end += 1
-                root = await self.prepare_append(root, values[index:end], prepared)
+                root = await self._prepare_append(root, inputs[index:end], prepared)
             else:
-                while end < len(values) and selected[end] == position + end - index:
+                while end < len(inputs) and selected[end] == position + end - index:
                     end += 1
                 slices = list(root.slices)
                 for span in baseline.slice(position, position + end - index).slices:
@@ -1161,4 +1182,4 @@ class ContentArchive:
                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
 
 
-__all__ = ["EXECUTION_PAYLOAD_CODEC", "ArchiveSlice", "ArchiveRoot", "ImmutableSequenceNode", "ContentRecord", "PreparedArchive", "ContentArchive", "archive_content_scope", "archive_scope_key", "archive_scope_parts", "archive_scope_token", "decode_archive_scope", "archive_content_identity", "validate_archive_content_identity", "validate_archive_group_id"]
+__all__ = ["EXECUTION_PAYLOAD_CODEC", "ArchiveContentInput", "ArchiveSlice", "ArchiveRoot", "ImmutableSequenceNode", "ContentRecord", "PreparedArchive", "ContentArchive", "archive_content_scope", "archive_scope_key", "archive_scope_parts", "archive_scope_token", "decode_archive_scope", "archive_content_identity", "validate_archive_content_identity", "validate_archive_group_id"]

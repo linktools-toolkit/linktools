@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Fixed Runtime policy owners and explicit per-execution changes."""
 
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -10,7 +9,7 @@ from dataclasses import replace
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..execution import ExecutionRecord
-from ._archive import archive_content_identity
+from ._archive import ArchiveContentInput
 from .codec import (EXECUTION_POLICY_FIELDS, decode_envelope, encode_envelope,
                     encode_domain, runtime_policy_reference)
 from .state import StoredRecord
@@ -26,9 +25,8 @@ def policy_values(value: ExecutionRecord) -> dict[str, JsonValue]:
     return {name: encode_domain(getattr(value, name)) for name in EXECUTION_POLICY_FIELDS}
 
 
-def encode_policy(values: Mapping[str, JsonValue]) -> tuple[str, bytes]:
-    raw = canonical_json_bytes({"version": 1, "fields": dict(values)})
-    return archive_content_identity(POLICY_CODEC, hashlib.sha256(raw).hexdigest()), raw
+def encode_policy(values: Mapping[str, JsonValue]) -> ArchiveContentInput:
+    return ArchiveContentInput(POLICY_CODEC, canonical_json_bytes({"version": 1, "fields": dict(values)}))
 
 
 def decode_policy(raw: bytes) -> Mapping[str, JsonValue]:
