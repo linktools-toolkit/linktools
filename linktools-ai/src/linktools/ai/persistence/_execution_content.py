@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Execution bindings and immutable payload bodies in the shared content archive."""
 
-import hashlib
 import json
 from collections import Counter
 from weakref import ref
@@ -17,7 +16,7 @@ from ..model import StoredUserInput, capture_plain_text_input, plain_text_input_
 from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
 from ._archive_read import ContentReferenceReader
-from ._archive import archive_scope_key, archive_content_scope, archive_content_identity, ContentArchive, ContentRecord, PreparedArchive
+from ._archive import archive_scope_key, archive_content_scope, ArchiveContentInput, ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
 from ._message_root import NativeTextReference, NativeUserInputReference, NativeMessageRoot
 from ..steps import native_store_key
@@ -227,8 +226,8 @@ class ExecutionContent:
         self._content_archive: ContentArchive | None = None
         self._share_content = True
         # This cache saves immutable encoding work, never proves source existence.
-        self._payload_encodings: dict[int, tuple[ref, str, bytes]] = {}
-        self._binding_encodings: dict[int, tuple[ref, str, bytes]] = {}
+        self._payload_encodings: dict[int, tuple[ref, ArchiveContentInput | tuple[str, bytes]]] = {}
+        self._binding_encodings: dict[int, tuple[ref, ArchiveContentInput]] = {}
         self._projections: dict[int, tuple[ref, StoredRecord]] = {}
 
     def bind_pending_operation_source(self, source: StateStore) -> None:
@@ -283,8 +282,9 @@ class ExecutionContent:
 
     async def prefetch_projection_owners(
         self, keys: Sequence[bytes], *, bindings: bool = False, result: bool = False,
-        result_body: bool = False, recovery: bool = False, terminal_details: bool = False,
+        result_body: bool = False,
         input_body: bool = False, additional_records: Mapping | None = None,
+        terminal_write_sources: bool = False,
     ) -> None:
         """Capture current control rows and only the immutable slots consumed next."""
         active = active_state_scope()
@@ -305,22 +305,20 @@ class ExecutionContent:
         if result_body:
             paths.append(("result", "fields", "output", "fields", "content", "$execution_payload"))
             native_paths.append(("result", "fields", "output", "fields", "content", "$native_text"))
-        if terminal_details:
-            paths.append(("terminal_details", "fields", "content", "$execution_payload"))
-        if recovery:
-            native_paths.append(("recovery", "fields", "terminal_handoff", "fields", "output", "fields", "content", "$native_text"))
-            paths.extend((
-                ("recovery", "fields", "pending_tools", "fields", "content", "$execution_payload"),
-                ("recovery", "fields", "terminal_handoff", "fields", "content", "$execution_payload"),
-                ("recovery", "fields", "terminal_handoff", "fields", "terminal_details", "fields", "content", "$execution_payload"),
-            ))
         archive = await self._archive()
+        from ._sql import SqlStateStorageGroup, SqlStateStore
+
+        source_options = ({"terminal_write_sources": True}
+                          if terminal_write_sources and active.writable
+                          and type(active.group) is SqlStateStorageGroup
+                          and type(self._store) is SqlStateStore else {})
         await active.record_reader.read_content_references(
             owner_store=self._store, owner_keys=keys, content_store=archive.store,
             content_scope_key=archive_scope_key(self._namespace, self._tenant_id),
             content_paths=tuple(("value", "payload", "fields", *path) for path in paths),
             native_root_paths=tuple(("value", "payload", "fields", *path) for path in native_paths),
             additional_records=additional_records,
+            fixed_projection=True, **source_options,
         )
 
     async def prefetch_configuration_owner(self, hint: StoredRecord) -> None:
@@ -429,11 +427,11 @@ class ExecutionContent:
             values.append(handoff)
         return tuple(values)
 
-    def _encoding(self, payload: StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping) -> tuple[str, bytes]:
+    def _encoding(self, payload: StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping) -> ArchiveContentInput | tuple[str, bytes]:
         key = id(payload)
         cached = self._payload_encodings.get(key)
         if cached is not None and cached[0]() is payload:
-            return cached[1:]
+            return cached[1]
         from .codec import encode_domain
         wire = (_encode_persisted_domain(payload) if isinstance(payload, (PendingToolContinuation, ResultRecord, RecoveryTerminalHandoff))
                 else encode_domain(payload))
@@ -451,26 +449,24 @@ class ExecutionContent:
                               if name not in {"safe_error_details", "error_diagnostics"}}
             outcome = {**outcome, "fields": {**outcome_fields, "output": None}}
             wire = {**wire, "fields": {**wire["fields"], "outcome": outcome}}
-        raw = canonical_json_bytes(wire)
-        identity = archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())
+        content = ArchiveContentInput(PAYLOAD_CODEC, canonical_json_bytes(wire))
         try:
             weak = ref(payload, lambda _value: self._payload_encodings.pop(key, None))
         except TypeError:
             # Slotted result/control values need not expose a weakref slot.
             # Encoding caches are optional and must not retain their owners.
-            return identity, raw
-        self._payload_encodings[key] = (weak, identity, raw)
-        return identity, raw
+            return content
+        self._payload_encodings[key] = (weak, content)
+        return content
 
-    def _binding_encoding(self, binding: AgentBindingContract | TaskBindingContract) -> tuple[str, bytes]:
+    def _binding_encoding(self, binding: AgentBindingContract | TaskBindingContract) -> ArchiveContentInput:
         key = id(binding)
         cached = self._binding_encodings.get(key)
         if cached is not None and cached[0]() is binding:
-            return cached[1:]
-        raw = canonical_json_bytes(_encode_persisted_domain(binding))
-        identity = archive_content_identity(BINDING_CODEC, hashlib.sha256(raw).hexdigest())
-        self._binding_encodings[key] = (ref(binding, lambda _value: self._binding_encodings.pop(key, None)), identity, raw)
-        return identity, raw
+            return cached[1]
+        content = ArchiveContentInput(BINDING_CODEC, canonical_json_bytes(_encode_persisted_domain(binding)))
+        self._binding_encodings[key] = (ref(binding, lambda _value: self._binding_encodings.pop(key, None)), content)
+        return content
 
     async def pending_operations(self, records: Sequence[StoredRecord]) -> dict:
         from ._pending_operation_reference import read_pending_operations
@@ -555,7 +551,9 @@ class ExecutionContent:
             }))
         archive = await self._archive(create=True)
         encoded = tuple(self._encoding(payload) for payload in selected)
-        await archive.prepare_content(tuple((PAYLOAD_CODEC, raw) for identity, raw in encoded), prepared)
+        await archive.prepare_content(tuple(
+            item if isinstance(item, ArchiveContentInput) else (PAYLOAD_CODEC, item[1]) for item in encoded
+        ), prepared)
 
     async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None,
                      result_source: NativeTextReference | None = None,
@@ -640,13 +638,12 @@ class ExecutionContent:
             compact = []
             for payload, encoded in selected:
                 if isinstance(payload, PendingToolContinuation):
-                    wire = json.loads(encoded[1])
+                    wire = json.loads(encoded.raw if isinstance(encoded, ArchiveContentInput) else encoded[1])
                     for name in ("approvals", "calls"):
                         for call, entry in zip(getattr(payload, name), wire["fields"][name]["$tuple"], strict=True):
                             if id(call.arguments_payload) in admitted:
                                 entry["fields"] = {key: entry["fields"][key] for key in ("operation_id", "metadata")}
-                    raw = canonical_json_bytes(wire)
-                    encoded = archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest()), raw
+                    encoded = ArchiveContentInput(PAYLOAD_CODEC, canonical_json_bytes(wire))
                 compact.append((payload, encoded))
             selected = compact
         binding = self._binding_encoding(value.binding)
@@ -672,10 +669,11 @@ class ExecutionContent:
         encoded_payloads.update({key: {"$dataclass": "stored_payload", "schema": 1,
             "fields": {"content": {"$pending_operation": identity, "source": "checkpoint"}}} for key, identity in admitted.items()})
         missing = []
-        for payload, (identity, raw) in selected:
+        for payload, content in selected:
+            identity = content.identity if isinstance(content, ArchiveContentInput) else content[0]
             reference = archive.scope_id, archive.content_scope, identity
             if reference not in retained:
-                missing.append((PAYLOAD_CODEC, raw))
+                missing.append(content if isinstance(content, ArchiveContentInput) else (PAYLOAD_CODEC, content[1]))
             wire = {StoredUserInput: "stored_user_input", StoredPayload: "stored_payload",
                     PendingToolContinuation: "pending_tool_continuation", RecoveryTerminalHandoff: "recovery_terminal_handoff", ResultRecord: "result_record"}[type(payload)]
             encoded_payloads[id(payload)] = {"$dataclass": wire, "schema": 1,
@@ -691,14 +689,15 @@ class ExecutionContent:
             if isinstance(payload, (ResultRecord, RecoveryTerminalHandoff)):
                 body = payload.output if isinstance(payload, ResultRecord) else payload.outcome.output
                 encoded_payloads[id(payload)]["fields"]["output"] = None if body is None else encoded_payloads[id(body)]
-        identity, raw = binding
-        if previous_binding != (archive.scope_id, archive.content_scope, identity):
-            missing.append((BINDING_CODEC, raw))
+        binding_identity = binding.identity
+        if previous_binding != (archive.scope_id, archive.content_scope, binding_identity):
+            missing.append(binding)
         previous_policy = None if previous is None else policy_reference(previous)
         effective_policy = policy_values(value)
         if previous_policy is None:
-            policy_identity, policy_raw = encode_policy(effective_policy)
-            missing.append((POLICY_CODEC, policy_raw))
+            policy = encode_policy(effective_policy)
+            policy_identity = policy.identity
+            missing.append(policy)
             policy_overrides = {}
         else:
             if previous_policy[:2] != (archive.scope_id, archive.content_scope):
@@ -710,7 +709,7 @@ class ExecutionContent:
                 # The caller still CASes that owner's physical revision; ordinary
                 # reads and policy changes must inspect their current source.
                 policy_overrides = decode_envelope(previous.data).value["payload"]["fields"].get("runtime_overrides", {})
-            elif encode_policy(effective_policy)[0] == policy_identity:
+            elif encode_policy(effective_policy).identity == policy_identity:
                 # The exact admitted base needs no delta. Retain its immutable
                 # identity without reading configuration for a control-only CAS.
                 policy_overrides = {}
@@ -721,7 +720,7 @@ class ExecutionContent:
                                     if canonical_json_bytes(item) != canonical_json_bytes(base_policy[name])}
         encoded_policy = {"$runtime_policy": policy_identity, "archive_scope": archive.scope_id,
                           "content_scope": archive.content_scope}
-        encoded_binding = {"$execution_binding": identity, "archive_scope": archive.scope_id,
+        encoded_binding = {"$execution_binding": binding_identity, "archive_scope": archive.scope_id,
                            "content_scope": archive.content_scope}
         if missing:
             await archive.ensure_content(tuple(missing))
@@ -885,7 +884,7 @@ class ExecutionContent:
             value = _decode_payload(raw)
             if not isinstance(value, Mapping):
                 key = id(value)
-                self._payload_encodings[key] = (ref(value, lambda _value, key=key: self._payload_encodings.pop(key, None)), identity, raw)
+                self._payload_encodings[key] = (ref(value, lambda _value, key=key: self._payload_encodings.pop(key, None)), (identity, raw))
             values[(archive.scope_id, archive.content_scope, identity)] = value
         return values
 

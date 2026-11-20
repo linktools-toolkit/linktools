@@ -695,12 +695,12 @@ derive from the graph recovery request, so retrying a partly recovered graph
 does not take over an already recovered child again. A later recovery boundary
 requires a new graph recovery key.
 
-An exclusively owned local SQLite execution source can automatically recover
-admitted checkpoint-enabled executions because its live resource writer lock
-supplies exclusive ownership. Select this explicitly
-with `PersistenceStorage.from_root(root, exclusive_writer=True)`; ordinary
-`from_root`, `sqlite(path)` and shared SQL retain their existing behavior. The
-request flag or file path alone does not grant restart recovery. Shared SQL startup can still finish
+Startup-wide execution reconciliation is disabled by default. To opt into
+automatically recovering admitted checkpoint-enabled executions on a local
+SQLite source, pass `auto_recover=True` and use
+`PersistenceStorage.from_root(root, exclusive_writer=True)` so the live writer
+lock supplies exclusive ownership. The flag or file path alone does not grant
+restart recovery. With the flag enabled, shared SQL startup can still finish
 durably handed-off work, including deferred continuations, prepared terminal
 handoffs, and terminal cleanup. A plain `FINALIZING` status alone is not proof
 that an active producer relinquished ownership.

@@ -87,11 +87,9 @@ async def _terminal_race(
             original_reserve = state.execution.executions._reserve_start
 
             async def reserve(
-                reservation: ExecutionStartReservation, *, started: bool = False,
-                input_context_write: object = None,
+                reservation: ExecutionStartReservation, **kwargs,
             ) -> ExecutionStartReservationResult:
-                assert input_context_write is None
-                result = await original_reserve(reservation, started=started)
+                result = await original_reserve(reservation, **kwargs)
                 if not result.created:
                     # Fault only the returned receipt; keep the durable winner
                     # unchanged so replay rejection cannot mask a second run.

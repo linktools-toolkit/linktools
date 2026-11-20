@@ -358,3 +358,40 @@ async def test_deferred_readback_preserves_producer_conflict(tmp_path: Path, exp
             )
         assert caught.value.code is ErrorCode.STORAGE_CONFLICT
         assert await _facts(state, approvals, calls) == before
+
+
+
+@pytest.mark.asyncio
+async def test_expired_source_cannot_publish_deferred_frontier(tmp_path: Path) -> None:
+    from sqlalchemy import update
+    from linktools.ai.persistence.coordination import PendingTurnCoordination
+    from linktools.ai.persistence.turns import StateTurnCoordination
+    from linktools.ai.storage import TurnScopeIdentity
+
+    scope = TurnScopeIdentity("readback", "tenant", "runtime-pending-turn")
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=_storage("sql", tmp_path)) as state:
+        _, commands, initial, continuation, approvals, calls = await _prepare(state, "pause")
+        store = state.execution.executions.state_store
+        authority = StateTurnCoordination(store, namespace=scope.namespace, tenant_id=scope.tenant_id,
+                                          _runtime_sql=True, _coowned=True)
+        coord = PendingTurnCoordination.for_state(None, authority, namespace=scope.namespace, tenant_id=scope.tenant_id)
+        lease = await authority.claim_turn(
+            scope, session_key="request:" + "a" * 64, request_key="a" * 64, request_digest="b" * 64,
+            execution_id=initial.execution_id, owner_id="c" * 32, lease_seconds=60,
+        )
+        fence = coord.durable_write_fence(lease, store)
+        before = await _facts(state, approvals, calls)
+        control = store.storage_group.metadata.tables["ai_execution_records"]
+        async with store.storage_group.context.engine.begin() as connection:
+            await connection.execute(update(control).where(
+                control.c.key == fence.authority.key, control.c.store_key == store.store_key,
+            ).values(turn_expiry=datetime(2000, 1, 1, tzinfo=timezone.utc)))
+        with pytest.raises(AIError) as revoked:
+            await commands.commit_deferred_checkpoint(
+                execution_id=initial.execution_id, tenant_id=scope.tenant_id,
+                expected_execution_revision=initial.revision, expected_event_seq=initial.event_seq,
+                expected_agent_run_seq=initial.agent_run_seq, continuation=continuation,
+                approval_records=approvals, external_records=calls, occurred_at=initial.created_at, turn_fence=fence,
+            )
+        assert revoked.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+        assert await _facts(state, approvals, calls) == before

@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Tool ledger payloads and fixed Native receipt projections."""
 
-import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
@@ -14,7 +13,7 @@ if TYPE_CHECKING:
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, StoredPayload
-from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity, archive_scope_key
+from ._archive import ArchiveContentInput, ContentArchive, ContentRecord, PreparedArchive, archive_scope_key
 from ._archive_read import ContentReferenceReader
 from ._payload import decode_payload_bytes
 from ._message_root import NativeMessageRoot, NativeToolResultReference, NativeToolArgumentsReference
@@ -154,6 +153,7 @@ class ToolOperationContent:
             native_root_paths=tuple(("value", "payload", "fields", name, "fields", "content", marker)
                 for name, marker in (("arguments_payload", "$native_tool_arguments"),
                                      ("result_payload", "$native_tool_result"))),
+            fixed_projection=True,
         )
         return (None if found is None else
                 tuple(sorted(found[self.store].values(), key=lambda row: (row.sort_key, row.key))))
@@ -214,10 +214,11 @@ class ToolOperationContent:
             prepared = PreparedArchive()
             missing = []
             for name, raw in selected.items():
-                identity = archive_content_identity(TOOL_PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())
+                content = ArchiveContentInput(TOOL_PAYLOAD_CODEC, raw)
+                identity = content.identity
                 reference = archive.scope_id, archive.content_scope, identity
                 if reference not in retained:
-                    missing.append((TOOL_PAYLOAD_CODEC, raw))
+                    missing.append(content)
                 retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1, "fields": {"content": {
                     "$execution_payload": identity, "archive_scope": archive.scope_id,
                     "content_scope": archive.content_scope}}}

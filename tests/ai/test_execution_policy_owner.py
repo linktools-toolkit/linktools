@@ -127,7 +127,7 @@ async def test_policy_overrides_allow_default_values_but_reject_unknown_fields(t
         fields["runtime_overrides"] = {"unknown_policy": True} if unknown_field else dict(values)
         changed = replace(raw, data=encode_envelope({**envelope.value,
             "payload": {**payload, "fields": fields}}))
-        _, policy = encode_policy(values)
+        policy = encode_policy(values).raw
         contents = {policy_reference(raw): policy}
         if unknown_field:
             with pytest.raises(AIError) as caught:

@@ -225,3 +225,62 @@ async def test_restartable_launch_reuses_reads_but_requires_attempt_claim(
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {"text": "answer"}
         assert calls == ["provider"]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_local_durable_event_reader_keeps_source_authorization(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from linktools.ai.core import AuthorizationAction, CommitPolicy, Principal
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.persistence import StateTurnResources
+    from linktools.ai.storage import InMemoryCacheBackend
+
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def model(messages, info):
+        entered.set()
+        await finish.wait()
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = RuntimeFeatures("durable-event-read")
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    cache = InMemoryCacheBackend(max_bytes=2**24)
+    storage = PersistenceStorage.sqlite(tmp_path / "events.db", cache=cache,
+                                         coordination=StateTurnResources(pending_cache=cache))
+    async with Runtime.open("durable-events", storage=storage,
+                            features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        session = await runtime.agents.get().create_session("session")
+        execution = await session.start("hello")
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            backend = runtime._execution_service.runtime_backend()
+            lookup = AsyncMock(side_effect=AssertionError("durable local producer has no remote pending record"))
+            monkeypatch.setattr(backend._pending_turns, "read_remote_execution", lookup)
+            authorization = runtime.events._authorization
+            actions = []
+
+            class EventPolicy:
+                async def authorize(self, principal, action, resource):
+                    actions.append(action)
+                    if principal.principal_id == "other":
+                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    await authorization.authorize(principal, action, resource)
+
+            monkeypatch.setattr(runtime.events, "_authorization", EventPolicy())
+            assert (await runtime.events.list(execution.execution_id, principal=runtime.default_principal)).items
+            assert actions == [AuthorizationAction.EVENT_READ, AuthorizationAction.EXECUTION_READ]
+            with pytest.raises(AIError) as denied:
+                await runtime.events.list(execution.execution_id,
+                                          principal=Principal("other", runtime.tenant_id, "service"))
+            assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            with monkeypatch.context() as patch:
+                patch.setattr(runtime._state.execution.executions, "get_header", AsyncMock(return_value=None))
+                with pytest.raises(AIError) as absent:
+                    await runtime.events.list(execution.execution_id, principal=runtime.default_principal)
+                assert absent.value.code is ErrorCode.AUTHORIZATION_DENIED
+            lookup.assert_not_awaited()
+        finally:
+            finish.set()
+        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED

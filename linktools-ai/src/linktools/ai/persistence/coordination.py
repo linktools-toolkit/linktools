@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -17,15 +18,17 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, StreamBackend, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader, TurnScopeIdentity
+from ..storage import CacheBackend, RenewingTurnScope, StreamBackend, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader, TurnScopeIdentity
 from .codec import decode_domain, encode_domain
-from .turns import StateTurnCoordination
+from .turns import SourceTurnWriteFence, StateTurnCoordination
+from ._turn_sql_schema import RUNTIME_TURN_SCOPE
 from ..execution import ExecutionRecord
 
 
 if TYPE_CHECKING:
     from ..storage import TurnScope
-    from .contracts import IdempotencyRecord, IdempotencyRepository
+    from ._runtime_commands import StateCommands
+    from .contracts import ExecutionStartReservation, ExecutionStartReservationResult, IdempotencyRecord, IdempotencyRepository, SessionRecord
 
 
 _PROMOTION_INTENT = b"promote"
@@ -45,7 +48,7 @@ class PendingTurnCoordination:
         self._backend = backend
         self._namespace = validate_persistence_namespace(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
-        self._scope = TurnScopeIdentity(self._namespace, self._tenant_id, "runtime-pending-turn")
+        self._scope = TurnScopeIdentity(self._namespace, self._tenant_id, RUNTIME_TURN_SCOPE)
         self._scope_payload = list(self._scope.as_tuple())
 
     @classmethod
@@ -86,6 +89,63 @@ class PendingTurnCoordination:
             request_digest=request_digest, execution_id=execution_id,
             owner_id=owner_id,
         )
+
+    def execution_authority(self, coordinated: TurnCoordination | None):
+        """Return a typed proof only for the explicitly composed SQL Runtime owner."""
+        source = self._state_authority
+        if coordinated is None or coordinated.lease is None or source is None or not source._coowned:
+            return None
+        if source._sql_source(self._scope.scope) is None:
+            return None
+        lease = coordinated.lease
+        identity = source._lease_identity(lease)
+        if identity is None or identity[:2] != (self._scope.scope, coordinated.execution_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        from ._execution_authority import ExecutionAuthority
+
+        return ExecutionAuthority(self._scope, coordinated.execution_id, identity[2],
+                                  lease.token, lease.fence)
+
+    def durable_write_fence(self, coordinated: TurnCoordination, target) -> SourceTurnWriteFence | None:
+        authority = self.execution_authority(coordinated)
+        if authority is None:
+            return None
+        source = self._state_authority._sql_source(self._scope.scope)
+        if source is not target:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return SourceTurnWriteFence(source, authority)
+
+    def can_group_start(
+        self, commands: StateCommands, reservation: ExecutionStartReservation, session: SessionRecord,
+    ) -> bool:
+        authority = self._state_authority
+        return authority is not None and commands.can_claim_and_reserve_start(authority, reservation, session)
+
+    def enter_grouped_start(
+        self, commands: StateCommands, reservation: ExecutionStartReservation, session: SessionRecord, *,
+        session_key: str, request_key: str, owner_id: str,
+        capture: Callable[[ExecutionStartReservationResult], None],
+    ) -> TurnScope:
+        authority = self._state_authority
+        assert authority is not None
+        execution_id = reservation.execution.execution_id
+        digest = reservation.idempotency.request_digest
+        claim_identity = dict(session_key=session_key, request_key=request_key,
+                              request_digest=digest, execution_id=execution_id, owner_id=owner_id)
+
+        async def claim(duration: float) -> TurnCoordination | None:
+            result = await commands.claim_and_reserve_start(
+                authority, self._scope, reservation, expected_session=session, session_key=session_key,
+                request_key=request_key, owner_id=owner_id, lease_seconds=duration,
+            )
+            if result is None:
+                return await authority.claim_turn(self._scope, **claim_identity, lease_seconds=duration)
+            coordination, receipt = result
+            if receipt is not None:
+                capture(receipt)
+            return coordination
+
+        return RenewingTurnScope(authority, self._scope, **claim_identity, _claim=claim)
 
     async def publish(
         self, record: ExecutionRecord, coordination: TurnCoordination,

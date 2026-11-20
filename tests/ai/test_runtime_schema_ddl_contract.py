@@ -313,9 +313,10 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     )
     selected = captured[0]
     assert set(selected.tables) == {
-        "ai_state_records", "ai_state_facts",
+        "ai_state_records", "ai_execution_records", "ai_state_facts",
         "ai_state_counters", "ai_state_operations", "ai_step_runs", "ai_step_messages", "ai_step_sequences",
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
+        "ai_turn_slots", "ai_turn_admissions",
     } | ({"ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
 
     def compile_ddl(metadata: MetaData) -> list[str]:
@@ -442,7 +443,8 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
     native_tables = set(build_step_sql_metadata().tables)
     maxima = {}
     for table in metadata.tables.values():
-        capacity = NATIVE_STORE_KEY_MAX_BYTES if table.name in native_tables else STORE_KEY_MAX_BYTES
+        capacity = (32 if table.name.startswith("ai_turn_") else
+                    NATIVE_STORE_KEY_MAX_BYTES if table.name in native_tables else STORE_KEY_MAX_BYTES)
         assert table.c.store_key.type.length == capacity
         assert table.c.store_key.type.compile(dialect=dialect) == {
             "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
@@ -482,9 +484,10 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
         "ai_asset_batch_receipts", "ai_asset_changes", "ai_asset_entries", "ai_asset_heads",
         "ai_metric_definitions", "ai_metric_observations",
         "ai_object_chunks", "ai_objects", "ai_state_facts",
-        "ai_state_operations", "ai_state_records", "ai_state_counters", "ai_step_events",
+        "ai_state_operations", "ai_state_records", "ai_execution_records", "ai_state_counters", "ai_step_events",
         "ai_step_messages", "ai_step_runs", "ai_step_sequences", "ai_step_snapshots", "ai_trace_events",
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
+        "ai_turn_slots", "ai_turn_admissions",
     }
     for table in metadata.tables.values():
         assert table.comment and all(column.comment for column in table.c)
@@ -499,7 +502,9 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
                 if isinstance(column.type, (LargeBinary, String)):
                     assert column.type.length is not None and column.type.length <= 128, (table.name, column.name)
                 if unique:
-                    assert not column.nullable, (table.name, index.name, column.name)
+                    assert not column.nullable, (
+                        table.name, index.name, column.name,
+                    )
         for index in table.indexes:
             assert not index.dialect_options["mysql"].get("length"), (table.name, index.name)
 
@@ -513,6 +518,7 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
     metadata = build_sql_schema_metadata()
     state_raw = {
         "ai_state_records": ("key", "scope_key", "parent_key"),
+        "ai_execution_records": ("key", "scope_key", "parent_key"),
         "ai_state_facts": ("stream_key", "owner_key"),
         "ai_state_counters": ("stream_key",),
         "ai_state_operations": ("operation_key", "stream_key"),
@@ -531,7 +537,7 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
                 "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
             }[dialect_name]
     for name in state_raw:
-        assert metadata.tables[name].c.store_key.type.length == 128
+        assert metadata.tables[name].c.store_key.type.length == (32 if name.startswith("ai_turn_") else 128)
     for table in metadata.tables.values():
         for column in table.c:
             if column.name.endswith("_locator"):
@@ -567,17 +573,33 @@ def test_record_scan_bucket_is_write_through_and_replaces_only_generic_index(dia
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
     if dialect_name == "mysql":
         dialect.server_version_info = (5, 7, 44)
-    records = metadata.tables["ai_state_records"]
-    column = records.c.scan_kind
-    assert column.type.length == 34
-    assert column.computed is None and not column.nullable
-    ddl = str(CreateColumn(column).compile(dialect=dialect))
-    assert "GENERATED" not in ddl and "JSON_EXTRACT" not in ddl
-    assert "handoff_phase" not in ddl
-    indexes = {tuple(index.columns.keys()) for index in records.indexes}
-    assert ("store_key", "scan_kind", "sort_prefix") in indexes
-    assert ("store_key", "kind", "sort_prefix") not in indexes
+    for owner in ("ai_state_records", "ai_execution_records"):
+        records = metadata.tables[owner]
+        column = records.c.scan_kind
+        assert column.type.length == 34
+        assert column.computed is None and not column.nullable
+        ddl = str(CreateColumn(column).compile(dialect=dialect))
+        assert "GENERATED" not in ddl and "JSON_EXTRACT" not in ddl
+        assert "handoff_phase" not in ddl
+        indexes = {tuple(index.columns.keys()) for index in records.indexes}
+        assert ("store_key", "scan_kind", "sort_prefix") in indexes
+        assert ("store_key", "kind", "sort_prefix") not in indexes
     for name in RECORD_OWNER_TABLES:
-        if name != "ai_state_records":
+        if name not in {"ai_state_records", "ai_execution_records"}:
             assert "scan_kind" not in metadata.tables[name].c
 
+
+
+def test_mysql_grouped_turn_admission_uses_insert_values_with_exact_control_id() -> None:
+    from linktools.ai.persistence._turn_sql import SqlTurnProof, SqlTurnRows
+    from linktools.ai.storage import TurnScopeIdentity
+
+    scope = TurnScopeIdentity("runtime", "tenant", "runtime-pending-turn")
+    source = SqlTurnRows(build_sql_schema_metadata(), b"r" * 32, scope, coowned=True)
+    proof = SqlTurnProof("execution", "session:s", "a" * 64, "b" * 64, "c" * 32,
+                         1, False, "d" * 32, "claim", True)
+    statement = source.publish_claim(proof, previous=None, control_id=42)
+    compiled = statement.compile(dialect=mysql.dialect())
+    sql = str(compiled).upper()
+    assert sql.startswith("INSERT INTO AI_TURN_ADMISSIONS") and " VALUES " in sql and "SELECT" not in sql
+    assert compiled.params["control_id"] == 42

@@ -98,7 +98,7 @@ from ..storage import (
 from ..execution import tool_operation_id, tool_operation_references
 
 from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
-from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
+from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _GroupedTurnStart, _TerminalMetricDelivery
 from ..observe.service import (
     capture_execution_terminal,
     record_metric_observation,
@@ -121,6 +121,7 @@ from ..execution import ExecutionRequest
 from ._conversation_service import ConversationService
 from ..persistence import PersistenceDomain
 from ..persistence.commands import StateCommands
+from ..persistence.turns import ExecutionAuthority, SourceTurnRevoked, SourceTurnWriteFence
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
 from ..persistence.objects import runtime_object_source_reads
@@ -1043,6 +1044,11 @@ class LocalExecutionBackend:
         local = await self._pending_turns.read_execution(execution_id, tenant_id=tenant_id)
         if local is not None:
             return local
+        owner = self._turn_owners.get(execution_id) if tenant_id == self._tenant_id else None
+        if owner is not None and owner.observed is not None and not owner.stopping:
+            # This owner has already committed the execution identity to the
+            # source; the event reader still authorizes the current source header.
+            return None
         return await self._pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
 
     def require_pending_producer(
@@ -1221,6 +1227,7 @@ class LocalExecutionBackend:
     async def run_turn(
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
+        grouped: _GroupedTurnStart | None = None,
     ) -> ExecutionHandle:
         parent = self._parent_turn(reservation)
         admission = asyncio.get_running_loop().create_future()
@@ -1228,7 +1235,7 @@ class LocalExecutionBackend:
         if parent is not None:
             parent.admissions.add(entered)
         task = asyncio.create_task(
-            self._turn_lifetime(reservation, principal, admit, admission, parent, entered),
+            self._turn_lifetime(reservation, principal, admit, admission, parent, entered, grouped),
             name=f"ai-turn-owner-{reservation.execution.execution_id}",
         )
         self._track_checkpoint_task(task, "turn_lifetime")
@@ -1355,7 +1362,7 @@ class LocalExecutionBackend:
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
         admission: asyncio.Future[ExecutionHandle], parent: _OwnedExecutionTurn | None,
-        entered: asyncio.Future[None] | None,
+        entered: asyncio.Future[None] | None, grouped: _GroupedTurnStart | None,
     ) -> None:
         execution = reservation.execution
         identity = reservation.idempotency
@@ -1370,6 +1377,11 @@ class LocalExecutionBackend:
 
         async def execute(coordination: TurnCoordination | None, scope: TurnScope | None) -> None:
             nonlocal owner
+            if grouped is not None and grouped.receipt is not None and not grouped.receipt.created:
+                result = await admit(coordination)
+                if not admission.done():
+                    admission.set_result(result)
+                return
             if coordinator is not None and coordination is None:
                 raise AIError(ErrorCode.SESSION_BUSY)
             if parent is not None:
@@ -1386,6 +1398,8 @@ class LocalExecutionBackend:
             owner = _OwnedExecutionTurn(reservation, coordination, principal, scope=scope,
                                         lifetime=asyncio.current_task(), admission=admission)
             self._turn_owners[execution.execution_id] = owner
+            if grouped is not None:
+                self._capture_reserved_start(owner, grouped.receipt)
             if parent is not None:
                 parent.children[execution.execution_id] = owner
                 parent.delegated_children.add(execution.execution_id)
@@ -1414,13 +1428,21 @@ class LocalExecutionBackend:
                 # One compact composite fits Turn's request/session limits and preserves
                 # boundaries when either raw identity contains a colon.
                 request_key = canonical_sha256([identity.scope, identity.idempotency_key])
-                scope = coordinator.enter(
-                    session_key=(f"session:{execution.session_id}" if execution.session_id is not None else
-                                 f"request:{request_key}"),
-                    request_key=request_key,
-                    request_digest=identity.request_digest, execution_id=execution.execution_id,
-                    owner_id=uuid.uuid4().hex,
-                )
+                session_key = (f"session:{execution.session_id}" if execution.session_id is not None
+                               else f"request:{request_key}")
+                owner_id = uuid.uuid4().hex
+                if grouped is None:
+                    scope = coordinator.enter(
+                        session_key=session_key, request_key=request_key, request_digest=identity.request_digest,
+                        execution_id=execution.execution_id, owner_id=owner_id,
+                    )
+                else:
+                    def capture(receipt: ExecutionStartReservationResult) -> None:
+                        grouped.receipt = receipt
+                    scope = coordinator.enter_grouped_start(
+                        self._runtime_commands, reservation, grouped.session, session_key=session_key,
+                        request_key=request_key, owner_id=owner_id, capture=capture,
+                    )
                 # A context may own ContextVars or a TaskGroup. Its task never changes.
                 async with scope as coordination:
                     await execute(coordination, scope)
@@ -1677,6 +1699,7 @@ class LocalExecutionBackend:
                     reservation, expected_session=turn.session,
                     captured_input_context=context, producer_claim_id=claim, context_write=context_write,
                     tool_operations=tool_operations,
+                    authority=self._pending_turns.coordination.execution_authority(turn.coordination),
                 )
                 await accept(execution)
 
@@ -1759,9 +1782,30 @@ class LocalExecutionBackend:
             await asyncio.sleep(pause)
             pause = min(1.0, pause * 2)
 
+    async def can_group_start(
+        self, request: ExecutionRequest, reservation: ExecutionStartReservation, session: SessionRecord,
+    ) -> bool:
+        coordinator = self._pending_turns.coordination
+        if (type(self) is not LocalExecutionBackend or coordinator is None
+                or not coordinator.can_group_start(self._runtime_commands, reservation, session)):
+            return False
+        await self._validate_start(request, reservation.execution)
+        return await self._expected_session_cursor(reservation.execution, session=session) == session.continuation
+
+    @staticmethod
+    def _capture_reserved_start(
+        owner: _OwnedExecutionTurn, result: ExecutionStartReservationResult | None,
+    ) -> None:
+        if result is not None and result.created and result.execution.recovery is not None:
+            owner.attempt = _InitialAttemptCapture(result.execution, result.session)
+            if isinstance(result, ExecutionStartReceipt):
+                owner.observed = result.observed
+                owner.reservation = replace(owner.reservation, idempotency=result.idempotency)
+                owner.session_turn = result.turn
+
     async def prepare_reserved_start(
         self, request: ExecutionRequest, reservation: ExecutionStartReservation,
-        session: SessionRecord | None,
+        session: SessionRecord | None, authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionStartReservationResult | None:
         await self._validate_start(request, reservation.execution)
         expected = (
@@ -1769,16 +1813,11 @@ class LocalExecutionBackend:
             if reservation.execution.session_id is not None else None
         )
         result = await self._runtime_commands.reserve_start_checkpoint(
-            reservation, expected_cursor=expected, expected_session=session,
+            reservation, expected_cursor=expected, expected_session=session, authority=authority,
         )
         owner = self._turn_owners.get(reservation.execution.execution_id)
-        if (owner is not None and result is not None and result.created
-                and result.execution.recovery is not None):
-            owner.attempt = _InitialAttemptCapture(result.execution, result.session)
-            if isinstance(result, ExecutionStartReceipt):
-                owner.observed = result.observed
-                owner.reservation = replace(owner.reservation, idempotency=result.idempotency)
-                owner.session_turn = result.turn
+        if owner is not None:
+            self._capture_reserved_start(owner, result)
         return result
 
     async def prepare_start(
@@ -2522,6 +2561,7 @@ class LocalExecutionBackend:
                     occurred_at=occurred_at,
                     background_tasks=self._execution_task_set(execution.execution_id),
                     producer_generation=producer_generation,
+                    turn_fence=self._source_turn_fence(self._turn_owners.get(execution.execution_id)),
                 )
             )
             if self._execution_buffer is not None:
@@ -4193,7 +4233,7 @@ class LocalExecutionBackend:
                     try:
                         activated = (
                             await self._runtime_commands.commit_agent_attempt_checkpoint(
-                                admission_claim,
+                                admission_claim, turn_fence=self._source_turn_fence(owner),
                             )
                         )
                     except AIError as error:
@@ -4511,6 +4551,7 @@ class LocalExecutionBackend:
                         activated = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
                             prepared_admission, prepared_context, context_write=context_write,
                             observed=None if owner is None else owner.observed,
+                            turn_fence=self._source_turn_fence(owner),
                         )
                     else:
                         async with pending.boundary:
@@ -4537,7 +4578,8 @@ class LocalExecutionBackend:
                                     context_write = (prepared.archive, prepared.records)
                                 activated = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
                                     prepared_admission, prepared_context, context_write=context_write,
-                            observed=None if owner is None else owner.observed,
+                                    observed=None if owner is None else owner.observed,
+                                    turn_fence=self._source_turn_fence(owner),
                                 )
                 except AIError as error:
                     if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -4768,6 +4810,8 @@ class LocalExecutionBackend:
                         ),
                     )
                 )
+            except SourceTurnRevoked:
+                raise
             except Exception as error:
                 if isinstance(error, AIError) and error.code is ErrorCode.EXECUTION_CANCELLED:
                     raise asyncio.CancelledError from error
@@ -4923,6 +4967,8 @@ class LocalExecutionBackend:
                     tool_operations=tool_operations,
                 )
             except asyncio.CancelledError:
+                raise
+            except SourceTurnRevoked:
                 raise
             except Exception as terminal_error:
                 if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
@@ -5150,6 +5196,22 @@ class LocalExecutionBackend:
             else:
                 metric_status = "CANCELLED"
             raise
+        except SourceTurnRevoked as error:
+            revoked = await self._finish_revoked_worker(
+                execution_id, agent_run_id=agent_run_id,
+                producer_generation=producer_generation, admission=original,
+            )
+            if revoked is not None:
+                metric_status = "SUPERSEDED"
+                return
+            # Knowing the slot has been lost does not prove a successor has
+            # acquired the durable execution/Step producer or recovered staging.
+            # Keep this worker's unresolved evidence for operator reconciliation.
+            metric_status = "FAILED"
+            metric_error_code = ErrorCode.STORAGE_RECOVERY_REQUIRED.value
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED, safe_details={"phase": "source_turn_revoked"},
+            ) from error
         except Exception as error:
             if (isinstance(error, AIError) and error.code is ErrorCode.STORAGE_CONFLICT
                     and (revoked := await self._finish_revoked_worker(
@@ -5478,12 +5540,17 @@ class LocalExecutionBackend:
         owner = self._turn_owners.get(execution.execution_id)
         capture = self._owned_attempt_capture(execution)
         observed = None if owner is None else owner.observed
-        current = (observed.value if owner is not None and not owner.stopping
-                   and owner.tool_admission is not None and owner.tool_terminal is not None
-                   and producer_generation is not None and owner.producer_generation == producer_generation
-                   and capture is not None and observed is not None
-                   and observed.value == capture.execution else None)
-        if current is None:
+        same_attempt = (owner is not None and not owner.stopping
+                        and producer_generation is not None and owner.producer_generation == producer_generation
+                        and capture is not None and observed is not None and observed.value == capture.execution)
+        repository = self._execution.executions
+        if same_attempt and owner.tool_admission is not None and owner.tool_terminal is not None:
+            current = observed.value
+        elif (same_attempt and type(repository) is ExecutionRepositoryImpl
+                and self._pending_turns.get(execution.execution_id, tenant_id=self._tenant_id) is None):
+            latest = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id, previous=observed)
+            current = None if latest is None else latest.value
+        else:
             current = await self.load_execution(execution.execution_id, tenant_id=self._tenant_id)
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -5515,6 +5582,12 @@ class LocalExecutionBackend:
             tool_operations=tool_operations,
         )
 
+    def _source_turn_fence(self, owner: _OwnedExecutionTurn | None) -> "SourceTurnWriteFence | None":
+        coordinator = self._pending_turns.coordination
+        if owner is None or owner.coordination is None or coordinator is None:
+            return None
+        return coordinator.durable_write_fence(owner.coordination, self._execution.executions.state_store)
+
     async def _bind_native_boundary(
         self, owner: _OwnedExecutionTurn, execution: ExecutionRecord, agent_run_id: str,
     ) -> None:
@@ -5529,6 +5602,8 @@ class LocalExecutionBackend:
         if self._pending_turns.get(execution.execution_id, tenant_id=self._tenant_id) is not None:
             return
         repository = self._execution.executions
+        turn_fence = self._source_turn_fence(owner)
+        participants = (state,) if turn_fence is None or turn_fence.store is state else (state, turn_fence.store)
         if owner.observed is None or owner.observed.value != execution:
             owner.observed = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
         if owner.observed is None or owner.observed.value != execution:
@@ -5612,7 +5687,7 @@ class LocalExecutionBackend:
                 receipt = await repository.commit_boundary_in_transaction(
                     transaction, observed, next_record=next_record,
                     expected_producer_generation=generation, expected_producer_claim_id=claim_id,
-                    allow_cancelling=terminal,
+                    allow_cancelling=terminal, turn_fence=turn_fence,
                 )
                 source_receipt = (self._run_store.step_event_receipt(agent_run_id)
                                   if managed or terminal else None)
@@ -5660,15 +5735,15 @@ class LocalExecutionBackend:
 
                             await self._run_store.commit_captured_execution_projection(
                                 *captured, execution_id=execution.execution_id,
-                                write=write, readback_write=readback_write, stores=(state,),
+                                write=write, readback_write=readback_write, stores=participants,
                             )
                             if committed is None:
                                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                             return committed
                         if joint:
                             async with self._run_store.native_event_publication(agent_run_id):
-                                return await state.storage_group.mutate((state,), publish)
-                        return await state.storage_group.mutate((state,), publish)
+                                return await state.storage_group.mutate(participants, publish)
+                        return await state.storage_group.mutate(participants, publish)
                     except AIError as error:
                         actual = None
                         if error.code in {ErrorCode.STORAGE_COMMIT_UNKNOWN, ErrorCode.STORAGE_CONFLICT}:
@@ -5735,7 +5810,7 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 receipt = await self._runtime_commands.commit_tool_admission_boundary(
                     request, execution=owner.observed, observed=observed,
-                    write=write, readback_write=readback, known_new=known_new,
+                    write=write, readback_write=readback, known_new=known_new, turn_fence=turn_fence,
                 )
                 owner.observed = receipt.execution
                 session = captured_session if owner.attempt is None else owner.attempt.session
@@ -6836,6 +6911,12 @@ class LocalExecutionBackend:
             return current
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return current
+        turn_fence = self._source_turn_fence(self._turn_owners.get(current.execution_id))
+        if turn_fence is not None and not self._same_terminal_storage_group(
+            current, status=status, agent_run_id=agent_run_id,
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH,
+                          "An admitted source-owned turn cannot switch to split terminal publication")
         pending = self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id)
         if pending is not None:
             await self._pending_turns.settle(pending)
@@ -7388,6 +7469,8 @@ class LocalExecutionBackend:
                 execution_projections=() if plan is None else plan.projections,
                 audit_events=pending_audit, tool_operations=tool_operations,
                 include_publication=True,
+                authority=(None if self._pending_turns.coordination is None else
+                           self._pending_turns.coordination.execution_authority(turn.coordination)),
             )
             if not await accept(committed):
                 assert turn.failure is not None
@@ -7914,6 +7997,7 @@ class LocalExecutionBackend:
                             else owner.reservation.idempotency),
             session_turn=None if owner is None else owner.session_turn,
             expected_execution=current,
+            turn_fence=self._source_turn_fence(owner),
             session_id=current.session_id,
             expected_cursor=expected_cursor,
             next_cursor=next_cursor,

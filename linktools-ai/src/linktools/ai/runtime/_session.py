@@ -282,6 +282,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
     ) -> None:
         self._watches: dict[str, _SessionWatch] = {}
         self._watches_closed = False
+        self._change_subscriptions: set[Callable[[], None]] = set()
         self._current_policy = current_policy
         self._admission_execution = execution
         self._runtime_conversation = conversation
@@ -345,6 +346,26 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 )
                 return None if turn is None else PublishedSessionTurn(turn, commit.turn_seq, image.session_revision)
             yield read
+
+    def observe_changes(self, session_id: str, on_invalidate: Callable[[], None]) -> Callable[[], None]:
+        if self._watches_closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        repository = self._runtime_conversation.sessions
+        if type(repository) is not SessionRepositoryImpl:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+
+        def notify() -> None:
+            if unsubscribe in self._change_subscriptions:
+                on_invalidate()
+
+        remove = repository.observe_changes(session_id, notify)
+
+        def unsubscribe() -> None:
+            self._change_subscriptions.discard(unsubscribe)
+            remove()
+
+        self._change_subscriptions.add(unsubscribe)
+        return unsubscribe
 
     async def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
         """Observe local Runtime session changes without polling.
@@ -441,6 +462,8 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
 
     async def close_watches(self) -> None:
         self._watches_closed = True
+        for unsubscribe in tuple(self._change_subscriptions):
+            unsubscribe()
         tasks = []
         for channel in self._watches.values():
             self._publish_watch(channel, AIError(ErrorCode.STORAGE_CLOSED))

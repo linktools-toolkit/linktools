@@ -471,7 +471,7 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
 
     group = _recovery_group(subagent)
     storage = PersistenceStorage.sqlite(path) if subagent else PersistenceStorage.from_root(path, exclusive_writer=True)
-    async with Persistence.open('deadline-recovery', storage=storage) as persistence_380, Runtime.attach(persistence=persistence_380, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_380) as engine:
+    async with Persistence.open('deadline-recovery', storage=storage) as persistence_380, Runtime.attach(persistence=persistence_380, features=model_features(_Models(_UsageFunctionModel(model)), group), auto_recover=not subagent) as runtime, TaskEngine.open(persistence=persistence_380) as engine:
         original_binding = (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,
         )).binding

@@ -456,7 +456,7 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
         async def open_runtime(storage):
             persistence = await stack.enter_async_context(Persistence.open(_NAMESPACE, storage=storage))
             return await stack.enter_async_context(Runtime.attach(
-                persistence=persistence, features=model_features(_ToolModels(), application),
+                persistence=persistence, features=model_features(_ToolModels(), application), auto_recover=True,
             ))
 
         opened = await asyncio.gather(*(open_runtime(state) for state in states), return_exceptions=True)

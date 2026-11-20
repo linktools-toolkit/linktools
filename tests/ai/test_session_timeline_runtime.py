@@ -125,8 +125,13 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("turn_count", "limit", "sequences"), (
+    (2, 1, (1, 2)),
+    (6, 2, (3, 4, 5, 6)),
+))
 async def test_session_timeline_reads_only_captured_tail_during_append(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    turn_count: int, limit: int, sequences: tuple[int, ...],
 ) -> None:
     from linktools.ai.history import _history as history_module
     from linktools.ai.persistence._sql import _SqlTransaction
@@ -142,7 +147,7 @@ async def test_session_timeline_reads_only_captured_tail_during_append(
     ):
         session = await runtime.agents.get("default").create_session("session")
         principal = runtime.default_principal
-        for n in range(6):
+        for n in range(turn_count):
             result = (await session.run(f"repeat {n % 2}", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
         full = await runtime.history.session_timeline("session", principal=principal)
@@ -164,17 +169,18 @@ async def test_session_timeline_reads_only_captured_tail_during_append(
         with monkeypatch.context() as patch:
             patch.setattr(_SqlTransaction, "get_facts", read_facts)
             patch.setattr(history_module, "capture_session_timeline", capture_then_append)
-            page = await runtime.history.session_timeline("session", principal=principal, limit=2)
-        assert page.items == full.items[-2:]
-        assert requested == [(3, 4, 5, 6)]
+            page = await runtime.history.session_timeline("session", principal=principal, limit=limit)
+        assert page.items == full.items[-limit:]
+        assert requested == [sequences]
         older = await runtime.history.session_timeline("session", principal=principal, cursor=page.next_cursor)
-        assert older.items == full.items[:-2]
+        assert older.items == full.items[:-limit]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ("missing", "malformed", "coordinate_gap", "head"))
+@pytest.mark.parametrize("turn_count", (2, 3))
 async def test_session_timeline_rejects_invalid_captured_tail(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, turn_count: int,
 ) -> None:
     from dataclasses import replace
 
@@ -193,7 +199,7 @@ async def test_session_timeline_rejects_invalid_captured_tail(
         Runtime.attach(persistence=persistence, features=model_features(RuntimeUsageModels(), application)) as runtime,
     ):
         session = await runtime.agents.get("default").create_session("session")
-        for _ in range(3):
+        for _ in range(turn_count):
             assert (await session.run("repeat", timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         get_facts = _SqlTransaction.get_facts
         decode_chunk = TranscriptRepository.decode_chunk
@@ -212,7 +218,7 @@ async def test_session_timeline_rejects_invalid_captured_tail(
         def decode(repository, fact):
             chunk = decode_chunk(repository, fact)
             return replace(chunk, first_message_index=chunk.first_message_index + 1) if (
-                fault == "coordinate_gap" and fact.sequence == 3 and fact.kind == "transcript_chunk"
+                fault == "coordinate_gap" and fact.sequence == turn_count and fact.kind == "transcript_chunk"
             ) else chunk
 
         async def capture_bad_head(*args, **kwargs):

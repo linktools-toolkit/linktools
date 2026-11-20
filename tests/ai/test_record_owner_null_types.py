@@ -65,9 +65,10 @@ async def test_server_typed_owner_content_union_prepares(
                 owner_keys=(record_key("owner-types", "tenant", "checkpoint", kind, ("owner",)),),
                 content_store_key=b"archive", content_scope_key=archive_scope_key("owner-types", "tenant"),
                 content_paths=(("value", "payload", "fields", "arguments_payload", "fields", "content", "$execution_payload"),),
-                typed_payloads=True,
+                typed_payloads=True, fixed_projection=True,
                 owner_statement=(_record_query_statement(metadata, b"owner",
-                    RecordQuery(kind=kind, parent_key=b"parent", limit=2)) if scoped else None))
+                    RecordQuery(kind=kind, parent_key=b"parent", limit=2),
+                    content_columns=("tool_arguments_sha256",)) if scoped else None))
             async with engine.connect() as connection:
                 # Both servers parse casts and resolve UNION column types even
                 # with no rows: exercise the actual owner/content JOIN.
@@ -78,14 +79,29 @@ async def test_server_typed_owner_content_union_prepares(
 
 @pytest.mark.parametrize("backend", ("postgresql", "mysql", "sqlite"))
 def test_scoped_owner_content_join_compiles_with_inner_limit(backend: str) -> None:
+    from linktools.ai.persistence._step_schema import build_step_sql_metadata
+
     metadata = build_runtime_sql_metadata(frozenset(PersistenceDomain))
+    build_step_sql_metadata(metadata=metadata)
     owner = _record_query_statement(metadata, b"owner",
-        RecordQuery(kind="tool_operation", parent_key=b"parent", limit=2))
+        RecordQuery(kind="tool_operation", parent_key=b"parent", limit=2),
+        content_columns=("tool_arguments_sha256", "tool_arguments_first_sha256"))
     query = content_reference_statement(metadata, dialect=backend, owner_store_key=b"owner", owner_keys=(),
         content_store_key=b"archive", content_scope_key=archive_scope_key("owner-types", "tenant"),
         content_paths=(("value", "payload", "fields", "arguments_payload", "fields", "content", "$execution_payload"),),
-        typed_payloads=True, owner_statement=owner)
+        typed_payloads=True, fixed_projection=True, owner_statement=owner,
+        native_root_paths=(("value", "payload", "fields", "arguments_payload", "fields", "content", "$native_tool_arguments"),))
     dialect = {"postgresql": postgresql, "mysql": mysql, "sqlite": sqlite}[backend].dialect()
     sql = str(query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True}))
+    assert "JSON_EXTRACT" not in sql.upper()
     assert "LIMIT" in sql and "content_owners" in sql and "parent_key" in sql
     assert "COLLATE utf8mb4_bin)" not in sql
+    if backend == "mysql":
+        # Owner rows, generic bodies, typed bodies and the native message arm
+        # select the same bounded global page before doing their respective joins.
+        assert sql.count("ORDER BY record_owners.sort_prefix, record_owners.sort_key, record_owners.`key`") == 4
+        assert sql.count("LIMIT") == 4
+        assert "SELECT record_owners.tool_arguments_sha256" in sql
+        assert "AS content_native_owners" in sql
+    if backend == "postgresql":
+        assert "CAST(NULL AS BYTEA) AS payload_bytes" in sql

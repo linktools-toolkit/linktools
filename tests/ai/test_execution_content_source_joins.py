@@ -3,11 +3,12 @@
 """Projection joins preserve actual source identity, cold retries, and narrow reads."""
 
 from copy import deepcopy
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select, update
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 
 from linktools.ai.errors import AIError, ErrorCode
@@ -76,6 +77,44 @@ async def test_projection_join_rejects_missing_damaged_and_foreign_sources(
         await state.close()
 
 
+@pytest.mark.parametrize("damage", ("missing", "duplicate", "stale"))
+async def test_execution_reference_has_one_physical_identity(tmp_path: Path, damage: str) -> None:
+    async with Persistence.open(_NAMESPACE, storage=_storage("sqlite", tmp_path), tenant_id="tenant") as state:
+        await _seed(state)
+        repository = state.execution.executions
+        store = repository.state_store
+        key = repository.execution_record_key("execution")
+        logical = await store.read_record(key)
+        assert logical is not None
+        assert (await store.read_records((key,)))[key] == logical
+        assert next(item for item in await store.read(lambda tx: tx.scan_records())
+                    if item.key == key) == logical
+        table = store.storage_group.metadata.tables["ai_execution_records"]
+        condition = (table.c.store_key == store.store_key) & (table.c.key == key)
+        async with store.context.engine.begin() as connection:
+            digest, raw = (await connection.execute(
+                select(table.c.output_sha256, table.c.payload_json).where(condition)
+            )).one()
+            assert len(digest) == 64 and digest not in raw
+            layout = json.loads(raw)
+            body = layout["value"]["payload"]["fields"]["result"]["fields"]["output"]["fields"]["content"]
+            assert body["$execution_payload"] is True
+            restored = decode_envelope(logical.data).value["payload"]
+            assert restored["fields"]["result"]["fields"]["output"]["fields"]["content"][
+                "$execution_payload"] == "execution-payload:" + digest
+            if damage == "missing":
+                damaged = {"output_sha256": None}
+            elif damage == "duplicate":
+                body["$execution_payload"] = "execution-payload:" + digest
+                damaged = {"payload_json": json.dumps(layout)}
+            else:
+                damaged = {"output_sha256": "f" * 64}
+            await connection.execute(update(table).where(condition).values(**damaged))
+        with pytest.raises(AIError) as caught:
+            await repository.get_result_record("execution", tenant_id="tenant", fresh=True)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 async def test_cold_projection_join_restarts_with_the_current_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -122,10 +161,11 @@ async def test_projection_join_uses_indexed_owners_and_counts_ctes_as_reads(tmp_
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert result is not None and result.result == expected.result
         assert len(statements) == 1
+        assert "JSON_EXTRACT" not in statements[0][0].upper()
         async with engine.connect() as connection:
             plan = await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statements[0][0], statements[0][1])
             details = tuple(row[-1] for row in plan)
-        assert any("SEARCH ai_state_records" in row and "key_locator" in row for row in details)
+        assert any("SEARCH ai_execution_records" in row and "key_locator" in row for row in details)
         assert any("SEARCH content_source" in row and "sort_prefix" in row for row in details)
         assert any("SEARCH ai_step_messages" in row and "sha256" in row for row in details)
         _, content = await group.open_archive()
@@ -137,7 +177,7 @@ async def test_projection_join_uses_indexed_owners_and_counts_ctes_as_reads(tmp_
             query = content_reference_statement(group.metadata, dialect=dialect.name,
                 owner_store_key=repository.state_store.store_key,
                 owner_keys=(repository.execution_record_key("execution"),), content_store_key=content.store_key,
-                content_scope_key=archive_scope_key(_NAMESPACE, "tenant"), content_paths=paths, typed_payloads=True)
+                content_scope_key=archive_scope_key(_NAMESPACE, "tenant"), content_paths=paths, typed_payloads=True, fixed_projection=True)
             compiled = query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
             assert (len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)) <= 999
             if dialect.name == "mysql":
@@ -150,16 +190,27 @@ async def test_content_join_batch_bound_covers_all_dialect_path_expansions(tmp_p
         repository = state.execution.executions
         group = repository.state_store.storage_group
         _, content = await group.open_archive()
-        for path_count in (1, 4, 8, 16):
+        prefix = ("value", "payload", "fields")
+        slots = (
+            ("runtime_policy", "$runtime_policy"),
+            ("binding", "$execution_binding"),
+            ("stored_user_input", "fields", "content", "$execution_payload"),
+            ("result", "fields", "content", "$execution_payload"),
+            ("result", "fields", "output", "fields", "content", "$execution_payload"),
+            ("terminal_details", "fields", "content", "$execution_payload"),
+            ("recovery", "fields", "pending_tools", "fields", "content", "$execution_payload"),
+            ("recovery", "fields", "terminal_handoff", "fields", "content", "$execution_payload"),
+            ("recovery", "fields", "terminal_handoff", "fields", "terminal_details", "fields", "content", "$execution_payload"),
+        )
+        for path_count, fixed in ((1, True), (4, True), (5, True), (len(slots), False)):
             keys = tuple(repository.execution_record_key(str(index))
                          for index in range(content_reference_batch_size(path_count)))
-            paths = tuple(("value", "payload", "fields", "declared", str(index), "$execution_payload")
-                          for index in range(path_count))
+            paths = tuple((*prefix, *slot) for slot in slots[:path_count])
             for dialect in (sqlite.dialect(), postgresql.dialect(), mysql.dialect(server_version_info=(5, 7, 44))):
                 query = content_reference_statement(group.metadata, dialect=dialect.name,
                     owner_store_key=repository.state_store.store_key, owner_keys=keys,
                     content_store_key=content.store_key, content_scope_key=archive_scope_key(_NAMESPACE, "tenant"),
-                    content_paths=paths, typed_payloads=True)
+                    content_paths=paths, typed_payloads=True, fixed_projection=fixed)
                 compiled = query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
                 count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
                 assert count <= 999
@@ -191,5 +242,5 @@ async def test_transaction_execution_read_batches_fixed_content(tmp_path: Path) 
         finally:
             event.remove(engine, "before_cursor_execute", observe)
         assert len(statements) == 1
-        assert "ai_state_records" in statements[0]
+        assert "ai_execution_records" in statements[0]
         assert "ai_step_messages" in statements[0]

@@ -50,7 +50,7 @@ def _execution_sql_bindings(persistence: Persistence) -> Iterator[list[dict]]:
     rows: list[dict] = []
 
     def capture(connection, cursor, statement, parameters, execution_context, many) -> None:
-        if "ai_state_records" not in statement or not statement.lstrip().upper().startswith(("INSERT", "UPDATE")):
+        if "ai_execution_records" not in statement or not statement.lstrip().upper().startswith(("INSERT", "UPDATE")):
             return
         batches = parameters if many else (parameters,)
         for batch in batches:
@@ -156,14 +156,13 @@ async def test_execution_payload_runtime_keeps_control_writes_compact_across_tur
                     assert record.result.output.decode() == {"text": _OUTPUT}
                     await _inspect_without_payload_reads(runtime, execution.execution_id, monkeypatch)
                 assert calls == len(prompts)
-                for index, execution_id in enumerate(ids):
+                for execution_id in ids:
                     writes = [row for row in bindings if row["fields"]["execution_id"] == execution_id]
                     assert len(writes) > 1, "the real producer must exercise control updates"
                     for slot in (_INPUT_SLOT, _OUTPUT_SLOT):
-                        references = [payload_reference(value) for write in writes
+                        references = [value["fields"]["content"]["$execution_payload"] for write in writes
                                       for path, value in execution_payload_slots(write) if path == slot]
-                        assert references and None not in references
-                        assert len(set(references)) == 1, "control updates changed an immutable body reference"
+                        assert references and all(reference is True for reference in references)
                 if conversation:
                     history = (await target.history()).items
                     assert [item.content for item in history if item.item_kind == "user"] == prompts
@@ -277,7 +276,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                     assert stored.recovery.terminal_handoff.outcome.output.decode() == {"text": _OUTPUT}
                     async with Persistence.open("execution-payload-handoff", storage=_split_sqlite_storage(database)) as reader_state:
                         async with Runtime.attach(persistence=reader_state,
-                            features=model_features(models, features), metrics=None) as reader:
+                            features=model_features(models, features), metrics=None, auto_recover=True) as reader:
                             result = await reader.executions.result(execution.execution_id, principal=reader.default_principal)
                             assert result.status is ExecutionStatus.SUCCEEDED
                             assert result.output == {"text": _OUTPUT}

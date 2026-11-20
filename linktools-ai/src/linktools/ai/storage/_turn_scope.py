@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Callable, Coroutine
 from types import TracebackType
 from typing import Literal
 
@@ -33,6 +34,7 @@ class RenewingTurnScope:
         self, backend: TurnCoordinationBackend, scope: TurnScopeIdentity, *, session_key: str,
         request_key: str, request_digest: str, execution_id: str, owner_id: str,
         lease_seconds: float = 30.0, renew_seconds: float = 5.0,
+        _claim: Callable[[float], Coroutine[object, object, TurnCoordination | None]] | None = None,
     ) -> None:
         if (isinstance(lease_seconds, bool) or isinstance(renew_seconds, bool)
                 or not math.isfinite(lease_seconds) or not math.isfinite(renew_seconds)
@@ -40,6 +42,7 @@ class RenewingTurnScope:
             raise ValueError("renewal period must be positive and shorter than the finite lease")
         if not isinstance(scope, TurnScopeIdentity):
             raise TypeError("turn scope must be a TurnScopeIdentity")
+        self._claim = _claim
         self._backend = backend
         self._scope = scope
         self._identity = dict(session_key=session_key, request_key=request_key,
@@ -67,9 +70,10 @@ class RenewingTurnScope:
         self._deadline = loop.time() + self._lease_seconds
         # A failure here remains an unknown claim outcome, never a busy result.
         with sql_observation_scope("storage.turn.claim"):
-            claim = asyncio.create_task(self._backend.claim_turn(
-                self._scope, **self._identity, lease_seconds=self._lease_seconds,
-            ))
+            claim = asyncio.create_task(
+                self._backend.claim_turn(self._scope, **self._identity, lease_seconds=self._lease_seconds)
+                if self._claim is None else self._claim(self._lease_seconds)
+            )
             cancelled = False
             while not claim.done():
                 try:

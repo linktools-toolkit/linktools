@@ -166,6 +166,7 @@ def _stored_bytes(root: Path) -> bytes:
         with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
             for table, column in (
                 ("ai_state_records", "payload_json"),
+                ("ai_execution_records", "payload_json"),
                 ("ai_state_facts", "payload_json"),
                 ("ai_step_tool_operations", "payload_json"),
             ):

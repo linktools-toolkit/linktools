@@ -214,7 +214,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
                 else:
                     # Trace still fences its execution producer, but replay must
                     # not rewrite transcript records, checkpoint facts or content.
-                    assert len(writes) == 1 and writes[0][0].startswith("UPDATE ai_state_records")
+                    assert len(writes) == 1 and writes[0][0].startswith("UPDATE ai_execution_records")
                     repository = state.execution.executions
                     assert repository.state_store.store_key in writes[0][1]
                     assert repository._key("execution", ("execution",)) in writes[0][1]

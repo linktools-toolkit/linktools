@@ -189,7 +189,7 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
         async def conflict(transaction, replacements):
             if {item.record.kind for item in replacements} == {"execution", "idempotency"}:
                 target = next(item for item in replacements if item.record.kind == member)
-                table = transaction._table("ai_state_records")
+                table = transaction._table("ai_execution_records")
                 await transaction._execute(update(table).where(
                     table.c.store_key == transaction._store_key,
                     table.c.key == target.record.key,

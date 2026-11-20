@@ -35,7 +35,7 @@ async def test_wrapper_retry_reuses_snapshot_and_keeps_dispatch_fence(tmp_path: 
     from sqlalchemy import event
     @event.listens_for(engine.sync_engine, "before_cursor_execute")
     def sql_probe(conn, cursor, statement, parameters, context, executemany):
-        if statement.startswith("UPDATE ai_state_records"):
+        if statement.startswith("UPDATE ai_execution_records"):
             execution_updates.append(statement)
         if statement.startswith("INSERT INTO ai_step_snapshots"):
             snapshots.append((statement, parameters))
@@ -274,7 +274,7 @@ async def test_empty_retry_boundary_keeps_database_fence_and_resolves_lost_ack(t
     def record_sql(connection, cursor, statement, parameters, context, many):
         if statement.startswith("INSERT INTO ai_step_snapshots"):
             snapshots.append(parameters)
-        if len(calls) == 1 and resume.is_set() and statement.startswith("UPDATE ai_state_records"):
+        if len(calls) == 1 and resume.is_set() and statement.startswith("UPDATE ai_execution_records"):
             fence_rowcounts.append(cursor.rowcount)
             if fault == "ack_loss" and not lost:
                 connection.info[marker] = True

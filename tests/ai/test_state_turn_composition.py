@@ -177,8 +177,13 @@ async def test_host_binds_source_once_and_borrows_cache(
         assert await cache.get("display") == b"content"
         claimed = await _claim(bound)
         assert claimed is not None and claimed.lease is not None
-        rows = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
+        store = state.execution.executions.state_store
+        rows = await store.read(lambda tx: tx.scan_records())
         assert {row.kind for row in rows} == {"turn_session", "turn_request", "turn_execution"}
+        from .test_state_turn_authority import _authority_records
+        assert {row.kind for row in await _authority_records(store, namespace="source-turns")} == {
+            "turn_session", "turn_request", "turn_execution",
+        }
         assert not state.capability_stores and not state.durable_capability_ids
         assert await bound.read_turn_by_session(_SCOPE, "session") == replace(claimed, lease=None)
         assert await bound.release_turn(claimed.lease)
@@ -315,11 +320,12 @@ async def test_snapshot_rejects_broken_source_turn_graph(tmp_path: Path, defect:
     cache = _BorrowedCache()
     async with _opened("sqlite", tmp_path, cache) as state:
         await _claim(state.coordination_backend)
-        records = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
+        from .test_state_turn_authority import _authority_records
+        records = await _authority_records(state.execution.executions.state_store, namespace="source-turns")
     namespace = "source-turns"
     domain = PersistenceDomain.EXECUTION
     if defect == "missing_execution":
-        records = tuple(record for record in records if record.kind != "turn_execution")
+        records = tuple(record for record in records if record.kind not in {"turn_admission", "turn_execution"})
     elif defect == "foreign_namespace":
         namespace = "wrong"
     elif defect == "wrong_domain":
@@ -441,3 +447,95 @@ async def test_failed_host_binding_does_not_admit_runtime_or_close_borrowed_cach
     with pytest.raises(AIError) as unbound:
         await configuration.coordination.read_turn_by_session(_SCOPE, "session")
     assert unbound.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+
+
+@pytest.mark.parametrize("layout", ("one_group", "side_group", "capability_group", "memory", "custom"))
+async def test_builtin_turn_authority_requires_one_durable_source_at_composition(tmp_path, layout):
+    from linktools.ai.persistence import StateTurnResources
+    from linktools.ai.persistence._plan import PersistencePlan
+    from linktools.ai.storage import StorageRoute
+
+    class CustomStateTurns(StateTurnResources):
+        pass
+
+    coordination = CustomStateTurns() if layout == "custom" else StateTurnResources()
+    if layout == "memory":
+        storage = PersistenceStorage.in_memory(coordination=coordination)
+    else:
+        plan = PersistencePlan.from_default(StorageRoute.sqlite(tmp_path / "state.db"))
+        if layout == "side_group":
+            plan = replace(plan, conversation=StorageRoute.sqlite(tmp_path / "side.db"))
+        elif layout == "capability_group":
+            plan = replace(plan, capability_routes={"optional": StorageRoute.sqlite(tmp_path / "cap.db")})
+        storage = PersistenceStorage(plan, coordination=coordination)
+    scope = TurnScopeIdentity("layout", "tenant", "runtime-pending-turn")
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=storage) as state:
+        bound = state.coordination_backend
+        assert isinstance(bound, StateTurnCoordination)
+        assert bound._coowned is (layout == "one_group")
+        with pytest.raises(AttributeError):
+            bound._coowned = not bound._coowned
+        claim = await bound.claim_turn(
+            scope, session_key="session:session", request_key="a" * 64,
+            request_digest="b" * 64, execution_id="execution",
+            owner_id="c" * 32, lease_seconds=60,
+        )
+        assert (state.pending_turn_coordination.execution_authority(claim) is not None) is (layout == "one_group")
+        assert await bound.release_turn(claim.lease)
+
+
+async def test_builtin_can_open_and_read_an_active_turn_from_another_layout(tmp_path):
+    from linktools.ai.persistence import StateTurnResources
+
+    class CustomStateTurns(StateTurnResources):
+        pass
+
+    scope = TurnScopeIdentity("layout-change", "tenant", "runtime-pending-turn")
+    path = tmp_path / "state.db"
+    resource = PersistenceStorage.sqlite(path, coordination=StateTurnResources())
+    custom = PersistenceStorage.sqlite(path, coordination=CustomStateTurns())
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=resource) as original:
+        authority = original.coordination_backend
+        reserved = await authority.claim_turn(
+            scope, session_key="session:session", request_key="a" * 64,
+            request_digest="b" * 64, execution_id="execution",
+            owner_id="c" * 32, lease_seconds=60,
+        )
+        async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom, read_only=True) as observer:
+            assert not observer.coordination_backend._coowned
+            active = await observer.coordination_backend.read_turn_by_session(scope, "session:session")
+            assert active == replace(reserved, lease=None)
+        assert await authority.release_turn(reserved.lease)
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom) as after:
+        assert not after.coordination_backend._coowned
+
+
+async def test_builtin_active_private_shell_restores_through_default_composition(tmp_path):
+    from linktools.ai.persistence import StateTurnResources
+
+    archive = InMemoryObjectStore()
+    scope = TurnScopeIdentity("default-shell-snapshot", "tenant", "runtime-pending-turn")
+    source = PersistenceStorage.from_root(tmp_path / "source", coordination=StateTurnResources())
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=source) as state:
+        claim = await state.coordination_backend.claim_turn(
+            scope, session_key="session:session", request_key="a" * 64, request_digest="b" * 64,
+            execution_id="hidden-shell", owner_id="c" * 32, lease_seconds=120,
+        )
+        assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=source, read_only=True) as state:
+        ref = await state.export_snapshot(object_store=archive, limits=_LIMITS)
+    destination = tmp_path / "restored"
+    await Persistence.restore_snapshot(ref, object_store=archive, root=destination, limits=_LIMITS)
+    restored = PersistenceStorage.from_root(destination, coordination=StateTurnResources())
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=restored) as state:
+        assert state.coordination_backend._coowned
+        assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
+        assert await state.coordination_backend.read_turn(scope, "hidden-shell") is None
+        assert not await state.coordination_backend.release_turn(claim.lease)
+        takeover = await state.coordination_backend.claim_turn(
+            scope, session_key="session:session", request_key="a" * 64, request_digest="b" * 64,
+            execution_id="hidden-shell", owner_id="d" * 32, lease_seconds=120,
+        )
+        assert takeover.lease.fence == claim.lease.fence + 1
+        assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
+        assert await state.coordination_backend.release_turn(takeover.lease)

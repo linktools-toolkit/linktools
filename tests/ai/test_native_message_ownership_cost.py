@@ -69,7 +69,7 @@ class _Traffic:
             target = re.match(r"(?:INSERT INTO|UPDATE|DELETE FROM) (\w+)", statement.lstrip())
             assert target is not None
             self.writes.append((operation, target.group(1)))
-        if operation == 'INSERT' and statement.lstrip().startswith('INSERT INTO ai_state_records '):
+        if operation == 'INSERT' and statement.lstrip().startswith(('INSERT INTO ai_state_records ', 'INSERT INTO ai_execution_records ')):
             columns = statement.split('(', 1)[1].split(')', 1)[0].split(', ')
             kind_index = columns.index('kind')
             batches = parameters if many else (parameters,)
@@ -98,16 +98,50 @@ class _Traffic:
         kinds: Counter[str] = Counter()
         for statement, parameters in self.reads[start:]:
             projection = " ".join(statement.split("FROM", 1)[0].split()).replace('"', '').replace('`', '')
-            if projection.startswith("SELECT ai_state_records.id,"):
+            if projection.startswith(("SELECT ai_state_records.id,", "SELECT ai_execution_records.id,")):
+                table = projection.split()[1].split(".")[0]
                 identifiers = statement.replace('"', '').replace('`', '')
-                assert "ai_state_records.store_key =" in identifiers
-                assert re.search(r"ai_state_records\.key_locator (?:= \?|IN \(\?(?:, \?)?\))", identifiers)
+                assert f"{table}.store_key =" in identifiers
+                assert re.search(rf"{table}\.key_locator (?:= \?|IN \(\?(?:, \?)?\))", identifiers)
                 # The lookup returns the complete raw identity for owner validation.
-                assert "ai_state_records.key," in projection and "ai_state_records.key_locator," in projection
+                assert f"{table}.key," in projection and f"{table}.key_locator," in projection
                 assert len(parameters) == (2 if parameters[0] == record_store else 3)
                 assert parameters[0] in (record_store,) + (() if binding_store is None else (binding_store,))
                 assert all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item) for item in parameters[1:])
                 kinds['owner' if parameters[0] == record_store else 'binding'] += 1
+            elif projection.startswith("SELECT record_owners.id,"):
+                identifiers = statement.replace('"', '').replace('`', '')
+                assert "FROM ai_execution_records" in identifiers
+                assert " UNION " not in identifiers
+                assert "ai_execution_records.kind != 'execution_shell'" in identifiers
+                assert "record_owners.store_key = ?" in identifiers
+                assert "record_owners.key_locator = ?" in identifiers
+                assert "record_owners.key," in projection and "record_owners.key_locator," in projection
+                assert len(parameters) == 2 and parameters[0] == record_store
+                assert isinstance(parameters[1], str) and re.fullmatch(r"[0-9a-f]{64}", parameters[1])
+                kinds['owner'] += 1
+            elif projection.startswith("SELECT ? AS typed_payload, ai_state_records.id,"):
+                assert binding_store is not None and payload_store is not None
+                record_sql, payload_sql = statement.split(" UNION ALL ")
+                assert "ai_state_records.store_key = ?" in record_sql
+                assert "ai_state_records.key_locator IN (?, ?)" in record_sql
+                assert 'ai_state_records."key",' in record_sql and "ai_state_records.key_locator," in record_sql
+                assert "ai_step_messages.store_locator = ?" in payload_sql
+                assert "ai_step_messages.store_key = ?" in payload_sql
+                assert "ai_step_messages.sha256 = ?" in payload_sql
+                # Check selection identities independently of UNION padding
+                # and row-discriminator representation.
+                record_start = record_sql.split("WHERE", 1)[0].count("?")
+                payload_start = record_sql.count("?") + payload_sql.split("WHERE", 1)[0].count("?")
+                record_binds = parameters[record_start:payload_start][:3]
+                payload_binds = parameters[payload_start:]
+                assert len(record_binds) == len(payload_binds) == 3
+                assert record_binds[0] == binding_store
+                assert payload_binds[:2] == (payload_store_locator(payload_store), payload_store)
+                assert all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                           for value in (*record_binds[1:], payload_binds[2]))
+                kinds['binding'] += 1
+                kinds['payload'] += 1
             elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":
                 assert "ai_step_sequences.sha256 IN" in statement
                 assert parameters == (native_store_locator(store_key), store_key, root)
@@ -586,14 +620,14 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                 binding_store=store.storage_group.opened_archive[1].store_key,
                 payload_store=payload_store_key(namespace, tenant),
             )
-            # Binding/policy share one bounded identity lookup; the typed input
-            # has one separate lookup. Neither is a Native history-body read.
-            phase_reads['binding'] += 1
-            phase_reads['payload'] += 1
-            phase_reads['context'] += writer_traffic.statements['SELECT'] - reads - 2
+            # Binding/policy and typed input share one bounded query across
+            # their owners. It does not read Native history bodies.
+            phase_reads['binding_payload'] += 1
+            phase_reads['context'] += writer_traffic.statements['SELECT'] - reads - 1
             budgeted_writes += writer_traffic.assert_writes(write_start, {
                 # Owner insert plus content-addressed binding insert-or-verify.
-                ('INSERT', 'ai_state_records'): 2, ('INSERT', 'ai_step_messages'): 1,
+                ('INSERT', 'ai_execution_records'): 1, ('INSERT', 'ai_state_records'): 1,
+                ('INSERT', 'ai_step_messages'): 1,
             })
             assert writer_traffic.rows == body_rows
 
@@ -619,7 +653,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         # separately from the zero-encode frozen projection/context reuse path.
         assert phase_encodings['mutable_snapshot_freeze'] <= turns * (turns + 1) // 2
         assert phase_encodings['frozen_projection'] == phase_encodings['confirmed_context'] == 0
-        assert phase_reads == {'snapshot': 0, 'archive': 2 * turns, 'context': 2 * turns, 'binding': turns, 'payload': turns}
+        assert phase_reads == {'snapshot': 0, 'archive': 2 * turns, 'context': 2 * turns, 'binding_payload': turns}
         assert writer_traffic.statements['SELECT'] == sum(phase_reads.values())
         assert reader_traffic.statements['SELECT'] == turns
         assert 0 < writer_traffic.preparations <= 2 * turns

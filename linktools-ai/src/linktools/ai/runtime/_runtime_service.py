@@ -158,7 +158,7 @@ class Runtime(Generic[AppT]):
         owns_persistence: bool, context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
-        auto_recover: bool = True,
+        auto_recover: bool = False,
     ) -> None:
         if not isinstance(persistence, Persistence):
             raise TypeError("persistence must be Persistence")
@@ -214,7 +214,7 @@ class Runtime(Generic[AppT]):
         context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
-        auto_recover: bool = True,
+        auto_recover: bool = False,
     ) -> "Runtime[AppT]":
         """Open selected producer domains, owning storage or borrowing persistence.
 
@@ -222,6 +222,7 @@ class Runtime(Generic[AppT]):
         writable persistence without namespace, storage or tenant overrides.
         Keep the returned Runtime before entering when cleanup may need retrying.
         Features opt into Agent; omitting them does not start an Agent producer.
+        Pass auto_recover=True to opt into startup reconciliation.
         """
         if persistence is not None:
             if namespace is not None or storage is not None or tenant_id is not None:
@@ -246,7 +247,7 @@ class Runtime(Generic[AppT]):
         cls, *, persistence: Persistence, context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
-        auto_recover: bool = True,
+        auto_recover: bool = False,
     ) -> "Runtime[AppT]":
         """Compatibility alias for open(persistence=...); the provider owns storage."""
         return cls.open(

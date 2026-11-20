@@ -59,9 +59,8 @@ async def _admit_without_worker(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("explicit_default", (False, True))
-async def test_startup_recovery_defaults_to_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_default: bool,
+async def test_startup_recovery_runs_when_explicitly_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
 
@@ -74,8 +73,7 @@ async def test_startup_recovery_defaults_to_enabled(
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     assert calls == []
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    options = {"auto_recover": True} if explicit_default else {}
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_75, Runtime.attach(persistence=persistence_75, features=model_features(models, _capabilities()), **options) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_75, Runtime.attach(persistence=persistence_75, features=model_features(models, _capabilities()), auto_recover=True) as runtime:
         result = (await runtime.executions.wait(
             before.execution_id, principal=runtime.default_principal, timeout_seconds=10,
         )).result
@@ -86,8 +84,9 @@ async def test_startup_recovery_defaults_to_enabled(
 
 
 @pytest.mark.asyncio
-async def test_disabled_startup_preserves_admission_until_explicit_execution_recovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("options", ({}, {"auto_recover": False}), ids=("default", "explicit-disabled"))
+async def test_startup_without_opt_in_preserves_admission_until_explicit_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, options: dict[str, bool],
 ) -> None:
     calls: list[str] = []
 
@@ -99,7 +98,7 @@ async def test_disabled_startup_preserves_admission_until_explicit_execution_rec
     models = _Models(FunctionModel(stream_function=model))
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_101, Runtime.attach(persistence=persistence_101, features=model_features(models, _capabilities()), auto_recover=False) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_101, Runtime.attach(persistence=persistence_101, features=model_features(models, _capabilities()), **options) as runtime:
         assert await runtime._state.execution.executions.get(
             before.execution_id, tenant_id=runtime.tenant_id,
         ) == before

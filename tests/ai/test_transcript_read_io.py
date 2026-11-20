@@ -711,7 +711,8 @@ async def test_owner_content_read_survives_concurrent_native_collection(
         # Simulate the committed result of retiring all owners and collecting
         # their native rows while the reader is between owner and body queries.
         async with engine.begin() as connection:
-            for table in ("ai_state_facts", "ai_state_records", "ai_step_sequences", "ai_step_messages"):
+            for table in ("ai_state_facts", "ai_state_records", "ai_execution_records",
+                          "ai_step_sequences", "ai_step_messages"):
                 await connection.execute(text(f"DELETE FROM {table}"))
         collected.set()
         messages = await asyncio.wait_for(task, timeout=5)

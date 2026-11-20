@@ -39,9 +39,10 @@ That port preserves the Agent producer's execution authority.
 ## Important signatures and semantics
 
 - `Runtime.open(namespace, *, storage, tenant_id="default", context=None,
-  features=None, metrics=None, authorization=None, auto_recover=True)` returns
+  features=None, metrics=None, authorization=None, auto_recover=False)` returns
   the context-managed Runtime. Omitting features does not start an Agent
-  producer. `Runtime.open(persistence=..., ...)` borrows an already-open,
+  producer. Pass `auto_recover=True` to opt into startup-wide execution
+  reconciliation. `Runtime.open(persistence=..., ...)` borrows an already-open,
   writable Persistence and inherits its namespace and tenant. Do not pass a
   namespace, tenant, or storage configuration in borrowing mode. The legacy
   `Runtime.attach(persistence=...)` forwards to this same entry. Retain the

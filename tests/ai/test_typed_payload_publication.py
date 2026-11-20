@@ -253,3 +253,36 @@ async def test_mixed_duplicate_rejects_corrupt_typed_size(tmp_path: Path) -> Non
         with pytest.raises(AIError) as caught:
             await archive.ensure_content(values)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_grouped_mixed_content_reads_hits_and_misses_once(tmp_path: Path) -> None:
+    async with Persistence.open(
+        "mixed", tenant_id="tenant", storage=PersistenceStorage.sqlite(tmp_path / "mixed.db"),
+    ) as state:
+        scope, store = await state.execution.executions.state_store.storage_group.open_archive(create=True)
+        archive = ContentArchive(store, scope, namespace="mixed", tenant_id="tenant", object_store=None)
+        values = ((PAYLOAD_CODEC, b"stored payload"), ("execution-binding", b"stored binding"))
+        await archive.ensure_content(values)
+        hits = archive.content_record_keys(values)
+        misses = archive.content_record_keys(((PAYLOAD_CODEC, b"missing"), ("execution-binding", b"missing")))
+        reads = []
+
+        def observe(_connection, _cursor, statement, _parameters, _context, _many):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                reads.append(statement)
+
+        async def read(transaction):
+            requested = (*hits, *misses, hits[0])
+            found = await transaction.get_records(requested)
+            assert tuple(found) == hits
+            assert await transaction.get_records(requested) == found
+
+        engine = store.storage_group.context.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", observe)
+        try:
+            await store.read(read)
+        finally:
+            event.remove(engine, "before_cursor_execute", observe)
+        assert len(reads) == 1
+        assert "ai_step_messages" in reads[0] and "ai_state_records" in reads[0]

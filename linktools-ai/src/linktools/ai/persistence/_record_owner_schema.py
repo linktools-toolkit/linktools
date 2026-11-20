@@ -22,9 +22,14 @@ if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
 
+from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
+from ._record_owner import SCAN_KIND_OWNERS
+from ._turn_sql_schema import TURN_SESSION_MAX_BYTES
+
+
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
     """Build one physical owner with the common optimistic record contract."""
-    from sqlalchemy import TIMESTAMP, BigInteger, JSON, Column, LargeBinary, String, Table, Text, text
+    from sqlalchemy import TIMESTAMP, BigInteger, SmallInteger, JSON, Column, LargeBinary, String, Table, Text, text
     from sqlalchemy.dialects import mysql
 
     if name in metadata.tables:
@@ -108,7 +113,11 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
             "payload_json",
             JSON(),
             nullable=False,
-            comment="Canonical domain JSON encoded as a JSON string preserving numeric representations.",
+            comment=(
+                "Domain JSON string; execution reference digests are stored in typed columns."
+                if name == "ai_execution_records" else
+                "Canonical domain JSON encoded as a JSON string preserving numeric representations."
+            ),
         ),
         Column("payload_bytes", sql_blob(), nullable=True,
                comment="Optional binary content body owned by this record; ordinary domain state remains JSON."),
@@ -120,13 +129,30 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                comment="Single SHA-256 lookup projection of the complete parent_key; raw identity must also match."),
         Column("sort_prefix", LargeBinary(128).with_variant(mysql.VARBINARY(128), "mysql"), nullable=False,
                comment="First 128 bytes of the full sort key; non-unique query projection only."),
+        *(Column(column, sql_sha256(), nullable=True, comment=(
+            "Canonical execution reference SHA-256." if name == "ai_execution_records" else
+            "Derived immutable content lookup SHA-256."
+        )) for column in CONTENT_REFERENCE_COLUMNS.get(name, ())),
         *sql_audit_columns(),
     ]
-    if name == "ai_state_records":
+    if name in SCAN_KIND_OWNERS:
         columns.insert(-2, Column(
             "scan_kind", String(34), nullable=False,
             comment="Write-through kind and execution recovery candidate projection; never domain authority.",
         ))
+    if name == "ai_execution_records":
+        columns[-2:-2] = [
+            Column("turn_slot_kind", SmallInteger, nullable=True, comment="Runtime slot family of the exact source owner."),
+            Column("turn_slot_key", LargeBinary(TURN_SESSION_MAX_BYTES).with_variant(mysql.VARBINARY(TURN_SESSION_MAX_BYTES), "mysql"),
+                   nullable=True, comment="Raw runtime slot identity, separate from its family."),
+            Column("turn_token", LargeBinary(32).with_variant(mysql.VARBINARY(32), "mysql"),
+                   nullable=True, comment="Exact generated runtime lease token."),
+            Column("turn_fence", BigInteger, nullable=True, comment="Session fencing generation of the coordinated execution."),
+            Column("turn_expiry", TIMESTAMP(timezone=True).with_variant(mysql.DATETIME(fsp=6), "mysql"),
+                   nullable=True, comment="Last granted source deadline; active only with a lease token."),
+            Column("turn_revision", BigInteger, nullable=False, server_default=text("0"),
+                   comment="Independent writable revision for source lease renewal."),
+        ]
     omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
     if name == "ai_task_graphs":
         omitted = {"kind"}
@@ -137,7 +163,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         sql_query_index(records, "store_key", "state", "sort_prefix")
         sql_audit_indexes(records)
         return
-    if name == "ai_state_records":
+    if name in SCAN_KIND_OWNERS:
         sql_query_index(records, "store_key", "scan_kind", "sort_prefix")
     elif "kind" in records.c:
         sql_query_index(records, "store_key", "kind", "sort_prefix")

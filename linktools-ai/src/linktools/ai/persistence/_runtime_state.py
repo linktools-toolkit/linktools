@@ -423,14 +423,24 @@ class Persistence:
                 self._read_only = read_only
                 config = self._coordination_config
                 if isinstance(config, StateTurnResources):
+                    from ._sql import SqlStateStore
+
                     execution_store = materialized.execution.executions.state_store
-                    if materialized.execution.idempotency.state_store.storage_group is not execution_store.storage_group:
+                    group = execution_store.storage_group
+                    if materialized.execution.idempotency.state_store.storage_group is not group:
                         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
                                       "State turn authority and execution receipts must share their storage group")
+                    # Any configured durable participant can enter a late execution
+                    # boundary. Unconfigured capability partitions join Execution's
+                    # group, and only native Step on its engine joins these writes.
+                    participants = (*materialized.stores.values(), *materialized.capability_stores.values())
+                    coowned = (type(config) is StateTurnResources
+                               and self._plan.route(PersistenceDomain.EXECUTION).retention is StorageRetentionMode.DURABLE
+                               and all(type(store) is SqlStateStore and store.storage_group is group for store in participants))
                     authority = StateTurnCoordination(
                         execution_store,
                         namespace=namespace, tenant_id=tenant_id,
-                        read_only=read_only, require_ready=self._require_ready,
+                        read_only=read_only, require_ready=self._require_ready, _runtime_sql=True, _coowned=coowned,
                     )
                     self._coordination_backend = authority
                     self._pending_turn_coordination = PendingTurnCoordination.for_state(

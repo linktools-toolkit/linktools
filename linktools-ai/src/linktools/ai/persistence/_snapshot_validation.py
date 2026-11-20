@@ -66,6 +66,7 @@ from ._repository_common import (
 )
 from ._step_contracts import TOOL_ERROR_CODE_METADATA_KEY, AgentRunRecord, StepEvent
 from .turns import validate_turn_records
+from ._turn_snapshot import GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot
 from .captures import CAPTURE_RECORD_KINDS, capture_record_value, validate_capture_record
 from .state import (
     StoredFact,
@@ -80,7 +81,20 @@ from .state import (
 )
 
 
-_TURN_RECORD_KINDS = frozenset({"turn_session", "turn_request", "turn_execution"})
+_TURN_RECORD_KINDS = GENERIC_TURN_SNAPSHOT_KINDS | TURN_SNAPSHOT_KINDS
+
+
+def _validate_turn_snapshot(records: tuple[StoredRecord, ...], *, namespace: str, tenant_id: str) -> None:
+    old = any(value.kind in GENERIC_TURN_SNAPSHOT_KINDS for value in records)
+    typed = any(value.kind in TURN_SNAPSHOT_KINDS for value in records)
+    if typed:
+        from ._turn_sql_schema import RUNTIME_TURN_SCOPE
+        if any(value.kind in GENERIC_TURN_SNAPSHOT_KINDS and value.data.get("scope") == RUNTIME_TURN_SCOPE
+               for value in records):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        decode_turn_snapshot(records, namespace=namespace, tenant_id=tenant_id)
+    if old:
+        validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
 
 _ALLOWED_RECORD_KINDS = {
     PersistenceDomain.CONVERSATION: frozenset(
@@ -200,7 +214,7 @@ def canonical_snapshot_indexes(
     operations: tuple[StoredOperation, ...],
 ) -> Mapping[bytes, int]:
     """Rebuild derived snapshot indexes from their durable semantic owners."""
-    validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
+    _validate_turn_snapshot(records, namespace=namespace, tenant_id=tenant_id)
     _records_by_key, values = _decode_snapshot_records(domain, records)
     _validate_budget_projections(values)
     _validate_trace_events(domain, facts, values)
@@ -229,7 +243,7 @@ def validate_snapshot_domain(
     sequences: Mapping[bytes, int],
 ) -> None:
     """Reject physical identities that cannot represent the decoded v1 facts."""
-    validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
+    _validate_turn_snapshot(records, namespace=namespace, tenant_id=tenant_id)
     records_by_key, values = _decode_snapshot_records(domain, records)
 
     _validate_budget_projections(values)

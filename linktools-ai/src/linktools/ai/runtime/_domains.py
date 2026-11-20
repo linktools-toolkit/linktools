@@ -303,6 +303,17 @@ class RuntimeSessions(Generic[AppT]):
                 return await captured()
             yield read
 
+    def observe_changes(self, session_id: str, on_invalidate: Callable[[], None]) -> Callable[[], None]:
+        """Subscribe a trusted host to this Runtime's local session invalidations.
+
+        No initial event, snapshot, authorization grant, external notification
+        or expiry timer is provided. Read current state through the authorized
+        API when needed. The synchronous callback must schedule rather than
+        perform I/O. Unsubscribe when done; Runtime close removes subscriptions.
+        """
+        self._ensure_open()
+        return self._service.observe_changes(session_id, on_invalidate)
+
     def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
         """Observe this Runtime's session changes; external writes need explicit refresh."""
         self._ensure_open()

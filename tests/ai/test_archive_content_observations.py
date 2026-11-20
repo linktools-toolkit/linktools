@@ -166,20 +166,13 @@ async def test_ensure_content_checks_current_bytes_without_republishing_existing
         archive = await _archive(state)
         values = (("execution-binding", b"shared terminal bytes"),)
         publications = []
-        preparations = []
         publish = archive.publish
-        prepare_content = archive.prepare_content
-
-        async def tracked_prepare(values: tuple[tuple[str, bytes], ...], prepared: PreparedArchive) -> tuple[str, ...]:
-            preparations.append(values)
-            return await prepare_content(values, prepared)
 
         async def tracked_publish(transaction: StateTransaction, prepared: PreparedArchive, *, native: bool = True) -> None:
             publications.append(tuple(prepared.records))
             await publish(transaction, prepared, native=native)
 
         monkeypatch.setattr(archive, "publish", tracked_publish)
-        monkeypatch.setattr(archive, "prepare_content", tracked_prepare)
         identities = await archive.ensure_content(values)
         assert len(publications) == 1
         assert await archive.ensure_content(values) == identities
@@ -187,7 +180,8 @@ async def test_ensure_content_checks_current_bytes_without_republishing_existing
         key, = archive.content_record_keys(values)
         current = await archive.store.read_record(key)
         assert current is not None
-        damaged = replace(current, payload_bytes=b"corrupt", storage_revision=current.storage_revision + 1)
+        damaged = replace(current, payload_bytes=b"!" * len(current.payload_bytes),
+                          storage_revision=current.storage_revision + 1)
         assert await archive.store.mutate(lambda transaction: transaction.replace_record(
             damaged, expected_storage_revision=current.storage_revision,
         ))
@@ -195,6 +189,5 @@ async def test_ensure_content_checks_current_bytes_without_republishing_existing
             await archive.ensure_content(values)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert len(publications) == 1
-        assert preparations == [values, values, values]
     finally:
         await state.close()

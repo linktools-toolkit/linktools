@@ -34,7 +34,7 @@ def test_native_capture_bind_budget_and_types(backend: str) -> None:
     statement = content_reference_statement(metadata, dialect=backend, owner_store_key=b"owner",
         owner_keys=tuple(record_key("namespace", "tenant", "checkpoint", "tool_operation", (str(i),)) for i in range(size)),
         content_store_key=b"archive", content_scope_key=archive_scope_key("namespace", "tenant"),
-        content_paths=paths, typed_payloads=True, native_root_paths=native_paths)
+        content_paths=paths, typed_payloads=True, fixed_projection=True, native_root_paths=native_paths)
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[backend].dialect()
     compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
     assert len(compiled.positiontup or compiled.params) <= 999
@@ -80,6 +80,7 @@ async def test_fixed_native_capture_remains_exact_and_transaction_scoped(tmp_pat
         finally:
             event.remove(group.context.engine.sync_engine, "before_cursor_execute", observe)
         assert len(statements) == (2 if case == "nonhead" else 1)
+        assert "JSON_EXTRACT" not in statements[0].upper()
         if case in {"singleton", "head", "nonhead"}:
             return
         if case == "scope":
@@ -88,7 +89,7 @@ async def test_fixed_native_capture_remains_exact_and_transaction_scoped(tmp_pat
             stored = await repository.state_store.read_record(repository.execution_record_key("execution"))
             value = deepcopy(decode_envelope(stored.data).value)
             value["payload"]["fields"]["result"]["fields"]["output"]["fields"]["content"]["$native_text"]["group_id"] = "other"
-            table = group.metadata.tables["ai_state_records"]
+            table = group.metadata.tables["ai_execution_records"]
             async with group.context.engine.begin() as connection:
                 await connection.execute(update(table).where(table.c.key == stored.key).values(
                     payload_json=canonical_json_bytes(encode_envelope(value)).decode("utf-8")))

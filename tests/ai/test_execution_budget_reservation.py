@@ -100,9 +100,9 @@ async def test_caller_cancelled_reservation_completes_and_snapshot_replays(
         reservations = []
         reserve = runtime._state.execution.executions._reserve_start
 
-        async def capture_reservation(value, *, started=False, input_context_write=None):
+        async def capture_reservation(value, **kwargs):
             reservations.append(value)
-            return await reserve(value, started=started, input_context_write=input_context_write)
+            return await reserve(value, **kwargs)
 
         async def pause_after_commit(stores, callback):
             outermost = active_state_transaction(store) is None

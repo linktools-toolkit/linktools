@@ -375,6 +375,7 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
         ExecutionRecoveryState,
         RuntimePayloadRef,
     )
+    from linktools.ai.persistence._record_owner import record_owner_table
     from linktools.ai.persistence._runtime_commands import StateCommands
     from linktools.ai.persistence._sql import _SqlTransaction
     from linktools.ai.storage import StoredPayload
@@ -398,11 +399,12 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
         async def conflict(transaction, replacements):
             target = next((item for item in replacements if item.record.kind == member), None)
             if target is not None:
-                table = transaction._table('ai_state_records')
-                await transaction._execute(update(table).where(
+                table = transaction._table(record_owner_table(target.record.key))
+                changed = await transaction._execute(update(table).where(
                     table.c.store_key == transaction._store_key,
                     table.c.key == target.record.key,
                 ).values(storage_revision=target.expected_storage_revision + 1))
+                assert changed.rowcount == 1
                 conflicts.append(member)
             return await original(transaction, replacements)
         with monkeypatch.context() as patch:
@@ -572,3 +574,45 @@ async def test_cancelled_admission_commit_never_dispatches_before_resolution(
             result = await runtime.executions.result(execution_id, principal=runtime.default_principal)
             assert result.status is ExecutionStatus.CANCELLED
         assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_prepared_attempt_receipt_matches_persisted_revision_and_payload(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from linktools.ai.core import ExecutionStatus
+    from linktools.ai.execution import ExecutionRecoveryDetail, ExecutionRecoveryState, RuntimePayloadRef
+    from linktools.ai.persistence.contracts import AgentAttemptClaim
+    from linktools.ai.persistence._runtime_commands import StateCommands
+    from linktools.ai.persistence import Persistence, PersistenceStorage
+    from linktools.ai.storage import StoredPayload
+
+    from .test_history_projection_conformance import _record
+
+    async with Persistence.open("prepared-receipt", storage=PersistenceStorage.sqlite(tmp_path / "receipt.db"),
+                                tenant_id="tenant") as state:
+        repository = state.execution.executions
+        value = replace(_record(ExecutionStatus.STARTED, 0), revision=1, durable_trace=False,
+                        recovery=ExecutionRecoveryDetail())
+        await repository.create_execution(value)
+        before = await repository.get_observed(value.execution_id, tenant_id="tenant")
+        assert before is not None
+        payload = RuntimePayloadRef(StoredPayload.inline_json({"prepared": True}), None)
+        commands = StateCommands(repository, namespace="prepared-receipt", events=state.execution.events,
+                                 checkpoint=state.checkpoint, background_tasks=set())
+        receipt = await commands.commit_prepared_agent_attempt_checkpoint(
+            AgentAttemptClaim(value.execution_id, 1, 0, ExecutionRecoveryState.ADMITTED),
+            payload, observed=before,
+        )
+        assert receipt == await repository.get_observed(value.execution_id, tenant_id="tenant")
+        assert receipt.storage_revision > before.storage_revision
+        assert receipt.value.input_context == payload and receipt.value.agent_run_seq == 1
+        assert receipt.value.producer_claim_id and receipt.value.producer_generation > value.producer_generation
+        assert await repository.get_observed(value.execution_id, tenant_id="tenant", previous=receipt) is receipt
+        forged = replace(receipt, value=replace(receipt.value, input_context=None))
+        assert await repository.get_observed(value.execution_id, tenant_id="tenant", previous=forged) == receipt
+        assert await repository.acquire_dependency_hold(value.execution_id, tenant_id="tenant", hold_id="hold")
+        refreshed = await repository.get_observed(value.execution_id, tenant_id="tenant", previous=receipt)
+        assert refreshed is not None
+        assert refreshed.value.dependency_hold_ids == ("hold",)
+        assert refreshed.storage_revision > receipt.storage_revision

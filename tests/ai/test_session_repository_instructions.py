@@ -331,7 +331,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
                 decided_at=datetime.now(timezone.utc),
                 resolution_metadata={"linktools": {"repository_instruction_frontier": "0" * 64}},
             )
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.attach(persistence=persistence, features=features, auto_recover=True) as runtime:
             finished = await runtime.executions.wait(
                 execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
             )
@@ -585,7 +585,7 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
             decided_at=datetime.now(timezone.utc),
             resolution_metadata={"linktools": {"repository_instruction_frontier": "0" * 64}},
         )
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.attach(persistence=persistence, features=features, auto_recover=True) as runtime:
             finished = await runtime.executions.wait(
                 execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
             )
