@@ -57,8 +57,12 @@ class ContentReferenceReader(Protocol):
         additional_records: Mapping["StateStore", Sequence[bytes]] | None = None,
         owner_query: "RecordQuery | None" = None,
         native_root_paths: Sequence[tuple[str, ...]] = (),
+        fixed_projection: bool = False,
     ) -> "Mapping[StateStore, Mapping[bytes, StoredRecord]] | None":
-        """Capture current owners and declared references in their enlisted snapshot."""
+        """Capture current owners and declared references in their enlisted snapshot.
+
+        Fixed projections require slots written by the canonical execution or tool owner.
+        """
         ...
 
     def captured_native_message_rows(

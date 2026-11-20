@@ -188,6 +188,7 @@ class _SqlGroupTransaction:
         additional_records: Mapping[StateStore, Sequence[bytes]] | None = None,
         owner_query: RecordQuery | None = None,
         native_root_paths: Sequence[tuple[str, ...]] = (),
+        fixed_projection: bool = False,
     ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]] | None:
         from ._archive import archive_scope_parts, validate_archive_content_identity
         from ._content_reference_sql import content_reference_batch_size, content_reference_statement
@@ -209,11 +210,14 @@ class _SqlGroupTransaction:
         if (not paths or len(paths) > 16 or any(not path or len(path) > 16
                 or any(not isinstance(part, str) or not part for part in path) for path in paths)):
             raise ValueError("content references require bounded explicit JSON paths")
-        projected = tuple(content_reference_slot(path) for path in paths)
-        native_projected = tuple(content_reference_slot(path) for path in native_paths)
-        if (any(slot is None or slot.codec is None for slot in projected)
-                or any(slot is None or slot.codec is not None for slot in native_projected)):
-            return None
+        content_columns = ()
+        if fixed_projection:
+            projected = tuple(content_reference_slot(path) for path in paths)
+            native_projected = tuple(content_reference_slot(path) for path in native_paths)
+            if (any(slot is None or slot.codec is None for slot in projected)
+                    or any(slot is None or slot.codec is not None for slot in native_projected)):
+                raise ValueError("SQL content capture requires declared lookup slots")
+            content_columns = tuple(slot.column for slot in (*projected, *native_projected))
         keys = tuple(dict.fromkeys(validate_record_key(key) for key in owner_keys))
         if owner_query is not None and (keys or additional_records or owner_query.kind != "tool_operation"
                 or owner_query.scope_key is None and owner_query.parent_key is None):
@@ -296,9 +300,9 @@ class _SqlGroupTransaction:
                 typed_payloads=typed_payloads,
                 additional_records={self.transaction(store)._store_key: requested for store, requested in extras.items()} if offset == 0 else None,
                 owner_statement=(_record_query_statement(self._group.metadata, owner._store_key, owner_query,
-                                     content_columns=tuple(slot.column for slot in (*projected, *native_projected)))
+                                     content_columns=content_columns)
                                  if owner_query is not None else None),
-                native_root_paths=native_paths,
+                native_root_paths=native_paths, fixed_projection=fixed_projection,
             )
             captured_rows = tuple((await owner._execute(statement)).mappings())
             # UNION order is unspecified; seed owner rows before decoding source locators.

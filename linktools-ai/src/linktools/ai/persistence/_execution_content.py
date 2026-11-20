@@ -321,6 +321,7 @@ class ExecutionContent:
             content_paths=tuple(("value", "payload", "fields", *path) for path in paths),
             native_root_paths=tuple(("value", "payload", "fields", *path) for path in native_paths),
             additional_records=additional_records,
+            fixed_projection=True,
         )
 
     async def prefetch_configuration_owner(self, hint: StoredRecord) -> None:

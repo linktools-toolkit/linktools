@@ -134,3 +134,50 @@ async def test_cached_owner_reads_declared_payload_by_key_in_same_snapshot(tmp_p
         assert len(statements) == 1
         assert "FROM ai_step_messages" in statements[0]
         assert "ai_state_records" not in statements[0]
+
+
+@pytest.mark.asyncio
+async def test_cold_custom_owner_keeps_declared_content_in_same_read(tmp_path: Path) -> None:
+    from sqlalchemy import event
+
+    async with _database(tmp_path / "cold.db") as (engine, owner, _):
+        _, archive = await owner.storage_group.open_archive(create=True)
+        scope = archive_scope_key("overlap", "tenant")
+        payloads = []
+        for body in (b"custom path body", b"canonical path reused by a custom owner"):
+            content = ContentRecord("execution-payload", hashlib.sha256(body).hexdigest(),
+                                    len(body), "raw", body=body)
+            key = record_key("overlap", "tenant", "archive", "archive_content", (content.identity,))
+            payloads.append(StoredRecord(key, scope, None, "archive_content", content.identity.encode(), None,
+                                         0, None, 0, None, content.to_json(), payload_bytes=body))
+        record = replace(_record("owner"), data={
+            "argument": {"$execution_payload": payloads[0].sort_key.decode()},
+            "value": {"payload": {"fields": {"result": {
+                "fields": {"content": {"$execution_payload": payloads[1].sort_key.decode()}},
+            }}}},
+        })
+        await owner.mutate(lambda tx: tx.insert_record(record))
+        await archive.mutate(lambda tx: tx.insert_records(payloads))
+        statements = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _many) -> None:
+            if statement.startswith(("SELECT", "WITH")):
+                statements.append(statement)
+
+        async def read(group):
+            reader = active_state_scope().record_reader
+            assert await reader.read_content_references(
+                owner_store=owner, owner_keys=(record.key,), content_store=archive, content_scope_key=scope,
+                content_paths=(("argument", "$execution_payload"),
+                               ("value", "payload", "fields", "result", "fields", "content", "$execution_payload")),
+            ) == {owner: {record.key: record}, archive: {payload.key: payload for payload in payloads}}
+            assert await group.transaction(owner).get_record(record.key) == record
+            for payload in payloads:
+                assert await group.transaction(archive).get_record(payload.key) == payload
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            await owner.storage_group.read_many((owner, archive), read)
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        assert len(statements) == 1

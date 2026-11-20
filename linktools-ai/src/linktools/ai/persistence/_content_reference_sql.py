@@ -37,12 +37,13 @@ def content_reference_statement(
     typed_payloads: bool, additional_records: Mapping[bytes, Sequence[bytes]] | None = None,
     owner_statement: "Select | None" = None,
     native_root_paths: Sequence[tuple[str, ...]] = (),
+    fixed_projection: bool = False,
 ) -> "Select":
-    from sqlalchemy import Integer, LargeBinary, String, and_, case, cast, func, literal, null, select, true, union_all
+    from sqlalchemy import JSON, Integer, LargeBinary, String, and_, case, cast, func, literal, null, select, true, type_coerce, union_all
     from sqlalchemy.dialects.mysql import BINARY
 
-    content = tuple(content_reference_slot(path) for path in content_paths)
-    roots = tuple(content_reference_slot(path) for path in native_root_paths)
+    content = tuple(content_reference_slot(path) for path in content_paths) if fixed_projection else ()
+    roots = tuple(content_reference_slot(path) for path in native_root_paths) if fixed_projection else ()
     if (any(slot is None or slot.codec is None for slot in content)
             or any(slot is None or slot.codec is not None for slot in roots)):
         raise ValueError("SQL content capture requires declared lookup slots")
@@ -62,12 +63,20 @@ def content_reference_statement(
     reference_owners = (
         owner_query.with_only_columns(*(owner_query.selected_columns[slot.column] for slot in content),
                                       maintain_column_froms=True).subquery("content_reference_owners")
-        if dialect == "mysql" else owners
+        if fixed_projection and dialect == "mysql" else owners
     )
     slots = [select(literal(index).label("slot")) for index in range(len(content_paths))]
     slots = (slots[0] if len(slots) == 1 else union_all(*slots)).subquery("content_slots")
-    identity = case(*((slots.c.slot == index, literal(slot.codec + ":", literal_execute=True) + reference_owners.c[slot.column])
-                      for index, slot in enumerate(content)))
+    if fixed_projection:
+        identities = tuple(literal(slot.codec + ":", literal_execute=True) + reference_owners.c[slot.column]
+                           for slot in content)
+    else:
+        # Custom owners have no fixed-slot write contract. Preserve the
+        # snapshot guarantee rather than loading their bodies in another query.
+        encoded = type_coerce(owners.c.payload_json, JSON)[()].as_string()
+        payload = cast(encoded, JSON) if dialect == "postgresql" else type_coerce(encoded, JSON)
+        identities = tuple(payload[path].as_string() for path in content_paths)
+    identity = case(*((slots.c.slot == index, value) for index, value in enumerate(identities)))
     selected = select(identity.label("identity")).select_from(reference_owners.join(slots, true())).subquery("declared_content")
     reference_query = select(selected.c.identity).where(selected.c.identity.is_not(None)).distinct()
     references = (reference_query.subquery("content_references") if dialect == "mysql" else
@@ -124,10 +133,11 @@ def content_reference_statement(
                 owner_query.selected_columns["key"], owner_query.selected_columns["store_key"],
                 *(owner_query.selected_columns[slot.column] for slot in roots),
                 maintain_column_froms=True,
-            ).subquery("content_native_owners") if dialect == "mysql" else owners
+            ).subquery("content_native_owners") if fixed_projection and dialect == "mysql" else owners
         )
-        first = case(*((native_slots.c.slot == index, native_owners.c[slot.column])
-                       for index, slot in enumerate(roots)))
+        first_digests = (tuple(native_owners.c[slot.column] for slot in roots) if fixed_projection else
+                         tuple(payload[(*path, "slices", 0, "first")].as_string() for path in native_root_paths))
+        first = case(*((native_slots.c.slot == index, value) for index, value in enumerate(first_digests)))
         partition = native_store_key(*archive_scope_parts(content_scope_key))
         locator = native_store_locator(partition)
         native_join = native_owners.join(native_slots, true()).outerjoin(nodes, and_(

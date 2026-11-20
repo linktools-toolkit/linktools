@@ -34,7 +34,7 @@ def test_native_capture_bind_budget_and_types(backend: str) -> None:
     statement = content_reference_statement(metadata, dialect=backend, owner_store_key=b"owner",
         owner_keys=tuple(record_key("namespace", "tenant", "checkpoint", "tool_operation", (str(i),)) for i in range(size)),
         content_store_key=b"archive", content_scope_key=archive_scope_key("namespace", "tenant"),
-        content_paths=paths, typed_payloads=True, native_root_paths=native_paths)
+        content_paths=paths, typed_payloads=True, fixed_projection=True, native_root_paths=native_paths)
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[backend].dialect()
     compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
     assert len(compiled.positiontup or compiled.params) <= 999

@@ -65,7 +65,7 @@ async def test_server_typed_owner_content_union_prepares(
                 owner_keys=(record_key("owner-types", "tenant", "checkpoint", kind, ("owner",)),),
                 content_store_key=b"archive", content_scope_key=archive_scope_key("owner-types", "tenant"),
                 content_paths=(("value", "payload", "fields", "arguments_payload", "fields", "content", "$execution_payload"),),
-                typed_payloads=True,
+                typed_payloads=True, fixed_projection=True,
                 owner_statement=(_record_query_statement(metadata, b"owner",
                     RecordQuery(kind=kind, parent_key=b"parent", limit=2),
                     content_columns=("tool_arguments_sha256",)) if scoped else None))
@@ -89,7 +89,7 @@ def test_scoped_owner_content_join_compiles_with_inner_limit(backend: str) -> No
     query = content_reference_statement(metadata, dialect=backend, owner_store_key=b"owner", owner_keys=(),
         content_store_key=b"archive", content_scope_key=archive_scope_key("owner-types", "tenant"),
         content_paths=(("value", "payload", "fields", "arguments_payload", "fields", "content", "$execution_payload"),),
-        typed_payloads=True, owner_statement=owner,
+        typed_payloads=True, fixed_projection=True, owner_statement=owner,
         native_root_paths=(("value", "payload", "fields", "arguments_payload", "fields", "content", "$native_tool_arguments"),))
     dialect = {"postgresql": postgresql, "mysql": mysql, "sqlite": sqlite}[backend].dialect()
     sql = str(query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True}))
