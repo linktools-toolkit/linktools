@@ -453,7 +453,16 @@ async def test_final_capture_authorization_error_wins_over_subscription_cleanup_
 async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_capture(monkeypatch) -> None:
     from linktools.ai.observe import stream as _observation
 
-    monkeypatch.setattr(_observation, "_FINAL_DRAIN_TIMEOUT", 0.01)
+    expire = asyncio.Event()
+
+    async def sleep_until_expired(delay: float) -> None:
+        assert delay == _observation._FINAL_DRAIN_TIMEOUT
+        await expire.wait()
+
+    # Exercise the timeout with a capture already in flight, not during setup.
+    monkeypatch.setattr(
+        _observation, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": sleep_until_expired})),
+    )
     bundle = await _bundle()
     try:
         binding = bundle.execution_run._binding
@@ -485,8 +494,9 @@ async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_ca
         async def consume():
             return [event async for event in stream]
         pending = asyncio.create_task(consume())
-        await asyncio.wait_for(entered.wait(), 1)
         try:
+            await asyncio.wait_for(entered.wait(), 1)
+            expire.set()
             done, _ = await asyncio.wait({pending}, timeout=1)
             assert pending in done
             with pytest.raises(ObservationError) as caught:
@@ -496,8 +506,9 @@ async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_ca
             assert bundle.runtime._observation_sessions
         finally:
             release.set()
+            if not pending.done():
+                pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
-            await bundle.close()
     finally:
         await bundle.close()
 
