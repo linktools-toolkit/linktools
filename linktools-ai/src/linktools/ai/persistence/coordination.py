@@ -20,7 +20,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import CacheBackend, RenewingTurnScope, StreamBackend, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader, TurnScopeIdentity
 from .codec import decode_domain, encode_domain
-from .turns import StateTurnCoordination
+from .turns import SourceTurnWriteFence, StateTurnCoordination
 from ._turn_sql_schema import RUNTIME_TURN_SCOPE
 from ..execution import ExecutionRecord
 
@@ -89,6 +89,31 @@ class PendingTurnCoordination:
             request_digest=request_digest, execution_id=execution_id,
             owner_id=owner_id,
         )
+
+    def execution_authority(self, coordinated: TurnCoordination | None):
+        """Return a typed proof only for the explicitly composed SQL Runtime owner."""
+        source = self._state_authority
+        if coordinated is None or coordinated.lease is None or source is None or not source._coowned:
+            return None
+        if source._sql_source(self._scope.scope) is None:
+            return None
+        lease = coordinated.lease
+        identity = source._lease_identity(lease)
+        if identity is None or identity[:2] != (self._scope.scope, coordinated.execution_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        from ._execution_authority import ExecutionAuthority
+
+        return ExecutionAuthority(self._scope, coordinated.execution_id, identity[2],
+                                  lease.token, lease.fence)
+
+    def durable_write_fence(self, coordinated: TurnCoordination, target) -> SourceTurnWriteFence | None:
+        authority = self.execution_authority(coordinated)
+        if authority is None:
+            return None
+        source = self._state_authority._sql_source(self._scope.scope)
+        if source is not target:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return SourceTurnWriteFence(source, authority)
 
     def can_group_start(
         self, commands: StateCommands, reservation: ExecutionStartReservation, session: SessionRecord,

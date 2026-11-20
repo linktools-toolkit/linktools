@@ -121,6 +121,7 @@ from ..execution import ExecutionRequest
 from ._conversation_service import ConversationService
 from ..persistence import PersistenceDomain
 from ..persistence.commands import StateCommands
+from ..persistence.turns import ExecutionAuthority, SourceTurnRevoked, SourceTurnWriteFence
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
 from ..persistence.objects import runtime_object_source_reads
@@ -1698,6 +1699,7 @@ class LocalExecutionBackend:
                     reservation, expected_session=turn.session,
                     captured_input_context=context, producer_claim_id=claim, context_write=context_write,
                     tool_operations=tool_operations,
+                    authority=self._pending_turns.coordination.execution_authority(turn.coordination),
                 )
                 await accept(execution)
 
@@ -1803,7 +1805,7 @@ class LocalExecutionBackend:
 
     async def prepare_reserved_start(
         self, request: ExecutionRequest, reservation: ExecutionStartReservation,
-        session: SessionRecord | None,
+        session: SessionRecord | None, authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionStartReservationResult | None:
         await self._validate_start(request, reservation.execution)
         expected = (
@@ -1811,7 +1813,7 @@ class LocalExecutionBackend:
             if reservation.execution.session_id is not None else None
         )
         result = await self._runtime_commands.reserve_start_checkpoint(
-            reservation, expected_cursor=expected, expected_session=session,
+            reservation, expected_cursor=expected, expected_session=session, authority=authority,
         )
         owner = self._turn_owners.get(reservation.execution.execution_id)
         if owner is not None:
@@ -2559,6 +2561,7 @@ class LocalExecutionBackend:
                     occurred_at=occurred_at,
                     background_tasks=self._execution_task_set(execution.execution_id),
                     producer_generation=producer_generation,
+                    turn_fence=self._source_turn_fence(self._turn_owners.get(execution.execution_id)),
                 )
             )
             if self._execution_buffer is not None:
@@ -4230,7 +4233,7 @@ class LocalExecutionBackend:
                     try:
                         activated = (
                             await self._runtime_commands.commit_agent_attempt_checkpoint(
-                                admission_claim,
+                                admission_claim, turn_fence=self._source_turn_fence(owner),
                             )
                         )
                     except AIError as error:
@@ -4548,6 +4551,7 @@ class LocalExecutionBackend:
                         activated = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
                             prepared_admission, prepared_context, context_write=context_write,
                             observed=None if owner is None else owner.observed,
+                            turn_fence=self._source_turn_fence(owner),
                         )
                     else:
                         async with pending.boundary:
@@ -4574,7 +4578,8 @@ class LocalExecutionBackend:
                                     context_write = (prepared.archive, prepared.records)
                                 activated = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
                                     prepared_admission, prepared_context, context_write=context_write,
-                            observed=None if owner is None else owner.observed,
+                                    observed=None if owner is None else owner.observed,
+                                    turn_fence=self._source_turn_fence(owner),
                                 )
                 except AIError as error:
                     if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -4805,6 +4810,8 @@ class LocalExecutionBackend:
                         ),
                     )
                 )
+            except SourceTurnRevoked:
+                raise
             except Exception as error:
                 if isinstance(error, AIError) and error.code is ErrorCode.EXECUTION_CANCELLED:
                     raise asyncio.CancelledError from error
@@ -4960,6 +4967,8 @@ class LocalExecutionBackend:
                     tool_operations=tool_operations,
                 )
             except asyncio.CancelledError:
+                raise
+            except SourceTurnRevoked:
                 raise
             except Exception as terminal_error:
                 if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
@@ -5187,6 +5196,22 @@ class LocalExecutionBackend:
             else:
                 metric_status = "CANCELLED"
             raise
+        except SourceTurnRevoked as error:
+            revoked = await self._finish_revoked_worker(
+                execution_id, agent_run_id=agent_run_id,
+                producer_generation=producer_generation, admission=original,
+            )
+            if revoked is not None:
+                metric_status = "SUPERSEDED"
+                return
+            # Knowing the slot has been lost does not prove a successor has
+            # acquired the durable execution/Step producer or recovered staging.
+            # Keep this worker's unresolved evidence for operator reconciliation.
+            metric_status = "FAILED"
+            metric_error_code = ErrorCode.STORAGE_RECOVERY_REQUIRED.value
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED, safe_details={"phase": "source_turn_revoked"},
+            ) from error
         except Exception as error:
             if (isinstance(error, AIError) and error.code is ErrorCode.STORAGE_CONFLICT
                     and (revoked := await self._finish_revoked_worker(
@@ -5557,6 +5582,12 @@ class LocalExecutionBackend:
             tool_operations=tool_operations,
         )
 
+    def _source_turn_fence(self, owner: _OwnedExecutionTurn | None) -> "SourceTurnWriteFence | None":
+        coordinator = self._pending_turns.coordination
+        if owner is None or owner.coordination is None or coordinator is None:
+            return None
+        return coordinator.durable_write_fence(owner.coordination, self._execution.executions.state_store)
+
     async def _bind_native_boundary(
         self, owner: _OwnedExecutionTurn, execution: ExecutionRecord, agent_run_id: str,
     ) -> None:
@@ -5571,6 +5602,8 @@ class LocalExecutionBackend:
         if self._pending_turns.get(execution.execution_id, tenant_id=self._tenant_id) is not None:
             return
         repository = self._execution.executions
+        turn_fence = self._source_turn_fence(owner)
+        participants = (state,) if turn_fence is None or turn_fence.store is state else (state, turn_fence.store)
         if owner.observed is None or owner.observed.value != execution:
             owner.observed = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
         if owner.observed is None or owner.observed.value != execution:
@@ -5654,7 +5687,7 @@ class LocalExecutionBackend:
                 receipt = await repository.commit_boundary_in_transaction(
                     transaction, observed, next_record=next_record,
                     expected_producer_generation=generation, expected_producer_claim_id=claim_id,
-                    allow_cancelling=terminal,
+                    allow_cancelling=terminal, turn_fence=turn_fence,
                 )
                 source_receipt = (self._run_store.step_event_receipt(agent_run_id)
                                   if managed or terminal else None)
@@ -5702,15 +5735,15 @@ class LocalExecutionBackend:
 
                             await self._run_store.commit_captured_execution_projection(
                                 *captured, execution_id=execution.execution_id,
-                                write=write, readback_write=readback_write, stores=(state,),
+                                write=write, readback_write=readback_write, stores=participants,
                             )
                             if committed is None:
                                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                             return committed
                         if joint:
                             async with self._run_store.native_event_publication(agent_run_id):
-                                return await state.storage_group.mutate((state,), publish)
-                        return await state.storage_group.mutate((state,), publish)
+                                return await state.storage_group.mutate(participants, publish)
+                        return await state.storage_group.mutate(participants, publish)
                     except AIError as error:
                         actual = None
                         if error.code in {ErrorCode.STORAGE_COMMIT_UNKNOWN, ErrorCode.STORAGE_CONFLICT}:
@@ -5777,7 +5810,7 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 receipt = await self._runtime_commands.commit_tool_admission_boundary(
                     request, execution=owner.observed, observed=observed,
-                    write=write, readback_write=readback, known_new=known_new,
+                    write=write, readback_write=readback, known_new=known_new, turn_fence=turn_fence,
                 )
                 owner.observed = receipt.execution
                 session = captured_session if owner.attempt is None else owner.attempt.session
@@ -6878,6 +6911,12 @@ class LocalExecutionBackend:
             return current
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return current
+        turn_fence = self._source_turn_fence(self._turn_owners.get(current.execution_id))
+        if turn_fence is not None and not self._same_terminal_storage_group(
+            current, status=status, agent_run_id=agent_run_id,
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH,
+                          "An admitted source-owned turn cannot switch to split terminal publication")
         pending = self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id)
         if pending is not None:
             await self._pending_turns.settle(pending)
@@ -7430,6 +7469,8 @@ class LocalExecutionBackend:
                 execution_projections=() if plan is None else plan.projections,
                 audit_events=pending_audit, tool_operations=tool_operations,
                 include_publication=True,
+                authority=(None if self._pending_turns.coordination is None else
+                           self._pending_turns.coordination.execution_authority(turn.coordination)),
             )
             if not await accept(committed):
                 assert turn.failure is not None
@@ -7956,6 +7997,7 @@ class LocalExecutionBackend:
                             else owner.reservation.idempotency),
             session_turn=None if owner is None else owner.session_turn,
             expected_execution=current,
+            turn_fence=self._source_turn_fence(owner),
             session_id=current.session_id,
             expected_cursor=expected_cursor,
             next_cursor=next_cursor,

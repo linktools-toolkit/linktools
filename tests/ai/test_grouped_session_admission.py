@@ -397,3 +397,118 @@ async def test_grouped_admission_late_unprepared_receipt_retains_original_semant
             resume.set()
             if not task.done():
                 await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_grouped_claim_binds_exact_execution_primary_key_with_plain_inserts(tmp_path):
+    from sqlalchemy import event, select
+
+    model_entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def model(messages, info):
+        model_entered.set()
+        await finish.wait()
+        return ModelResponse(parts=[TextPart("answer")])
+
+    async with _runtime(tmp_path / "state.db", model) as (persistence, runtime):
+        await runtime.agents.get().create_session("session")
+        store = persistence.execution.executions.state_store
+        engine = store.storage_group.context.engine
+        metadata = store.storage_group.metadata
+        executions, admissions = metadata.tables["ai_execution_records"], metadata.tables["ai_turn_admissions"]
+        writes = []
+
+        def observe(_connection, cursor, statement, *_args):
+            if statement.startswith(("INSERT INTO ai_execution_records", "INSERT INTO ai_turn_admissions",
+                                     "DELETE FROM ai_execution_records", "INSERT INTO ai_turn_slots",
+                                     "UPDATE ai_turn_slots")):
+                writes.append((statement, cursor.rowcount))
+
+        event.listen(engine.sync_engine, "after_cursor_execute", observe)
+        try:
+            handle = await runtime.sessions.start(
+                "session", "question", principal=runtime.default_principal, idempotency_key="request",
+            )
+            await asyncio.wait_for(model_entered.wait(), 8)
+            backend = runtime._execution_service.runtime_backend()
+            lifetime = backend._turn_owners[handle.execution_id]
+            async with engine.begin() as connection:
+                row = (await connection.execute(select(executions.c.id, executions.c.kind, executions.c.turn_token).select_from(
+                    admissions.join(executions, admissions.c.control_id == executions.c.id),
+                ).where(admissions.c.store_key == store.store_key,
+                        admissions.c.execution_id == handle.execution_id.encode("utf-8")))).one()
+                assert row.kind == "execution" and row.turn_token
+                execution_row_id = row.id
+            execution_insert, receipt_insert = [entry for entry in writes if entry[0].startswith("INSERT INTO ai_execution_records")]
+            assert execution_insert[1] == receipt_insert[1] == 1
+            assert "strftime" in execution_insert[0]
+            (slot,) = [entry[0] for entry in writes if entry[0].startswith(
+                ("INSERT INTO ai_turn_slots", "UPDATE ai_turn_slots"),
+            )]
+            assert "active_execution_id" in slot and "lease_fence" in slot
+            (admission,) = [entry for entry in writes if entry[0].startswith("INSERT INTO ai_turn_admissions")]
+            assert "VALUES" in admission[0] and "SELECT" not in admission[0] and admission[1] == 1
+            finish.set()
+            assert (await handle.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
+            await asyncio.wait_for(lifetime.closed.wait(), 8)
+            async with engine.begin() as connection:
+                retired = (await connection.execute(select(admissions.c.control_id, admissions.c.receipt_kind).where(
+                    admissions.c.store_key == store.store_key,
+                    admissions.c.execution_id == handle.execution_id.encode("utf-8"),
+                ))).one()
+                assert retired.control_id is None and retired.receipt_kind == "release"
+                (token,) = (await connection.execute(select(executions.c.turn_token).where(
+                    executions.c.id == execution_row_id,
+                ))).one()
+                assert token is None
+            assert not [entry for entry in writes if entry[0].startswith("DELETE FROM ai_execution_records")]
+        finally:
+            finish.set()
+            event.remove(engine.sync_engine, "after_cursor_execute", observe)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior_turn", [False, True])
+async def test_failed_grouped_reservation_rolls_back_early_slot_binding(tmp_path, monkeypatch, prior_turn):
+    async def model(messages, info):
+        return ModelResponse(parts=[TextPart("answer")])
+
+    async with _runtime(tmp_path / "state.db", model) as (persistence, runtime):
+        await runtime.agents.get().create_session("session")
+        backend = runtime._execution_service.runtime_backend()
+        start = runtime.sessions.start
+        principal = runtime.default_principal
+        if prior_turn:
+            warm = await start("session", "warm", principal=principal)
+            owner = backend._turn_owners.get(warm.execution_id)
+            assert (await warm.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
+            if owner is not None:
+                await asyncio.wait_for(owner.closed.wait(), 8)
+        store = persistence.execution.executions.state_store
+        engine = store.storage_group.context.engine
+        slots = store.storage_group.metadata.tables["ai_turn_slots"]
+        from sqlalchemy import select
+
+        async def physical():
+            async with engine.begin() as conn:
+                return tuple((await conn.execute(select(
+                    slots.c.session_kind, slots.c.session_key, slots.c.active_execution_id,
+                    slots.c.lease_fence, slots.c.revision,
+                ).where(slots.c.store_key == store.store_key))).all())
+
+        before = await physical()
+        commands = backend._runtime_commands
+        original = commands._reserve_start_in_transaction
+
+        async def fail_after_slot(*args, **kwargs):
+            assert kwargs["authority"] is not None
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        monkeypatch.setattr(commands, "_reserve_start_in_transaction", fail_after_slot)
+        with pytest.raises(AIError) as failure:
+            await start("session", "question", principal=principal)
+        assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await physical() == before
+        monkeypatch.setattr(commands, "_reserve_start_in_transaction", original)
+        handle = await start("session", "question", principal=principal)
+        assert (await handle.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED

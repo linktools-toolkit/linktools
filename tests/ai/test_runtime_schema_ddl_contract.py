@@ -588,3 +588,18 @@ def test_record_scan_bucket_is_write_through_and_replaces_only_generic_index(dia
         if name not in {"ai_state_records", "ai_execution_records"}:
             assert "scan_kind" not in metadata.tables[name].c
 
+
+
+def test_mysql_grouped_turn_admission_uses_insert_values_with_exact_control_id() -> None:
+    from linktools.ai.persistence._turn_sql import SqlTurnProof, SqlTurnRows
+    from linktools.ai.storage import TurnScopeIdentity
+
+    scope = TurnScopeIdentity("runtime", "tenant", "runtime-pending-turn")
+    source = SqlTurnRows(build_sql_schema_metadata(), b"r" * 32, scope, coowned=True)
+    proof = SqlTurnProof("execution", "session:s", "a" * 64, "b" * 64, "c" * 32,
+                         1, False, "d" * 32, "claim", True)
+    statement = source.publish_claim(proof, previous=None, control_id=42)
+    compiled = statement.compile(dialect=mysql.dialect())
+    sql = str(compiled).upper()
+    assert sql.startswith("INSERT INTO AI_TURN_ADMISSIONS") and " VALUES " in sql and "SELECT" not in sql
+    assert compiled.params["control_id"] == 42

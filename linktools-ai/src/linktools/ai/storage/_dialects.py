@@ -243,6 +243,10 @@ class SQLiteDialect:
             execution_options={"isolation_level": "REPEATABLE READ"}
         )
 
+    def write_audit_time_expression(self) -> "ColumnElement[str] | ColumnElement[datetime]":
+        """The existing SQL audit timestamp (not necessarily a lease clock)."""
+        return self._database_now_expression()
+
     async def database_now(self, session: "AsyncSession") -> datetime:
         return await self._read_database_time(session, self._database_now_expression())
 

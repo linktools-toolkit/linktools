@@ -24,11 +24,12 @@ if TYPE_CHECKING:
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
 from ._record_owner import SCAN_KIND_OWNERS
+from ._turn_sql_schema import TURN_SESSION_MAX_BYTES
 
 
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
     """Build one physical owner with the common optimistic record contract."""
-    from sqlalchemy import TIMESTAMP, BigInteger, JSON, Column, LargeBinary, String, Table, Text, text
+    from sqlalchemy import TIMESTAMP, BigInteger, SmallInteger, JSON, Column, LargeBinary, String, Table, Text, text
     from sqlalchemy.dialects import mysql
 
     if name in metadata.tables:
@@ -139,6 +140,19 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
             "scan_kind", String(34), nullable=False,
             comment="Write-through kind and execution recovery candidate projection; never domain authority.",
         ))
+    if name == "ai_execution_records":
+        columns[-2:-2] = [
+            Column("turn_slot_kind", SmallInteger, nullable=True, comment="Runtime slot family of the exact source owner."),
+            Column("turn_slot_key", LargeBinary(TURN_SESSION_MAX_BYTES).with_variant(mysql.VARBINARY(TURN_SESSION_MAX_BYTES), "mysql"),
+                   nullable=True, comment="Raw runtime slot identity, separate from its family."),
+            Column("turn_token", LargeBinary(32).with_variant(mysql.VARBINARY(32), "mysql"),
+                   nullable=True, comment="Exact generated runtime lease token."),
+            Column("turn_fence", BigInteger, nullable=True, comment="Session fencing generation of the coordinated execution."),
+            Column("turn_expiry", TIMESTAMP(timezone=True).with_variant(mysql.DATETIME(fsp=6), "mysql"),
+                   nullable=True, comment="Last granted source deadline; active only with a lease token."),
+            Column("turn_revision", BigInteger, nullable=False, server_default=text("0"),
+                   comment="Independent writable revision for source lease renewal."),
+        ]
     omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
     if name == "ai_task_graphs":
         omitted = {"kind"}

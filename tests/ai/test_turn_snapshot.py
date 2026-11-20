@@ -18,33 +18,34 @@ _SCOPE = TurnScopeIdentity("turn-snapshot", "tenant", "runtime-pending-turn")
 _LIMITS = SnapshotLimits(max_entries=1000, max_bytes=1_000_000)
 
 
-async def _claim(store, *, session, execution, request, token):
+async def _claim(store, *, session, execution, request, token, coowned):
     outcome = await store.claim_turn_admission(
         _SCOPE, session_key=session, execution_id=execution, request_key=request,
-        request_digest="d" * 64, owner_id=sha256(execution.encode()).hexdigest()[:32], duration=120, token=token,
+        request_digest="d" * 64, owner_id=sha256(execution.encode()).hexdigest()[:32], duration=120, token=token, coowned=coowned,
     )
     assert outcome is not None and outcome.lease is not None
     return outcome.lease
 
 
 @pytest.mark.asyncio
-async def test_sql_turn_snapshot_restores_live_admission_and_retired_release(tmp_path):
+@pytest.mark.parametrize("coowned", (False, True))
+async def test_sql_turn_snapshot_restores_live_admission_and_retired_release(tmp_path, coowned):
     archive = InMemoryObjectStore()
     source = PersistenceStorage.from_root(tmp_path / "source")
     async with Persistence.open(_SCOPE.namespace, storage=source, tenant_id=_SCOPE.tenant_id) as state:
         store = state.execution.executions.state_store
         store.bind_runtime_turn_scope(_SCOPE)
-        first = await _claim(store, session="session:session", execution="first", request="a" * 64, token="1" * 32)
+        first = await _claim(store, session="session:session", execution="first", request="a" * 64, token="1" * 32, coowned=coowned)
         assert await store.retire_turn_admission(
             _SCOPE, session_key="session:session", execution_id="first", request_key="a" * 64,
-            token=first.token, fence=first.fence, receipt="a" * 32,
+            token=first.token, fence=first.fence, receipt="a" * 32, coowned=coowned,
         )
-        idle = await _claim(store, session="session:idle", execution="idle-execution", request="b" * 64, token="2" * 32)
+        idle = await _claim(store, session="session:idle", execution="idle-execution", request="b" * 64, token="2" * 32, coowned=coowned)
         assert await store.retire_turn_admission(
             _SCOPE, session_key="session:idle", execution_id="idle-execution", request_key="b" * 64,
-            token=idle.token, fence=idle.fence, receipt="b" * 32,
+            token=idle.token, fence=idle.fence, receipt="b" * 32, coowned=coowned,
         )
-        current = await _claim(store, session="session:session", execution="next", request="a" * 64, token="3" * 32)
+        current = await _claim(store, session="session:session", execution="next", request="a" * 64, token="3" * 32, coowned=coowned)
     async with Persistence.open(_SCOPE.namespace, storage=source, tenant_id=_SCOPE.tenant_id, read_only=True) as state:
         reference = await state.export_snapshot(object_store=archive, limits=_LIMITS)
 
@@ -54,20 +55,20 @@ async def test_sql_turn_snapshot_restores_live_admission_and_retired_release(tmp
                                 tenant_id=_SCOPE.tenant_id) as state:
         store = state.execution.executions.state_store
         store.bind_runtime_turn_scope(_SCOPE)
-        assert await store.confirm_turn_admission(_SCOPE, execution_id="first", receipt="a" * 32, kind="release") is True
-        assert await store.confirm_turn_admission(_SCOPE, execution_id="first", receipt="d" * 32, kind="release") is None
-        proof = await store.observe_turn_admission(_SCOPE, route="request", identity="a" * 64)
+        assert await store.confirm_turn_admission(_SCOPE, execution_id="first", receipt="a" * 32, kind="release", coowned=coowned) is True
+        assert await store.confirm_turn_admission(_SCOPE, execution_id="first", receipt="d" * 32, kind="release", coowned=coowned) is None
+        proof = await store.observe_turn_admission(_SCOPE, route="request", identity="a" * 64, coowned=coowned)
         assert (proof.execution_id, proof.fence) == ("next", current.fence)
         assert proof.coordination(_SCOPE).lease is None
-        following = await _claim(store, session="session:idle", execution="following", request="c" * 64, token="4" * 32)
+        following = await _claim(store, session="session:idle", execution="following", request="c" * 64, token="4" * 32, coowned=coowned)
         assert following.fence == idle.fence + 1
         assert not await store.retire_turn_admission(
             _SCOPE, session_key="session:session", execution_id="next", request_key="a" * 64,
-            token=first.token, fence=first.fence, receipt="d" * 32,
+            token=first.token, fence=first.fence, receipt="d" * 32, coowned=coowned,
         )
         assert await store.retire_turn_admission(
             _SCOPE, session_key="session:session", execution_id="next", request_key="a" * 64,
-            token=current.token, fence=current.fence, receipt="c" * 32,
+            token=current.token, fence=current.fence, receipt="c" * 32, coowned=coowned,
         )
 
 

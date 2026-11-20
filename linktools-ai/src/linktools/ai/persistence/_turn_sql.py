@@ -10,13 +10,14 @@ from collections.abc import Callable, Mapping
 from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScopeIdentity
+from .state import record_key
 from ._turn_sql_schema import (
     TURN_ADMISSION_TABLE, TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES,
     RUNTIME_TURN_SCOPE, TURN_SESSION_MAX_BYTES, TURN_SLOT_TABLE,
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy import Insert, MetaData, Select, Update
+    from sqlalchemy import Delete, Insert, MetaData, Select, Update
     from sqlalchemy.sql.elements import ColumnElement
 
 
@@ -131,7 +132,10 @@ class SqlTurnNotOwned(AIError):
 class SqlTurnRows:
     """Statement construction for one physical store and logical coordination scope."""
 
-    def __init__(self, metadata: "MetaData", store_key: bytes, scope: TurnScopeIdentity) -> None:
+    def __init__(self, metadata: "MetaData", store_key: bytes, scope: TurnScopeIdentity, *, coowned: bool = False) -> None:
+        self._scope = scope
+        self.coowned = coowned
+        self._control = metadata.tables["ai_execution_records"] if coowned else None
         self._slot = metadata.tables[TURN_SLOT_TABLE]
         self._admission = metadata.tables[TURN_ADMISSION_TABLE]
         if type(store_key) is not bytes or len(store_key) != 32:
@@ -139,6 +143,16 @@ class SqlTurnRows:
         self._store_key = store_key
         if scope.scope != RUNTIME_TURN_SCOPE:
             raise ValueError("typed turn SQL accepts only the fixed runtime scope")
+
+    def execution_key(self, execution_id: str) -> bytes:
+        return record_key(self._scope.namespace, self._scope.tenant_id, "execution", "execution", (execution_id,))
+
+    @staticmethod
+    def _control_link(slot, admission, control):
+        from sqlalchemy import and_
+        return and_(control.c.id == admission.c.control_id, control.c.store_key == slot.c.store_key,
+                    control.c.turn_slot_kind == slot.c.session_kind, control.c.turn_slot_key == slot.c.session_key,
+                    control.c.turn_fence == slot.c.lease_fence)
 
     def _owns(self, table):
         return table.c.store_key == self._store_key
@@ -182,15 +196,21 @@ class SqlTurnRows:
             anchor = a
             predicate = (a.c.execution_id == self._key(identity, TURN_EXECUTION_MAX_BYTES) if route == "execution"
                          else and_(a.c.route_kind == ACTIVE_REQUEST, a.c.route_key == turn_hex(identity, TURN_REQUEST_MAX_BYTES)))
+        if self._control is None:
+            authority = (s.c.lease_expires_at, s.c.lease_token, s.c.revision.label("authority_revision"))
+        else:
+            control = self._control
+            joined = joined.outerjoin(control, self._control_link(s, a, control))
+            authority = (control.c.turn_expiry.label("lease_expires_at"), control.c.turn_token.label("lease_token"),
+                         control.c.turn_revision.label("authority_revision"), control.c.key.label("execution_key"))
         return select(
             a, s.c.session_key.label("slot_session_key"), s.c.session_kind.label("slot_session_kind"), s.c.active_execution_id,
             s.c.lease_fence.label("slot_fence"), s.c.revision.label("slot_revision"),
-            s.c.lease_expires_at, s.c.lease_token, clock.label("observed_at"),
+            *authority, clock.label("observed_at"),
         ).select_from(joined).where(self._owns(anchor), predicate)
 
-    @staticmethod
     def parse_observation(
-        row: Mapping[str, object], *, decode_time: Callable[[object], datetime],
+        self, row: Mapping[str, object], *, decode_time: Callable[[object], datetime],
     ) -> SqlTurnObservation | None:
         if row["active_execution_id"] is None and row["execution_id"] is None:
             if row["lease_token"] is not None or row["lease_expires_at"] is not None:
@@ -208,14 +228,17 @@ class SqlTurnRows:
                 or row["slot_fence"] != proof.fence):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         proof.validate_live_token(row["lease_token"])
-        revision = row["slot_revision"]
+        if self.coowned and row["execution_key"] != self.execution_key(proof.execution_id):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not self.coowned and row["control_id"] is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        revision = row["authority_revision"]
         if type(revision) is not int or revision < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return SqlTurnObservation(proof, revision, decode_time(row["lease_expires_at"]) <= decode_time(row["observed_at"]))
 
-    @staticmethod
-    def live_proof(row: Mapping[str, object], *, decode_time: Callable[[object], datetime]) -> SqlTurnProof | None:
-        observed = SqlTurnRows.parse_observation(row, decode_time=decode_time)
+    def live_proof(self, row: Mapping[str, object], *, decode_time: Callable[[object], datetime]) -> SqlTurnProof | None:
+        observed = self.parse_observation(row, decode_time=decode_time)
         return None if observed is None or observed.expired else observed.proof
 
     def select_claim(self, *, session_key: str, request_key: str, execution_id: str, clock: "ColumnElement") -> "Select":
@@ -234,24 +257,53 @@ class SqlTurnRows:
         ).outerjoin(incumbent, and_(self._owns(incumbent), incumbent.c.session_kind == live_request.c.session_kind, incumbent.c.session_key == live_request.c.session_key)
         ).outerjoin(target_owner, and_(self._owns(target_owner), target_owner.c.execution_id == target.c.active_execution_id)
         ).outerjoin(proposed, and_(self._owns(proposed), proposed.c.execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES)))
+        extra = []
+        excluded = {"created_at", "updated_at", "store_key"}
+        if self.coowned:
+            target_control, incumbent_control, proposed_control = (
+                self._control.alias("owner_control"), self._control.alias("incumbent_control"), self._control.alias("proposed_control"),
+            )
+            joined = joined.outerjoin(target_control, self._control_link(target, target_owner, target_control)
+                ).outerjoin(incumbent_control, self._control_link(incumbent, live_request, incumbent_control)
+                ).outerjoin(proposed_control, and_(proposed_control.c.store_key == self._store_key,
+                                                  proposed_control.c.key == self.execution_key(execution_id)))
+            for slot, control in ((target, target_control), (incumbent, incumbent_control)):
+                for name, value in (
+                    ("lease_token", control.c.turn_token), ("lease_expires_at", control.c.turn_expiry),
+                    ("execution_key", control.c.key), ("turn_revision", control.c.turn_revision),
+                ):
+                    extra.append(value.label(slot.name + "__" + name))
+            extra.append(proposed_control.c.id.label("control__id"))
+            excluded.update(("lease_token", "lease_expires_at"))
         return select(clock.label("observed_at"), *(
             column.label(table.name + "__" + column.name)
             for table in (target, incumbent, live_request, target_owner, proposed)
-            for column in table.c if column.name not in {"created_at", "updated_at", "store_key"}
-        )).select_from(joined)
+            for column in table.c if column.name not in excluded
+        ), *extra).select_from(joined)
 
-    def create_slot(self, session: str) -> "Insert":
+    def create_slot(self, session: str, *, bind: tuple[str, int] | None = None) -> "Insert":
         from sqlalchemy import insert
 
         kind, key = turn_session_address(session)
-        return insert(self._slot).values(store_key=self._store_key, session_kind=kind, session_key=key)
+        return insert(self._slot).values(store_key=self._store_key, session_kind=kind, session_key=key,
+                                         **self._early_slot_values(bind))
 
-    def guard_slot_revision(self, session: tuple[int, bytes], revision: int) -> "Update":
+    def guard_slot_revision(
+        self, session: tuple[int, bytes], revision: int, *, bind: tuple[str, int] | None = None,
+    ) -> "Update":
         from sqlalchemy import update
 
         slot = self._slot
         return update(slot).where(self._owns(slot), self._session(slot, session), slot.c.revision == revision
-                                  ).values(revision=revision + 1)
+                                  ).values(revision=revision + 1, **self._early_slot_values(bind))
+
+    def _early_slot_values(self, bind: tuple[str, int] | None) -> dict[str, bytes | int]:
+        if bind is None:
+            return {}
+        if not self.coowned:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        execution, fence = bind
+        return dict(active_execution_id=self._key(execution, TURN_EXECUTION_MAX_BYTES), lease_fence=fence)
 
     def bind_slot(self, session: tuple[int, bytes], *, execution: str | None, token: str | None,
                   fence: int, expiry: datetime | None) -> "Update":
@@ -260,10 +312,11 @@ class SqlTurnRows:
         slot = self._slot
         return update(slot).where(self._owns(slot), self._session(slot, session)).values(
             active_execution_id=None if execution is None else self._key(execution, TURN_EXECUTION_MAX_BYTES),
-            lease_token=None if token is None else turn_hex(token, 32), lease_fence=fence, lease_expires_at=expiry,
+            lease_token=None if token is None or self.coowned else turn_hex(token, 32),
+            lease_fence=fence, lease_expires_at=None if self.coowned else expiry,
         )
 
-    def publish_claim(self, proof: SqlTurnProof, *, previous: SqlTurnProof | None) -> "Insert | Update":
+    def publish_claim(self, proof: SqlTurnProof, *, previous: SqlTurnProof | None, control_id: int | None = None) -> "Insert | Update":
         from sqlalchemy import insert, update
 
         a = self._admission
@@ -273,7 +326,7 @@ class SqlTurnRows:
         values = dict(session_kind=kind, session_key=key, retired_request_key=None,
                       route_kind=ACTIVE_REQUEST, route_key=request, request_digest=proof.request_digest,
                       owner_id=turn_hex(proof.owner_id, 32), lease_fence=proof.fence, cancel_requested=False,
-                      receipt_id=turn_hex(proof.receipt_id, 32), receipt_kind="claim")
+                      receipt_id=turn_hex(proof.receipt_id, 32), receipt_kind="claim", control_id=control_id)
         if previous is None:
             return insert(a).values(store_key=self._store_key, execution_id=execution, **values)
         return update(a).where(
@@ -298,6 +351,46 @@ class SqlTurnRows:
             a.c.route_kind == ACTIVE_REQUEST, a.c.route_key == turn_hex(request_key, TURN_REQUEST_MAX_BYTES),
         ).values(**values)
 
+    def control_guard(
+        self, *, session_key: str, execution_id: str, token: str, fence: int,
+        revision: int | None = None, published_only: bool = False, revoke: bool = False,
+    ) -> "Update":
+        from sqlalchemy import update
+        control = self._control
+        slot_kind, slot = turn_session_address(session_key)
+        exact = [control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id),
+                 control.c.turn_slot_kind == slot_kind, control.c.turn_slot_key == slot,
+                 control.c.turn_token == turn_hex(token, 32), control.c.turn_fence == fence]
+        if published_only:
+            exact.append(control.c.kind == "execution")
+        if revision is not None:
+            exact.append(control.c.turn_revision == revision)
+        return update(control).where(*exact).values(
+            turn_revision=control.c.turn_revision + 1, **({"turn_token": None} if revoke else {}),
+        )
+
+    def control_set_expiry(self, *, execution_id: str, token: str, fence: int, expiry: datetime | None, clock: "ColumnElement | None" = None, sqlite: bool = False) -> "Update":
+        from sqlalchemy import func, update
+        control = self._control
+        values = {"turn_expiry": expiry}
+        if expiry is None:
+            values.update(turn_token=None)
+        expires = control.c.turn_expiry
+        live = None if clock is None else (func.julianday(expires) > func.julianday(clock) if sqlite else expires > clock)
+        return update(control).where(
+            control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id),
+            control.c.turn_token == turn_hex(token, 32), control.c.turn_fence == fence,
+            *(() if live is None else (live,)),
+        ).values(**values)
+
+    def slot_guard_for_release(self, session_key: str, execution_id: str, fence: int) -> "Update":
+        from sqlalchemy import update
+        slot = self._slot
+        return update(slot).where(
+            self._owns(slot), self._session(slot, turn_session_address(session_key)),
+            slot.c.active_execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES), slot.c.lease_fence == fence,
+        ).values(revision=slot.c.revision + 1, active_execution_id=None)
+
     def clear_serialized_slot(self, *, session_key: str, clock: "ColumnElement", sqlite: bool) -> "Update":
         """Check clock in a statement issued after slot-write serialization."""
         from sqlalchemy import func, update
@@ -311,13 +404,47 @@ class SqlTurnRows:
             self._owns(slot), self._session(slot, turn_session_address(session_key)), live,
         ).values(active_execution_id=None, lease_token=None, lease_expires_at=None)
 
-    def retire_admission(self, *, execution_id: str, session_key: str, request_key: str,
-                         fence: int, receipt: str, token: str, kind: str = "release") -> "Update":
-        from sqlalchemy import and_, or_, update
+    def _deadline_is_live(self, clock: "ColumnElement", *, sqlite: bool) -> "ColumnElement[bool]":
+        from sqlalchemy import func
+
+        expiry = self._control.c.turn_expiry
+        return func.julianday(expiry) > func.julianday(clock) if sqlite else expiry > clock
+
+    def revoked_control_deadline(
+        self, *, execution_id: str, fence: int, clock: "ColumnElement", sqlite: bool,
+    ) -> "Select":
+        from sqlalchemy import select
+
+        control = self._control
+        return select(self._deadline_is_live(clock, sqlite=sqlite)).where(
+            control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id),
+            control.c.turn_fence == fence, control.c.turn_token.is_(None),
+        )
+
+    def retire_admission(
+        self, *, execution_id: str, session_key: str, request_key: str, fence: int,
+        receipt: str, token: str, kind: str = "release", clock: "ColumnElement | None" = None,
+        sqlite: bool = False,
+    ) -> "Update":
+        from sqlalchemy import and_, exists, or_, select, update
 
         admission = self._admission
         request = turn_hex(request_key, TURN_REQUEST_MAX_BYTES)
-        return update(admission).where(
+        linked = ()
+        if self.coowned:
+            control = self._control
+            owner = select(1).where(control.c.id == admission.c.control_id,
+                                    control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id))
+            if clock is not None:
+                slot_kind, slot_key = turn_session_address(session_key)
+                # The current transaction already locked the exact owner and
+                # revoked its token. The retained last deadline cannot authorize
+                # a write. Checking it now avoids using a pre-lock SQL clock.
+                owner = owner.where(control.c.turn_slot_kind == slot_kind, control.c.turn_slot_key == slot_key,
+                                    control.c.turn_fence == fence, control.c.turn_token.is_(None),
+                                    self._deadline_is_live(clock, sqlite=sqlite))
+            linked = (exists(owner),)
+        return update(admission).where(*linked,
             self._owns(admission), admission.c.execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES),
             self._session(admission, turn_session_address(session_key)),
             admission.c.lease_fence == fence,
@@ -325,13 +452,32 @@ class SqlTurnRows:
             or_(and_(admission.c.receipt_kind == "claim", admission.c.receipt_id == turn_hex(token, 32)),
                 admission.c.receipt_kind == "renew",
                 and_(admission.c.receipt_kind == "cancel", admission.c.cancel_requested)),
-        ).values(route_kind=RETIRED_EXECUTION, route_key=admission.c.execution_id, retired_request_key=request,
+        ).values(route_kind=RETIRED_EXECUTION, route_key=admission.c.execution_id, retired_request_key=request, control_id=None,
                  receipt_id=turn_hex(receipt, 32), receipt_kind=kind)
+
+    def reclaim_retired_shell(self, execution_id: str) -> "Delete":
+        from sqlalchemy import delete, exists, select
+        from ._record_owner import EXECUTION_SHELL_KIND
+
+        control, admission = self._control, self._admission
+        execution = self._key(execution_id, TURN_EXECUTION_MAX_BYTES)
+        retired = exists(select(1).where(
+            self._owns(admission), admission.c.execution_id == execution,
+            admission.c.route_kind == RETIRED_EXECUTION, admission.c.route_key == execution,
+            admission.c.control_id.is_(None),
+        ))
+        return delete(control).where(
+            control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id),
+            control.c.kind == EXECUTION_SHELL_KIND, control.c.turn_token.is_(None),
+            retired,
+        )
 
     def serialize_slot(self, *, session_key: str, execution_id: str, token: str, fence: int) -> "Update":
         """Acquire real write serialization; expiry must still be tested after waiting."""
         from sqlalchemy import update
 
+        if self.coowned:
+            return self.control_guard(session_key=session_key, token=token, fence=fence, execution_id=execution_id)
         slot = self._slot
         return update(slot).where(
             self._owns(slot), self._session(slot, turn_session_address(session_key)),

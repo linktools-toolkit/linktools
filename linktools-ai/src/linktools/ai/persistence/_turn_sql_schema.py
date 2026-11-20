@@ -55,6 +55,8 @@ def build_turn_sql_metadata(metadata: "MetaData") -> None:
         Column("cancel_requested", Boolean, nullable=False, comment="Whether the current admission was cancelled."),
         Column("receipt_id", binary(32), nullable=False, comment="Latest source mutation receipt identifier."),
         Column("receipt_kind", String(8), nullable=False, comment="Latest source mutation operation."),
+        Column("control_id", BigInteger, nullable=True,
+               comment="Local row address of the execution authority; rebuilt on restore."),
         *sql_audit_columns(),
         comment="Source turn admission and its latest operation receipt, retained after release.",
         **sql_table_options(),

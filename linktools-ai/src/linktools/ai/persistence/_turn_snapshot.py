@@ -74,6 +74,7 @@ def turn_snapshot_record(table: str, row: Mapping[str, object], *, namespace: st
             "request_key": proof.request_key, "request_digest": proof.request_digest, "owner_id": proof.owner_id,
             "fence": proof.fence, "cancel_requested": proof.cancel_requested,
             "receipt_id": proof.receipt_id, "receipt_kind": proof.receipt_kind,
+            **({"coowned": True} if proof.active and row.get("control_id") is not None else {}),
         })
     except (AttributeError, KeyError, TypeError, ValueError) as error:
         raise _integrity() from error
@@ -121,7 +122,8 @@ def decode_turn_snapshot(
                     raise _integrity()
                 slots[identity] = row
             else:
-                if (set(data) != {"scope", "session_key", "execution_id", "request_key", "request_digest",
+                if (("coowned" in data and (data["coowned"] is not True or record.state != "ACTIVE"))
+                        or set(data) - {"coowned"} != {"scope", "session_key", "execution_id", "request_key", "request_digest",
                                   "owner_id", "fence", "cancel_requested", "receipt_id", "receipt_kind"}
                         or record.state not in ("ACTIVE", "RETIRED")
                         or record.storage_revision != 0 or record.lease_owner is not None
@@ -143,6 +145,8 @@ def decode_turn_snapshot(
                 identity = row["execution_id"]
                 if identity in admissions or proof.active and request in requests:
                     raise _integrity()
+                if data.get("coowned") is True:
+                    row["_coowned"] = True
                 admissions[identity] = row
                 if proof.active:
                     requests.add(request)

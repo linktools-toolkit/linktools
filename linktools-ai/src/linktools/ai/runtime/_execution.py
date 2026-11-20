@@ -149,6 +149,7 @@ from ..execution import (
 from ..persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository, ExecutionTerminalPublication
 
 if TYPE_CHECKING:
+    from ..persistence.turns import ExecutionAuthority
     from ..persistence.state import StateTransaction
     from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
     from ..session import SessionRecord
@@ -325,7 +326,7 @@ class _ExecutionRuntimeBridge:
         self._port: _ExecutionRuntimePort | None = None
         self.pending_turns = _PendingExecutionTurns()
         self.prepare_reserved_start: Callable[
-            [ExecutionRequest, ExecutionStartReservation, "SessionRecord | None"],
+            [ExecutionRequest, ExecutionStartReservation, "SessionRecord | None", "ExecutionAuthority | None"],
             Awaitable[ExecutionStartReservationResult | None],
         ] | None = None
         self.pending_start: Callable[
@@ -1796,6 +1797,7 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
                 capture_metric=capture_metric,
                 coordinated_receipt=None if grouped is None else grouped.receipt,
+                authority=None if coordinator is None else coordinator.execution_authority(coordination),
             )
 
         if run_turn is None:
@@ -1885,6 +1887,7 @@ class DefaultExecutionService(TaskExecutionService):
         budget_scope_id: str | None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
         coordinated_receipt: ExecutionStartReservationResult | None = None,
+        authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionHandle:
         if coordinated_receipt is None:
             proposed_reservation = replace(proposed_reservation, execution=await _materialize_execution_payloads(
@@ -1908,15 +1911,16 @@ class DefaultExecutionService(TaskExecutionService):
         request_digest = identity.request_digest
         reservation = coordinated_receipt
         if reservation is None and prepared_context is None and self._runtime_bridge.prepare_reserved_start is not None:
-            reservation = await self._runtime_bridge.prepare_reserved_start(request, proposed_reservation, session)
+            reservation = await self._runtime_bridge.prepare_reserved_start(request, proposed_reservation, session, authority)
         if reservation is not None:
             pass
         elif prepared_context is None:
-            reservation = await self._state.executions.reserve_start(proposed_reservation)
+            reservation = await self._state.executions.reserve_start(proposed_reservation, **({"authority": authority} if authority is not None else {}))
         else:
             reservation = await self._state.executions.reserve_start(
                 proposed_reservation,
                 input_context_write=(prepared_context.archive, prepared_context.records),
+                **({"authority": authority} if authority is not None else {}),
             )
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:

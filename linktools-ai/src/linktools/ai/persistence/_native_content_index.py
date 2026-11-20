@@ -11,7 +11,9 @@ from ..steps import native_store_locator
 from ._step_schema import build_step_sql_metadata
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Result
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql import ColumnElement, Select
     from ..storage import SqlStorageContext
 
 
@@ -100,6 +102,38 @@ async def run_native_mutation(
 def _tables():
     metadata = build_step_sql_metadata()
     return metadata.tables["ai_step_sequences"], metadata.tables["ai_step_messages"]
+
+
+async def capture_retention_root_evidence(
+    session: "AsyncSession", execute: Callable[["Select"], Awaitable["Result"]],
+    *, store: bytes, roots: tuple[str, ...], audit_time: "ColumnElement",
+) -> tuple[object, Callable[[], None]]:
+    """Read clock and existing roots; activate only after the observed owner CAS."""
+    from sqlalchemy import and_, literal, select
+
+    sequences, _ = _tables()
+    seed = select(literal(1).label("seed")).subquery()
+    rows = tuple((await execute(select(audit_time.label("observed_at"), sequences.c.sha256).select_from(
+        seed.outerjoin(sequences, and_(
+            sequences.c.store_locator == native_store_locator(store),
+            sequences.c.store_key == store, sequences.c.sha256.in_(roots),
+        ))
+    ))).mappings())
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    found = tuple(sorted({row["sha256"] for row in rows if row["sha256"] in roots}))
+
+    def confirm(candidate: "AsyncSession", *, store_key: bytes, roots: Sequence[str]) -> None:
+        current = candidate.get_nested_transaction() or candidate.get_transaction()
+        if candidate is not session or transaction is None or current is not transaction or store_key != store or tuple(roots) != found:
+            raise PublicationUnavailable("retention root evidence is outside its source transaction")
+
+    def activate() -> None:
+        # A miss isn't conclusive until final validation: a later participant
+        # could materialize the root within this same transaction.
+        if found:
+            register_publication(session, store, found, confirm)
+
+    return rows[0]["observed_at"], activate
 
 
 async def resolve_targets(

@@ -447,3 +447,88 @@ async def test_failed_host_binding_does_not_admit_runtime_or_close_borrowed_cach
     with pytest.raises(AIError) as unbound:
         await configuration.coordination.read_turn_by_session(_SCOPE, "session")
     assert unbound.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+
+
+@pytest.mark.parametrize("layout", ("one_group", "side_group", "capability_group", "memory", "custom"))
+async def test_builtin_turn_authority_requires_one_durable_source_at_composition(tmp_path, layout):
+    from linktools.ai.persistence import StateTurnResources
+    from linktools.ai.persistence._plan import PersistencePlan
+    from linktools.ai.storage import StorageRoute
+
+    class CustomStateTurns(StateTurnResources):
+        pass
+
+    coordination = CustomStateTurns() if layout == "custom" else StateTurnResources()
+    if layout == "memory":
+        storage = PersistenceStorage.in_memory(coordination=coordination)
+    else:
+        plan = PersistencePlan.from_default(StorageRoute.sqlite(tmp_path / "state.db"))
+        if layout == "side_group":
+            plan = replace(plan, conversation=StorageRoute.sqlite(tmp_path / "side.db"))
+        elif layout == "capability_group":
+            plan = replace(plan, capability_routes={"optional": StorageRoute.sqlite(tmp_path / "cap.db")})
+        storage = PersistenceStorage(plan, coordination=coordination)
+    scope = TurnScopeIdentity("layout", "tenant", "runtime-pending-turn")
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=storage) as state:
+        bound = state.coordination_backend
+        assert isinstance(bound, StateTurnCoordination)
+        assert bound._coowned is (layout == "one_group")
+        with pytest.raises(AttributeError):
+            bound._coowned = not bound._coowned
+        claim = await bound.claim_turn(
+            scope, session_key="session:session", request_key="a" * 64,
+            request_digest="b" * 64, execution_id="execution",
+            owner_id="c" * 32, lease_seconds=60,
+        )
+        assert (state.pending_turn_coordination.execution_authority(claim) is not None) is (layout == "one_group")
+        assert await bound.release_turn(claim.lease)
+
+
+async def test_builtin_cannot_change_active_turn_authority_layout_on_same_partition(tmp_path):
+    from linktools.ai.persistence import StateTurnResources
+
+    class CustomStateTurns(StateTurnResources):
+        pass
+
+    scope = TurnScopeIdentity("layout-change", "tenant", "runtime-pending-turn")
+    path = tmp_path / "state.db"
+    resource = PersistenceStorage.sqlite(path, coordination=StateTurnResources())
+    custom = PersistenceStorage.sqlite(path, coordination=CustomStateTurns())
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=resource) as original:
+        authority = original.coordination_backend
+        reserved = await authority.claim_turn(
+            scope, session_key="session:session", request_key="a" * 64,
+            request_digest="b" * 64, execution_id="execution",
+            owner_id="c" * 32, lease_seconds=60,
+        )
+        with pytest.raises(AIError) as mismatch:
+            async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom):
+                pytest.fail("a different mode must not interpret the live source")
+        assert mismatch.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+        assert await authority.release_turn(reserved.lease)
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom) as after:
+        assert not after.coordination_backend._coowned
+
+
+async def test_builtin_active_private_shell_restores_through_default_composition(tmp_path):
+    from linktools.ai.persistence import StateTurnResources
+
+    archive = InMemoryObjectStore()
+    scope = TurnScopeIdentity("default-shell-snapshot", "tenant", "runtime-pending-turn")
+    source = PersistenceStorage.from_root(tmp_path / "source", coordination=StateTurnResources())
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=source) as state:
+        claim = await state.coordination_backend.claim_turn(
+            scope, session_key="session:session", request_key="a" * 64, request_digest="b" * 64,
+            execution_id="hidden-shell", owner_id="c" * 32, lease_seconds=120,
+        )
+        assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=source, read_only=True) as state:
+        ref = await state.export_snapshot(object_store=archive, limits=_LIMITS)
+    destination = tmp_path / "restored"
+    await Persistence.restore_snapshot(ref, object_store=archive, root=destination, limits=_LIMITS)
+    restored = PersistenceStorage.from_root(destination, coordination=StateTurnResources())
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=restored) as state:
+        assert state.coordination_backend._coowned
+        assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
+        assert await state.coordination_backend.read_turn(scope, "hidden-shell") == replace(claim, lease=None)
+        assert await state.coordination_backend.release_turn(claim.lease)

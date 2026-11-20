@@ -5,7 +5,7 @@
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 from ._record_query import ExecutionRecoveryCandidateQuery
 from ._message_root import NativeTextReference, NativeMessageRoot
 from linktools.core import environ
@@ -56,6 +56,7 @@ from .contracts import (
 )
 from .contracts import RuntimePayloadRef, ExecutionMembershipRecord, ExecutionObservationRecord
 from ._plan import PersistenceDomain
+from .turns import SourceTurnWriteFence
 from .state import (
     FactQuery,
     Observed,
@@ -85,6 +86,10 @@ from ._repository_common import (
 )
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
+
+
+if TYPE_CHECKING:
+    from ._execution_authority import ExecutionAuthority, InitialExecutionAuthority
 
 
 class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
@@ -699,6 +704,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         self, transaction: StateTransaction, observed: Observed[ExecutionRecord], *,
         next_record: ExecutionRecord, expected_producer_generation: int,
         expected_producer_claim_id: str, allow_cancelling: bool = False,
+        turn_fence: "SourceTurnWriteFence | None" = None,
     ) -> Observed[ExecutionRecord]:
         """Publish a prepared boundary using its confirmed control receipt."""
         current = observed.value
@@ -713,12 +719,16 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 or (next_record != current and next_record.revision != current.revision + 1)):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if next_record == current:
-            revision = await transaction.guard_record_revision(
-                self._key("execution", (current.execution_id,)), expected_storage_revision=observed.storage_revision,
-            )
+            key = self._key("execution", (current.execution_id,))
+            revision = (await transaction.guard_record_revision(key, expected_storage_revision=observed.storage_revision)
+                        if turn_fence is None else await turn_fence.guard_execution_revision(
+                            self._store, transaction, current.execution_id, key, observed.storage_revision,
+                        ))
             if revision is None or revision != observed.storage_revision + 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return Observed(current, revision)
+        if turn_fence is not None:
+            await turn_fence.guard(current.execution_id)
         candidate = replace(await self._stored_content("execution", (next_record.execution_id,), next_record,
                                          state=next_record.status.value, previous_value=current),
                             storage_revision=observed.storage_revision + 1)
@@ -1129,21 +1139,45 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values[0] if values else None
 
+    @staticmethod
+    async def _insert_execution_and_idempotency(
+        transaction: StateTransaction, execution: StoredRecord, receipt: StoredRecord, *,
+        authority: "ExecutionAuthority | InitialExecutionAuthority | None",
+    ) -> None:
+        if authority is None:
+            await transaction.insert_records((execution, receipt))
+        else:
+            from ._sql import _SqlTransaction
+            if not isinstance(transaction, _SqlTransaction):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            from ._execution_authority import InitialExecutionAuthority
+            if isinstance(authority, InitialExecutionAuthority):
+                if authority.control_id is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                authority.control_id = await transaction.insert_execution_with_authority(
+                    authority.proof, execution, expiry=authority.expiry,
+                )
+            else:
+                await transaction.publish_execution_shell(authority, execution)
+            await transaction.insert_record(receipt)
+
     async def reserve_start(
         self, reservation: ExecutionStartReservation, *,
         input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
+        authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionStartReservationResult:
-        return await self._reserve_start(reservation, input_context_write=input_context_write)
+        return await self._reserve_start(reservation, input_context_write=input_context_write, authority=authority)
 
     async def reserve_started(
-        self, reservation: ExecutionStartReservation,
+        self, reservation: ExecutionStartReservation, *, authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
     ) -> ExecutionStartReservationResult:
         """Insert a new admitted owner once inside the caller's group transaction."""
-        return await self._reserve_start(reservation, started=True)
+        return await self._reserve_start(reservation, started=True, authority=authority)
 
     async def _reserve_start(
         self, reservation: ExecutionStartReservation, *, started: bool = False,
         input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
+        authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
     ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
@@ -1238,7 +1272,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if started:
                 execution_record = replace(execution_record, storage_revision=1)
                 idempotency_record = replace(idempotency_record, storage_revision=1)
-            await transaction.insert_records((execution_record, idempotency_record))
+            await self._insert_execution_and_idempotency(transaction, execution_record, idempotency_record, authority=authority)
             if started:
                 await transaction.insert_facts((StoredFact(
                     stream_key(self._namespace, self._tenant_id, self._domain.value,
@@ -2186,6 +2220,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def insert_pending_turn_in_transaction(
         self, transaction: StateTransaction, reservation: ExecutionStartReservation,
         commit: ExecutionTerminalCommit, *, audit_events: Sequence[ExecutionEventAppend] = (),
+        authority: "ExecutionAuthority | None" = None,
     ) -> tuple[ExecutionTerminalCommitResult, ExecutionInsertionReceipt]:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
@@ -2233,10 +2268,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                             error_code=commit.execution.error_code,
                             updated_at=await transaction.now())
         execution_record = await self._stored_content("execution", (execution_id,), final, state=final.status.value)
-        await transaction.insert_records((
-            execution_record,
-            self._idempotency._stored("idempotency", identity, completed, state=completed.status.value),
-        ))
+        await self._insert_execution_and_idempotency(
+            transaction, execution_record,
+            self._idempotency._stored("idempotency", identity, completed, state=completed.status.value), authority=authority,
+        )
         stream = stream_key(self._namespace, self._tenant_id, self._domain.value, "execution", (execution_id,))
         await transaction.insert_facts(tuple(
             StoredFact(stream, index, self._key("execution", (execution_id,)), str(event.event_type),
@@ -2356,6 +2391,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> tuple[bool, ExecutionRetentionRecord | None]:
         _require_repository_tenant(tenant_id, self._tenant_id)
         key = self._key("execution", (execution_id,))
+        exact_projection = False
         if observed is None:
             await self._execution_content.prefetch_projection_owners((key,))
             stored = await transaction.get_record(key)
@@ -2381,6 +2417,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 # This exact decoded owner already carries closure metadata.
                 # Reuse it without restoring unrelated immutable bodies; the
                 # physical CAS below rejects any intervening owner update.
+                exact_projection = True
                 current = ExecutionRetentionRecord(
                     execution_id=current.execution_id, session_id=current.session_id,
                     status=current.status, conversation=current.conversation,
@@ -2397,6 +2434,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return False, current
         if current.retention_closed:
             return True, current
+        proof = None
+        if exact_projection:
+            from ._sql import _SqlTransaction
+
+            if type(transaction) is _SqlTransaction:
+                proof = await transaction.capture_observed_retention_roots(stored)
         next_value = replace(
             current,
             retention_closed=True,
@@ -2411,6 +2454,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         }}})
         await _replace_checked(transaction, replace(stored, data=data,
             storage_revision=stored.storage_revision + 1), stored.storage_revision)
+        if proof is not None:
+            proof()
         return True, next_value
 
     async def require_active_producer(

@@ -89,7 +89,7 @@ from .durability import (
 )
 from ._execution_commands import _execution_history_seal
 from ._execution_repositories import ExecutionRepositoryImpl, IdempotencyRepositoryImpl
-from .turns import StateTurnCoordination, _duration, _TurnGraphReadError
+from .turns import SourceTurnWriteFence, StateTurnCoordination, _duration, _TurnGraphReadError
 from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._conversation_repositories import (
     ConversationHistoryRepositoryImpl,
@@ -169,6 +169,7 @@ def _timeline_turn_message_range(
 
 
 if TYPE_CHECKING:
+    from ._execution_authority import ExecutionAuthority, InitialExecutionAuthority
     from .capabilities import RuntimeCapabilityWrites, PreparedCapabilityWrites
 
 
@@ -291,6 +292,7 @@ class StateCommands:
         occurred_at: datetime,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
         producer_generation: int | None = None,
+        turn_fence: SourceTurnWriteFence | None = None,
     ) -> ExecutionRecord:
         self._require_checkpoint()
         approvals = self._checkpoint.approvals
@@ -367,7 +369,7 @@ class StateCommands:
         stores = _dedupe_stores(
             (
                 self._execution.state_store,
-                self._execution.state_store,
+                *((turn_fence.store,) if turn_fence is not None else ()),
                 approvals.state_store,
                 external_calls.state_store,
             )
@@ -379,6 +381,8 @@ class StateCommands:
             async def mutate(
                 group: StateGroupTransaction,
             ) -> ExecutionRecord:
+                if turn_fence is not None:
+                    await turn_fence.guard(execution_id)
                 execution_tx = group.transaction(self._execution.state_store)
                 recovery_tx = group.transaction(approvals.state_store)
                 if producer_generation is not None:
@@ -1172,27 +1176,45 @@ class StateCommands:
                 if stale.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     # Leave guarded recovery/old actor replay to its established entry point.
                     raise AIError(ErrorCode.SESSION_BUSY)
+            saved = None
+
+            async def reserve(source: "InitialExecutionAuthority | None") -> ExecutionStartReservationResult:
+                if stale is not None:
+                    await self._conversation.release_execution_in_transaction(
+                        session_tx, initial.session_id, tenant_id=self._tenant_id, execution_id=stale.execution_id,
+                        history_unavailable=stale.invalidates_session_history, require_turn_commit=stale.conversation,
+                    )
+                result = await self._reserve_start_in_transaction(
+                    group, reservation, claim, expected_cursor=expected_session.continuation,
+                    expected_session=expected_session, authority=source,
+                )
+                if result is None:
+                    raise _GroupedStartUnavailable()
+                if not result.created or result.execution.execution_id != initial.execution_id:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                return result
+
+            async def publish(insertion: "InitialExecutionAuthority") -> int:
+                nonlocal saved
+                saved = await reserve(insertion)
+                if insertion.control_id is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return insertion.control_id
+
+            coowned = authority._coowned and sql_coordination is not None
             coordinated = await authority._claim_in_transaction(
                 authority_tx, local_scope, session_key=session_key, request_key=request_key,
                 request_digest=identity.request_digest, execution_id=initial.execution_id,
-                duration=duration, owner_id=owner_id, token=token,
+                duration=duration, owner_id=owner_id, token=token, publish=publish if coowned else None,
             )
             if coordinated is None:
                 raise AIError(ErrorCode.SESSION_BUSY)
             if coordinated.lease is None:
                 return coordinated, None
-            if stale is not None:
-                await self._conversation.release_execution_in_transaction(
-                    session_tx, initial.session_id, tenant_id=self._tenant_id, execution_id=stale.execution_id,
-                    history_unavailable=stale.invalidates_session_history, require_turn_commit=stale.conversation,
-                )
-            saved = await self._reserve_start_in_transaction(
-                group, reservation, claim, expected_cursor=expected_session.continuation, expected_session=expected_session,
-            )
+            if not coowned:
+                saved = await reserve(None)
             if saved is None:
-                raise _GroupedStartUnavailable()
-            if not saved.created or saved.execution.execution_id != coordinated.execution_id:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return coordinated, saved
 
         async def readback(group: StateGroupTransaction) -> tuple[TurnCoordination | None, ExecutionStartReservationResult | None] | None:
@@ -1203,7 +1225,7 @@ class StateCommands:
             if sql_coordination is not None:
                 coordinated = await sql_coordination.confirm_turn_admission(
                     scope, execution_id=initial.execution_id, receipt=token, kind="claim",
-                    expected_claim=(session_key, request_key, identity.request_digest, owner_id),
+                    expected_claim=(session_key, request_key, identity.request_digest, owner_id), coowned=authority._coowned,
                 )
                 if not isinstance(coordinated, TurnCoordination) or coordinated.lease is None:
                     return None
@@ -1262,6 +1284,7 @@ class StateCommands:
         self, reservation: ExecutionStartReservation, *,
         expected_cursor: ConversationCursor | None,
         expected_session: SessionRecord | None = None,
+        authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionStartReservationResult | None:
         """Reserve and admit a new local execution without publishing a worker."""
         initial = reservation.execution
@@ -1284,7 +1307,7 @@ class StateCommands:
 
         async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult | None:
             return await self._reserve_start_in_transaction(
-                group, reservation, claim, expected_cursor=expected_cursor, expected_session=expected_session,
+                group, reservation, claim, expected_cursor=expected_cursor, expected_session=expected_session, authority=authority,
             )
 
         for attempt in range(2):
@@ -1326,6 +1349,7 @@ class StateCommands:
     async def _reserve_start_in_transaction(
         self, group: StateGroupTransaction, reservation: ExecutionStartReservation, claim: ExecutionStartClaim, *,
         expected_cursor: ConversationCursor | None, expected_session: SessionRecord | None,
+        authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
     ) -> ExecutionStartReservationResult | None:
         initial, identity = reservation.execution, reservation.idempotency
         if initial.session_id is not None and isinstance(group, GroupRecordReader):
@@ -1350,7 +1374,7 @@ class StateCommands:
                     or session.continuation != expected_cursor
                     or session.history_quality == "unavailable"):
                 return None
-        reserved = await self._execution.reserve_started(reservation)
+        reserved = await self._execution.reserve_started(reservation, authority=authority)
         if not reserved.created:
             return reserved
         turns: list[SessionTurnRef] = []
@@ -1497,18 +1521,23 @@ class StateCommands:
         recovery_operation: OperationLedgerInput | None = None,
         source_agent_run_id: str | None = None,
         completed_tool_call_ids: frozenset[str] = frozenset(),
+        turn_fence: SourceTurnWriteFence | None = None,
     ) -> Observed[ExecutionRecord]:
         return await self._commit_agent_attempt_checkpoint(
             claim, recovery_operation=recovery_operation, source_agent_run_id=source_agent_run_id,
-            completed_tool_call_ids=completed_tool_call_ids,
+            completed_tool_call_ids=completed_tool_call_ids, turn_fence=turn_fence,
         )
 
     async def commit_prepared_agent_attempt_checkpoint(
         self, claim: AgentAttemptClaim, input_context: RuntimePayloadRef, *,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         observed: Observed[ExecutionRecord] | None = None,
+        turn_fence: SourceTurnWriteFence | None = None,
     ) -> Observed[ExecutionRecord]:
-        return await self._commit_agent_attempt_checkpoint(claim, prepared_input_context=input_context, context_write=context_write, observed=observed)
+        return await self._commit_agent_attempt_checkpoint(
+            claim, prepared_input_context=input_context, context_write=context_write, observed=observed,
+            turn_fence=turn_fence,
+        )
 
     async def _commit_agent_attempt_checkpoint(
         self, claim: AgentAttemptClaim, *,
@@ -1519,9 +1548,12 @@ class StateCommands:
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         observed: Observed[ExecutionRecord] | None = None,
         producer_claim_id: str | None = None,
+        turn_fence: SourceTurnWriteFence | None = None,
     ) -> Observed[ExecutionRecord]:
         """Atomically publish the execution sequence and active recovery run."""
         stores = [self._execution.state_store]
+        if turn_fence is not None:
+            stores.append(turn_fence.store)
         operations = self._operations
         if recovery_operation is not None:
             if operations is None:
@@ -1545,6 +1577,8 @@ class StateCommands:
         async def callback(
             group: StateGroupTransaction,
         ) -> Observed[ExecutionRecord]:
+            if turn_fence is not None:
+                await turn_fence.guard(claim.execution_id)
             execution_transaction = group.transaction(self._execution.state_store)
             existing_operation = None
             if recovery_operation is not None:
@@ -1726,7 +1760,7 @@ class StateCommands:
             if error.code is ErrorCode.STORAGE_CONFLICT and observed is not None:
                 return await self._commit_agent_attempt_checkpoint(
                     claim, prepared_input_context=prepared_input_context, context_write=context_write,
-                    producer_claim_id=producer_claim_id,
+                    producer_claim_id=producer_claim_id, turn_fence=turn_fence,
                 )
             if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
@@ -2189,6 +2223,7 @@ class StateCommands:
         write: Callable[[StateGroupTransaction], Awaitable[None]] | None = None,
         readback_write: Callable[[], Awaitable[bool]] | None = None,
         stores: Sequence[StateStore] = (),
+        turn_fence: SourceTurnWriteFence | None = None,
     ) -> ToolBoundaryReceipt:
         """Fence final leaf admission and publish its prepared native event once."""
         tools = self._tools
@@ -2202,7 +2237,8 @@ class StateCommands:
         target = current if next_execution is None else next_execution
         budget = self._tool_budget_repository(current)
         participants = _dedupe_stores((self._execution.state_store, tools.state_store,
-                                      *((budget.state_store,) if budget is not None else ()), *stores))
+                                      *((budget.state_store,) if budget is not None else ()),
+                                      *((turn_fence.store,) if turn_fence is not None else ()), *stores))
         if not _same_group(participants):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
@@ -2220,6 +2256,7 @@ class StateCommands:
                         group.transaction(self._execution.state_store), execution,
                         next_record=target, expected_producer_generation=current.producer_generation,
                         expected_producer_claim_id=request.owner,
+                        **({} if turn_fence is None else {"turn_fence": turn_fence}),
                     )
                 except AIError as error:
                     control_conflict = error.code is ErrorCode.STORAGE_CONFLICT
@@ -2795,6 +2832,7 @@ class StateCommands:
         producer_claim_id: str | None = None,
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         tool_operations: Sequence[ToolOperationRecord] = (),
+        authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionRecord:
         """Confirm durable producer ownership before a local turn performs effects."""
         producer_claim_id = uuid4().hex if producer_claim_id is None else producer_claim_id
@@ -2844,7 +2882,7 @@ class StateCommands:
                     rejected = True
                     raise AIError(ErrorCode.SESSION_BUSY)
             try:
-                reserved = await self._execution.reserve_start(reservation)
+                reserved = await self._execution.reserve_start(reservation, authority=authority)
             except AIError as error:
                 if error.code is ErrorCode.IDEMPOTENCY_CONFLICT:
                     rejected = True
@@ -2919,6 +2957,7 @@ class StateCommands:
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         tool_operations: Sequence[ToolOperationRecord] = (),
         include_publication: bool = False,
+        authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionTerminalCommitResult:
         """Materialize one volatile turn and its replay-safe outcomes atomically.
 
@@ -3140,7 +3179,7 @@ class StateCommands:
                     if current_history != history:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
             final, insertion = await repository.insert_pending_turn_in_transaction(
-                execution_transaction, reservation, commit, audit_events=tuple(audit_events),
+                execution_transaction, reservation, commit, audit_events=tuple(audit_events), authority=authority,
             )
             if seal is not None:
                 await self._execution_run_store.execution_history_heads(expected_runs)
@@ -3395,6 +3434,7 @@ class StateCommands:
         execution_projections: Sequence[PreparedExecutionProjection] = (),
         audit_events: Sequence[ExecutionEventAppend] = (),
         background_tasks: "set[asyncio.Task[object]] | None" = None,
+        turn_fence: SourceTurnWriteFence | None = None,
     ) -> ExecutionTerminalCommitResult:
         if expected_execution is not None and (
             expected_execution.execution_id != commit.execution.execution_id
@@ -3441,6 +3481,11 @@ class StateCommands:
             if self._conversation_run_store is None or conversation_agent_run is None or conversation_checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stores.extend(self._conversation_run_store.transaction_stores)
+        if turn_fence is not None:
+            stores = list(_dedupe_stores((*stores, turn_fence.store)))
+            if not _same_group(stores):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH,
+                              "A source-owned terminal commit cannot publish across SQL groups")
         terminal_archives = tuple(
             archive for archive, participates in (
                 (self._execution_run_store, execution_run is not None and bool(execution_projections or execution_checkpoints)),
@@ -3583,6 +3628,9 @@ class StateCommands:
             ) if self._capability_writes is not None else None)
             if prepared is not None:
                 stores.extend(prepared.stores)
+                if turn_fence is not None and not _same_group(stores):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH,
+                                  "A source-owned terminal commit cannot publish across SQL groups")
             fresh_record_keys: dict[StateStore, tuple[bytes, ...]] = {}
             if (shared_archive is not None
                     and isinstance(stores[0].storage_group, GroupRecordReader)
@@ -3622,6 +3670,8 @@ class StateCommands:
             try:
                 async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                     nonlocal effective_commit, next_cursor
+                    if turn_fence is not None:
+                        await turn_fence.guard(commit.execution.execution_id)
                     if isinstance(self._execution, ExecutionRepositoryImpl):
                         await self._execution.prefetch_terminal_records(
                             commit.execution.execution_id, additional_records=fresh_record_keys,

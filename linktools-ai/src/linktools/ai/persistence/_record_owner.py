@@ -48,12 +48,18 @@ def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[
     return ("e:1", "e:0")
 
 
+EXECUTION_SHELL_KIND = "execution_shell"
+EXECUTION_AUTHORITY_COLUMNS = frozenset({
+    "turn_slot_kind", "turn_slot_key", "turn_token", "turn_fence", "turn_expiry", "turn_revision",
+})
+
+
 def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) -> tuple["ColumnElement", ...]:
     """Return the common wire row and any canonical execution digest cells."""
     from sqlalchemy import String, cast, null
 
     base = tuple(column for column in table.c if column.name != "scan_kind"
-                 and column.name not in CONTENT_REFERENCE_COLUMN_NAMES)
+                 and column.name not in CONTENT_REFERENCE_COLUMN_NAMES and column.name not in EXECUTION_AUTHORITY_COLUMNS)
     return base + tuple(
         table.c[name] if name in table.c else cast(null(), String(64)).label(name)
         for name in EXECUTION_REFERENCE_COLUMNS if pad_execution or name in table.c
@@ -122,7 +128,7 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
     canonical = metadata.tables["ai_state_records"]
     if "ai_execution_records" in names:
         content_columns = tuple(dict.fromkeys((*EXECUTION_REFERENCE_COLUMNS, *content_columns)))
-    if (len(names) == 1 and names[0] in SCAN_KIND_OWNERS and keys is not None and kind is None
+    if (len(names) == 1 and names[0] == "ai_state_records" and keys is not None and kind is None
             and scan_kind is None and not include_run_counters):
         table = metadata.tables[names[0]]
         if all(column in table.c for column in content_columns):
@@ -148,6 +154,8 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
                 (table.c[column] if column in table.c else cast(null(), String(64)).label(column))
                 for column in content_columns
             ))
+        if name == "ai_execution_records":
+            selection = selection.where(table.c.kind != literal(EXECUTION_SHELL_KIND, literal_execute=True))
         if name in SCAN_KIND_OWNERS and scan_kind is not None:
             selection = selection.where(table.c.scan_kind == literal(scan_kind, literal_execute=True))
         elif name in SCAN_KIND_OWNERS and kind is not None and kind.rstrip(" ") != "execution":
@@ -171,5 +179,5 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
 
 
 
-__all__ = ["record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["EXECUTION_SHELL_KIND", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
 
