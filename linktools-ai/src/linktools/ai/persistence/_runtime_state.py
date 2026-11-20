@@ -424,8 +424,6 @@ class Persistence:
                 config = self._coordination_config
                 if isinstance(config, StateTurnResources):
                     from ._sql import SqlStateStore
-                    from ._turn_sql_schema import RUNTIME_TURN_SCOPE
-                    from ..storage import TurnScopeIdentity
 
                     execution_store = materialized.execution.executions.state_store
                     group = execution_store.storage_group
@@ -444,10 +442,6 @@ class Persistence:
                         namespace=namespace, tenant_id=tenant_id,
                         read_only=read_only, require_ready=self._require_ready, _runtime_sql=True, _coowned=coowned,
                     )
-                    if type(execution_store) is SqlStateStore:
-                        await execution_store.require_runtime_turn_mode(
-                            TurnScopeIdentity(namespace, tenant_id, RUNTIME_TURN_SCOPE), coowned=coowned,
-                        )
                     self._coordination_backend = authority
                     self._pending_turn_coordination = PendingTurnCoordination.for_state(
                         config.pending_cache, authority, namespace=namespace, tenant_id=tenant_id,

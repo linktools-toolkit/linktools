@@ -484,7 +484,7 @@ async def test_builtin_turn_authority_requires_one_durable_source_at_composition
         assert await bound.release_turn(claim.lease)
 
 
-async def test_builtin_cannot_change_active_turn_authority_layout_on_same_partition(tmp_path):
+async def test_builtin_can_open_and_read_an_active_turn_from_another_layout(tmp_path):
     from linktools.ai.persistence import StateTurnResources
 
     class CustomStateTurns(StateTurnResources):
@@ -501,10 +501,10 @@ async def test_builtin_cannot_change_active_turn_authority_layout_on_same_partit
             request_digest="b" * 64, execution_id="execution",
             owner_id="c" * 32, lease_seconds=60,
         )
-        with pytest.raises(AIError) as mismatch:
-            async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom):
-                pytest.fail("a different mode must not interpret the live source")
-        assert mismatch.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+        async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom, read_only=True) as observer:
+            assert not observer.coordination_backend._coowned
+            active = await observer.coordination_backend.read_turn_by_session(scope, "session:session")
+            assert active == replace(reserved, lease=None)
         assert await authority.release_turn(reserved.lease)
     async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom) as after:
         assert not after.coordination_backend._coowned

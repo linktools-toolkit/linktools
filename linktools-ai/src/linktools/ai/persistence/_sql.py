@@ -1136,24 +1136,6 @@ class SqlStateStore:
         if self._turn_scope is None or scope != self._turn_scope:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
-    async def require_runtime_turn_mode(self, scope: "TurnScopeIdentity", *, coowned: bool) -> None:
-        """Reject a storage-route change while opposite-mode admission is live."""
-        from sqlalchemy import select
-        from ._turn_sql import ACTIVE_REQUEST
-        from ._turn_sql_schema import TURN_ADMISSION_TABLE
-
-        self._require_runtime_turn_scope(scope)
-        table = self._metadata.tables[TURN_ADMISSION_TABLE]
-        wrong_mode = table.c.control_id.is_(None) if coowned else table.c.control_id.is_not(None)
-        statement = select(table.c.id).where(
-            table.c.store_key == self._store_key, table.c.route_kind == ACTIVE_REQUEST, wrong_mode,
-        ).limit(1)
-        async def inspect(transaction):
-            return await transaction.read_sql_rows(self.context, statement)
-        if await self.read(inspect):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED,
-                          "Active runtime turns belong to a different SQL authority layout")
-
     def _turn_transaction(self) -> "_SqlTransaction":
         active = active_state_scope()
         if active is None or not isinstance(active.record_reader, _SqlGroupTransaction):
@@ -1438,7 +1420,7 @@ class _SqlTransaction:
             row = named[family]
             return None if row["execution_id"] is None else SqlTurnProof.from_row(row)
 
-        def verify(slot, proof):
+        def verify(slot, proof, *, linked):
             if proof is None:
                 valid = slot["active_execution_id"] is None and slot["lease_token"] is None and slot["lease_expires_at"] is None
             else:
@@ -1450,13 +1432,15 @@ class _SqlTransaction:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if proof is not None:
                 proof.validate_live_token(slot["lease_token"])
-                if coowned and slot["execution_key"] != source.execution_key(proof.execution_id):
+                if linked and slot["execution_key"] != source.execution_key(proof.execution_id):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         duplicate, owner, proposed = admission("live_request"), admission("target_owner"), admission("proposed")
-        verify(target, owner)
+        owner_linked = named["target_owner"]["control_id"] is not None
+        duplicate_linked = named["live_request"]["control_id"] is not None
+        verify(target, owner, linked=owner_linked)
         if duplicate is not None:
-            verify(incumbent, duplicate)
+            verify(incumbent, duplicate, linked=duplicate_linked)
         def live(slot, at):
             return slot["lease_expires_at"] is not None and dialect.decode_database_time(slot["lease_expires_at"]) > at
 
@@ -1479,7 +1463,14 @@ class _SqlTransaction:
         protected = {(slot["session_kind"], slot["session_key"]): slot for slot in (target, incumbent) if slot["session_key"] is not None}
         try:
             lease_duration = timedelta(seconds=duration)
-            retire = {item.execution_id: item for item in (owner, duplicate) if item is not None}
+            retire = {proof.execution_id: (proof, linked)
+                      for proof, linked in ((owner, owner_linked), (duplicate, duplicate_linked))
+                      if proof is not None}
+            retiring_sources = {coowned: source}
+            if any(linked != coowned for _, linked in retire.values()):
+                retiring_sources[not coowned] = SqlTurnRows(
+                    self._metadata, self._store_key, scope, coowned=not coowned,
+                )
             fence = (target["lease_fence"] or 0) + 1
             initial_claim = coowned and publish is not None and not retire
             for key in sorted(set(protected) | {session}):
@@ -1493,14 +1484,15 @@ class _SqlTransaction:
                     key, protected[key]["revision"], bind=bind,
                 ))).rowcount != 1:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if coowned:
-                for old_id, old in sorted(retire.items()):
-                    old_slot = protected[turn_session_address(old.session_key)]
-                    if (await self._execute(source.control_guard(
-                        session_key=old.session_key, execution_id=old_id, fence=old.fence,
-                        token=old_slot["lease_token"].decode("utf-8"), revision=old_slot["turn_revision"],
-                    ))).rowcount != 1:
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+            for old_id, (old, linked) in sorted(retire.items()):
+                if not linked:
+                    continue
+                old_slot = protected[turn_session_address(old.session_key)]
+                if (await self._execute(retiring_sources[True].control_guard(
+                    session_key=old.session_key, execution_id=old_id, fence=old.fence,
+                    token=old_slot["lease_token"].decode("utf-8"), revision=old_slot["authority_revision"],
+                ))).rowcount != 1:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
             # A fresh grouped claim has no previous lease to check. Only its
             # Execution row stores the deadline, so sample the clock in that
             # mandatory INSERT, after the slot's write serialization.
@@ -1516,20 +1508,21 @@ class _SqlTransaction:
                 # guards must not publish a partially claimed turn.
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-            for old_id, old in sorted(retire.items()):
-                if (await self._execute(source.retire_admission(
+            for old_id, (old, linked) in sorted(retire.items()):
+                old_source = retiring_sources[linked]
+                if (await self._execute(old_source.retire_admission(
                     execution_id=old_id, session_key=old.session_key, request_key=old.request_key,
                     fence=old.fence, receipt=token,
                     token=protected[turn_session_address(old.session_key)]["lease_token"].decode("utf-8"), kind="expire",
                 ))).rowcount != 1:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if coowned and (await self._execute(source.control_set_expiry(
+                if linked and (await self._execute(old_source.control_set_expiry(
                     execution_id=old_id, fence=old.fence, expiry=None,
                     token=protected[turn_session_address(old.session_key)]["lease_token"].decode("ascii"),
                 ))).rowcount != 1:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if coowned and old_id != execution_id:
-                    await self._execute(source.reclaim_retired_shell(old_id))
+                if linked and (old_id != execution_id or not coowned):
+                    await self._execute(old_source.reclaim_retired_shell(old_id))
             if duplicate is not None and duplicate.session_key != session_key:
                 key = turn_session_address(duplicate.session_key)
                 await self._execute(source.bind_slot(key, execution=None, token=None, fence=duplicate.fence, expiry=None))
@@ -1656,6 +1649,10 @@ class _SqlTransaction:
             row, proof = await capture()
             if proof is None:
                 return None
+            actual_coowned = row["control_id"] is not None
+            if actual_coowned != coowned:
+                coowned = actual_coowned
+                source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
             lease = proof.session_key, proof.request_key, row["lease_token"].decode("utf-8"), proof.fence
         session, request, token, fence = lease
         matched = (await self._execute(source.serialize_slot(

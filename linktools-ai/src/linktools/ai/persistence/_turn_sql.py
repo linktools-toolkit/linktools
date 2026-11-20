@@ -137,7 +137,7 @@ class SqlTurnRows:
     def __init__(self, metadata: "MetaData", store_key: bytes, scope: TurnScopeIdentity, *, coowned: bool = False) -> None:
         self._scope = scope
         self.coowned = coowned
-        self._control = metadata.tables["ai_execution_records"] if coowned else None
+        self._control = metadata.tables["ai_execution_records"]
         self._slot = metadata.tables[TURN_SLOT_TABLE]
         self._admission = metadata.tables[TURN_ADMISSION_TABLE]
         if type(store_key) is not bytes or len(store_key) != 32:
@@ -165,6 +165,18 @@ class SqlTurnRows:
         return and_(control.c.id == admission.c.control_id, control.c.store_key == slot.c.store_key,
                     control.c.turn_slot_kind == slot.c.session_kind, control.c.turn_slot_key == slot.c.session_key,
                     control.c.turn_fence == slot.c.lease_fence)
+
+    @staticmethod
+    def _authority_columns(slot, admission, control):
+        from sqlalchemy import case
+
+        linked = admission.c.control_id.is_not(None)
+        return {
+            "lease_token": case((linked, control.c.turn_token), else_=slot.c.lease_token),
+            "lease_expires_at": case((linked, control.c.turn_expiry), else_=slot.c.lease_expires_at),
+            "authority_revision": case((linked, control.c.turn_revision), else_=slot.c.revision),
+            "execution_key": control.c.key,
+        }
 
     def _owns(self, table):
         return table.c.store_key == self._store_key
@@ -208,17 +220,13 @@ class SqlTurnRows:
             anchor = a
             predicate = (a.c.execution_id == self._key(identity, TURN_EXECUTION_MAX_BYTES) if route == "execution"
                          else and_(a.c.route_kind == ACTIVE_REQUEST, a.c.route_key == turn_hex(identity, TURN_REQUEST_MAX_BYTES)))
-        if self._control is None:
-            authority = (s.c.lease_expires_at, s.c.lease_token, s.c.revision.label("authority_revision"))
-        else:
-            control = self._control
-            joined = joined.outerjoin(control, self._control_link(s, a, control))
-            authority = (control.c.turn_expiry.label("lease_expires_at"), control.c.turn_token.label("lease_token"),
-                         control.c.turn_revision.label("authority_revision"), control.c.key.label("execution_key"))
+        control = self._control
+        joined = joined.outerjoin(control, self._control_link(s, a, control))
+        authority = self._authority_columns(s, a, control)
         return select(
             a, s.c.session_key.label("slot_session_key"), s.c.session_kind.label("slot_session_kind"), s.c.active_execution_id,
             s.c.lease_fence.label("slot_fence"), s.c.revision.label("slot_revision"),
-            *authority, clock.label("observed_at"),
+            *(value.label(name) for name, value in authority.items()), clock.label("observed_at"),
         ).select_from(joined).where(self._owns(anchor), predicate)
 
     def parse_observation(
@@ -240,9 +248,7 @@ class SqlTurnRows:
                 or row["slot_fence"] != proof.fence):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         proof.validate_live_token(row["lease_token"])
-        if self.coowned and row["execution_key"] != self.execution_key(proof.execution_id):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not self.coowned and row["control_id"] is not None:
+        if row["control_id"] is not None and row["execution_key"] != self.execution_key(proof.execution_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         revision = row["authority_revision"]
         if type(revision) is not int or revision < 0:
@@ -269,23 +275,20 @@ class SqlTurnRows:
         ).outerjoin(incumbent, and_(self._owns(incumbent), incumbent.c.session_kind == live_request.c.session_kind, incumbent.c.session_key == live_request.c.session_key)
         ).outerjoin(target_owner, and_(self._owns(target_owner), target_owner.c.execution_id == target.c.active_execution_id)
         ).outerjoin(proposed, and_(self._owns(proposed), proposed.c.execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES)))
-        extra = []
-        excluded = {"created_at", "updated_at", "store_key"}
+        target_control = self._control.alias("owner_control")
+        incumbent_control = self._control.alias("incumbent_control")
+        joined = joined.outerjoin(target_control, self._control_link(target, target_owner, target_control)
+            ).outerjoin(incumbent_control, self._control_link(incumbent, live_request, incumbent_control))
+        extra = [
+            value.label(slot.name + "__" + name)
+            for slot, admission, control in ((target, target_owner, target_control), (incumbent, live_request, incumbent_control))
+            for name, value in self._authority_columns(slot, admission, control).items()
+        ]
+        excluded = {"created_at", "updated_at", "store_key", "lease_token", "lease_expires_at"}
         if self.coowned:
-            target_control, incumbent_control, proposed_control = (
-                self._control.alias("owner_control"), self._control.alias("incumbent_control"), self._control.alias("proposed_control"),
-            )
-            joined = joined.outerjoin(target_control, self._control_link(target, target_owner, target_control)
-                ).outerjoin(incumbent_control, self._control_link(incumbent, live_request, incumbent_control)
-                ).outerjoin(proposed_control, self._execution_address(proposed_control, execution_id))
-            for slot, control in ((target, target_control), (incumbent, incumbent_control)):
-                for name, value in (
-                    ("lease_token", control.c.turn_token), ("lease_expires_at", control.c.turn_expiry),
-                    ("execution_key", control.c.key), ("turn_revision", control.c.turn_revision),
-                ):
-                    extra.append(value.label(slot.name + "__" + name))
+            proposed_control = self._control.alias("proposed_control")
+            joined = joined.outerjoin(proposed_control, self._execution_address(proposed_control, execution_id))
             extra.append(proposed_control.c.id.label("control__id"))
-            excluded.update(("lease_token", "lease_expires_at"))
         return select(clock.label("observed_at"), *(
             column.label(table.name + "__" + column.name)
             for table in (target, incumbent, live_request, target_owner, proposed)
