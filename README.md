@@ -20,12 +20,12 @@ Linktools 是一套面向移动安全研究、逆向分析、合规检测工具�
 
 ### 依赖项
 
-Python & pip（3.6 及以上）：<https://www.python.org/downloads/>
+Python 和 pip：核心包要求 Python 3.6+；安装 `linktools-ai` 或下面包含它的 GitHub 开发版时，使用 Python 3.11+。参见 [Python 下载](https://www.python.org/downloads/)。
 
 ### 安装
 
 ```bash
-# 安装方式一：安装所有包
+# 安装方式一：安装核心及其 all 可选依赖（不含 linktools-ai）
 python3 -m pip install -U "linktools[all]"
 
 # 安装方式二：按需安装子包

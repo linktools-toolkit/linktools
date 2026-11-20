@@ -1,12 +1,14 @@
 # SQL state payload storage
 
-The SQL StateStore stores `ai_state_records.payload_json`,
-`ai_state_facts.payload_json`, and `ai_state_operations.payload_json` in **JSON
-columns whose values are JSON strings**. Each string contains the canonical JSON
-text of the domain payload. Canonical SQLAlchemy metadata declares `JSON` for
-MySQL, PostgreSQL and SQLite; the MySQL `migrations/init_schema.sql` also declares
-`JSON`, not `TEXT` or `LONGTEXT`. SQLite's underlying storage does not change
-this declared schema or the encoding contract.
+These Runtime StateStore tables use a `payload_json` column whose **SQL
+type is JSON but whose value is a JSON string**: `ai_state_records`,
+`ai_execution_records`, `ai_task_graphs`, `ai_step_tool_operations`,
+`ai_step_run_admissions`, `ai_state_facts` and `ai_state_operations`.
+
+Each string contains the canonical JSON text of the domain payload. The SQLAlchemy
+metadata and the [MySQL schema](../migrations/init_schema.sql) declare these
+columns as JSON, not TEXT. SQLite's underlying storage does not change the
+declared schema or the encoding contract.
 
 ## Encoding and reading
 
@@ -36,6 +38,13 @@ Keeping the payload as text **inside** the JSON string prevents the outer JSON
 layer from interpreting its numbers. Integers, floats, signed zero, booleans and
 null retain their existing semantics. Domain validation, semantic hashes and
 idempotency keys are unchanged.
+
+The outer SQL JSON string is the current storage representation, not what makes
+the inner text canonical. A text column could preserve the same canonical bytes
+without the outer encoding. It would still need an inner JSON decode when reading
+the domain record, and a schema change would need to update the typed bindings
+and the archive and native-reference queries below. This does not apply to real
+JSON objects or arrays elsewhere that are queried as structured data.
 
 ## SQL link extraction
 
@@ -95,6 +104,13 @@ restore into a fresh local root. Export from a quiescent source and verify
 the restored state before switching over. Restore packs the reference
 columns from logical records; these SQL details are not part of the portable
 wire representation.
+
+For built-in SQL Runtime turn admissions, offline restore preserves the execution
+and request identities, fencing generation and stored operation proof, but expires
+any imported active grant. The old grant cannot renew or retire, and its prior
+renewal receipt no longer confirms a live lease. A completed release remains
+confirmable; restore does not synthesize a release. Normal takeover can continue
+the same execution with the next fencing generation.
 
 A future migration of a populated, released v1 store would require an
 explicit cutover coordinated with its deployment. Preserve exact encoded keys,

@@ -114,7 +114,7 @@ whole turn, but has no pending-view optimization.
 
 The caller supplies a frozen `TurnScopeIdentity(namespace, tenant_id, scope)`.
 Namespace and tenant use the existing persistence identity bounds; the local
-scope contains 1–256 exact UTF-8 bytes. No component is normalized or truncated.
+scope contains 1–128 exact UTF-8 bytes. No component is normalized or truncated.
 Runtime uses `runtime-pending-turn` as its local scope. A shared generic backend
 isolates all three components. `StateTurnCoordination` checks the namespace and
 tenant against its binding and stores only the local scope in that partition.
