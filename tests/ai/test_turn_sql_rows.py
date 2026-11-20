@@ -10,6 +10,8 @@ from sqlalchemy import MetaData, create_engine, insert, literal, update
 from sqlalchemy.exc import IntegrityError
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._turn_sql import SqlTurnProof, SqlTurnRows
 from linktools.ai.persistence._turn_sql_schema import (
     TURN_ADMISSION_TABLE, RUNTIME_TURN_SCOPE, TURN_SLOT_TABLE, build_turn_sql_metadata,
@@ -20,8 +22,7 @@ from linktools.ai.storage._dialects import SQLiteDialect
 
 
 def test_sql_turn_request_route_is_exact_and_reusable_after_retirement() -> None:
-    metadata = MetaData()
-    build_turn_sql_metadata(metadata)
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.EXECUTION}))
     engine = create_engine("sqlite://")
     try:
         metadata.create_all(engine)
