@@ -172,3 +172,50 @@ def test_server_deadline_uses_native_database_clock_when_compiled() -> None:
         statement = select(_initial_turn_deadline(adapter, timedelta(milliseconds=1501)))
         compiled = str(statement.compile(dialect=dialect, compile_kwargs={"literal_binds": True})).lower()
         assert all(part in compiled for part in expected), compiled
+
+
+@pytest.mark.asyncio
+async def test_execution_authority_point_queries_use_sqlite_unique_locator(tmp_path) -> None:
+    from hashlib import sha256
+
+    from sqlalchemy import literal
+
+    from linktools.ai.persistence._turn_sql import SqlTurnRows
+
+    namespace, tenant = "execution-control", "tenant"
+    async with Persistence.open(
+        namespace, tenant_id=tenant, storage=PersistenceStorage.sqlite(tmp_path / "locator.db"),
+    ) as state:
+        store = state.execution.executions.state_store
+        scope = TurnScopeIdentity(namespace, tenant, "runtime-pending-turn")
+        source = SqlTurnRows(store.storage_group.metadata, store.store_key, scope, coowned=True)
+        execution_id, session_key, token = "execution", "session:session", "b" * 32
+        clock = literal("2026-11-20T12:00:00.000")
+        key = source.execution_key(execution_id)
+        statements = (
+            ("proposed_control", source.select_claim(
+                session_key=session_key, request_key="a" * 64, execution_id=execution_id, clock=clock,
+            )),
+            ("ai_execution_records", source.control_guard(
+                session_key=session_key, execution_id=execution_id, token=token, fence=1,
+            )),
+            ("ai_execution_records", source.control_set_expiry(
+                execution_id=execution_id, token=token, fence=1, expiry=None,
+            )),
+            ("ai_execution_records", source.revoked_control_deadline(
+                execution_id=execution_id, fence=1, clock=clock, sqlite=True,
+            )),
+            ("ai_execution_records", source.reclaim_retired_shell(execution_id)),
+        )
+        engine = store.storage_group.context.engine
+        async with engine.connect() as connection:
+            for alias, statement in statements:
+                compiled = statement.compile(dialect=engine.dialect, compile_kwargs={"render_postcompile": True})
+                parameters = tuple(compiled.params[name] for name in compiled.positiontup or ())
+                assert key in parameters and sha256(key).hexdigest() in parameters
+                plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + str(compiled), parameters)).all()
+                assert any(
+                    detail.startswith(f"SEARCH {alias} USING INDEX ")
+                    and "store_key=? AND key_locator=?" in detail
+                    for _, _, _, detail in plan
+                ), plan

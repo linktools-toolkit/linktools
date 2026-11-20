@@ -530,5 +530,12 @@ async def test_builtin_active_private_shell_restores_through_default_composition
     async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=restored) as state:
         assert state.coordination_backend._coowned
         assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
-        assert await state.coordination_backend.read_turn(scope, "hidden-shell") == replace(claim, lease=None)
-        assert await state.coordination_backend.release_turn(claim.lease)
+        assert await state.coordination_backend.read_turn(scope, "hidden-shell") is None
+        assert not await state.coordination_backend.release_turn(claim.lease)
+        takeover = await state.coordination_backend.claim_turn(
+            scope, session_key="session:session", request_key="a" * 64, request_digest="b" * 64,
+            execution_id="hidden-shell", owner_id="d" * 32, lease_seconds=120,
+        )
+        assert takeover.lease.fence == claim.lease.fence + 1
+        assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
+        assert await state.coordination_backend.release_turn(takeover.lease)

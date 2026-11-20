@@ -8,6 +8,7 @@ from bisect import bisect_left, bisect_right
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -1790,6 +1791,14 @@ async def restore_snapshot(
                     slots, admissions = decode_turn_snapshot(
                         records, namespace=resources.namespace, tenant_id=resources.tenant_id, store_key=store.store_key,
                     )
+
+                    # A snapshot preserves the admission proof, not a live
+                    # producer. Restore both layouts as expired so ordinary
+                    # takeover can retire the generation without a fake release.
+                    expired_at = datetime(1970, 1, 1, tzinfo=timezone.utc)
+                    for slot in slots:
+                        if slot["lease_expires_at"] is not None:
+                            slot["lease_expires_at"] = min(slot["lease_expires_at"], expired_at)
 
                     async def restore_turn_rows(session) -> None:
                         from sqlalchemy import select, update

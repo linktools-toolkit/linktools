@@ -18,10 +18,10 @@ _SCOPE = TurnScopeIdentity("turn-snapshot", "tenant", "runtime-pending-turn")
 _LIMITS = SnapshotLimits(max_entries=1000, max_bytes=1_000_000)
 
 
-async def _claim(store, *, session, execution, request, token, coowned):
+async def _claim(store, *, session, execution, request, token, coowned, owner=None):
     outcome = await store.claim_turn_admission(
         _SCOPE, session_key=session, execution_id=execution, request_key=request,
-        request_digest="d" * 64, owner_id=sha256(execution.encode()).hexdigest()[:32], duration=120, token=token, coowned=coowned,
+        request_digest="d" * 64, owner_id=owner or sha256(execution.encode()).hexdigest()[:32], duration=120, token=token, coowned=coowned,
     )
     assert outcome is not None and outcome.lease is not None
     return outcome.lease
@@ -29,7 +29,7 @@ async def _claim(store, *, session, execution, request, token, coowned):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("coowned", (False, True))
-async def test_sql_turn_snapshot_restores_live_admission_and_retired_release(tmp_path, coowned):
+async def test_sql_turn_snapshot_restores_proofs_but_not_live_authority(tmp_path, coowned):
     archive = InMemoryObjectStore()
     source = PersistenceStorage.from_root(tmp_path / "source")
     async with Persistence.open(_SCOPE.namespace, storage=source, tenant_id=_SCOPE.tenant_id) as state:
@@ -46,6 +46,13 @@ async def test_sql_turn_snapshot_restores_live_admission_and_retired_release(tmp
             token=idle.token, fence=idle.fence, receipt="b" * 32, coowned=coowned,
         )
         current = await _claim(store, session="session:session", execution="next", request="a" * 64, token="3" * 32, coowned=coowned)
+        old_lease = ("session:session", "a" * 64, current.token, current.fence)
+        renewed = await store.change_turn_admission(
+            _SCOPE, execution_id="next", receipt="e" * 32, kind="renew", lease=old_lease, duration=120, coowned=coowned,
+        )
+        assert renewed.lease == current
+        original = await store.get_turn_operation_proof(_SCOPE, "next", coowned=coowned)
+        assert (original.receipt_kind, original.receipt_id) == ("renew", "e" * 32)
     async with Persistence.open(_SCOPE.namespace, storage=source, tenant_id=_SCOPE.tenant_id, read_only=True) as state:
         reference = await state.export_snapshot(object_store=archive, limits=_LIMITS)
 
@@ -57,19 +64,32 @@ async def test_sql_turn_snapshot_restores_live_admission_and_retired_release(tmp
         store.bind_runtime_turn_scope(_SCOPE)
         assert await store.confirm_turn_admission(_SCOPE, execution_id="first", receipt="a" * 32, kind="release", coowned=coowned) is True
         assert await store.confirm_turn_admission(_SCOPE, execution_id="first", receipt="d" * 32, kind="release", coowned=coowned) is None
-        proof = await store.observe_turn_admission(_SCOPE, route="request", identity="a" * 64, coowned=coowned)
-        assert (proof.execution_id, proof.fence) == ("next", current.fence)
-        assert proof.coordination(_SCOPE).lease is None
+        captured = await store.capture_turn_admission(_SCOPE, route="request", identity="a" * 64, coowned=coowned)
+        assert captured.expired and captured.proof == original
+        for route, identity in (("request", "a" * 64), ("execution", "next"), ("session", "session:session")):
+            assert await store.observe_turn_admission(_SCOPE, route=route, identity=identity, coowned=coowned) is None
+        assert await store.confirm_turn_admission(_SCOPE, execution_id="next", receipt="e" * 32, kind="renew", coowned=coowned) is None
+        with pytest.raises(AIError) as denied:
+            await store.change_turn_admission(
+                _SCOPE, execution_id="next", receipt="d" * 32, kind="renew", lease=old_lease, duration=120, coowned=coowned,
+            )
+        assert denied.value.code is ErrorCode.STORAGE_CONFLICT
+        with pytest.raises(AIError) as denied:
+            await store.retire_turn_admission(
+                _SCOPE, session_key="session:session", execution_id="next", request_key="a" * 64,
+                token=current.token, fence=current.fence, receipt="c" * 32, coowned=coowned,
+            )
+        assert denied.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await store.confirm_turn_admission(_SCOPE, execution_id="next", receipt="c" * 32, kind="release", coowned=coowned) is None
+        assert await store.get_turn_operation_proof(_SCOPE, "next", coowned=coowned) == original
+        takeover = await _claim(store, session="session:session", execution="next", request="a" * 64,
+                                token="5" * 32, owner="6" * 32, coowned=coowned)
+        assert takeover.fence == current.fence + 1
+        assert await store.confirm_turn_admission(_SCOPE, execution_id="next", receipt="e" * 32, kind="renew", coowned=coowned) is None
+        assert await store.confirm_turn_admission(_SCOPE, execution_id="first", receipt="a" * 32, kind="release", coowned=coowned) is True
         following = await _claim(store, session="session:idle", execution="following", request="c" * 64, token="4" * 32, coowned=coowned)
         assert following.fence == idle.fence + 1
-        assert not await store.retire_turn_admission(
-            _SCOPE, session_key="session:session", execution_id="next", request_key="a" * 64,
-            token=first.token, fence=first.fence, receipt="d" * 32, coowned=coowned,
-        )
-        assert await store.retire_turn_admission(
-            _SCOPE, session_key="session:session", execution_id="next", request_key="a" * 64,
-            token=current.token, fence=current.fence, receipt="c" * 32, coowned=coowned,
-        )
+
 
 
 def test_sql_turn_snapshot_rejects_missing_active_owner():

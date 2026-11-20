@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import TYPE_CHECKING, Literal
 from collections.abc import Callable, Mapping
 
@@ -19,6 +20,7 @@ from ._turn_sql_schema import (
 if TYPE_CHECKING:
     from sqlalchemy import Delete, Insert, MetaData, Select, Update
     from sqlalchemy.sql.elements import ColumnElement
+    from sqlalchemy.sql.selectable import FromClause
 
 
 Route = Literal["session", "execution", "request"]
@@ -147,6 +149,16 @@ class SqlTurnRows:
     def execution_key(self, execution_id: str) -> bytes:
         return record_key(self._scope.namespace, self._scope.tenant_id, "execution", "execution", (execution_id,))
 
+    def _execution_address(self, control: "FromClause", execution_id: str) -> "ColumnElement[bool]":
+        from sqlalchemy import and_
+
+        key = self.execution_key(execution_id)
+        return and_(
+            control.c.store_key == self._store_key,
+            control.c.key_locator == sha256(key).hexdigest(),
+            control.c.key == key,
+        )
+
     @staticmethod
     def _control_link(slot, admission, control):
         from sqlalchemy import and_
@@ -265,8 +277,7 @@ class SqlTurnRows:
             )
             joined = joined.outerjoin(target_control, self._control_link(target, target_owner, target_control)
                 ).outerjoin(incumbent_control, self._control_link(incumbent, live_request, incumbent_control)
-                ).outerjoin(proposed_control, and_(proposed_control.c.store_key == self._store_key,
-                                                  proposed_control.c.key == self.execution_key(execution_id)))
+                ).outerjoin(proposed_control, self._execution_address(proposed_control, execution_id))
             for slot, control in ((target, target_control), (incumbent, incumbent_control)):
                 for name, value in (
                     ("lease_token", control.c.turn_token), ("lease_expires_at", control.c.turn_expiry),
@@ -358,7 +369,7 @@ class SqlTurnRows:
         from sqlalchemy import update
         control = self._control
         slot_kind, slot = turn_session_address(session_key)
-        exact = [control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id),
+        exact = [self._execution_address(control, execution_id),
                  control.c.turn_slot_kind == slot_kind, control.c.turn_slot_key == slot,
                  control.c.turn_token == turn_hex(token, 32), control.c.turn_fence == fence]
         if published_only:
@@ -378,7 +389,7 @@ class SqlTurnRows:
         expires = control.c.turn_expiry
         live = None if clock is None else (func.julianday(expires) > func.julianday(clock) if sqlite else expires > clock)
         return update(control).where(
-            control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id),
+            self._execution_address(control, execution_id),
             control.c.turn_token == turn_hex(token, 32), control.c.turn_fence == fence,
             *(() if live is None else (live,)),
         ).values(**values)
@@ -417,7 +428,7 @@ class SqlTurnRows:
 
         control = self._control
         return select(self._deadline_is_live(clock, sqlite=sqlite)).where(
-            control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id),
+            self._execution_address(control, execution_id),
             control.c.turn_fence == fence, control.c.turn_token.is_(None),
         )
 
@@ -467,7 +478,7 @@ class SqlTurnRows:
             admission.c.control_id.is_(None),
         ))
         return delete(control).where(
-            control.c.store_key == self._store_key, control.c.key == self.execution_key(execution_id),
+            self._execution_address(control, execution_id),
             control.c.kind == EXECUTION_SHELL_KIND, control.c.turn_token.is_(None),
             retired,
         )
