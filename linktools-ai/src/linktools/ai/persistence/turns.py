@@ -17,7 +17,8 @@ from ..core import JsonValue, canonical_json_bytes, validate_persistence_namespa
 from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScope, TurnScopeIdentity, RenewingTurnScope, sql_observation_phase, sql_observation_scope
 from ._sql import SqlStateStore
-from ._turn_sql import SqlTurnNotOwned
+from ._turn_sql import SqlTurnNotOwned, turn_hex, turn_session_address
+from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES
 from .state import (
     RecordLeaseTransition, RecordReplacement, StateGroupTransaction, StateStore, StateTransaction, StateTransactionNestingError,
     StoredRecord, active_state_scope, record_key, scope_key,
@@ -515,6 +516,15 @@ class StateTurnCoordination:
         local_scope = self._local_scope(scope)
         for value in (session_key, request_key, request_digest, execution_id, owner_id):
             _text(value)
+        if self._sql_source(local_scope) is not None:
+            validate_resource_id(execution_id)
+            try:
+                turn_session_address(session_key)
+                turn_hex(request_key, TURN_REQUEST_MAX_BYTES)
+                turn_hex(request_digest, 64)
+                turn_hex(owner_id, 32)
+            except (UnicodeError, ValueError) as error:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         duration = _duration(lease_seconds)
         token = uuid4().hex
 

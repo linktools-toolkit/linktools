@@ -1997,12 +1997,14 @@ class TranscriptRepository:
     ) -> tuple[StoredFact, ...] | None:
         width = end - start
         if (head is None or head.message_count != end or not 0 < width < _TRANSCRIPT_PAGE_SIZE
-                or head.chunk_count <= width or not isinstance(transaction, FactReader)):
+                or not head.chunk_count or (start == 0 and head.chunk_count <= width)
+                or not isinstance(transaction, FactReader)):
             return None
 
         # The append-only stream allocates one sequence per nonempty chunk;
-        # at most width chunks can intersect the captured suffix.
-        sequences = range(head.chunk_count - width + 1, head.chunk_count + 1)
+        # at most width chunks can intersect the captured suffix. If the
+        # entire captured stream fits, start at its first chunk.
+        sequences = range(max(1, head.chunk_count - width + 1), head.chunk_count + 1)
         stream = self._transcript_stream(owner_id)
         facts = await transaction.get_facts(stream, sequences)
         if len(facts) != len(sequences):
@@ -2013,6 +2015,7 @@ class TranscriptRepository:
             if (fact.sequence != sequence or fact.stream_key != stream or fact.kind != "transcript_chunk"
                     or fact.owner_key != self._owner_key(owner_id) or chunk.owner_id != owner_id
                     or chunk.message_count <= 0
+                    or (sequence == 1 and chunk.first_message_index != 0)
                     or (previous_end is None and chunk.first_message_index > start)
                     or (previous_end is not None and chunk.first_message_index != previous_end)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

@@ -356,7 +356,8 @@ async def test_same_source_live_owner_without_pending_bytes_is_unknown(tmp_path)
         owner = await authority.claim_turn(
             TurnScopeIdentity(state.namespace, state.tenant_id, "runtime-pending-turn"),
             session_key="session:conversation", request_key=canonical_sha256(["session.resume", "request"]),
-            request_digest="request-digest", execution_id="live", owner_id="producer", lease_seconds=60,
+            request_digest=canonical_sha256("request-digest"), execution_id="live",
+            owner_id="f" * 32, lease_seconds=60,
         )
         assert owner is not None and owner.lease is not None
         try:
@@ -367,6 +368,27 @@ async def test_same_source_live_owner_without_pending_bytes_is_unknown(tmp_path)
             assert error.value.code is ErrorCode.EXECUTION_START_UNKNOWN
         finally:
             assert await authority.release_turn(owner.lease)
+
+
+@pytest.mark.parametrize(("field", "invalid"), (
+    ("owner_id", "f" * 33),
+    ("request_digest", "d" * 65),
+    ("session_key", "session:" + "界" * 43),
+))
+async def test_same_source_admission_rejects_oversized_keys_before_mutation(tmp_path, monkeypatch, field, invalid):
+    async with _runtimes(tmp_path, cache=None, shared=False, source_authority=True) as (runtimes, *_):
+        _, state = runtimes[0]
+        authority = state.coordination_backend
+        scope = TurnScopeIdentity(state.namespace, state.tenant_id, "runtime-pending-turn")
+        identity = dict(session_key="session:conversation", request_key="a" * 64, request_digest="b" * 64,
+                        execution_id="live", owner_id="f" * 32, lease_seconds=60)
+        identity[field] = invalid
+        async def unexpected(*args, **kwargs):
+            pytest.fail("invalid typed input must not enter the mutation boundary")
+        monkeypatch.setattr(authority, "_mutation", unexpected)
+        with pytest.raises(AIError) as error:
+            await authority.claim_turn(scope, **identity)
+        assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 async def test_same_source_lookup_authorizes_before_checking_receipt(tmp_path, monkeypatch):
