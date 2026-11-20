@@ -30,7 +30,10 @@ from ..storage import (
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
 from ._record_query import ExecutionRecoveryCandidateQuery, record_scan_projection
-from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS, content_reference_slot, content_reference_values
+from ._content_reference_projection import (
+    CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS, content_reference_slot, pack_execution_references,
+    tool_content_reference_values, unpack_execution_references,
+)
 from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
@@ -1637,6 +1640,49 @@ class _SqlTransaction:
         for key in keys:
             self._record_cache.setdefault(key, None)
         return tuple(result)
+
+    async def read_sequence_window(
+        self, key: bytes, *, before: int | None, limit: int, include_next: bool = False,
+    ) -> tuple[int, tuple[StoredFact, ...]]:
+        """Read the sequence counter and a preceding bounded fact window together.
+
+        Reserving the next sequence also captures its durable predecessor, so
+        the caller can validate an observation against the last admitted fact.
+        Empty pages still carry the counter's physical identity and value.
+        """
+        from sqlalchemy import and_, case, func, literal, select
+
+        validate_stream_key(key)
+        counters, facts = self._table("ai_state_counters"), self._table("ai_state_facts")
+        seed = select(literal(1).label("seed")).subquery()
+        source = select(counters.c.stream_key.label("counter_key"),
+                        counters.c.stream_locator.label("counter_locator"),
+                        counters.c.value.label("counter_value")).select_from(seed.outerjoin(counters, and_(
+                            counters.c.store_key == self._store_key,
+                            counters.c.stream_locator == _key_locator(key),
+                        ))).subquery()
+        head = func.coalesce(source.c.counter_value, 0)
+        page_before = head + 1 + int(include_next) if before is None else literal(before)
+        page_start = case((page_before - limit > 1, page_before - limit), else_=1)
+        read_start = case((and_(literal(include_next), head > 0, head < page_start), head), else_=page_start)
+        read_end = case((head + 1 < page_before, head + 1), else_=page_before)
+        statement = select(source, *facts.c).select_from(source.outerjoin(facts, and_(
+            facts.c.store_key == self._store_key,
+            _key_matches(facts.c.stream_key, key),
+            facts.c.sequence >= read_start, facts.c.sequence < read_end,
+        ))).order_by(facts.c.sequence)
+        rows = await self.read_sql_rows(self._context, statement)
+        first = rows[0]
+        value = 0
+        if first["counter_key"] is not None:
+            if first["counter_key"] != key:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            _validate_locators({"stream_key": first["counter_key"],
+                                "stream_locator": first["counter_locator"]}, "stream_key")
+            value = _row_nonnegative_int(first["counter_value"])
+        if before is not None and not 1 <= before <= value + int(include_next) + 1:
+            return value, ()
+        return value, tuple(_fact_from_row(row) for row in rows if row["sequence"] is not None)
 
     async def read_joined_facts(
         self, context: SqlStorageContext, statement: "Select",
@@ -3369,6 +3415,10 @@ class _SqlTransaction:
 
 def _record_values(record: StoredRecord) -> dict[str, object]:
     data = dict(record.data)
+    if record.kind == "execution" and record_owner_table(record.key) == "ai_execution_records":
+        stored_data, references = pack_execution_references(data)
+    else:
+        stored_data, references = data, tool_content_reference_values(record.kind, data)
     values: dict[str, object] = {
         "key": validate_record_key(record.key),
         "key_locator": _key_locator(record.key),
@@ -3389,10 +3439,10 @@ def _record_values(record: StoredRecord) -> dict[str, object]:
         "lease_fence": record.lease_fence,
         "lease_expires_at": (None if record.lease_expires_at is None
                              else record.lease_expires_at.astimezone(timezone.utc)),
-        "payload_json": canonical_json_bytes(data).decode("utf-8"),
+        "payload_json": canonical_json_bytes(stored_data).decode("utf-8"),
         "payload_bytes": record.payload_bytes,
     }
-    values.update(content_reference_values(record.kind, data))
+    values.update(references)
     return values
 
 
@@ -3417,18 +3467,23 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
         _validate_locators(row, "key", "scope_key", "parent_key")
         if row["sort_prefix"] != row["sort_key"][:128]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = _row_record_key(row["key"])
+        kind = _row_string(row["kind"])
+        data = _row_mapping(row["payload_json"])
+        if kind == "execution" and record_owner_table(key) == "ai_execution_records":
+            data = unpack_execution_references(data, row)
         record = StoredRecord(
-            _row_record_key(row["key"]),
+            key,
             row["scope_key"],
             row["parent_key"],
-            _row_string(row["kind"]),
+            kind,
             row["sort_key"],
             _row_optional_string(row["state"]),
             _row_nonnegative_int(row["storage_revision"]),
             _row_optional_string(row["lease_owner"]),
             _row_nonnegative_int(row["lease_fence"]),
             _datetime_or_none(row["lease_expires_at"]),
-            _row_mapping(row["payload_json"]),
+            data,
             subject_id=_row_subject_id(row["subject_id"]),
             payload_bytes=row["payload_bytes"],
         )
@@ -3633,7 +3688,8 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
         # Logical filters and raw-key cursors apply before each branch limit.
         branches = [
             _record_page_statement(
-                record_owner_rows(metadata, kind=query.kind, owner=owner, scan_kind=bucket),
+                record_owner_rows(metadata, kind=query.kind, owner=owner, scan_kind=bucket,
+                                  content_columns=EXECUTION_REFERENCE_COLUMNS),
                 store_key, query,
             )
             for owner in record_owner_names(kind=query.kind)

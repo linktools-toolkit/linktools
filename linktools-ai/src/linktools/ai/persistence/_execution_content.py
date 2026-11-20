@@ -282,7 +282,7 @@ class ExecutionContent:
 
     async def prefetch_projection_owners(
         self, keys: Sequence[bytes], *, bindings: bool = False, result: bool = False,
-        result_body: bool = False, recovery: bool = False, terminal_details: bool = False,
+        result_body: bool = False,
         input_body: bool = False, additional_records: Mapping | None = None,
     ) -> None:
         """Capture current control rows and only the immutable slots consumed next."""
@@ -304,15 +304,6 @@ class ExecutionContent:
         if result_body:
             paths.append(("result", "fields", "output", "fields", "content", "$execution_payload"))
             native_paths.append(("result", "fields", "output", "fields", "content", "$native_text"))
-        if terminal_details:
-            paths.append(("terminal_details", "fields", "content", "$execution_payload"))
-        if recovery:
-            native_paths.append(("recovery", "fields", "terminal_handoff", "fields", "output", "fields", "content", "$native_text"))
-            paths.extend((
-                ("recovery", "fields", "pending_tools", "fields", "content", "$execution_payload"),
-                ("recovery", "fields", "terminal_handoff", "fields", "content", "$execution_payload"),
-                ("recovery", "fields", "terminal_handoff", "fields", "terminal_details", "fields", "content", "$execution_payload"),
-            ))
         archive = await self._archive()
         await active.record_reader.read_content_references(
             owner_store=self._store, owner_keys=keys, content_store=archive.store,

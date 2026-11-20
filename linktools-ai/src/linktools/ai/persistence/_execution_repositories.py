@@ -279,7 +279,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             async def read(_group: object) -> ExecutionRecord | None:
                 await self._execution_content.prefetch_projection_owners(
                     (key,), bindings=True, input_body=True, result=True,
-                    result_body=True, recovery=True, terminal_details=True,
+                    result_body=True,
                 )
                 return await super(ExecutionRepositoryImpl, self).get(identity, tenant_id=tenant_id)
             return await self.read_content(read)
@@ -301,7 +301,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             async def read_current(_group: object) -> ExecutionRecord | None:
                 await self._execution_content.prefetch_projection_owners(
                     (key,), bindings=True, input_body=True, result=True,
-                    result_body=True, recovery=True, terminal_details=True,
+                    result_body=True,
                 )
                 return await super(ExecutionRepositoryImpl, self).get(identity, tenant_id=tenant_id)
             return await self.read_content(read_current)
@@ -320,7 +320,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         key = self._key("execution", (execution_id,))
         async def read():
             await self._execution_content.prefetch_projection_owners(
-                (key,), bindings=True, result=True, result_body=fresh, terminal_details=True,
+                (key,), bindings=True, result=True, result_body=fresh,
             )
             record = ((await self._refresh_records((key,))).get(key) if fresh else
                       await self._store.read_record(key))
@@ -352,7 +352,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         key = self._key("execution", (execution_id,))
         async def read(_transactions):
             await self._execution_content.prefetch_projection_owners(
-                (key,), result=True, result_body=True, terminal_details=True,
+                (key,), result=True, result_body=True,
             )
             record = ((await self._refresh_records((key,))).get(key) if fresh else
                       await self._store.read_record(key))
@@ -369,7 +369,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                                           *, tenant_id: str) -> ExecutionRetentionRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
         key = self._key("execution", (execution_id,))
-        await self._execution_content.prefetch_projection_owners((key,), recovery=True)
+        await self._execution_content.prefetch_projection_owners((key,))
         record = await transaction.get_record(key)
         if record is None:
             return None
@@ -539,7 +539,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         """Capture timeline owners, immutable content and sibling membership together."""
         await self._execution_content.prefetch_projection_owners(
             tuple(self.execution_record_key(identity) for identity in execution_ids),
-            result=True, result_body=True, terminal_details=True, input_body=True,
+            result=True, result_body=True, input_body=True,
             additional_records=additional_records)
 
     async def get_timeline_many(
@@ -604,7 +604,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                         return previous
             await self._execution_content.prefetch_projection_owners(
                 (key,), bindings=True, input_body=True, result=True,
-                result_body=True, recovery=True, terminal_details=True,
+                result_body=True,
             )
             record = await self._record(key)
             return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
@@ -617,7 +617,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         key = self._key("execution", (execution_id,))
         await self._execution_content.prefetch_projection_owners(
             (key,), bindings=True, input_body=True, result=True,
-            result_body=True, recovery=True, terminal_details=True,
+            result_body=True,
         )
         record = await transaction.get_record(key)
         return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
@@ -758,7 +758,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
             await self._execution_content.prefetch_projection_owners(
                 tuple(keys.values()), bindings=True, input_body=True, result=True,
-                result_body=True, recovery=True, terminal_details=True,
+                result_body=True,
             )
             records = (await self._refresh_records(tuple(keys.values())) if refresh else
                        await self._store.read_records(tuple(keys.values())))
@@ -948,7 +948,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         key = self._key("execution", (execution_id,))
         await self._execution_content.prefetch_projection_owners(
             (key,), bindings=True, input_body=True, result=True,
-            result_body=True, recovery=True, terminal_details=True,
+            result_body=True,
         )
         record = await transaction.get_record(key)
         return None if record is None else await self._decode(record, ExecutionRecord)
@@ -1849,8 +1849,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         """Read terminal control and immutable bodies in their transaction snapshot."""
         await self._execution_content.prefetch_projection_owners(
             (self._key("execution", (execution_id,)),), bindings=True,
-            input_body=True, result=True, result_body=True, recovery=True,
-            terminal_details=True, additional_records=additional_records,
+            input_body=True, result=True, result_body=True, additional_records=additional_records,
         )
 
     async def confirm_terminal_write_in_transaction(
@@ -2356,7 +2355,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         _require_repository_tenant(tenant_id, self._tenant_id)
         key = self._key("execution", (execution_id,))
         if observed is None:
-            await self._execution_content.prefetch_projection_owners((key,), recovery=True)
+            await self._execution_content.prefetch_projection_owners((key,))
             stored = await transaction.get_record(key)
             if stored is None:
                 return True, None

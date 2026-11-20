@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from ..errors import AIError, ErrorCode
-from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS
+from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
 
 if TYPE_CHECKING:
@@ -48,9 +48,16 @@ def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[
     return ("e:1", "e:0")
 
 
-def record_owner_columns(table: "FromClause") -> tuple["ColumnElement", ...]:
-    """Exclude physical scan projections from the common record wire shape."""
-    return tuple(column for column in table.c if column.name != "scan_kind" and column.name not in CONTENT_REFERENCE_COLUMN_NAMES)
+def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) -> tuple["ColumnElement", ...]:
+    """Return the common wire row and any canonical execution digest cells."""
+    from sqlalchemy import String, cast, null
+
+    base = tuple(column for column in table.c if column.name != "scan_kind"
+                 and column.name not in CONTENT_REFERENCE_COLUMN_NAMES)
+    return base + tuple(
+        table.c[name] if name in table.c else cast(null(), String(64)).label(name)
+        for name in EXECUTION_REFERENCE_COLUMNS if pad_execution or name in table.c
+    )
 
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
@@ -113,6 +120,8 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
         raise ValueError("unknown record owner")
     names = (owner,) if owner is not None else record_owner_names(keys=keys, kind=kind)
     canonical = metadata.tables["ai_state_records"]
+    if "ai_execution_records" in names:
+        content_columns = tuple(dict.fromkeys((*EXECUTION_REFERENCE_COLUMNS, *content_columns)))
     if (len(names) == 1 and names[0] in SCAN_KIND_OWNERS and keys is not None and kind is None
             and scan_kind is None and not include_run_counters):
         table = metadata.tables[names[0]]

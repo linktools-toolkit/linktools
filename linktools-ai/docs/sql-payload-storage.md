@@ -46,13 +46,21 @@ records remain in `ai_state_records`, without built-in content lookup columns.
 Typed readers use the owning table directly; generic kind queries retain both
 physical sources.
 
-Execution and tool-history content captures use fixed same-row lookup
-projections. Nullable SHA-256 columns are derived from the canonical record
-in the same insert or compare-and-swap as its payload, without a second write
-or another source of truth. This lets owner rows, archived content and eligible
-native message suffixes share one SQL read without extracting those references
-from JSON on the server. Canonical decoding and scope/integrity checks still
-apply; other native message ranges use the existing range reader.
+Execution content reads select fixed same-row references for admitted policy,
+binding, user input, result template and output, including the indexed native
+tail alternatives for input and output. For these execution slots the SHA-256
+is stored once in its nullable SQL column, not repeated in the JSON. The
+remaining JSON descriptor retains scope, range and projection semantics; the
+StateStore reconstructs the complete logical record before typed decoding,
+archive validation and export. Failure details, deferred recovery and prepared
+handoff references remain in their complete JSON form and load in the same
+read scope when needed. Tool-operation read projections retain their own
+existing columns on the tool owner.
+
+Fixed slots let an owner, its immutable bodies and eligible native suffixes
+share one SQL read without database-side JSON extraction on the normal read
+path. Full scope and integrity checks still apply; other native message ranges
+use the exact range reader.
 
 Archive traversal and native run/event reference queries unwrap the outer JSON
 string before extracting fields from the inner payload. The SQLAlchemy
@@ -77,15 +85,22 @@ schema. Provision shared schemas explicitly through the deployment process.
 Runtime startup does not ALTER existing tables; the local SQLite state backend
 may initialize its own schema.
 
-Before opening a populated store with this schema, move canonical execution
-and execution-domain receipt rows into their new owner and derive the content
-lookup columns as part of the explicit cutover. Preserve the exact encoded
-store and record keys, payloads, revision/lease state and timestamps. Leave
-opaque custom rows and unrelated domains in the original table. Do not mix
-writers that use different physical owners. For a local SQLite store, quiesce writers, export a portable
-snapshot with the old runtime, and restore it into a fresh root with the new
-runtime. Restore derives the columns from the canonical records; the snapshot
-wire format is unchanged. Verify the restored store before switching over.
+Pre-release physical layouts and exported snapshots that do not satisfy the
+current v1 wire contract are not supported. Use fresh storage for this
+contract; there is no compatibility reader, startup conversion or migration
+obligation for development data.
+
+A snapshot exported by a runtime using the current v1 logical contract can
+restore into a fresh local root. Export from a quiescent source and verify
+the restored state before switching over. Restore packs the reference
+columns from logical records; these SQL details are not part of the portable
+wire representation.
+
+A future migration of a populated, released v1 store would require an
+explicit cutover coordinated with its deployment. Preserve exact encoded keys,
+logical payloads, revision and lease state, and timestamps; preserve opaque
+custom rows in their owning store. Do not mix writers that use different
+physical owners. The v1 schema does not provide an in-place migrator.
 
 The schema validator requires the JSON type family and JSON compatibility for
 these columns. `TEXT`/`LONGTEXT` columns do not satisfy it, and PostgreSQL `JSONB`

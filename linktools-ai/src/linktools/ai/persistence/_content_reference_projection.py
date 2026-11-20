@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """Same-row SQL lookup projections of canonical content reference slots."""
 
+import re
 from collections.abc import Mapping
 from typing import NamedTuple
-import re
+
+from ..errors import AIError, ErrorCode
 
 
 class ContentReferenceSlot(NamedTuple):
@@ -14,7 +16,6 @@ class ContentReferenceSlot(NamedTuple):
 
 _PREFIX = ("value", "payload", "fields")
 _OUTPUT = ("result", "fields", "output", "fields", "content")
-_HANDOFF = ("recovery", "fields", "terminal_handoff", "fields")
 _TOOL = ("fields", "content")
 _PAYLOAD = "$execution_payload"
 _EXECUTION_SLOTS = {
@@ -23,15 +24,8 @@ _EXECUTION_SLOTS = {
     ("stored_user_input", "fields", "content", _PAYLOAD): ContentReferenceSlot("input_sha256", "execution-payload"),
     ("result", "fields", "content", _PAYLOAD): ContentReferenceSlot("result_sha256", "execution-payload"),
     (*_OUTPUT, _PAYLOAD): ContentReferenceSlot("output_sha256", "execution-payload"),
-    ("terminal_details", "fields", "content", _PAYLOAD): ContentReferenceSlot("terminal_details_sha256", "execution-payload"),
-    ("recovery", "fields", "pending_tools", "fields", "content", _PAYLOAD):
-        ContentReferenceSlot("pending_tools_sha256", "execution-payload"),
-    (*_HANDOFF, "content", _PAYLOAD): ContentReferenceSlot("handoff_sha256", "execution-payload"),
-    (*_HANDOFF, "terminal_details", "fields", "content", _PAYLOAD):
-        ContentReferenceSlot("handoff_details_sha256", "execution-payload"),
     ("stored_user_input", "fields", "content", "$native_user_input"): ContentReferenceSlot("input_first_sha256", None),
     (*_OUTPUT, "$native_text"): ContentReferenceSlot("output_first_sha256", None),
-    (*_HANDOFF, "output", "fields", "content", "$native_text"): ContentReferenceSlot("handoff_output_first_sha256", None),
 }
 _TOOL_SLOTS = {
     ("arguments_payload", *_TOOL, _PAYLOAD): ContentReferenceSlot("tool_arguments_sha256", "execution-payload"),
@@ -45,6 +39,7 @@ CONTENT_REFERENCE_COLUMNS = {
     "ai_execution_records": tuple(slot.column for slot in _EXECUTION_SLOTS.values()),
     "ai_step_tool_operations": tuple(slot.column for slot in _TOOL_SLOTS.values()),
 }
+EXECUTION_REFERENCE_COLUMNS = CONTENT_REFERENCE_COLUMNS["ai_execution_records"]
 CONTENT_REFERENCE_COLUMN_NAMES = frozenset(slot.column for slot in _CONTENT_SLOTS.values())
 _SHA256 = re.compile(r"[a-f0-9]{64}")
 
@@ -72,15 +67,14 @@ def _project_digest(value: object, codec: str | None) -> str | None:
     return digest if isinstance(digest, str) and _SHA256.fullmatch(digest) else None
 
 
-def content_reference_values(kind: str, data: Mapping[str, object]) -> dict[str, str | None]:
-    slots = {"execution": _EXECUTION_SLOTS, "tool_operation": _TOOL_SLOTS}.get(kind.rstrip(" "))
-    if slots is None:
+def tool_content_reference_values(kind: str, data: Mapping[str, object]) -> dict[str, str | None]:
+    if kind != "tool_operation":
         return {}
     fields: object = data
     for component in _PREFIX:
         fields = fields.get(component) if isinstance(fields, Mapping) else None
     result = {}
-    for path, slot in slots.items():
+    for path, slot in _TOOL_SLOTS.items():
         value = fields
         for component in path:
             value = value.get(component) if isinstance(value, Mapping) else None
@@ -88,5 +82,86 @@ def content_reference_values(kind: str, data: Mapping[str, object]) -> dict[str,
     return result
 
 
-__all__ = ["CONTENT_REFERENCE_COLUMNS", "CONTENT_REFERENCE_COLUMN_NAMES", "ContentReferenceSlot",
-           "content_reference_slot", "content_reference_values"]
+_ROW_REFERENCE = True
+
+
+def _execution_field_map(value: Mapping) -> Mapping | None:
+    envelope = value.get("value")
+    if not isinstance(envelope, Mapping) or envelope.get("type") != "execution_record":
+        return None
+    payload = envelope.get("payload")
+    if not isinstance(payload, Mapping) or payload.get("$dataclass") != "execution_record":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return fields
+
+
+def _slot_value(value: object, path: tuple[str | int, ...]) -> object:
+    for part in path:
+        if isinstance(part, int):
+            value = value[part] if isinstance(value, list) and len(value) > part else None
+        else:
+            value = value.get(part) if isinstance(value, Mapping) else None
+    return value
+
+
+def _replace_slot(value: object, path: tuple[str | int, ...], replacement: object) -> object:
+    if not path:
+        return replacement
+    part, *tail = path
+    if isinstance(part, int):
+        updated = list(value)
+    else:
+        updated = dict(value)
+    updated[part] = _replace_slot(updated[part], tuple(tail), replacement)
+    return updated
+
+
+def pack_execution_references(value: Mapping) -> tuple[Mapping, dict[str, str | None]]:
+    """Move a digest, never the complete archive/native descriptor, to its SQL cell."""
+    fields = _execution_field_map(value)
+    if fields is None:
+        return value, {}
+    updated = value
+    columns = {}
+    for path, slot in _EXECUTION_SLOTS.items():
+        source = _slot_value(fields, path)
+        digest = _project_digest(source, slot.codec)
+        columns[slot.column] = digest
+        cell_path = path if slot.codec is not None else (*path, "slices", 0, "first")
+        if _slot_value(fields, cell_path) is _ROW_REFERENCE:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if digest is not None:
+            updated = _replace_slot(updated, (*_PREFIX, *cell_path), _ROW_REFERENCE)
+    return updated, columns
+
+
+def unpack_execution_references(value: Mapping, row: Mapping) -> Mapping:
+    """Restore the exact logical v1 envelope before any semantic or archive read."""
+    fields = _execution_field_map(value)
+    updated = value
+    for path, slot in _EXECUTION_SLOTS.items():
+        digest = row.get(slot.column)
+        if fields is None:
+            if digest is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            continue
+        cell_path = path if slot.codec is not None else (*path, "slices", 0, "first")
+        source = _slot_value(fields, cell_path)
+        if digest is None:
+            if source is _ROW_REFERENCE or _project_digest(_slot_value(fields, path), slot.codec) is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            continue
+        if source is not _ROW_REFERENCE or not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        restored = digest if slot.codec is None else slot.codec + ":" + digest
+        updated = _replace_slot(updated, (*_PREFIX, *cell_path), restored)
+        if _project_digest(_slot_value(updated, (*_PREFIX, *path)), slot.codec) != digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return updated
+
+
+__all__ = ["CONTENT_REFERENCE_COLUMNS", "CONTENT_REFERENCE_COLUMN_NAMES", "ContentReferenceSlot", "EXECUTION_REFERENCE_COLUMNS",
+           "content_reference_slot", "tool_content_reference_values", "pack_execution_references", "unpack_execution_references"]

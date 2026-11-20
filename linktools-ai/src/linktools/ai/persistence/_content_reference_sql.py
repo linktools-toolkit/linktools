@@ -6,8 +6,8 @@ import hashlib
 from collections.abc import Sequence, Mapping
 from typing import TYPE_CHECKING
 
-from ._content_reference_projection import content_reference_slot
-from ._record_owner import record_owner_rows, record_owner_columns
+from ._content_reference_projection import EXECUTION_REFERENCE_COLUMNS, content_reference_slot
+from ._record_owner import record_owner_rows, record_owner_columns, record_owner_table
 from ._archive import archive_scope_parts
 from ._step_payload_owner import payload_store_key, payload_store_locator
 
@@ -51,7 +51,8 @@ def content_reference_statement(
     if owner_query is None:
         columns = tuple(dict.fromkeys(slot.column for slot in (*content, *roots)))
         table = record_owner_rows(metadata, keys=owner_keys, content_columns=columns)
-        owner_query = select(*record_owner_columns(table), *(table.c[name] for name in columns)).where(
+        owner_query = select(*record_owner_columns(table), *(table.c[name] for name in columns
+                                     if name not in EXECUTION_REFERENCE_COLUMNS)).where(
             table.c.store_key == owner_store_key,
             table.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in owner_keys)),
             table.c.key.in_(tuple(owner_keys)),
@@ -59,7 +60,10 @@ def content_reference_statement(
     # MySQL 5.7 retains the same indexed plan through derived tables.
     owners = (owner_query.subquery("content_owners") if dialect == "mysql" else
               owner_query.cte("content_owners"))
-    owner_columns = record_owner_columns(owners)
+    pad_execution = any(name in owners.c for name in EXECUTION_REFERENCE_COLUMNS) or bool(
+        additional_records and any(record_owner_table(key) == "ai_execution_records"
+                                   for keys in additional_records.values() for key in keys))
+    owner_columns = record_owner_columns(owners, pad_execution=pad_execution)
     reference_owners = (
         owner_query.with_only_columns(*(owner_query.selected_columns[slot.column] for slot in content),
                                       maintain_column_froms=True).subquery("content_reference_owners")
@@ -75,7 +79,11 @@ def content_reference_statement(
         # snapshot guarantee rather than loading their bodies in another query.
         encoded = type_coerce(owners.c.payload_json, JSON)[()].as_string()
         payload = cast(encoded, JSON) if dialect == "postgresql" else type_coerce(encoded, JSON)
-        identities = tuple(payload[path].as_string() for path in content_paths)
+        identities = tuple(func.coalesce(
+            literal(slot.codec + ":", literal_execute=True) + owners.c[slot.column], payload[path].as_string())
+            if (slot := content_reference_slot(path)) is not None and slot.codec is not None
+            and slot.column in EXECUTION_REFERENCE_COLUMNS and slot.column in owners.c
+            else payload[path].as_string() for path in content_paths)
     identity = case(*((slots.c.slot == index, value) for index, value in enumerate(identities)))
     selected = select(identity.label("identity")).select_from(reference_owners.join(slots, true())).subquery("declared_content")
     reference_query = select(selected.c.identity).where(selected.c.identity.is_not(None)).distinct()
@@ -96,7 +104,7 @@ def content_reference_statement(
     native_nulls = (() if native is None else tuple(
         literal(None, type_=column.type).label("typed_" + column.name) for column in native.c))
     selections = [select(literal(0).label("source_kind"), *owner_columns, *native_nulls),
-                  select(literal(1).label("source_kind"), *record_owner_columns(content), *native_nulls).select_from(joined)]
+                  select(literal(1).label("source_kind"), *record_owner_columns(content, pad_execution=pad_execution), *native_nulls).select_from(joined)]
     if native is not None:
         selections[-1] = selections[-1].where(func.substr(identity, 1, 18) != "execution-payload:")
         store = payload_store_key(*archive_scope_parts(content_scope_key))
@@ -110,7 +118,7 @@ def content_reference_statement(
             *(column.label("typed_" + column.name) for column in native.c)).select_from(joined_native))
     for store_key, keys in (additional_records or {}).items():
         extra = record_owner_rows(metadata, keys=keys)
-        selections.append(select(literal(3).label("source_kind"), *record_owner_columns(extra), *native_nulls).where(
+        selections.append(select(literal(3).label("source_kind"), *record_owner_columns(extra, pad_execution=pad_execution), *native_nulls).where(
             extra.c.store_key == store_key,
             extra.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in keys)),
             extra.c.key.in_(tuple(keys))))
@@ -136,7 +144,10 @@ def content_reference_statement(
             ).subquery("content_native_owners") if fixed_projection and dialect == "mysql" else owners
         )
         first_digests = (tuple(native_owners.c[slot.column] for slot in roots) if fixed_projection else
-                         tuple(payload[(*path, "slices", 0, "first")].as_string() for path in native_root_paths))
+                         tuple(func.coalesce(owners.c[slot.column], payload[(*path, "slices", 0, "first")].as_string())
+                               if (slot := content_reference_slot(path)) is not None and slot.column in owners.c
+                               and slot.column in EXECUTION_REFERENCE_COLUMNS
+                               else payload[(*path, "slices", 0, "first")].as_string() for path in native_root_paths))
         first = case(*((native_slots.c.slot == index, value) for index, value in enumerate(first_digests)))
         partition = native_store_key(*archive_scope_parts(content_scope_key))
         locator = native_store_locator(partition)

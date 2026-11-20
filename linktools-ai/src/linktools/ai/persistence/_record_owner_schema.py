@@ -112,7 +112,11 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
             "payload_json",
             JSON(),
             nullable=False,
-            comment="Canonical domain JSON encoded as a JSON string preserving numeric representations.",
+            comment=(
+                "Domain JSON string; execution reference digests are stored in typed columns."
+                if name == "ai_execution_records" else
+                "Canonical domain JSON encoded as a JSON string preserving numeric representations."
+            ),
         ),
         Column("payload_bytes", sql_blob(), nullable=True,
                comment="Optional binary content body owned by this record; ordinary domain state remains JSON."),
@@ -124,8 +128,10 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                comment="Single SHA-256 lookup projection of the complete parent_key; raw identity must also match."),
         Column("sort_prefix", LargeBinary(128).with_variant(mysql.VARBINARY(128), "mysql"), nullable=False,
                comment="First 128 bytes of the full sort key; non-unique query projection only."),
-        *(Column(column, sql_sha256(), nullable=True, comment="Derived immutable content lookup SHA-256.")
-          for column in CONTENT_REFERENCE_COLUMNS.get(name, ())),
+        *(Column(column, sql_sha256(), nullable=True, comment=(
+            "Canonical execution reference SHA-256." if name == "ai_execution_records" else
+            "Derived immutable content lookup SHA-256."
+        )) for column in CONTENT_REFERENCE_COLUMNS.get(name, ())),
         *sql_audit_columns(),
     ]
     if name in SCAN_KIND_OWNERS:
