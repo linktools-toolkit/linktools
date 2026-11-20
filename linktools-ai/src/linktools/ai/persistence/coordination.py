@@ -21,6 +21,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import CacheBackend, RenewingTurnScope, StreamBackend, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader, TurnScopeIdentity
 from .codec import decode_domain, encode_domain
 from .turns import StateTurnCoordination
+from ._turn_sql_schema import RUNTIME_TURN_SCOPE
 from ..execution import ExecutionRecord
 
 
@@ -47,7 +48,7 @@ class PendingTurnCoordination:
         self._backend = backend
         self._namespace = validate_persistence_namespace(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
-        self._scope = TurnScopeIdentity(self._namespace, self._tenant_id, "runtime-pending-turn")
+        self._scope = TurnScopeIdentity(self._namespace, self._tenant_id, RUNTIME_TURN_SCOPE)
         self._scope_payload = list(self._scope.as_tuple())
 
     @classmethod

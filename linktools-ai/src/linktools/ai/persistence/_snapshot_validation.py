@@ -87,11 +87,13 @@ _TURN_RECORD_KINDS = GENERIC_TURN_SNAPSHOT_KINDS | TURN_SNAPSHOT_KINDS
 def _validate_turn_snapshot(records: tuple[StoredRecord, ...], *, namespace: str, tenant_id: str) -> None:
     old = any(value.kind in GENERIC_TURN_SNAPSHOT_KINDS for value in records)
     typed = any(value.kind in TURN_SNAPSHOT_KINDS for value in records)
-    if old and typed:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if typed:
+        from ._turn_sql_schema import RUNTIME_TURN_SCOPE
+        if any(value.kind in GENERIC_TURN_SNAPSHOT_KINDS and value.data.get("scope") == RUNTIME_TURN_SCOPE
+               for value in records):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         decode_turn_snapshot(records, namespace=namespace, tenant_id=tenant_id)
-    elif old:
+    if old:
         validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
 
 _ALLOWED_RECORD_KINDS = {

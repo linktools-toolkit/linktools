@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import Insert, Update, select
-from .test_state_turn_authority import _authority_records, _backend, _claim, _validate_authority
-from .test_state_batch_delete_backends import _open_store
+from .test_state_turn_authority import _authority_records, _backend, _claim, _open_store, _validate_authority
 from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.turns import validate_turn_records
@@ -18,7 +17,7 @@ from linktools.ai.persistence._turn_sql_schema import TURN_ADMISSION_TABLE, TURN
 
 pytestmark = pytest.mark.asyncio
 
-_SCOPE = TurnScopeIdentity("turn-authority", "tenant", "scope")
+_SCOPE = TurnScopeIdentity("turn-authority", "tenant", "runtime-pending-turn")
 
 
 @pytest.mark.parametrize("failure", ("acquire_rejected", "cancel_after_acquire", "final_validation"))
@@ -118,7 +117,7 @@ async def test_initial_sql_claim_rolls_back_typed_slot_and_admission(tmp_path, m
 
 async def test_initial_claim_two_sql_connections_admit_exactly_one(tmp_path, monkeypatch):
     async with _open_store("sql", tmp_path / "sql") as store:
-        other = SqlStateStore(store.context.engine)
+        other = SqlStateStore(store.context.engine, store_key=store.store_key)
         await other.initialize()
         original = _SqlTransaction._execute
         arrived = set()
@@ -151,7 +150,7 @@ async def test_initial_claim_two_sql_connections_admit_exactly_one(tmp_path, mon
 
 async def test_initial_claim_is_not_visible_before_acquire_or_after_cancel(tmp_path, monkeypatch):
     async with _open_store("sql", tmp_path / "sql") as store:
-        other = SqlStateStore(store.context.engine)
+        other = SqlStateStore(store.context.engine, store_key=store.store_key)
         await other.initialize()
         original = _SqlTransaction._execute
         staged, release = asyncio.Event(), asyncio.Event()

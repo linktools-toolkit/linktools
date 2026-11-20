@@ -43,7 +43,7 @@ from ._sql import SqlStateStore
 from ._turn_snapshot import (
     GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, turn_snapshot_record,
 )
-from ._turn_sql_schema import TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
+from ._turn_sql_schema import RUNTIME_TURN_SCOPE, TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
 from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
 from ..model.messages import decode_model_message_payloads
@@ -116,6 +116,13 @@ from .codec import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
     from ._step_store import SqlStepStore
+
+
+def _require_turn_snapshot_partition(store: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
+    from .state import state_store_key
+
+    if store.store_key != state_store_key(namespace, tenant_id, "execution"):
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
 
 class _SnapshotReader(Protocol):
@@ -196,6 +203,7 @@ class _StateSnapshotReader:
         store, scope = self._store, self._turn_scope
         if scope is None or not isinstance(store, SqlStateStore):
             return ()
+        _require_turn_snapshot_partition(store, namespace=scope[0], tenant_id=scope[1])
         from sqlalchemy import select
 
         captured = []
@@ -1748,11 +1756,13 @@ async def restore_snapshot(
                     state_facts = tuple(value for value in facts if value.kind != "step_event")
                 state_records = records
                 if (domain is PersistenceDomain.EXECUTION and isinstance(store, SqlStateStore)
-                        and any(row.kind in GENERIC_TURN_SNAPSHOT_KINDS for row in records)):
+                        and any(row.kind in GENERIC_TURN_SNAPSHOT_KINDS
+                                and row.data.get("scope") == RUNTIME_TURN_SCOPE for row in records)):
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Pre-release turn coordination snapshot layout")
                 if domain is PersistenceDomain.EXECUTION and any(row.kind in TURN_SNAPSHOT_KINDS for row in records):
                     if not isinstance(store, SqlStateStore) or not isinstance(transaction, SqlStateTransaction):
                         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                    _require_turn_snapshot_partition(store, namespace=resources.namespace, tenant_id=resources.tenant_id)
                     slots, admissions = decode_turn_snapshot(
                         records, namespace=resources.namespace, tenant_id=resources.tenant_id, store_key=store.store_key,
                     )

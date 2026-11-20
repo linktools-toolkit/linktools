@@ -184,15 +184,21 @@ class StateTurnCoordination:
     def __init__(
         self, store: StateStore, *, namespace: str, tenant_id: str,
         read_only: bool = False, require_ready: Callable[[], None] | None = None,
+        _runtime_sql: bool = False,
     ) -> None:
         self._read_only = read_only
         self._require_ready = require_ready
         self._store = store
+        self._runtime_sql = _runtime_sql and type(store) is SqlStateStore
+        if self._runtime_sql:
+            from ._turn_sql_schema import RUNTIME_TURN_SCOPE
+
+            store.bind_runtime_turn_scope(TurnScopeIdentity(namespace, tenant_id, RUNTIME_TURN_SCOPE))
         self._records = _TurnRecords(namespace, tenant_id)
 
-    @property
-    def _sql_source(self) -> SqlStateStore | None:
-        return self._store if isinstance(self._store, SqlStateStore) else None
+    def _sql_source(self, scope: str) -> SqlStateStore | None:
+        from ._turn_sql_schema import RUNTIME_TURN_SCOPE
+        return self._store if self._runtime_sql and scope == RUNTIME_TURN_SCOPE else None
 
     def _local_scope(self, scope: TurnScopeIdentity) -> str:
         if not isinstance(scope, TurnScopeIdentity):
@@ -326,18 +332,18 @@ class StateTurnCoordination:
         return TurnCoordination(data["execution_id"], data["owner_id"], data["cancel_requested"], lease)
 
     async def read_turn(self, scope: TurnScopeIdentity, execution_id: str) -> TurnCoordination | None:
-        if (source := self._sql_source) is not None:
+        local_scope = self._local_scope(scope)
+        if (source := self._sql_source(local_scope)) is not None:
             self._outside_transaction()
-            self._local_scope(scope)
             proof = await source.observe_turn_admission(scope, route="execution", identity=execution_id)
             return None if proof is None else proof.coordination(scope)
         graph = await self._observe(self._local_scope(scope), "turn_execution", execution_id)
         return None if graph is None else self._coordination(graph)
 
     async def read_turn_by_request(self, scope: TurnScopeIdentity, request_key: str) -> TurnCoordination | None:
-        if (source := self._sql_source) is not None:
+        local_scope = self._local_scope(scope)
+        if (source := self._sql_source(local_scope)) is not None:
             self._outside_transaction()
-            self._local_scope(scope)
             proof = await source.observe_turn_admission(scope, route="request", identity=request_key)
             return None if proof is None else proof.coordination(scope)
         graph = await self._observe(self._local_scope(scope), "turn_request", request_key)
@@ -355,7 +361,7 @@ class StateTurnCoordination:
         if requests.state_store.storage_group is not group:
             raise StateTransactionNestingError("admission receipt and authority must share a state group")
 
-        if (source := self._sql_source) is not None:
+        if (source := self._sql_source(local_scope)) is not None:
             async def sql_capture(transaction: StateGroupTransaction):
                 receipt = await requests.get(idempotency_scope, idempotency_key, tenant_id=scope.tenant_id)
                 return receipt, None if receipt is not None else await source.capture_turn_admission(
@@ -401,9 +407,9 @@ class StateTurnCoordination:
         return receipt, None if graph is None or expired else self._coordination(graph)
 
     async def read_turn_by_session(self, scope: TurnScopeIdentity, session_key: str) -> TurnCoordination | None:
-        if (source := self._sql_source) is not None:
+        local_scope = self._local_scope(scope)
+        if (source := self._sql_source(local_scope)) is not None:
             self._outside_transaction()
-            self._local_scope(scope)
             proof = await source.observe_turn_admission(scope, route="session", identity=session_key)
             return None if proof is None else proof.coordination(scope)
         graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
@@ -414,9 +420,9 @@ class StateTurnCoordination:
         self, scope: TurnScopeIdentity, session_key: str, execution_id: str, owner_id: str, fence: int,
     ) -> bool:
         """Validate a display hint without exposing its owner's lease."""
-        if (source := self._sql_source) is not None:
+        local_scope = self._local_scope(scope)
+        if (source := self._sql_source(local_scope)) is not None:
             self._outside_transaction()
-            self._local_scope(scope)
             proof = await source.observe_turn_admission(scope, route="session", identity=session_key)
             return proof is not None and (proof.execution_id, proof.owner_id, proof.fence) == (execution_id, owner_id, fence)
         graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
@@ -480,7 +486,7 @@ class StateTurnCoordination:
     async def _confirmed(
         self, scope: str, execution_id: str, *, receipt: str, kind: str,
     ) -> TurnCoordination | bool | None:
-        if (source := self._sql_source) is not None:
+        if (source := self._sql_source(scope)) is not None:
             full_scope = TurnScopeIdentity(self._records.namespace, self._records.tenant_id, scope)
             return await source.confirm_turn_admission(full_scope, execution_id=execution_id, receipt=receipt, kind=kind)
         execution = await self._store.read(lambda tx: self._load(tx, scope, "turn_execution", execution_id))
@@ -528,7 +534,7 @@ class StateTurnCoordination:
         session_key: str, request_key: str, request_digest: str,
         execution_id: str, owner_id: str, duration: float, token: str,
     ) -> TurnCoordination | None:
-        if (source := self._sql_source) is not None:
+        if (source := self._sql_source(local_scope)) is not None:
             scope = TurnScopeIdentity(self._records.namespace, self._records.tenant_id, local_scope)
             return await source.claim_turn_admission(
                 scope, session_key=session_key, request_key=request_key, request_digest=request_digest,
@@ -671,7 +677,7 @@ class StateTurnCoordination:
         self._writable()
         _text(scope)
         _text(execution_id)
-        if (source := self._sql_source) is not None:
+        if (source := self._sql_source(scope)) is not None:
             full_scope = TurnScopeIdentity(self._records.namespace, self._records.tenant_id, scope)
             receipt = uuid4().hex
 
@@ -690,7 +696,11 @@ class StateTurnCoordination:
                 return change is not None if kind == "cancel" else change
 
             if lease is not None:
+                from ._turn_sql import turn_hex, turn_session_address
                 try:
+                    turn_hex(lease[0].token, 32)
+                    turn_session_address(lease[1])
+                    turn_hex(lease[2], 64)
                     for record_kind, key in zip(("turn_execution", "turn_session", "turn_request"),
                                                 (execution_id, lease[1], lease[2]), strict=True):
                         self._records.key(scope, record_kind, key)

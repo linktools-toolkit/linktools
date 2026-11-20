@@ -7,11 +7,10 @@ from datetime import datetime, timezone
 
 from ..errors import AIError, ErrorCode
 from ..storage import TurnScopeIdentity
-from ._record_key import decode_key_components, encode_key_components
-from ._turn_sql import SqlTurnProof
+from ._turn_sql import ACTIVE_REQUEST, RETIRED_EXECUTION, SqlTurnProof, turn_hex, turn_session_address, turn_session_identity
 from ._turn_sql_schema import (
     TURN_ADMISSION_TABLE, TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES,
-    TURN_SCOPE_MAX_BYTES, TURN_SESSION_MAX_BYTES, TURN_SLOT_TABLE,
+    RUNTIME_TURN_SCOPE, TURN_SLOT_TABLE,
 )
 from .state import StoredRecord, record_key, scope_key
 
@@ -44,12 +43,10 @@ def _address(scope: TurnScopeIdentity, kind: str, identity: str) -> tuple[bytes,
 def turn_snapshot_record(table: str, row: Mapping[str, object], *, namespace: str, tenant_id: str) -> StoredRecord:
     """Encode one source row without persisting or exporting SQL surrogate IDs."""
     try:
-        scope = TurnScopeIdentity(*decode_key_components(row["scope_key"], TURN_SCOPE_MAX_BYTES))
-        if (scope.namespace, scope.tenant_id) != (namespace, tenant_id):
-            raise _integrity()
+        scope = TurnScopeIdentity(namespace, tenant_id, RUNTIME_TURN_SCOPE)
         if table == TURN_SLOT_TABLE:
             kind = "turn_slot"
-            identity = row["session_key"].decode("utf-8")
+            identity = turn_session_identity(row["session_kind"], row["session_key"])
             execution = row["active_execution_id"]
             token, expiry = row["lease_token"], row["lease_expires_at"]
             active = execution is not None
@@ -94,7 +91,8 @@ def decode_turn_snapshot(
         try:
             data = record.data
             scope = TurnScopeIdentity(namespace, tenant_id, data["scope"])
-            raw_scope = encode_key_components(scope.as_tuple(), TURN_SCOPE_MAX_BYTES)
+            if scope.scope != RUNTIME_TURN_SCOPE:
+                raise _integrity()
             is_slot = record.kind == "turn_slot"
             identity = data["session_key"] if is_slot else data["execution_id"]
             key, grouped = _address(scope, record.kind, identity)
@@ -102,8 +100,8 @@ def decode_turn_snapshot(
                     or record.parent_key is not None or record.subject_id is not None
                     or record.payload_bytes is not None):
                 raise _integrity()
-            row = {"store_key": store_key, "scope_key": raw_scope,
-                   "session_key": _bytes(data["session_key"], TURN_SESSION_MAX_BYTES)}
+            session_kind, session_key = turn_session_address(data["session_key"])
+            row = {"store_key": store_key, "session_kind": session_kind, "session_key": session_key}
             if is_slot:
                 if set(data) != {"scope", "session_key", "execution_id"} or record.state not in ("ACTIVE", "IDLE"):
                     raise _integrity()
@@ -114,11 +112,11 @@ def decode_turn_snapshot(
                     raise _integrity()
                 row.update(
                     active_execution_id=_bytes(data["execution_id"], TURN_EXECUTION_MAX_BYTES) if active else None,
-                    lease_token=record.lease_owner.encode("utf-8") if active else None,
+                    lease_token=turn_hex(record.lease_owner, 32) if active else None,
                     lease_fence=record.lease_fence, lease_expires_at=record.lease_expires_at,
                     revision=record.storage_revision,
                 )
-                identity = raw_scope, row["session_key"]
+                identity = session_kind, session_key
                 if identity in slots:
                     raise _integrity()
                 slots[identity] = row
@@ -129,37 +127,39 @@ def decode_turn_snapshot(
                         or record.storage_revision != 0 or record.lease_owner is not None
                         or record.lease_fence != 0 or record.lease_expires_at is not None):
                     raise _integrity()
-                request = _bytes(data["request_key"], TURN_REQUEST_MAX_BYTES)
-                row.update(execution_id=_bytes(data["execution_id"], TURN_EXECUTION_MAX_BYTES),
-                           request_key=request, live_request_key=request if record.state == "ACTIVE" else None,
-                           request_digest=data["request_digest"], owner_id=data["owner_id"], lease_fence=data["fence"],
-                           cancel_requested=data["cancel_requested"], receipt_id=data["receipt_id"],
+                request = turn_hex(data["request_key"], TURN_REQUEST_MAX_BYTES)
+                execution = _bytes(data["execution_id"], TURN_EXECUTION_MAX_BYTES)
+                active = record.state == "ACTIVE"
+                row.update(execution_id=execution, retired_request_key=None if active else request,
+                           route_kind=ACTIVE_REQUEST if active else RETIRED_EXECUTION, route_key=request if active else execution,
+                           request_digest=data["request_digest"], owner_id=turn_hex(data["owner_id"], 32), lease_fence=data["fence"],
+                           cancel_requested=data["cancel_requested"], receipt_id=turn_hex(data["receipt_id"], 32),
                            receipt_kind=data["receipt_kind"])
                 proof = SqlTurnProof.from_row(row)
                 if (type(proof.cancel_requested) is not bool
                         or proof.receipt_kind == "claim" and proof.cancel_requested
                         or proof.receipt_kind == "cancel" and not proof.cancel_requested):
                     raise _integrity()
-                identity = raw_scope, row["execution_id"]
-                if identity in admissions or proof.active and (raw_scope, request) in requests:
+                identity = row["execution_id"]
+                if identity in admissions or proof.active and request in requests:
                     raise _integrity()
                 admissions[identity] = row
                 if proof.active:
-                    requests.add((raw_scope, request))
+                    requests.add(request)
         except (KeyError, TypeError, ValueError) as error:
             raise _integrity() from error
 
-    for (scope, _), row in slots.items():
+    for address, row in slots.items():
         if row["active_execution_id"] is None:
             continue
-        linked = admissions.get((scope, row["active_execution_id"]))
-        if (linked is None or linked["live_request_key"] is None
-                or linked["session_key"] != row["session_key"] or linked["lease_fence"] != row["lease_fence"]
-                or linked["receipt_kind"] == "claim" and linked["receipt_id"].encode("utf-8") != row["lease_token"]):
+        linked = admissions.get(row["active_execution_id"])
+        if (linked is None or linked["route_kind"] != ACTIVE_REQUEST
+                or (linked["session_kind"], linked["session_key"]) != address or linked["lease_fence"] != row["lease_fence"]
+                or linked["receipt_kind"] == "claim" and linked["receipt_id"] != row["lease_token"]):
             raise _integrity()
-    for (scope, execution), row in admissions.items():
-        slot = slots.get((scope, row["session_key"]))
+    for execution, row in admissions.items():
+        slot = slots.get((row["session_kind"], row["session_key"]))
         if (slot is None or slot["lease_fence"] < row["lease_fence"]
-                or row["live_request_key"] is not None and slot["active_execution_id"] != execution):
+                or row["route_kind"] == ACTIVE_REQUEST and slot["active_execution_id"] != execution):
             raise _integrity()
     return list(slots.values()), list(admissions.values())

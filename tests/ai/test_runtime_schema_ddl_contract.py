@@ -443,7 +443,8 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
     native_tables = set(build_step_sql_metadata().tables)
     maxima = {}
     for table in metadata.tables.values():
-        capacity = NATIVE_STORE_KEY_MAX_BYTES if table.name in native_tables else STORE_KEY_MAX_BYTES
+        capacity = (32 if table.name.startswith("ai_turn_") else
+                    NATIVE_STORE_KEY_MAX_BYTES if table.name in native_tables else STORE_KEY_MAX_BYTES)
         assert table.c.store_key.type.length == capacity
         assert table.c.store_key.type.compile(dialect=dialect) == {
             "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
@@ -488,8 +489,6 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
         "ai_turn_slots", "ai_turn_admissions",
     }
-    turn_widths = {("ai_turn_slots", "scope_key"): 390, ("ai_turn_slots", "session_key"): 265,
-                   ("ai_turn_admissions", "scope_key"): 390, ("ai_turn_admissions", "live_request_key"): 257}
     for table in metadata.tables.values():
         assert table.comment and all(column.comment for column in table.c)
         assert tuple(column.name for column in table.c)[-2:] == ("updated_at", "created_at")
@@ -501,11 +500,9 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
             assert 1 <= len(index.columns) <= 3, (table.name, index.name)
             for column in index.columns:
                 if isinstance(column.type, (LargeBinary, String)):
-                    assert column.type.length is not None and column.type.length <= turn_widths.get(
-                        (table.name, column.name), 128,
-                    ), (table.name, column.name)
+                    assert column.type.length is not None and column.type.length <= 128, (table.name, column.name)
                 if unique:
-                    assert column.nullable == ((table.name, column.name) == ("ai_turn_admissions", "live_request_key")), (
+                    assert not column.nullable, (
                         table.name, index.name, column.name,
                     )
         for index in table.indexes:
@@ -540,7 +537,7 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
                 "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
             }[dialect_name]
     for name in state_raw:
-        assert metadata.tables[name].c.store_key.type.length == 128
+        assert metadata.tables[name].c.store_key.type.length == (32 if name.startswith("ai_turn_") else 128)
     for table in metadata.tables.values():
         for column in table.c:
             if column.name.endswith("_locator"):

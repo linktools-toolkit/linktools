@@ -1094,7 +1094,7 @@ class StateCommands:
         session_store = self._conversation.state_store
         authority._writable()
         local_scope = authority._local_scope(scope)
-        sql_coordination = authority._sql_source
+        sql_coordination = authority._sql_source(local_scope)
         if (session_key != f"session:{initial.session_id}"
                 or request_key != canonical_sha256([identity.scope, identity.idempotency_key])):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)

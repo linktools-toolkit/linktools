@@ -430,7 +430,7 @@ class Persistence:
                     authority = StateTurnCoordination(
                         execution_store,
                         namespace=namespace, tenant_id=tenant_id,
-                        read_only=read_only, require_ready=self._require_ready,
+                        read_only=read_only, require_ready=self._require_ready, _runtime_sql=True,
                     )
                     self._coordination_backend = authority
                     self._pending_turn_coordination = PendingTurnCoordination.for_state(

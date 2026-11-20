@@ -179,14 +179,11 @@ async def test_host_binds_source_once_and_borrows_cache(
         assert claimed is not None and claimed.lease is not None
         store = state.execution.executions.state_store
         rows = await store.read(lambda tx: tx.scan_records())
-        if backend == "memory":
-            assert {row.kind for row in rows} == {"turn_session", "turn_request", "turn_execution"}
-        else:
-            from .test_state_turn_authority import _authority_records
-            assert not rows
-            assert {row.kind for row in await _authority_records(store, namespace="source-turns")} == {
-                "turn_slot", "turn_admission",
-            }
+        assert {row.kind for row in rows} == {"turn_session", "turn_request", "turn_execution"}
+        from .test_state_turn_authority import _authority_records
+        assert {row.kind for row in await _authority_records(store, namespace="source-turns")} == {
+            "turn_session", "turn_request", "turn_execution",
+        }
         assert not state.capability_stores and not state.durable_capability_ids
         assert await bound.read_turn_by_session(_SCOPE, "session") == replace(claimed, lease=None)
         assert await bound.release_turn(claimed.lease)
@@ -328,7 +325,7 @@ async def test_snapshot_rejects_broken_source_turn_graph(tmp_path: Path, defect:
     namespace = "source-turns"
     domain = PersistenceDomain.EXECUTION
     if defect == "missing_execution":
-        records = tuple(record for record in records if record.kind != "turn_admission")
+        records = tuple(record for record in records if record.kind not in {"turn_admission", "turn_execution"})
     elif defect == "foreign_namespace":
         namespace = "wrong"
     elif defect == "wrong_domain":
