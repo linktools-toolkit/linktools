@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from ..core import Principal
 from ..errors import AIError, ErrorCode, ObservationError
-from .projection import ModelProjection
+from .projection import ModelProjection, SharedModelProjection
 from ..observe.stream import await_stream_cleanup, drain_stream_tasks, is_observation_cleanup, report_observation_error
 from .stream import SharedStreamEvent
 from ._tree_ready import ExecutionTreeReady
@@ -133,6 +133,8 @@ class _ExecutionModelObservation:
         # A mixed Task binding can route watch and capture to distinct stores.
         startup = None
         if self.owner.share_tree_capture:
+            if self.owner.history is not None:
+                self.models = SharedModelProjection(self.owner.history, self.principal, self.owner.model_progress)
             startup = ExecutionTreeReady(
                 (lambda: ExecutionWatchPositions(self.sequences, self.previews)) if self.include_descendants else None,
             )

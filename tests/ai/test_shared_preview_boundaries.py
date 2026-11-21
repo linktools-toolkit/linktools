@@ -18,7 +18,7 @@ from linktools.ai.execution.stream import (
     SharedStreamEvent, SharedStreamPublisher, decode_stream_record,
     shared_stream_positions, stream_key,
 )
-from linktools.ai.storage import InMemoryStreamBackend
+from linktools.ai.storage import InMemoryStreamBackend, StreamBatch
 
 from .test_runtime_stream_order import _execution
 
@@ -100,6 +100,52 @@ async def _read(
             return tuple([await asyncio.wait_for(anext(stream), 1) for _ in range(count)])
         finally:
             await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_watchers_share_transport_read_without_sharing_cancellation() -> None:
+    class BlockingStream(InMemoryStreamBackend):
+        def __init__(self) -> None:
+            super().__init__(max_bytes=4096)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.reads = 0
+
+        async def read_stream(
+            self, key: bytes, after: int, *, limit: int, wait_seconds: float,
+        ) -> StreamBatch:
+            self.reads += 1
+            self.entered.set()
+            await self.release.wait()
+            return await super().read_stream(key, after, limit=limit, wait_seconds=wait_seconds)
+
+    backend = BlockingStream()
+    publisher = SharedStreamPublisher(backend, "scope", "tenant")
+    key = stream_key("scope", "tenant", "execution", 1, "claim")
+    writer = await backend.open_stream(key, b"producer")
+    await writer.append(1, b'{"kind":"delta","type":"ASSISTANT_TEXT_DELTA","text":"live"}')
+    reader = _ExecutionReader()
+    service = DefaultEventService(
+        reader, reader, TenantAuthorizationPolicy(), lambda *args, **kwargs: None,
+        LiveExecutionEventBroker(shared=publisher),
+    )
+    first = asyncio.create_task(_read(service, 1))
+    second = asyncio.create_task(_read(service, 1))
+    try:
+        await asyncio.wait_for(backend.entered.wait(), 1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        backend.release.set()
+        (event,) = await second
+        assert event.payload["text"] == "live"
+        assert event.position == (key.hex(), 1)
+        assert backend.reads == 1
+    finally:
+        first.cancel()
+        second.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await publisher.close()
 
 
 async def _assert_distinct(deltas: Sequence[ExecutionDelta]) -> None:

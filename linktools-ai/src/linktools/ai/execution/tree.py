@@ -142,6 +142,13 @@ def _capture_views(
     return tuple(captured)
 
 
+class _LiveTreeSample:
+    def __init__(self) -> None:
+        self.references = 0
+        self.task: asyncio.Task[tuple[tuple[ExecutionView, int, int], ...]] | None = None
+        self.expires_at = 0.0
+
+
 class ExecutionTreeStreamer:
     """Merge an execution subtree with relative depths and per-stream ordering."""
 
@@ -154,6 +161,7 @@ class ExecutionTreeStreamer:
         self._executions = executions
         self._events = events
         self._broker = broker
+        self._live_samples: dict[tuple[str, Principal], _LiveTreeSample] = {}
 
     async def capture(
         self,
@@ -320,6 +328,8 @@ class ExecutionTreeStreamer:
         observing = False
         shared = ready if isinstance(ready, ExecutionTreeReady) and ready.positions is not None else None
         preparation_failure: ExecutionStreamFailure | None = None
+        sample_key = (execution_id, principal)
+        live_sample: _LiveTreeSample | None = None
 
         def start(view: ExecutionView) -> None:
             stream = self._events.stream(
@@ -449,13 +459,29 @@ class ExecutionTreeStreamer:
             if discovery_wait in done:
                 if shared is not None:
                     assert shared.positions is not None
-                    snapshot = await self.capture(
-                        execution_id, principal=principal, after_event_seqs=shared.positions(),
-                        include_descendants=include_descendants,
-                    )
+                    assert live_sample is not None
+                    positions = shared.positions()
+                    now = asyncio.get_running_loop().time()
+                    sample_task = live_sample.task
+                    if sample_task is None or (
+                        sample_task.done() and (
+                            now >= live_sample.expires_at or sample_task.cancelled()
+                            or sample_task.exception() is not None
+                        )
+                    ):
+                        sample_task = asyncio.create_task(
+                            self.capture(execution_id, principal=principal, include_descendants=include_descendants),
+                        )
+                        live_sample.task = sample_task
+                        live_sample.expires_at = now + _DISCOVERY_BACKOFF_INITIAL
+                    snapshot = await asyncio.shield(sample_task)
                     for view, depth, _ in snapshot:
                         add_view(view, depth)
-                    shared.snapshot = snapshot
+                    # This sample is for discovery, not a replay cutoff. A
+                    # live cursor may already be ahead of its snapshot.
+                    for member in (set(positions) | set(get_preview_positions(positions))) - views.keys():
+                        await validate_cursor_member(member)
+                    shared.snapshot = _capture_views(views, depths, {})
                     shared.sampled.set()
                 else:
                     added = await discover_persisted_children(tuple(views))
@@ -488,6 +514,9 @@ class ExecutionTreeStreamer:
                 ready.set()
 
             discovery_backoff = _DISCOVERY_BACKOFF_INITIAL
+            if shared is not None:
+                live_sample = self._live_samples.setdefault(sample_key, _LiveTreeSample())
+                live_sample.references += 1
             if include_descendants:
                 discovery_wait = asyncio.create_task(
                     asyncio.sleep(discovery_backoff),
@@ -581,6 +610,12 @@ class ExecutionTreeStreamer:
 
             async def cleanup() -> None:
                 errors = await drain_stream_tasks((discovery,)) if discovery is not None else []
+                if live_sample is not None:
+                    live_sample.references -= 1
+                    if not live_sample.references:
+                        self._live_samples.pop(sample_key)
+                        if live_sample.task is not None:
+                            errors.extend(await drain_stream_tasks((live_sample.task,)))
                 wait_tasks = tuple(child_waits.values()) + tuple(pending.values())
                 if discovery_wait is not None:
                     wait_tasks += (discovery_wait,)

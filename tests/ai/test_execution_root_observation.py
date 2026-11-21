@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Root observations reuse authorized event/model delivery without child discovery."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 
@@ -11,6 +12,7 @@ from linktools.ai.core import ExecutionDeltaType, Page, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionEvent, ExecutionObservationEvent, ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView, ModelInteractionItem, TaskModelProjection
 from linktools.ai.execution.handle import Execution, ExecutionBinding
+from linktools.ai.execution._tree_ready import ExecutionTreeReady
 from linktools.ai.execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer, _ExecutionTreeSubscription
 from linktools.ai.observe.cursors import ExecutionWatchPositions, encode_execution_observation_cursor, encode_execution_watch_cursor
 
@@ -240,3 +242,37 @@ async def test_root_checkpoint_can_expand_to_tree_without_repeating_root_events(
     assert sorted(events.opened) == sorted(events.closed)
     assert not broker._subscriptions
     assert not active
+
+
+@pytest.mark.asyncio
+async def test_live_tree_views_share_periodic_child_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.execution import tree
+
+    class LiveEvents(_Events):
+        async def stream(self, execution_id: str, *, principal: Principal,
+                         after_event_seq: int = 0) -> AsyncIterator[ExecutionStreamEvent]:
+            # Keep the execution open until the observer leaves.
+            await asyncio.Event().wait()
+            async for event in super().stream(execution_id, principal=principal, after_event_seq=after_event_seq):
+                yield event
+
+    monkeypatch.setattr(tree, "_DISCOVERY_BACKOFF_INITIAL", 0.05)
+    reader = _Reader()
+    streamer = ExecutionTreeStreamer(reader, LiveEvents(reader), ExecutionTreeBroker())
+    positions: dict[str, int] = {}
+    readiness = [ExecutionTreeReady(positions.copy) for _ in range(10)]
+    streams = [streamer.stream("execution", principal=_PRINCIPAL, ready=ready) for ready in readiness]
+    pending = [asyncio.create_task(anext(stream)) for stream in streams]
+    try:
+        await asyncio.wait_for(asyncio.gather(*(ready.wait() for ready in readiness)), 2)
+        baseline = reader.children_reads
+        # Buffered events may already have taken a viewer past the cached sample.
+        positions["execution"] = 100
+        await asyncio.wait_for(asyncio.gather(*(ready.sampled.wait() for ready in readiness)), 2)
+        # The shared sample reads root and child, not one tree per observer.
+        assert reader.children_reads - baseline == 2
+    finally:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.gather(*(stream.aclose() for stream in streams))

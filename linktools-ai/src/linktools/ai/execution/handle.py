@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import secrets
 import asyncio
 import sys
@@ -17,6 +17,7 @@ from ..errors import AIError, ErrorCode, ObservationError
 from .stream import SharedStreamEvent
 from ..observe import WaitResult
 from ._observation import _ExecutionModelObservation
+from .projection import ModelProgress
 from ..observe.stream import wait_for_result, validate_wait, await_stream_cleanup, is_observation_cleanup, owned_watch
 from ._input_context import ExecutionInputContext
 from ..model import ModelBinding, UserPromptInput, validate_user_input
@@ -63,6 +64,7 @@ class ExecutionBinding:
     retry: Callable[..., Awaitable[Execution[object]]] | None = None
     fork: Callable[..., Awaitable[Execution[object]]] | None = None
     share_tree_capture: bool = False
+    model_progress: ModelProgress = field(default_factory=ModelProgress, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

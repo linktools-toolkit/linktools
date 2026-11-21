@@ -39,6 +39,7 @@ from . import ExecutionRecord
 
 if TYPE_CHECKING:
     from ..persistence.contracts import EventRepository, ExecutionRepository
+    from ..storage import StreamBatch, StreamBackend
 
 _logger = environ.get_logger("ai.execution.event")
 _DEFAULT_BUFFER_BYTES = 1024 * 1024
@@ -786,6 +787,12 @@ async def _wait_live_activity(
         raise ExecutionStreamFailure(error) from error
 
 
+@dataclass(slots=True)
+class _SharedRead:
+    task: asyncio.Task[StreamBatch]
+    readers: int = 0
+
+
 class DefaultEventService:
     """Read durable events and merge them with ephemeral live deltas."""
 
@@ -807,6 +814,30 @@ class DefaultEventService:
         self._live = live_broker or LiveExecutionEventBroker()
         self._pending_execution = pending_execution
         self._pending_stream = pending_stream
+        self._shared_reads: dict[tuple[bytes, int], _SharedRead] = {}
+
+    async def _read_shared_batch(
+        self, backend: StreamBackend, key: bytes, after: int, *, wait_seconds: float,
+    ) -> StreamBatch:
+        # A generation key and position describe the same opaque batch, not
+        # the reader's authorization, durable cursor or acknowledged output.
+        identity = (key, after)
+        read = self._shared_reads.get(identity)
+        if read is None:
+            read = _SharedRead(asyncio.create_task(backend.read_stream(
+                key, after, limit=100, wait_seconds=wait_seconds,
+            )))
+            self._shared_reads[identity] = read
+        read.readers += 1
+        try:
+            return await asyncio.wait_for(asyncio.shield(read.task), timeout=wait_seconds + 0.05)
+        finally:
+            read.readers -= 1
+            if not read.readers:
+                del self._shared_reads[identity]
+                if not read.task.done():
+                    read.task.cancel()
+                await asyncio.gather(read.task, return_exceptions=True)
 
     @property
     def live_broker(self) -> LiveExecutionEventBroker:
@@ -1220,9 +1251,8 @@ class DefaultEventService:
                     deadline = loop.time() + backoff
                     remaining = backoff
                 try:
-                    batch = await asyncio.wait_for(
-                        shared.backend.read_stream(key, position, limit=100, wait_seconds=remaining),
-                        timeout=remaining + 0.05,
+                    batch = await self._read_shared_batch(
+                        shared.backend, key, position, wait_seconds=remaining,
                     )
                 except asyncio.CancelledError:
                     raise

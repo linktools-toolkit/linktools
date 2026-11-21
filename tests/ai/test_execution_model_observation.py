@@ -188,6 +188,52 @@ async def test_model_notification_rereads_active_identity_without_new_event_posi
 
 
 @pytest.mark.asyncio
+async def test_concurrent_model_watchers_share_live_refresh_at_unchanged_cursor() -> None:
+    bundle = await _bundle()
+    run = replace(bundle.execution_run, _binding=replace(bundle.execution_run._binding, share_tree_capture=True))
+    streams = [run.watch(include_model_interactions=True) for _ in range(10)]
+    history = bundle.runtime.history
+    read = history.read_model_interaction_updates
+    reads = []
+
+    async def counted(*args, **kwargs):
+        reads.append(kwargs["after_cutoffs"])
+        return await read(*args, **kwargs)
+
+    history.read_model_interaction_updates = counted
+    try:
+        history.rows[0] = replace(history.rows[0], status="RUNNING", started_at=datetime.now(timezone.utc))
+        history.durable = False
+        bundle.tree.release.clear()
+        initial = await asyncio.wait_for(asyncio.gather(*(anext(stream) for stream in streams)), 2)
+        assert [item.event.item.status for item in initial] == ["RUNNING"] * 10
+        assert len(reads) == 1
+
+        slow, *fast = streams
+        waiting = asyncio.gather(*(anext(stream) for stream in fast))
+        history.update(replace(history.rows[0], status="SUCCEEDED"))
+        updated = await asyncio.wait_for(waiting, 2)
+        assert [item.event.item.status for item in updated] == ["SUCCEEDED"] * 9
+        assert [_positions(item.cursor) for item in initial[1:]] == [_positions(item.cursor) for item in updated]
+        assert len(reads) == 2
+
+        second = replace(history.rows[0], model_request_seq=2)
+        history.rows.append(second)
+        history.update(second)
+        latest = await asyncio.wait_for(asyncio.gather(*(anext(stream) for stream in fast)), 2)
+        assert [item.event.item.model_request_seq for item in latest] == [2] * 9
+        replay = [await asyncio.wait_for(anext(slow), 2) for _ in range(2)]
+        assert [(item.event.item.model_request_seq, item.event.item.status) for item in replay] == [
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"),
+        ]
+        assert len(reads) == 3
+    finally:
+        await asyncio.gather(*(stream.aclose() for stream in streams))
+        await bundle.close()
+    assert all(subscription.closed for subscription in history.subscriptions)
+
+
+@pytest.mark.asyncio
 async def test_runtime_close_owns_standalone_watch_while_consumer_is_paused() -> None:
     bundle = await _bundle()
     try:

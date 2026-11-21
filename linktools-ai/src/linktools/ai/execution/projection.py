@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from ..core import Principal
 from ..errors import AIError, ErrorCode
+from ..observe.stream import drain_stream_tasks
 from .ranges import model_interaction_update_ranges
 from ._service_api import ExecutionHistoryService, ExecutionView, ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, TaskModelProjection, UsageReadCutoff
 
@@ -220,4 +221,149 @@ class ModelProjection:
                 raise result
 
 
-__all__ = ["ModelProjection"]
+class _LiveModelSample:
+    def __init__(self, projection: ModelProjection, view: ExecutionView) -> None:
+        self.projection = projection
+        self.generation = 0
+        self.rows: dict[tuple[str, int, int], TaskModelProjection] = {}
+        self.updates: tuple[tuple[tuple[str, int, int], TaskModelProjection], ...] = ()
+        self.changed = asyncio.Event()
+        self.references = 0
+        self.task = asyncio.create_task(self.run(view))
+
+    async def run(self, view: ExecutionView) -> None:
+        execution_id = view.execution_id
+        try:
+            await self.projection.add(execution_id, view, 0)
+            while True:
+                updates = {}
+                async for _, update in self.projection.refresh(execution_id):
+                    item = update.item
+                    updates[(item.execution_id, item.agent_run_seq, item.model_request_seq)] = update
+                if updates or not self.generation:
+                    self.rows.update(updates)
+                    self.updates = tuple(updates.items())
+                    self.generation += 1
+                    previous, self.changed = self.changed, asyncio.Event()
+                    previous.set()
+                if self.projection.waits:
+                    done, _ = await asyncio.wait(
+                        tuple(self.projection.waits.values()), timeout=1.0,
+                    )
+                    self.projection.changed(done)
+                else:
+                    await asyncio.sleep(1.0)
+        finally:
+            try:
+                await self.projection.close()
+            finally:
+                self.changed.set()
+
+    async def wait(self, after_generation: int) -> int:
+        while self.generation <= after_generation and not self.task.done():
+            wake = asyncio.create_task(self.changed.wait())
+            try:
+                await asyncio.wait((wake, self.task), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                await drain_stream_tasks((wake,))
+        if self.task.done():
+            self.task.result()
+        return self.generation
+
+
+class ModelProgress:
+    """One live metadata projection for equivalent readers on the same execution binding."""
+
+    def __init__(self) -> None:
+        self._samples: dict[tuple[int, Principal, str], _LiveModelSample] = {}
+
+    def attach(
+        self, history: ExecutionHistoryService, principal: Principal, view: ExecutionView,
+    ) -> _LiveModelSample:
+        key = (id(history), principal, view.execution_id)
+        sample = self._samples.get(key)
+        if sample is None:
+            sample = self._samples[key] = _LiveModelSample(ModelProjection(history, principal), view)
+        sample.references += 1
+        return sample
+
+    async def release(
+        self, history: ExecutionHistoryService, principal: Principal, execution_id: str, sample: _LiveModelSample,
+    ) -> None:
+        sample.references -= 1
+        if sample.references:
+            return
+        del self._samples[(id(history), principal, execution_id)]
+        errors = await drain_stream_tasks((sample.task,))
+        if errors:
+            raise errors[0]
+
+
+class SharedModelProjection(ModelProjection):
+    def __init__(
+        self, history: ExecutionHistoryService, principal: Principal, progress: ModelProgress,
+    ) -> None:
+        super().__init__(history, principal)
+        self._progress = progress
+        self._samples: dict[str, _LiveModelSample] = {}
+        self._delivered: dict[str, int] = {}
+
+    async def add(
+        self, node_id: str, view: ExecutionView, depth: int, *, subscribe: bool = True,
+    ) -> None:
+        if view.execution_id in self.views:
+            await super().add(node_id, view, depth, subscribe=False)
+            return
+        assert self.history is not None
+        # Joining is still an authorized history operation even if a sample is cached.
+        authorization = await self.history.subscribe_model_interactions(
+            view.execution_id, principal=self.principal,
+        )
+        if authorization is not None:
+            await authorization.close()
+        await super().add(node_id, view, depth, subscribe=False)
+        self._samples[view.execution_id] = self._progress.attach(self.history, self.principal, view)
+        self.generations[view.execution_id] = self._delivered[view.execution_id] = 0
+
+    def arm(self, execution_id: str) -> None:
+        if execution_id not in self.waits:
+            self.waits[execution_id] = asyncio.create_task(
+                self._samples[execution_id].wait(self.generations[execution_id]),
+                name=f"execution-model-change-{execution_id}",
+            )
+
+    async def refresh(
+        self, execution_id: str, *, boundary: ModelInteractionReadBoundary | None = None,
+    ) -> AsyncIterator[tuple[str, TaskModelProjection]]:
+        sample = self._samples[execution_id]
+        revision = await sample.wait(0)
+        delivered = self._delivered[execution_id]
+        if delivered < revision:
+            node_id, _, depth = self.views[execution_id]
+            self._delivered[execution_id] = revision
+            # A slow reader can reconstruct the latest metadata without holding a
+            # queue open or delaying refresh for healthy readers.
+            rows = sample.updates if delivered == revision - 1 else tuple(sample.rows.items())
+            for identity, projection in rows:
+                if self.rows.get(identity) != projection:
+                    self.rows[identity] = projection
+                    yield node_id, replace(projection, item=replace(projection.item, depth=depth))
+        self.generations[execution_id] = max(revision, self.generations[execution_id])
+        self.arm(execution_id)
+
+    async def close(self) -> None:
+        try:
+            await super().close()
+        finally:
+            assert self.history is not None
+            results = await asyncio.gather(
+                *(self._progress.release(self.history, self.principal, execution_id, sample)
+                  for execution_id, sample in self._samples.items()),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+
+
+__all__ = ["ModelProjection", "ModelProgress", "SharedModelProjection"]
