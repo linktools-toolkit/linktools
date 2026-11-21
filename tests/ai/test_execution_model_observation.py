@@ -105,6 +105,43 @@ def _positions(cursor):
 
 
 @pytest.mark.asyncio
+async def test_shared_model_progress_preserves_authoritative_terminal_and_discards_gapped_items() -> None:
+    from linktools.ai.execution.model_progress import encode_model_progress
+    from linktools.ai.execution.projection import ModelProgress, SharedModelProjection
+
+    bundle = await _bundle()
+    models = SharedModelProjection(bundle.runtime.history, _PRINCIPAL, ModelProgress())
+    try:
+        ((view, depth, _),) = await bundle.tree.capture("execution", principal=_PRINCIPAL)
+        await models.add("execution", view, depth)
+        initial = [projection async for _, projection in models.refresh("execution")]
+        assert [projection.item.status for projection in initial] == ["SUCCEEDED"]
+        terminal = initial[0].item
+        generation = {"producer_generation": 1}
+        models.observe_remote("execution", ("owner", 1), {
+            **generation, "kind": "coverage", "model": True, "published_at": time.time(),
+            "authority_deadline": asyncio.get_running_loop().time() + 6.0,
+        })
+        models.observe_remote("execution", ("owner", 2), {
+            **generation, "kind": "model", "item": encode_model_progress(replace(terminal, model_request_seq=2)),
+        })
+        models.observe_remote("execution", ("owner", 2), {**generation, "kind": "gap"})
+        models.observe_remote("execution", ("owner", 3), {
+            **generation, "kind": "model", "item": encode_model_progress(replace(terminal, status="FAILED")),
+        })
+        models.observe_remote("execution", ("owner", 4), {
+            **generation, "kind": "model", "item": encode_model_progress(replace(terminal, model_request_seq=3)),
+        })
+        await asyncio.wait_for(asyncio.shield(models.waits["execution"]), 1)
+        ready = [projection async for _, projection in models.refresh("execution")]
+        assert [(projection.item.model_request_seq, projection.item.status)
+                for projection in ready] == [(3, "SUCCEEDED")]
+    finally:
+        await models.close()
+        await bundle.close()
+
+
+@pytest.mark.asyncio
 async def test_default_tree_mode_and_authority_only_wait_do_not_touch_metadata() -> None:
     bundle = await _bundle()
     try:

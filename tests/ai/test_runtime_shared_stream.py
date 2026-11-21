@@ -8,6 +8,7 @@ from ._runtime_test_helpers import model_features
 from ._runtime_test_helpers import workspace_features
 
 import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -147,6 +148,108 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
     assert not backend.closed
     await backend.put("host-owned", b"after close")
     assert await backend.get("host-owned") == b"after close"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("viewer_counts", [(1,), (4, 3, 3)])
+async def test_covered_remote_observation_needs_no_periodic_tree_or_model_reads(
+    tmp_path, monkeypatch, viewer_counts,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from linktools.ai.capability import AgentContext, TraceCapability
+    from linktools.ai.execution import TaskModelProjection
+    from ._runtime_test_helpers import _UsageFunctionModel
+
+    calling = asyncio.Event()
+    first_release = asyncio.Event()
+    second_entered = asyncio.Event()
+    final_release = asyncio.Event()
+    calls = 0
+
+    async def pause(ctx: AgentContext[None]) -> str:
+        return "continue"
+
+    async def model(messages, info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            calling.set()
+            await first_release.wait()
+            return ModelResponse(parts=[ToolCallPart("pause", {}, tool_call_id="gate")])
+        second_entered.set()
+        await final_release.wait()
+        return ModelResponse(parts=[TextPart("done")])
+
+    group = RuntimeFeatures("covered-observers")
+    group.capability(ExecutionCapability(), scope="runtime")
+    group.capability(TraceCapability(), scope="runtime")
+    group.tool(pause, effect_policy="replay_safe")
+    group.agent("default", model="default", allow_tools=("pause",))
+    features = model_features(_Models(_UsageFunctionModel(model)), group)
+    stream_backend = _CombinedCache()
+    database = tmp_path / "runtime.db"
+    readers = [0, 0]
+    watcher_tasks = []
+    watcher_ready = [asyncio.Event() for _ in range(sum(viewer_counts))]
+    first_finished = [asyncio.Event() for _ in watcher_ready]
+
+    def count(reader, method, slot):
+        original = getattr(reader, method)
+
+        async def read(*args, **kwargs):
+            readers[slot] += 1
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(reader, method, read)
+
+    async def watch(remote, index):
+        async for event in remote.watch(include_model_interactions=True):
+            projection = event.event
+            if isinstance(projection, TaskModelProjection):
+                item = projection.item
+                if item.model_request_seq == 1:
+                    assert not item.content_included and not item.request and item.response is None
+                    watcher_ready[index].set()
+                    if item.status == "SUCCEEDED":
+                        first_finished[index].set()
+
+    async with AsyncExitStack() as stack:
+        async def open_runtime():
+            storage = PersistenceStorage.sqlite(database, cache=stream_backend, coordination=stream_backend)
+            persistence = await stack.enter_async_context(Persistence.open("covered-observers", storage=storage))
+            return await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features))
+
+        owner = await open_runtime()
+        web_runtimes = [await open_runtime() for _ in viewer_counts]
+        execution = await owner.agents.get().start("use the tool")
+        try:
+            await asyncio.wait_for(calling.wait(), 5)
+            for web, viewers in zip(web_runtimes, viewer_counts, strict=True):
+                count(web.history, "read_model_interaction_updates", 0)
+                count(web._execution_service, "list_children", 1)
+                remote = await web.executions.get(execution.execution_id)
+                for _ in range(viewers):
+                    watcher_tasks.append(asyncio.create_task(watch(remote, len(watcher_tasks))))
+            await asyncio.wait_for(asyncio.gather(*(ready.wait() for ready in watcher_ready)), 5)
+            # Allow the first producer coverage tick to reach every Web Runtime.
+            await asyncio.sleep(2.5)
+            baseline = tuple(readers)
+            await asyncio.sleep(2.5)
+            assert tuple(readers) == baseline
+            first_release.set()
+            await asyncio.wait_for(second_entered.wait(), 5)
+            await asyncio.wait_for(asyncio.gather(*(seen.wait() for seen in first_finished)), 5)
+            assert not final_release.is_set()
+            assert tuple(readers) == baseline
+            final_release.set()
+            await asyncio.wait_for(asyncio.gather(*watcher_tasks), 5)
+            assert (await execution.wait()).result.output == {"text": "done"}
+        finally:
+            first_release.set()
+            final_release.set()
+            for task in watcher_tasks:
+                task.cancel()
+            await asyncio.gather(*watcher_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

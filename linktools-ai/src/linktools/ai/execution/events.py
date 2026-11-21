@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, replace
@@ -26,10 +26,12 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
+    TenantAuthorizationPolicy,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import StreamBatch
 from ..execution.stream import (
-    SharedStreamPublisher, SharedStreamEvent, decode_stream_record,
+    OBSERVATION_TIMEOUT, SharedStreamPublisher, SharedStreamEvent, decode_stream_record, deliver_shared_observation,
     shared_stream_position, shared_stream_requested, stream_key,
 )
 from ..observe.stream import is_observation_cleanup, await_stream_cleanup
@@ -39,7 +41,7 @@ from . import ExecutionRecord
 
 if TYPE_CHECKING:
     from ..persistence.contracts import EventRepository, ExecutionRepository
-    from ..storage import StreamBatch, StreamBackend
+    from ..storage import StreamBackend
 
 _logger = environ.get_logger("ai.execution.event")
 _DEFAULT_BUFFER_BYTES = 1024 * 1024
@@ -313,9 +315,11 @@ class LiveExecutionEventBroker:
     def shared(self) -> SharedStreamPublisher | None:
         return self._shared
 
-    def admit_shared_producer(self, execution_id: str, generation: int, claim: str) -> None:
+    def admit_shared_producer(
+        self, execution_id: str, generation: int, claim: str, *, durable_seq: int = 0,
+    ) -> None:
         if self._shared is not None:
-            self._shared.admit(execution_id, generation, claim)
+            self._shared.admit(execution_id, generation, claim, durable_seq=durable_seq)
 
     async def close_shared(self) -> None:
         if self._shared is not None:
@@ -793,6 +797,13 @@ class _SharedRead:
     readers: int = 0
 
 
+@dataclass(slots=True)
+class _ObservationAuthority:
+    task: asyncio.Task[bool]
+    checked_at: float
+    readers: int = 0
+
+
 class DefaultEventService:
     """Read durable events and merge them with ephemeral live deltas."""
 
@@ -815,6 +826,7 @@ class DefaultEventService:
         self._pending_execution = pending_execution
         self._pending_stream = pending_stream
         self._shared_reads: dict[tuple[bytes, int], _SharedRead] = {}
+        self._observation_authority: OrderedDict[bytes, _ObservationAuthority] = OrderedDict()
 
     async def _read_shared_batch(
         self, backend: StreamBackend, key: bytes, after: int, *, wait_seconds: float,
@@ -823,14 +835,25 @@ class DefaultEventService:
         # the reader's authorization, durable cursor or acknowledged output.
         identity = (key, after)
         read = self._shared_reads.get(identity)
+        joined = read is not None
         if read is None:
-            read = _SharedRead(asyncio.create_task(backend.read_stream(
-                key, after, limit=100, wait_seconds=wait_seconds,
-            )))
+            async def fetch() -> StreamBatch:
+                # The backend's healthy long-poll expiry must get a scheduling
+                # turn before a stalled call is treated as transport loss.
+                async with asyncio.timeout(wait_seconds + 1.0):
+                    return await backend.read_stream(key, after, limit=100, wait_seconds=wait_seconds)
+
+            read = _SharedRead(asyncio.create_task(fetch()))
             self._shared_reads[identity] = read
         read.readers += 1
         try:
-            return await asyncio.wait_for(asyncio.shield(read.task), timeout=wait_seconds + 0.05)
+            if joined:
+                done, _ = await asyncio.wait((read.task,), timeout=wait_seconds)
+                if not done:
+                    # This subscriber must recheck authority sooner than the
+                    # shared read completes. It has not observed a transport gap.
+                    return StreamBatch((), gap=False, sealed=False)
+            return await asyncio.shield(read.task)
         finally:
             read.readers -= 1
             if not read.readers:
@@ -838,6 +861,33 @@ class DefaultEventService:
                 if not read.task.done():
                     read.task.cancel()
                 await asyncio.gather(read.task, return_exceptions=True)
+
+    async def _observation_authority_deadline(
+        self, key: bytes, execution_id: str, *, tenant_id: str, generation: int, claim: str,
+    ) -> float | None:
+        now = asyncio.get_running_loop().time()
+        check = self._observation_authority.get(key)
+        if check is None or (check.task.done() and now - check.checked_at >= OBSERVATION_TIMEOUT / 2):
+            check = _ObservationAuthority(asyncio.create_task(self._shared_owner_matches(
+                execution_id, tenant_id=tenant_id, generation=generation, claim=claim,
+            )), now)
+            self._observation_authority[key] = check
+        self._observation_authority.move_to_end(key)
+        if len(self._observation_authority) > _QUEUE_LIMIT:
+            self._observation_authority.popitem(last=False)
+        check.readers += 1
+        try:
+            if not await asyncio.shield(check.task):
+                return None
+            return check.checked_at + OBSERVATION_TIMEOUT
+        finally:
+            check.readers -= 1
+            if not check.readers and (not check.task.done() or check.task.cancelled() or check.task.exception()):
+                if self._observation_authority.get(key) is check:
+                    del self._observation_authority[key]
+                if not check.task.done():
+                    check.task.cancel()
+                    await asyncio.gather(check.task, return_exceptions=True)
 
     @property
     def live_broker(self) -> LiveExecutionEventBroker:
@@ -1356,6 +1406,26 @@ class DefaultEventService:
                                     return
                         if gap:
                             break
+                        if type(self._authorization) is TenantAuthorizationPolicy and "observation" in record:
+                            observation = record["observation"]
+                            if (not isinstance(observation, dict)
+                                    or observation.get("kind") not in ("coverage", "model", "child")):
+                                deliver_shared_observation(execution_id, (identity, position), {
+                                    "kind": "gap", "producer_generation": generation,
+                                })
+                                continue
+                            authority_deadline = await self._observation_authority_deadline(
+                                key, execution_id, tenant_id=principal.tenant_id, generation=generation, claim=claim,
+                            )
+                            if authority_deadline is None or authority_deadline <= loop.time():
+                                deliver_shared_observation(execution_id, (identity, position), {
+                                    "kind": "gap", "producer_generation": generation,
+                                })
+                                continue
+                            deliver_shared_observation(execution_id, (identity, position), {
+                                **observation, "producer_generation": generation,
+                                "authority_deadline": authority_deadline,
+                            })
                     else:
                         gap = kind == "gap"
                         sealed = kind == "seal"
@@ -1365,6 +1435,10 @@ class DefaultEventService:
                 if not batch.records and loop.time() < deadline:
                     # A backend may return an empty batch immediately; avoid a busy loop.
                     await asyncio.sleep(min(0.01, max(0.0, deadline - loop.time())))
+        if identity:
+            deliver_shared_observation(execution_id, (identity, position), {
+                "kind": "gap", "producer_generation": generation,
+            })
         if gap:
             yield SharedStreamEvent(
                 execution_id, None, "STREAM_RESET", {"stream_truncated": True}, ("", 0),

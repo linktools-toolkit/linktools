@@ -7,10 +7,12 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from ..core import Principal
+from ..core import JsonValue, Principal
 from ..errors import AIError, ErrorCode
 from ..observe.stream import drain_stream_tasks
 from .ranges import model_interaction_update_ranges
+from .model_progress import decode_model_progress
+from .stream import OBSERVATION_TIMEOUT, is_fresh_observation_coverage
 from ._service_api import ExecutionHistoryService, ExecutionView, ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, TaskModelProjection, UsageReadCutoff
 
 
@@ -229,7 +231,65 @@ class _LiveModelSample:
         self.updates: tuple[tuple[tuple[str, int, int], TaskModelProjection], ...] = ()
         self.changed = asyncio.Event()
         self.references = 0
+        self._remote_wakeup = asyncio.Event()
+        self._remote_generation = 0
+        self._remote_position = ("", 0)
+        self._remote_deadline = 0.0
+        self._remote_baseline = True
+        self._remote_items: dict[tuple[int, int], ModelInteractionItem] = {}
+        self._tree_sample: object | None = None
         self.task = asyncio.create_task(self.run(view))
+
+    def reconcile_after_sample(self, sample: object) -> None:
+        if self._tree_sample is not sample:
+            self._tree_sample = sample
+            self._remote_wakeup.set()
+
+    def observe(self, execution_id: str, position: tuple[str, int], record: dict[str, JsonValue]) -> None:
+        kind = record.get("kind")
+        generation = record.get("producer_generation")
+        if kind not in ("model", "coverage", "gap") or type(generation) is not int:
+            return
+        if generation < self._remote_generation:
+            return
+        if generation > self._remote_generation:
+            self._remote_generation = generation
+            self._remote_position = (position[0], 0)
+            self._remote_deadline = 0
+            self._remote_baseline = True
+            self._remote_items.clear()
+        if position[0] != self._remote_position[0] or position[1] < self._remote_position[1]:
+            return
+        if position == self._remote_position and kind != "gap":
+            return
+        self._remote_position = position
+        now = asyncio.get_running_loop().time()
+        if kind == "coverage":
+            authority = record.get("authority_deadline")
+            if (record.get("model") is True and type(authority) in (float, int) and authority > now
+                    and is_fresh_observation_coverage(record)):
+                if self._remote_deadline <= now:
+                    self._remote_baseline = True
+                self._remote_deadline = min(authority, now + OBSERVATION_TIMEOUT)
+            elif record.get("model") is not True:
+                self._remote_deadline = 0
+                self._remote_items.clear()
+        elif kind == "gap":
+            self._remote_deadline = 0
+            self._remote_items.clear()
+        else:
+            try:
+                item = decode_model_progress(execution_id, record.get("item"))
+            except (TypeError, ValueError):
+                self._remote_deadline = 0
+                self._remote_items.clear()
+            else:
+                if len(self._remote_items) < 200:
+                    self._remote_items[(item.agent_run_seq, item.model_request_seq)] = item
+                else:
+                    self._remote_deadline = 0
+                    self._remote_items.clear()
+        self._remote_wakeup.set()
 
     async def run(self, view: ExecutionView) -> None:
         execution_id = view.execution_id
@@ -237,22 +297,52 @@ class _LiveModelSample:
             await self.projection.add(execution_id, view, 0)
             while True:
                 updates = {}
-                async for _, update in self.projection.refresh(execution_id):
-                    item = update.item
-                    updates[(item.execution_id, item.agent_run_seq, item.model_request_seq)] = update
+                self._remote_wakeup.clear()
+                if self._remote_baseline or asyncio.get_running_loop().time() >= self._remote_deadline:
+                    self._remote_baseline = False
+                    async for _, update in self.projection.refresh(execution_id):
+                        item = update.item
+                        updates[(item.execution_id, item.agent_run_seq, item.model_request_seq)] = update
+                items, self._remote_items = self._remote_items, {}
+                for (run, sequence), item in items.items():
+                    identity = (execution_id, run, sequence)
+                    canonical = self.projection.rows.get(identity)
+                    if canonical is not None and canonical.item.status != "RUNNING":
+                        continue
+                    existing = updates.get(identity) or self.rows.get(identity)
+                    if existing is not None and (
+                        existing.item == item and existing.visibility == "durable_history"
+                        or existing.item.status != "RUNNING"
+                    ):
+                        continue
+                    updates[identity] = TaskModelProjection(
+                        item, view.root_execution_id, view.parent_execution_id, view.parent_invocation_id,
+                        "durable_history", datetime.now(timezone.utc),
+                    )
+                for identity, update in tuple(updates.items()):
+                    previous = self.rows.get(identity)
+                    if previous is not None and (
+                        previous.item == update.item and previous.visibility == update.visibility
+                        or previous.item.status != "RUNNING" and update.item.status == "RUNNING"
+                    ):
+                        del updates[identity]
                 if updates or not self.generation:
                     self.rows.update(updates)
                     self.updates = tuple(updates.items())
                     self.generation += 1
                     previous, self.changed = self.changed, asyncio.Event()
                     previous.set()
-                if self.projection.waits:
+                remote = asyncio.create_task(self._remote_wakeup.wait())
+                try:
                     done, _ = await asyncio.wait(
-                        tuple(self.projection.waits.values()), timeout=1.0,
+                        (remote, *self.projection.waits.values()), timeout=1.0,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
                     self.projection.changed(done)
-                else:
-                    await asyncio.sleep(1.0)
+                    for changed_execution in tuple(self.projection.subscriptions):
+                        self.projection.arm(changed_execution)
+                finally:
+                    await drain_stream_tasks((remote,))
         finally:
             try:
                 await self.projection.close()
@@ -307,6 +397,17 @@ class SharedModelProjection(ModelProjection):
         self._progress = progress
         self._samples: dict[str, _LiveModelSample] = {}
         self._delivered: dict[str, int] = {}
+
+    def observe_remote(self, execution_id: str, position: tuple[str, int], record: dict[str, JsonValue]) -> None:
+        sample = self._samples.get(execution_id)
+        if sample is not None:
+            sample.observe(execution_id, position, record)
+
+    def reconcile_after_sample(self, views: tuple[tuple[ExecutionView, int, int], ...]) -> None:
+        for view, _, _ in views:
+            sample = self._samples.get(view.execution_id)
+            if sample is not None:
+                sample.reconcile_after_sample(views)
 
     async def add(
         self, node_id: str, view: ExecutionView, depth: int, *, subscribe: bool = True,

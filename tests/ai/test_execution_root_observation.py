@@ -259,15 +259,12 @@ async def test_live_tree_views_share_periodic_child_discovery(monkeypatch: pytes
     monkeypatch.setattr(tree, "_DISCOVERY_BACKOFF_INITIAL", 0.05)
     reader = _Reader()
     streamer = ExecutionTreeStreamer(reader, LiveEvents(reader), ExecutionTreeBroker())
-    positions: dict[str, int] = {}
-    readiness = [ExecutionTreeReady(positions.copy) for _ in range(10)]
+    readiness = [ExecutionTreeReady(dict) for _ in range(10)]
     streams = [streamer.stream("execution", principal=_PRINCIPAL, ready=ready) for ready in readiness]
     pending = [asyncio.create_task(anext(stream)) for stream in streams]
     try:
         await asyncio.wait_for(asyncio.gather(*(ready.wait() for ready in readiness)), 2)
         baseline = reader.children_reads
-        # Buffered events may already have taken a viewer past the cached sample.
-        positions["execution"] = 100
         await asyncio.wait_for(asyncio.gather(*(ready.sampled.wait() for ready in readiness)), 2)
         # The shared sample reads root and child, not one tree per observer.
         assert reader.children_reads - baseline == 2
@@ -276,3 +273,90 @@ async def test_live_tree_views_share_periodic_child_discovery(monkeypatch: pytes
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         await asyncio.gather(*(stream.aclose() for stream in streams))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost", ["gap", "malformed", "unresolved"])
+async def test_shared_topology_falls_back_when_coverage_is_unusable(
+    monkeypatch: pytest.MonkeyPatch, lost: str,
+) -> None:
+    from linktools.ai.execution import tree
+    from linktools.ai.execution.stream import deliver_shared_observation
+
+    class RemoteTreeReader(_Reader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.root_reads = 0
+            self.root_read = asyncio.Event()
+
+        async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
+            if execution_id == "not-found":
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            return await super().inspect(execution_id, principal=principal)
+
+        async def list_children(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionView, ...]:
+            self.children_reads += 1
+            if execution_id == self.root.execution_id:
+                self.root_reads += 1
+                self.root_read.set()
+            return ()
+
+    attached = asyncio.Event()
+    add_child = asyncio.Event()
+    lose_coverage = asyncio.Event()
+
+    class SharedEvents(_Events):
+        async def stream(self, execution_id: str, *, principal: Principal,
+                         after_event_seq: int = 0) -> AsyncIterator[ExecutionStreamEvent]:
+            from time import time
+
+            position = ("remote:" + execution_id, 1)
+            deliver_shared_observation(execution_id, position, {
+                "kind": "coverage", "tree": True, "published_at": time(),
+                "authority_deadline": asyncio.get_running_loop().time() + 5,
+            })
+            if execution_id == "execution":
+                attached.set()
+                await add_child.wait()
+                deliver_shared_observation(execution_id, (position[0], 2), {"kind": "child", "execution_id": "child"})
+                await lose_coverage.wait()
+                if lost == "gap":
+                    record = {"kind": "gap"}
+                else:
+                    record = {"kind": "child", "execution_id": "" if lost == "malformed" else "not-found"}
+                deliver_shared_observation(execution_id, (position[0], 3), record)
+            else:
+                yield ExecutionStreamEvent(execution_id, 1, "MODEL_REQUEST_STARTED", {})
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(tree, "_DISCOVERY_BACKOFF_INITIAL", 0.02)
+    reader = RemoteTreeReader()
+    streamer = ExecutionTreeStreamer(reader, SharedEvents(reader), ExecutionTreeBroker())
+    ready = ExecutionTreeReady(lambda: {})
+    stream = streamer.stream("execution", principal=_PRINCIPAL, ready=ready)
+    pending = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(attached.wait(), 2)
+        # Startup plus the first verified coverage boundary reconcile the index.
+        async with asyncio.timeout(2):
+            while reader.root_reads < 2:
+                reader.root_read.clear()
+                await reader.root_read.wait()
+        baseline = reader.root_reads
+        await asyncio.sleep(0.08)
+        assert reader.root_reads == baseline
+        add_child.set()
+        child = await asyncio.wait_for(pending, 2)
+        assert child.execution_id == "child"
+        assert reader.root_reads == baseline
+
+        reader.root_read.clear()
+        pending = asyncio.create_task(anext(stream))
+        lose_coverage.set()
+        await asyncio.wait_for(reader.root_read.wait(), 2)
+        assert reader.root_reads > baseline
+        assert not pending.done()
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await stream.aclose()

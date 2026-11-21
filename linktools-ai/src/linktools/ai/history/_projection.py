@@ -1351,8 +1351,8 @@ class StepExecutionHistoryReader:
         )
 
 
+    @staticmethod
     def _project_model_interaction(
-        self,
         interaction: ModelInteractionRecord | StagedModelInteraction,
         execution_id: str,
         agent_run_seq: int,
@@ -3240,4 +3240,13 @@ def _transcript_message_values(
     return project_execution_transcript_message(message)
 
 
-__all__ = ["StepExecutionHistoryReader", "StepSessionHistoryReader"]
+def project_committed_model_progress(
+    execution_id: str, agent_run_seq: int, interaction: ModelInteractionRecord,
+) -> ModelInteractionItem:
+    """Project committed metadata without opening content or archive references."""
+    return StepExecutionHistoryReader._project_model_interaction(
+        interaction, execution_id, agent_run_seq, 0, None, include_content=False,
+    )
+
+
+__all__ = ["StepExecutionHistoryReader", "StepSessionHistoryReader", "project_committed_model_progress"]
