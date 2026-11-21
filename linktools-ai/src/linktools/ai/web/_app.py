@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """Same-origin HTTP delivery; Runtime owns execution and durable state."""
 
+import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
+from contextlib import aclosing, suppress
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -12,6 +14,7 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio
 import httpx2
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -179,16 +182,57 @@ class _LocalBoundary:
         await self.app(scope, receive, send)
 
 
+class _SSEStream(StreamingResponse):
+    def __init__(self, body: AsyncGenerator[str, None], shutdown_event: asyncio.Event | None) -> None:
+        super().__init__(body, media_type="text/event-stream", headers=_SSE_HEADERS)
+        self._body = body
+        self._shutdown_event = shutdown_event
+
+    async def stream_response(self, send: "Send") -> None:
+        if self._shutdown_event is None:
+            async with aclosing(self._body):
+                await super().stream_response(send)
+            return
+
+        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+
+        async def stream() -> None:
+            async with aclosing(self._body):
+                async for chunk in self._body:
+                    await send({"type": "http.response.body", "body": chunk.encode(self.charset), "more_body": True})
+
+        response = asyncio.create_task(stream())
+        shutdown = asyncio.create_task(self._shutdown_event.wait())
+        try:
+            await asyncio.wait((response, shutdown), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if not response.done():
+                response.cancel()
+            shutdown.cancel()
+            # Starlette can also cancel this scope when the browser disconnects.
+            # Join both tasks without interrupting our observer's cleanup.
+            with anyio.CancelScope(shield=True):
+                try:
+                    with suppress(asyncio.CancelledError):
+                        await response
+                finally:
+                    with suppress(asyncio.CancelledError):
+                        await shutdown
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
 class _Console:
     def __init__(
         self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
         status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]],
+        shutdown_event: asyncio.Event | None,
     ) -> None:
         self.runtime = runtime
         self.history = runtime.history if runtime is not None else history
         self.metrics = metrics
         self.status = dict(status)
         self.capabilities = tuple(capabilities)
+        self._shutdown_event = shutdown_event
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
         )
@@ -287,7 +331,7 @@ class _Console:
         runtime = self.require_runtime()
         identity = _text(request.query_params, "session_id")
 
-        async def stream() -> AsyncIterator[str]:
+        async def stream() -> AsyncGenerator[str, None]:
             watch = runtime.sessions.watch(identity, principal=self.principal)
             try:
                 async for session in watch:
@@ -303,7 +347,7 @@ class _Console:
             finally:
                 await watch.aclose()
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+        return _SSEStream(stream(), self._shutdown_event)
 
     async def executions(self, request: Request) -> Response:
         if environ.debug:
@@ -422,7 +466,7 @@ class _Console:
         cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or None
         watch = execution.watch(cursor=cursor, include_content=True, include_model_interactions=True)
 
-        async def stream() -> AsyncIterator[str]:
+        async def stream() -> AsyncGenerator[str, None]:
             try:
                 async for observation in watch:
                     item = observation.event
@@ -444,7 +488,7 @@ class _Console:
             finally:
                 await watch.aclose()
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+        return _SSEStream(stream(), self._shutdown_event)
 
     async def metric_query(self, request: Request) -> Response:
         if environ.debug:
@@ -513,15 +557,17 @@ def create_app(
     *, runtime: Runtime | None = None, history: History | None = None,
     metrics: Metrics | None = None, status: Mapping[str, object] | None = None,
     capabilities: Sequence[Mapping[str, object]] = (),
+    shutdown_event: asyncio.Event | None = None,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
 
-    With no Runtime, mutations and live watches are disabled. Historical reads
+    Set shutdown_event before draining HTTP connections to close live observers
+    without shutting down their Runtime. With no Runtime, mutations and live watches are disabled. Historical reads
     remain available without model credentials. Host/Origin headers are not
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
-    console = _Console(runtime, history, metrics, status or {}, capabilities)
+    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event)
     app = Starlette(routes=[
         Route("/", _asset), Route("/assets/{name}", _asset),
         Route("/api/config", console.config),

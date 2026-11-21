@@ -228,6 +228,69 @@ if(process.argv[3]==='snapshot-tail') {
   console.log('Successful SSE tail reuses metadata; transport/reconnect and observation errors reread authority');
   process.exit(0);
 }
+if(process.argv[3]==='session-open-active') {
+  const active='a-hydrating',pendingTurn={...timeline('a').items[0],execution_id:active,status:'STARTED',
+    user_input:'Question from the other tab',conversation_committed:false,items:[]};
+  const reads=()=>calls.filter(call=>call.method==='GET' && call.key==='/api/sessions/a').length;
+  const earlier=timeline('a'),prior=reads(),openingRead=deferred('GET /api/sessions/a');
+  const base={...sessions.get('a')},opening=select('#session=a');
+  await openingRead.requested;
+  executions.set(active,{...info(active,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(active,{});
+  timelineOverrides.set('a',{...earlier,items:[...earlier.items,pendingTurn]});
+  // A pending owner is observable without changing the persisted session revision.
+  sessions.get('a').active_execution_id=active;
+  await until('same-revision pending SSE owner',()=>sessionSources.at(-1)?.id==='a');
+  await settle();
+  openingRead({session:base,timeline:earlier});
+  await opening;
+  await until('other tab user input loads before terminal',()=>node('conversation').textContent.includes(pendingTurn.user_input));
+  assert.equal(reads(),prior+2,'one catch-up read after the stale opening page');
+  const source=sessionSources.at(-1);
+  source.onerror();source.snapshot();source.snapshot();await settle();
+  assert.equal(reads(),prior+2,'a reconnect with the active turn already loaded does not duplicate requests');
+  timelineOverrides.set('a',{...earlier,items:[...earlier.items,{...pendingTurn,status:'SUCCEEDED',
+    conversation_committed:true,items:[{item_kind:'assistant',content:'Answer to the other tab'}]}]});
+  executions.set(active,info(active,'a'));
+  sessions.get('a').active_execution_id=null;sessions.get('a').revision++;
+  const stream=streamBlocks.get(active).controller;
+  stream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(active,'a'))+'\n\n'));stream.close();
+  await until('committed turn replaces pending projection',()=>node('conversation').textContent.includes('Answer to the other tab'));
+  await refresh();
+  assert.equal(node('conversation').textContent.split(pendingTurn.user_input).length,2,'one user message after terminal and explicit refresh');
+  const finishing='a-finishing',catchup=deferred('GET /api/sessions/a');
+  const priorTurns=timelineOverrides.get('a'),answer='A quickly committed remote answer';
+  executions.set(finishing,{...info(finishing,'a'),status:'STARTED',terminal_at:null});
+  streamBlocks.set(finishing,{});
+  sessions.get('a').active_execution_id=finishing;source.snapshot();
+  await catchup.requested;
+  await until('execution stream opened before History catches up',()=>streamBlocks.get(finishing).controller);
+  const emit=(event_type,payload)=>streamBlocks.get(finishing).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:finishing,depth:0,event:{event_type,payload}}})+'\n\n'));
+  emit('ASSISTANT_TEXT_DELTA',{text:answer});emit('TOOL_CALL_STARTED',{call_id:'one',tool_name:'remote_tool'});
+  await until('in-flight answer and process before committed history',()=>node('conversation').textContent.includes(answer) && node('conversation').textContent.includes('remote_tool'));
+  const committed={...pendingTurn,execution_id:finishing,user_input:'Another remote question',status:'SUCCEEDED',conversation_committed:true,
+    items:[{item_kind:'tool_call',tool_name:'remote_tool',content:'input'},{item_kind:'assistant',content:answer}]};
+  catchup({session:{...sessions.get('a')},timeline:{...priorTurns,items:[...priorTurns.items,committed]}});
+  await until('exact committed row loaded without waiting for stream tail',()=>node('conversation').textContent.includes(committed.user_input));
+  const assertNoDuplicate=()=>{
+    assert.equal(node('conversation').textContent.split(answer).length,2);
+    assert.equal(node('conversation').textContent.split('remote_tool').length,2);
+  };
+  assertNoDuplicate();
+  emit('ASSISTANT_TEXT_DELTA',{text:answer});emit('TOOL_CALL_STARTED',{call_id:'one',tool_name:'remote_tool'});
+  await settle();
+  assertNoDuplicate();
+  const reopenRead=deferred('GET /api/sessions/a'),reopening=select('#session=a&execution='+finishing);
+  await reopenRead.requested;
+  emit('ASSISTANT_TEXT_DELTA',{text:answer});emit('TOOL_CALL_STARTED',{call_id:'one',tool_name:'remote_tool'});
+  await settle();
+  assertNoDuplicate();
+  reopenRead({session:{...sessions.get('a')},timeline:{...priorTurns,items:[...priorTurns.items,committed]}});
+  await reopening;
+  assertNoDuplicate();
+
+  process.exit(0);
+}
 if(process.argv[3]==='session-sync') {
   await select('#session=a&execution=a-run');
   await until('session initial snapshot',()=>!node('send').disabled);
@@ -292,17 +355,17 @@ if(process.argv[3]==='session-sync') {
     late(stale?{...info(quick,'a'),status:'STARTED',terminal_at:null}:info(quick,'a'));
     await until('released turn without execution stream appears',()=>node('conversation').textContent.includes(answer));
     await settle();
-    assert.equal(historyReads(),beforeReleaseReads+1,'release without stream reads the timeline once');
+    assert.equal(historyReads(),beforeReleaseReads+2,'each admission and release reads the timeline once');
     assert.equal(calls.filter(call=>call.key===`/api/executions/${quick}/events`).length,0);
     assert.equal(node('detail-turn').value,'a-run');assert.equal(node('prompt').value,'My private draft');
     assert.equal(node('planning').checked,true);assert.equal(node('thinking').value,'3');assert.equal(document.activeElement,node('prompt'));
   }
 
-  const streamed='a-released-before-tail',beforeStreamReads=historyReads();
+  const streamed='a-released-before-tail';
   executions.set(streamed,{...info(streamed,'a'),status:'STARTED',terminal_at:null});
   streamBlocks.set(streamed,{});sessions.get('a').active_execution_id=streamed;
-  await until('remote execution stream starts',()=>Boolean(streamBlocks.get(streamed).controller));
-  const streamedTimeline=timeline('a');
+  await until('remote execution stream starts',()=>Boolean(streamBlocks.get(streamed).controller));await settle();
+  const beforeStreamReads=historyReads(),streamedTimeline=timeline('a');
   timelineOverrides.set('a',{...streamedTimeline,items:[...streamedTimeline.items,{...streamedTimeline.items[0],execution_id:streamed,user_input:'Committed with execution stream'}]});
   sessions.get('a').active_execution_id=null;sessions.get('a').revision++;
   await until('release while streaming enables sending',()=>!node('send').disabled);await settle();
@@ -753,7 +816,14 @@ if(process.argv[3]==='tools') {
   timelineOverrides.set('a',{items:[{execution_id:id,status:'STARTED',user_input:'Use tools',conversation_committed:false,items:[]}],next_cursor:null});
   streamBlocks.set(id,{});await select('#session=a');await until('tool stream opened',()=>streamBlocks.get(id).controller);
   const emit=(event_type,payload,execution_id=id,depth=0)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id,agent_id:depth?'child-agent':'default',depth,event:{event_type,payload}},cursor:null})+'\n\n'));
-  const tools=()=>node('live').children.find(item=>item.className==='live-tools');
+  const processArea=()=>node('live').children.find(item=>item.className==='turn-process');
+  const tools=()=>processArea()?.children.find(item=>item.className==='live-tools');
+  assert.equal(processArea(),undefined,'no process is inferred before observable data arrives');
+  emit('ASSISTANT_THINKING_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,text:'Provider summary'});
+  emit('ASSISTANT_TEXT_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,text:'Assistant answer'});
+  await until('actual model summary is presented',()=>processArea()?.textContent.includes('Thinking summaryProvider summary'));
+  assert.ok(node('live').textContent.includes('Assistant answer'));
+  assert.doesNotMatch(processArea().textContent,/Assistant answer|LIVE RESPONSE/);
   const call={agent_run_seq:1,call_id:'same-call',tool_name:'lookup'};
   node('prompt').focus();emit('TOOL_CALL_STARTED',call);
   await until('visible running tool before any final response',()=>tools()?.textContent.includes('lookupStarted · awaiting result'));
@@ -769,6 +839,7 @@ if(process.argv[3]==='tools') {
   await until('new agent run call remains distinct',()=>tools()?.children.length===3);
   for(let seq=0;seq<110;seq++)emit('MODEL_REQUEST_STARTED',{agent_run_seq:2,model_request_seq:seq});
   await until('activity limit crossed',()=>node('live-activity').textContent.includes('model request started'));
+  assert.doesNotMatch(processArea().textContent,/model request started/,'internal states are confined to diagnostics');
   assert.match(tools().textContent,/next lookupStarted · awaiting result/,'a long-lived call survives activity trimming');
   emit('TOOL_CALL_STARTED',{...call,call_id:'child-pending',tool_name:'child pending'},'child',1);
   emit('EXECUTION_FAILED',{},'child',1);
@@ -782,8 +853,20 @@ if(process.argv[3]==='tools') {
   assert.equal(first.status.textContent,'Completed');
   executions.set(id,{...info(id,'a'),status:'STARTED'});await refresh();
   assert.match(tools().textContent,/next lookupOutcome unconfirmed/,'resuming does not invent a result for an old call');
+  timelineOverrides.set('b',{items:[{...timeline('b').items[0],items:[
+    {item_kind:'thinking',content:''},
+    {item_kind:'thinking',content:'Saved provider summary'},
+    {item_kind:'tool_call',tool_name:'catalog',content:{query:'plants'}},
+    {item_kind:'tool_result',tool_name:'catalog',content:'Ivy'},
+    {item_kind:'assistant',content:'Saved answer'},
+  ]}],next_cursor:null});
   await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/next lookup|TOOL_RETRY_REQUIRED/);
-  console.log('Live tool calls are visible during work, replay-safe, scoped and never inferred successful');process.exit(0);
+  const saved=descendants(node('conversation')).find(item=>item.className==='turn-process');
+  assert.match(saved.textContent,/Thinking summarySaved provider summary.*Tool call · catalog.*Tool result · catalog/s);
+  assert.equal(saved.children.filter(item=>item.textContent.startsWith('Thinking summary')).length,1);
+  assert.doesNotMatch(saved.textContent,/Saved answer/);
+  assert.match(node('conversation').textContent,/Saved answer/);
+  console.log('Process shows observed thinking and tools without moving answers or diagnostics into it');process.exit(0);
 }
 if(process.argv[3]==='thinking') {
   assert.equal(node('thinking').value,'0','the first visible effort is Low');
@@ -926,7 +1009,7 @@ if(process.argv[3]==='streaming') {
   copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emit('ASSISTANT_THINKING_DELTA','thinking');
   await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
   assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);
-  const thinking=node('live').children.find(item=>item.className==='tool-message');thinking.open=true;
+  const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking summary'));thinking.open=true;
   emit('ASSISTANT_THINKING_DELTA',' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
   await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
   assert.equal(thinking.open,true);assert.match(thinking.textContent,/thinking continued/);await copy.click();assert.equal(copied,expected);

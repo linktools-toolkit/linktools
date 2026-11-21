@@ -16,7 +16,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 import pytest
 
 
-def test_web_cli_serves_http_and_exits_cleanly(tmp_path: Path) -> None:
+def test_web_cli_exits_cleanly_with_an_idle_observer(tmp_path: Path) -> None:
     pytest.importorskip("starlette")
     pytest.importorskip("uvicorn")
     source_root = Path(__file__).parents[2]
@@ -61,11 +61,25 @@ def test_web_cli_serves_http_and_exits_cleanly(tmp_path: Path) -> None:
             with opener.open(Request(f"http://127.0.0.1:{port}/", headers=headers), timeout=2) as response:
                 assert response.status == 200
                 assert b"<html" in response.read().lower()
-            process.send_signal(signal.SIGINT)
-            process.wait(timeout=15)
+            with opener.open(Request(
+                f"http://127.0.0.1:{port}/api/sessions",
+                data=json.dumps({"session_id": "idle", "request_id": "create"}).encode(),
+                headers={**headers, "Content-Type": "application/json", "X-Linktools-Console": "1"},
+            ), timeout=2) as response:
+                assert response.status == 201
+            with opener.open(Request(f"http://127.0.0.1:{port}/api/session/events?session_id=idle",
+                                     headers=headers), timeout=7) as stream:
+                assert stream.headers.get_content_type() == "text/event-stream"
+                assert stream.readline().startswith(b"data: ")
+                assert stream.readline() == b"\n"
+                process.send_signal(signal.SIGINT)
+                assert stream.read() == b""
+                process.wait(timeout=15)
             output.seek(0)
             log = output.read()
             assert process.returncode == 130, log
+            assert "timeout graceful shutdown exceeded" not in log
+            assert "Exception in ASGI application" not in log
             assert "Application shutdown complete." in log
         finally:
             if process.poll() is None:
