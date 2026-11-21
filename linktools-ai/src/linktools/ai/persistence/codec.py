@@ -2844,7 +2844,7 @@ def _decode_domain(
                 raise TypeError("scalar value has the wrong type")
             # A native JSON store may return a whole-valued float as an int.
             try:
-                number = float(value)
+                number = value if isinstance(value, float) else float(value)
             except OverflowError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             return _require_finite_wire_float(number)
