@@ -1163,43 +1163,38 @@ than infer safe deletion from the current Runtime's local routes.
 ## Native StepStore identity
 
 Native SQL partitions retain the exact length-prefixed tuple
-`("native_store", namespace, tenant_id)` in `store_key`, independently of State
-store keys. Namespace and tenant limits are 256 and 128 UTF-8 bytes, so the native
-partition is at most 402 bytes. Constructors and current durable readers enforce
-these limits.
+`("native_store", namespace, tenant_id)` in `store_key`. Namespace and tenant
+are each limited to 128 UTF-8 bytes, so the native partition is at most 274
+bytes. SQL indexes `store_locator`, its SHA-256 lookup projection, while
+the exact scope remains authoritative.
 
-Event and snapshot replay keys are exact optional strings of at most 512 UTF-8
-bytes. SQL stores their original UTF-8 bytes in `VARBINARY(512)` / `BYTEA` / `BLOB`,
-preserving empty strings, trailing spaces, and Unicode without collation
-normalization. NUL is rejected at writers and current readers because PostgreSQL
-text and JSON text extraction cannot represent it. The unique key is `(store_key, run_id, idempotency_key)`.
-A NULL replay key appends a new occurrence; row order retains those occurrences,
-without a generated replay identity. Pruned keyed snapshots retain their original
-replay tuple as a tombstone. Native Trace references carry the original run and
-replay strings; existing queries join those fields directly.
-
-The largest native unique index reserves 402 + 4 × 128 + 512 = 1426 MySQL
-key bytes. PostgreSQL values use at most 402 + 128 + 512 = 1042 bytes before normal
-tuple overhead. Native content and sequence SHA-256 values remain byte-integrity
-and structural identities. JSON transport encodes only binary native scopes as
-canonical Base64; decoding occurs before SQL and does not create a second identity.
+Public event and snapshot replay keys are optional strings of at most 128
+UTF-8 bytes, with no NUL. A supplied key preserves its exact bytes, including
+an empty key, trailing spaces and Unicode. SQL uses a non-null binary key:
+an append without a supplied key gets a distinct reserved occurrence token
+that decodes back to no public key. Uniqueness uses
+`(store_locator, run_id, idempotency_key)`. Pruned keyed snapshots retain their
+original replay identity as a tombstone. Portable JSON uses Base64 to carry
+binary scope and replay values, not to create new identities.
 
 ## Native StepStore backup boundary
 
 The official StepStore protocol has no portable export/restore method. Its
 caller-owned records are not silently copied into Persistence's portable format.
-The built-in, colocated `SqlStepStore` without an external tool-effect ledger can
-export its native owner rows and shared message closure. Restore preserves raw
-scope and replay identities, occurrence order, and pruning tombstones, while
-relocating the explicit group reference. Other native checkpoint owners raise
-`SNAPSHOT_UNSUPPORTED`; checkpoint-free portable export is unchanged.
+Persistence supports portable export of native owner rows and the shared
+message closure for executions with an admitted source in the built-in,
+colocated `SqlStepStore` without an external tool-effect ledger. The tables
+alone do not prove the source. Export rejects missing portable sources and
+mismatched owners rather than dropping checkpoint data. Restore preserves raw
+scope and replay identities, occurrence order and pruning tombstones while
+relocating the explicit group reference.
 
 Stop writers and object cleanup, then take a consistent backend backup of the
-Runtime database and the StepStore. With `SqlStepStore` on that database, include
-all five `ai_step_*` tables along with the business tables. For a separate official
-SQLite store, use SQLite's backup facility or copy the database only after all
-writers are stopped and WAL state has been safely checkpointed. Include any
-configured external MediaStore. Restore these resources together before reopening
+Runtime database and the StepStore. With a colocated `SqlStepStore`, include
+the full Runtime database, not a fixed list of native table names. For a
+separate official SQLite store, use SQLite's backup facility or copy the database
+only after all writers are stopped and WAL state has been safely checkpointed.
+Include any configured external MediaStore. Restore these resources together before reopening
 writers. Do not restore a source under active workers or interpret restored tool
 records as proof that external effects were rolled back.
 

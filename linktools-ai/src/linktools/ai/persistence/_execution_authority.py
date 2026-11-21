@@ -51,7 +51,7 @@ class ExecutionAuthority:
         if expiry.tzinfo is None:
             raise ValueError("execution authority expiry must be timezone-aware")
         return dict(store_key=store_key, key=key, kind=EXECUTION_SHELL_KIND, sort_key=key, sort_prefix=key[:128],
-                    scan_kind="k:" + EXECUTION_SHELL_KIND, storage_revision=0, payload_json="{}",
+                    scan_kind="k:" + EXECUTION_SHELL_KIND, storage_revision=0, payload_json={},
                     key_locator=sha256(key).hexdigest(), turn_expiry=expiry, **self.authority_values())
 
     def owner_matches(self, table: "Table", store_key: bytes) -> "ColumnElement[bool]":

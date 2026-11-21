@@ -3,7 +3,6 @@
 """Projection joins preserve actual source identity, cold retries, and narrow reads."""
 
 from copy import deepcopy
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -95,8 +94,8 @@ async def test_execution_reference_has_one_physical_identity(tmp_path: Path, dam
             digest, raw = (await connection.execute(
                 select(table.c.output_sha256, table.c.payload_json).where(condition)
             )).one()
-            assert len(digest) == 64 and digest not in raw
-            layout = json.loads(raw)
+            assert len(digest) == 64 and digest not in repr(raw)
+            layout = raw
             body = layout["value"]["payload"]["fields"]["result"]["fields"]["output"]["fields"]["content"]
             assert body["$execution_payload"] is True
             restored = decode_envelope(logical.data).value["payload"]
@@ -106,7 +105,7 @@ async def test_execution_reference_has_one_physical_identity(tmp_path: Path, dam
                 damaged = {"output_sha256": None}
             elif damage == "duplicate":
                 body["$execution_payload"] = "execution-payload:" + digest
-                damaged = {"payload_json": json.dumps(layout)}
+                damaged = {"payload_json": layout}
             else:
                 damaged = {"output_sha256": "f" * 64}
             await connection.execute(update(table).where(condition).values(**damaged))

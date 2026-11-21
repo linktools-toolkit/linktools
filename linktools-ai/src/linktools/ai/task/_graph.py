@@ -22,7 +22,7 @@ from ..core import (
     CorrelationData,
     TaskStatus,
     canonical_json_bytes,
-    canonical_sha256,
+    semantic_json_sha256,
     normalize_correlation,
     normalize_tool_effects,
     ToolEffects,
@@ -756,24 +756,23 @@ def _task_graph_request_digest(
     tool_effects: ToolEffects = "live",
     request_identity_version: int = 2,
 ) -> str:
-    return canonical_sha256(
-        {
-            "principal": principal_identity_payload(principal),
-            "graph_id": graph.graph_id,
-            **({"budget": budget.digest_payload()} if budget is not None else {}),
-            **({"tool_effects": tool_effects} if tool_effects != "live" else {}),
-            "nodes": [
-                node.request_identity_payload(request_identity_version=request_identity_version)
-                for node in sorted(graph.nodes, key=lambda item: item.node_id)
-            ],
-            "limits": {
-                "max_nodes": limits.max_nodes,
-                "max_depth": limits.max_depth,
-                "max_budget": limits.max_budget,
-                "max_concurrency": limits.max_concurrency,
-            },
-        }
-    )
+    identity: dict[str, JsonValue] = {
+        "principal": principal_identity_payload(principal),
+        "graph_id": graph.graph_id,
+        **({"budget": budget.digest_payload()} if budget is not None else {}),
+        **({"tool_effects": tool_effects} if tool_effects != "live" else {}),
+        "nodes": [
+            node.request_identity_payload(request_identity_version=request_identity_version)
+            for node in sorted(graph.nodes, key=lambda item: item.node_id)
+        ],
+        "limits": {
+            "max_nodes": limits.max_nodes,
+            "max_depth": limits.max_depth,
+            "max_budget": limits.max_budget,
+            "max_concurrency": limits.max_concurrency,
+        },
+    }
+    return semantic_json_sha256(identity)
 
 
 @dataclass(frozen=True, slots=True)

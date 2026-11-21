@@ -1775,13 +1775,15 @@ engine remains owned by its caller. Read-only Persistence and in-memory Executio
 routes reject this factory; explicitly ephemeral applications can use the native
 `InMemoryStepStore` instead, without a durability or atomic SQL guarantee.
 
-A new local Execution database includes the five native tables in its initial
-atomic schema publication. `create_step_store()` does not inspect schemas,
-create missing tables, or migrate existing databases. Shared SQL must be
-provisioned explicitly. Missing or incompatible native tables fail at the first
-affected operation; deployment checks can use `validate_sql` with
-`build_step_sql_metadata()` from `linktools.ai.persistence.schema`. Existing
-pre-release checkpoint records and archives are not implicitly migrated.
+A newly initialized local database includes the native tables needed for its
+configured persistence domains. The complete SQL checkpoint layout includes
+the StepStore tables as well as Runtime-owned run admissions and tool operations.
+`create_step_store()` does not inspect schemas, create missing tables or
+migrate existing databases. Shared SQL must be provisioned explicitly. Missing
+or incompatible native tables fail at the first affected operation. Use
+`validate_sql` with metadata appropriate to the deployed schema; for the
+complete schema use `build_sql_schema_metadata()` from `linktools.ai.migrate`.
+Existing pre-release checkpoint records and archives are not implicitly migrated.
 The local CLI now stores native steps in `runtime.db`; previous standalone
 `steps.db` records are not imported or read as a fallback. Existing `runtime.db`
 files without the current native schema require explicit provisioning or a new
@@ -1789,19 +1791,22 @@ local root. Reopening a current database is not a migration of earlier CLI data.
 
 Native `StepPersistence(store=...)` is another caller-owned backup resource.
 Quiesce writers and back up its database consistently with Runtime control state.
-For `SqlStepStore`, include all five `ai_step_*` tables and the Runtime business
-tables in the same database backup; an external MediaStore must be backed up too.
+For a colocated `SqlStepStore`, back up the entire Runtime SQL database,
+including its native StepStore and Runtime-owned tables. Back up any external
+MediaStore consistently with it.
 For `from_root`, one SQLite online backup of `runtime.db` includes both control
 and native checkpoint rows. Filesystem objects and Asset history still require
 their own consistent backup after writers and cleanup have been quiesced.
-Portable export returns `SNAPSHOT_UNSUPPORTED` when persisted executions depend
-on native checkpoints, rather than producing an incomplete recovery archive.
-Executions without checkpoints retain their existing portable export behavior.
-Old checkpoint archive formats and portable packages are not a compatibility
-path for this version. Schema deployment remains an explicit maintenance action.
+Portable export supports executions with an admitted, verifiable checkpoint
+source in the built-in colocated SQL store without an external tool-effect
+ledger. A missing portable source returns `SNAPSHOT_UNSUPPORTED`;
+a mismatched owner is rejected. Merely having native tables does not prove
+source ownership. See the
+[backup boundary](docs/storage-caching.md#native-stepstore-backup-boundary)
+for the distinction between portable export and a physical backup.
 
 
-SQLite-backed `PersistenceStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime schema, the five native `ai_step_*` tables on the Execution route, and `ai_objects` when using the built-in SQL ObjectStore; an existing SQLite database is opened without automatic schema validation and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
+SQLite-backed `PersistenceStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes the schema for its configured persistence domains; an existing database is not automatically validated, migrated, or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
 
 SQL Runtime, Asset, and Metrics initialization and ordinary reads do not inspect
 table schemas by default. Schema diagnostics are an explicit deployment or

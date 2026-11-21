@@ -22,6 +22,21 @@ def canonical_sha256(value: JsonValue) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def _semantic_json_numbers(value: JsonValue) -> JsonValue:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, list):
+        return [_semantic_json_numbers(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _semantic_json_numbers(item) for key, item in value.items()}
+    return value
+
+
+def semantic_json_sha256(value: JsonValue) -> str:
+    """Hash JSON meaning for contracts where integer and integral float are equivalent."""
+    return canonical_sha256(_semantic_json_numbers(value))
+
+
 def deterministic_id(*parts: JsonValue) -> str:
     """Return a stable UUID derived from canonical values."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical_json_bytes(parts).decode("utf-8")))
@@ -65,6 +80,7 @@ def principal_identity_payload(principal: Principal) -> dict[str, str]:
 __all__ = [
     "RUNTIME_OBJECT_STORE_ID",
     "canonical_sha256",
+    "semantic_json_sha256",
     "deterministic_id",
     "principal_identity_payload",
     "agent_conversation_id",

@@ -129,7 +129,7 @@ class NativeRunReferences:
                   expected_start: NativeStepEvent | None = None,
                   expected_terminal: NativeStepEvent | None = None, include_run_counters: bool = False) -> "Select":
         from ._sql import _key_matches, _keys_match
-        from sqlalchemy import JSON, and_, bindparam, cast, select, type_coerce
+        from sqlalchemy import and_, bindparam, select
         from sqlalchemy import literal_column
         from sqlalchemy.sql import visitors
         from sqlalchemy.sql.elements import BindParameter
@@ -138,14 +138,12 @@ class NativeRunReferences:
                                     include_run_counters=include_run_counters,
                                     scan_kind="k:agent_run" if query is not None else None)
         runs = self._runs
-        encoded = type_coerce(records.c.payload_json, JSON)[()].as_string()
-        payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
-        reference = payload["value"]["payload"]
-        source_run = reference["run_id"].as_string()
+        payload = records.c.payload_json
+        source_run = payload[("value", "payload", "run_id")].as_string()
         run_join = and_(
             records.c.kind == "agent_run", runs.c.store_locator == self._store_locator, runs.c.store_key == self._store_key,
             runs.c.run_id == source_run,
-            runs.c.registration_id.is_not_distinct_from(reference["registration_id"].as_string()),
+            runs.c.registration_id.is_not_distinct_from(payload[("value", "payload", "registration_id")].as_string()),
         )
         source_columns = tuple(column.label("native_" + column.name) for column in runs.c)
         expected = expected_start if expected_start is not None else expected_terminal

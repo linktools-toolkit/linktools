@@ -195,7 +195,6 @@ async def index_nodes(
 
 async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *, group_id: str | None) -> None:
     import hashlib
-    import json
     from sqlalchemy import JSON, LargeBinary, String, column, select, table
     from .state import RECORD_KEY_MAX_BYTES, STORE_KEY_MAX_BYTES, STATE_GROUP_METADATA_KEY, record_key
     pending = session.info.pop(_PENDING, {})
@@ -207,7 +206,9 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
             records.c.key == scope_key, records.c.key_locator == hashlib.sha256(scope_key).hexdigest(),
         ))
         if wire is not None:
-            group_id = json.loads(wire)["archive_scope_id"]
+            if not isinstance(wire, dict) or not isinstance(wire.get("archive_scope_id"), str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            group_id = wire["archive_scope_id"]
     targets: dict[bytes, set[str]] = {}
     for roots in pending.values():
         for root in roots:

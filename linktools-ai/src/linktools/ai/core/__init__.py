@@ -16,6 +16,7 @@ from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
     RUNTIME_OBJECT_STORE_ID,
     canonical_sha256,
+    semantic_json_sha256,
     deterministic_id,
     principal_identity_payload,
     agent_conversation_id,
@@ -178,6 +179,7 @@ __all__ = [
     "UsageMetrics",
     "canonical_json_bytes",
     "canonical_sha256",
+    "semantic_json_sha256",
     "canonical_string_tuple",
     "deterministic_id",
     "normalize_execution_mode",

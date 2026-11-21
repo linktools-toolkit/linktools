@@ -97,6 +97,12 @@ class StoredPayload:
             return cast(JsonValue, json.loads(self._value))
         return self._value
 
+    def inline_json_text(self) -> str:
+        """Return the exact bytes represented by an inline JSON payload as UTF-8 text."""
+        if self.encoding != "json" or not isinstance(self._value, bytes):
+            raise ValueError("payload is not inline JSON")
+        return self._value.decode("utf-8")
+
     @classmethod
     def _inline(cls, encoding: str, value: JsonValue) -> "StoredPayload":
         if encoding == "json":
