@@ -16,9 +16,9 @@ from linktools.ai.execution import ExecutionEvent, ExecutionRecord, ExecutionStr
 from linktools.ai.execution.events import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from linktools.ai.execution.stream import (
     SharedStreamEvent, SharedStreamPublisher, decode_stream_record,
-    shared_stream_positions, stream_key,
+    shared_stream_observation, shared_stream_positions, stream_key,
 )
-from linktools.ai.storage import InMemoryStreamBackend
+from linktools.ai.storage import InMemoryStreamBackend, StreamBatch
 
 from .test_runtime_stream_order import _execution
 
@@ -102,6 +102,57 @@ async def _read(
             await stream.aclose()
 
 
+@pytest.mark.asyncio
+async def test_remote_watchers_share_transport_read_without_sharing_cancellation() -> None:
+    class BlockingStream(InMemoryStreamBackend):
+        def __init__(self) -> None:
+            super().__init__(max_bytes=4096)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.reads = 0
+
+        async def read_stream(
+            self, key: bytes, after: int, *, limit: int, wait_seconds: float,
+        ) -> StreamBatch:
+            self.reads += 1
+            self.entered.set()
+            await self.release.wait()
+            return await super().read_stream(key, after, limit=limit, wait_seconds=wait_seconds)
+
+    backend = BlockingStream()
+    publisher = SharedStreamPublisher(backend, "scope", "tenant")
+    key = stream_key("scope", "tenant", "execution", 1, "claim")
+    writer = await backend.open_stream(key, b"producer")
+    await writer.append(1, b'{"kind":"delta","type":"ASSISTANT_TEXT_DELTA","text":"live"}')
+    reader = _ExecutionReader()
+    service = DefaultEventService(
+        reader, reader, TenantAuthorizationPolicy(), lambda *args, **kwargs: None,
+        LiveExecutionEventBroker(shared=publisher),
+    )
+    first = asyncio.create_task(_read(service, 1))
+    second = asyncio.create_task(_read(service, 1))
+    try:
+        await asyncio.wait_for(backend.entered.wait(), 1)
+        # The short watcher has to recheck its authority before this healthy
+        # transport read can finish. That deadline is not a replay gap.
+        early = await service._read_shared_batch(backend, key, 0, wait_seconds=0.001)
+        assert early == StreamBatch((), gap=False, sealed=False)
+        assert not second.done()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        backend.release.set()
+        (event,) = await second
+        assert event.payload["text"] == "live"
+        assert event.position == (key.hex(), 1)
+        assert backend.reads == 1
+    finally:
+        first.cancel()
+        second.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await publisher.close()
+
+
 async def _assert_distinct(deltas: Sequence[ExecutionDelta]) -> None:
     records, service = await _publish(deltas)
     expected = [
@@ -173,6 +224,44 @@ async def test_shared_preview_separates_text_and_thinking() -> None:
     await _assert_distinct((
         _delta("text"), _delta("thinking", event_type=ExecutionDeltaType.ASSISTANT_THINKING_DELTA),
     ))
+
+
+@pytest.mark.asyncio
+async def test_shared_observation_frames_preserve_committed_frontier_and_preview() -> None:
+    backend = InMemoryStreamBackend(max_bytes=1024 * 1024)
+    publisher = SharedStreamPublisher(backend, "scope", "tenant")
+    key = stream_key("scope", "tenant", "execution", 1, "claim")
+    publisher.admit("execution", 1, "claim")
+    publisher.cover_models("execution", 1, "claim")
+    publisher.model("execution", 1, "claim", {"status": "uncovered"})
+    publisher.event("execution", "COMMITTED", {}, 1)
+    publisher.model("execution", 1, "claim", {"status": "RUNNING"})
+    publisher.model("execution", 1, "claim", {"status": "SUCCEEDED"})
+    publisher.delta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "tail", False)
+    publisher.complete("execution")
+    await publisher.close()
+    batch = await backend.read_stream(key, 0, limit=100, wait_seconds=0)
+    records = [decode_stream_record(raw) for _, raw in batch.records]
+    assert [record["kind"] for record in records] == ["event"] * 4 + ["delta", "seal"]
+    assert [record["durable"] for record in records[:4]] == [1] * 4
+    assert [record["observation"]["item"]["status"] for record in records[2:4]] == ["RUNNING", "SUCCEEDED"]
+
+    reader = _ExecutionReader()
+    service = DefaultEventService(
+        reader, reader, TenantAuthorizationPolicy(), lambda *args, **kwargs: None,
+        LiveExecutionEventBroker(shared=publisher),
+    )
+    hints = []
+    with shared_stream_positions({"execution": (key.hex(), 0)}):
+        with shared_stream_observation(lambda execution_id, pos, record: hints.append(record["kind"])):
+            stream = service.stream("execution", principal=_PRINCIPAL, after_event_seq=1)
+            try:
+                text = await asyncio.wait_for(anext(stream), 1)
+            finally:
+                await stream.aclose()
+    assert text.event_type == "ASSISTANT_TEXT_DELTA"
+    assert text.payload["text"] == "tail"
+    assert hints == ["coverage", "model", "model"]
 
 
 @pytest.mark.asyncio

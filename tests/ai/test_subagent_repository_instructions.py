@@ -231,6 +231,29 @@ async def test_new_child_inherits_exact_parent_structured_pin_without_live_resol
 
 
 @pytest.mark.asyncio
+async def test_child_topology_comes_from_confirmed_admission_not_dispatcher() -> None:
+    state = Persistence(PersistenceStorage.in_memory())
+    await state.initialize(namespace="subagent-topology", tenant_id="tenant")
+    try:
+        await _create_parent(state, None)
+        service = _service(state, resolver=None, ids=("child",))
+        topology = []
+        service._runtime_bridge.child_topology = lambda parent, generation, child: topology.append(
+            (parent, generation, child, service._runtime_bridge.port.launches),
+        )
+        kwargs = {
+            "parent_execution_id": "parent", "parent_producer_generation": 1,
+            "root_execution_id": "parent", "parent_invocation_id": "delegate-call",
+        }
+        handle = await service.start_subagent(_binding().binding_digest, _request("child-key"), **kwargs)
+        assert handle.execution_id == "child"
+        assert topology == [("parent", 1, "child", 0)]
+        assert await state.execution.executions.get(handle.execution_id, tenant_id="tenant") is not None
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_child_inherits_parent_context_instructions_after_source_reload(monkeypatch: pytest.MonkeyPatch) -> None:
     from linktools.ai.execution import ExecutionInputContext
     from unittest.mock import AsyncMock

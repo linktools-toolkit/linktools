@@ -343,6 +343,7 @@ class _ExecutionRuntimeBridge:
         self.resume_subagent: Callable[[ExecutionRecord, int], Awaitable[None]] | None = None
         self.pending_promote: Callable[[str], Awaitable[None]] | None = None
         self.pending_cancel_promote: Callable[[str], Awaitable[None]] | None = None
+        self.child_topology: Callable[[str, int, str | None], None] | None = None
 
     def bind(self, runtime_port: _ExecutionRuntimePort) -> None:
         if self._port is not None:
@@ -1910,18 +1911,35 @@ class DefaultExecutionService(TaskExecutionService):
         idempotency_key = identity.idempotency_key
         request_digest = identity.request_digest
         reservation = coordinated_receipt
-        if reservation is None and prepared_context is None and self._runtime_bridge.prepare_reserved_start is not None:
-            reservation = await self._runtime_bridge.prepare_reserved_start(request, proposed_reservation, session, authority)
-        if reservation is not None:
-            pass
-        elif prepared_context is None:
-            reservation = await self._state.executions.reserve_start(proposed_reservation, **({"authority": authority} if authority is not None else {}))
-        else:
-            reservation = await self._state.executions.reserve_start(
-                proposed_reservation,
-                input_context_write=(prepared_context.archive, prepared_context.records),
-                **({"authority": authority} if authority is not None else {}),
-            )
+        child = proposed_reservation.execution
+        parent_id = child.parent_execution_id
+        parent_generation = proposed_reservation.parent_producer_generation
+        topology = (
+            self._runtime_bridge.child_topology
+            if child.lineage_kind is ExecutionLineageKind.SUBAGENT
+            and parent_id is not None and parent_generation is not None
+            else None
+        )
+        try:
+            if reservation is None and prepared_context is None and self._runtime_bridge.prepare_reserved_start is not None:
+                reservation = await self._runtime_bridge.prepare_reserved_start(request, proposed_reservation, session, authority)
+            if reservation is None:
+                reservation = await self._state.executions.reserve_start(
+                    proposed_reservation,
+                    **({} if prepared_context is None else
+                       {"input_context_write": (prepared_context.archive, prepared_context.records)}),
+                    **({} if authority is None else {"authority": authority}),
+                )
+        except BaseException:
+            if topology is not None:
+                assert parent_id is not None and parent_generation is not None
+                # If commit acknowledgement was lost, only the durable index
+                # can establish whether this generation added a child.
+                topology(parent_id, parent_generation, None)
+            raise
+        if topology is not None and reservation.created:
+            assert parent_id is not None and parent_generation is not None
+            topology(parent_id, parent_generation, reservation.execution.execution_id)
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)

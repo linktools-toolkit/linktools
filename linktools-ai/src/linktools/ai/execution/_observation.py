@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 
 from ..core import Principal
 from ..errors import AIError, ErrorCode, ObservationError
-from .projection import ModelProjection
+from .projection import ModelProjection, SharedModelProjection
 from ..observe.stream import await_stream_cleanup, drain_stream_tasks, is_observation_cleanup, report_observation_error
-from .stream import SharedStreamEvent
+from .stream import SharedStreamEvent, shared_stream_observation
 from ._tree_ready import ExecutionTreeReady
 from ..observe.cursors import get_preview_positions, ExecutionWatchPositions, decode_execution_observation_cursor, encode_execution_observation_cursor, encode_execution_watch_cursor
 from ._service_api import ExecutionObservationEvent, ExecutionTreeEvent, ExecutionView, TaskModelProjection
@@ -110,10 +110,12 @@ class _ExecutionModelObservation:
                 dirty = self.models.changed(done)
                 if tick in done or discovery in done:
                     discovered.clear()
-                    if sample is not None and tick in done:
+                    if sample is not None and sample.sampled.is_set():
                         sample.sampled.clear()
                         for view, depth, _ in sample.snapshot:
                             await self.models.add(self.execution_id, view, depth)
+                        if isinstance(self.models, SharedModelProjection):
+                            self.models.reconcile_after_sample(sample.snapshot)
                     else:
                         await self.capture()
                     dirty.update(self.models.views)
@@ -133,6 +135,8 @@ class _ExecutionModelObservation:
         # A mixed Task binding can route watch and capture to distinct stores.
         startup = None
         if self.owner.share_tree_capture:
+            if self.owner.history is not None:
+                self.models = SharedModelProjection(self.owner.history, self.principal, self.owner.model_progress)
             startup = ExecutionTreeReady(
                 (lambda: ExecutionWatchPositions(self.sequences, self.previews)) if self.include_descendants else None,
             )
@@ -143,7 +147,11 @@ class _ExecutionModelObservation:
             include_output_preview=self.include_output_preview,
             include_descendants=self.include_descendants,
         )
-        pending = asyncio.create_task(stream.__anext__())
+        if isinstance(self.models, SharedModelProjection):
+            with shared_stream_observation(self.models.observe_remote):
+                pending = asyncio.create_task(stream.__anext__())
+        else:
+            pending = asyncio.create_task(stream.__anext__())
         prepared = asyncio.create_task(tree_ready.wait())
         discovered = asyncio.Event()
         reconciliation = self.reconcile(discovered, startup)
@@ -186,7 +194,11 @@ class _ExecutionModelObservation:
                         if event.execution_id not in self.models.views:
                             discovered.set()
                         yield self.tree_event(event)
-                        pending = asyncio.create_task(stream.__anext__())
+                        if isinstance(self.models, SharedModelProjection):
+                            with shared_stream_observation(self.models.observe_remote):
+                                pending = asyncio.create_task(stream.__anext__())
+                        else:
+                            pending = asyncio.create_task(stream.__anext__())
                 if metadata in done:
                     projection = metadata.result()
                     self.cursor = self.checkpoint()

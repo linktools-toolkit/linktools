@@ -98,6 +98,8 @@ from ..storage import (
 from ..execution import tool_operation_id, tool_operation_references
 
 from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
+from ..execution.model_progress import encode_model_progress
+from ..history import project_committed_model_progress
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _GroupedTurnStart, _TerminalMetricDelivery
 from ..observe.service import (
     capture_execution_terminal,
@@ -132,6 +134,7 @@ from ..persistence.contracts import (
     AgentAttemptClaim,
     ConversationRepositories,
     ExecutionEventAppend,
+    ModelInteractionRecord,
     ExecutionRepository,
     ExecutionRepositories,
     ExternalCallRecord,
@@ -4606,11 +4609,13 @@ class LocalExecutionBackend:
                 owner.producer_generation = producer_generation
                 owner.attempt = _InitialAttemptCapture(current, session)
             pending = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
+            shared_claim = None
             if pending is not None and pending.coordination is not None:
                 pending.require_active(producer_generation, allow_cancelling=True)
-                assert pending.execution.producer_claim_id is not None
+                shared_claim = pending.execution.producer_claim_id
+                assert shared_claim is not None
                 self._live_broker.admit_shared_producer(
-                    execution_id, producer_generation, pending.execution.producer_claim_id,
+                    execution_id, producer_generation, shared_claim,
                 )
             if (self._live_broker.shared is not None
                     and self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is None):
@@ -4620,12 +4625,32 @@ class LocalExecutionBackend:
                 if (shared_execution is not None
                         and shared_execution.producer_generation == producer_generation
                         and shared_execution.producer_claim_id is not None):
+                    shared_claim = shared_execution.producer_claim_id
                     self._live_broker.admit_shared_producer(
-                        execution_id, producer_generation, shared_execution.producer_claim_id,
+                        execution_id, producer_generation, shared_claim, durable_seq=shared_execution.event_seq,
                     )
             if self._execution_buffer is not None:
                 self._execution_buffer.bind_producer(execution_id, producer_generation)
             if isinstance(self._run_store, RuntimeAgentRunStore):
+                shared = self._live_broker.shared
+                claim = shared_claim
+                model_progress = None
+                if (shared is not None and claim is not None and current.durable_trace
+                        and type(self._execution.executions) is ExecutionRepositoryImpl
+                        and self._run_store.supports_committed_model_progress):
+                    run_sequence = current.agent_run_seq
+
+                    def model_progress(records: tuple[ModelInteractionRecord, ...] | None) -> None:
+                        try:
+                            for item in records or ():
+                                shared.model(execution_id, producer_generation, claim, encode_model_progress(
+                                    project_committed_model_progress(execution_id, run_sequence, item),
+                                ))
+                        except (TypeError, ValueError):
+                            records = None
+                        if records is None:
+                            shared.model(execution_id, producer_generation, claim, None)
+
                 self._run_store.bind_execution_producer(
                     agent_run_id,
                     execution_id=execution_id,
@@ -4633,6 +4658,7 @@ class LocalExecutionBackend:
                     conversation=current.conversation,
                     restart_checkpoints=current.restart_checkpoints,
                     durable_trace=current.durable_trace,
+                    model_progress=model_progress,
                 )
                 if current.durable_trace and current.agent_run_seq > 1:
                     trace_archive = self._run_stores[PersistenceDomain.TRACE]
@@ -4648,6 +4674,11 @@ class LocalExecutionBackend:
                                 execution_id=execution_id,
                                 producer_generation=producer_generation,
                             )
+                if shared is not None:
+                    if model_progress is not None and claim is not None:
+                        shared.cover_models(execution_id, producer_generation, claim)
+                    if type(self) is LocalExecutionBackend and type(self._execution.executions) is ExecutionRepositoryImpl:
+                        shared.cover_tree(execution_id, producer_generation)
                 self._run_store.register_context_baseline(
                     agent_run_id, loaded_context,
                     source_run=(recovery_run if current.restart_checkpoints and recovery_history_agent_run_id is not None else None),

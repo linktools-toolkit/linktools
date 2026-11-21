@@ -559,7 +559,8 @@ async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_stream_disconnect_closes_observer_without_cancelling_execution() -> None:
+@pytest.mark.parametrize("server_shutdown", (False, True))
+async def test_leaving_stream_closes_observer_without_cancelling_execution(server_shutdown: bool) -> None:
     closed = asyncio.Event()
     cancel_called = False
 
@@ -586,9 +587,11 @@ async def test_stream_disconnect_closes_observer_without_cancelling_execution() 
         history = None
         executions = Executions()
 
-    app = create_app(runtime=RuntimeStub())
+    shutdown = asyncio.Event()
+    app = create_app(runtime=RuntimeStub(), shutdown_event=shutdown)
     sent_body = asyncio.Event()
     initial = False
+    body = []
 
     async def receive() -> dict[str, object]:
         nonlocal initial
@@ -596,11 +599,17 @@ async def test_stream_disconnect_closes_observer_without_cancelling_execution() 
             initial = True
             return {"type": "http.request", "body": b"", "more_body": False}
         await sent_body.wait()
+        if server_shutdown:
+            await asyncio.Event().wait()
         return {"type": "http.disconnect"}
 
     async def send(message: dict[str, object]) -> None:
-        if message["type"] == "http.response.body" and message.get("body"):
-            sent_body.set()
+        if message["type"] == "http.response.body":
+            body.append(message.get("body", b""))
+            if message.get("body"):
+                sent_body.set()
+                if server_shutdown:
+                    shutdown.set()
 
     scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
              "scheme": "http", "path": "/api/executions/execution/events", "raw_path": b"/api/executions/execution/events",
@@ -608,6 +617,9 @@ async def test_stream_disconnect_closes_observer_without_cancelling_execution() 
     await asyncio.wait_for(app(scope, receive, send), 2)
     assert closed.is_set()
     assert not cancel_called
+    if server_shutdown:
+        assert len(body) == 2
+        assert body[-1] == b""
 
 
 def test_web_command_preserves_runtime_flags_and_validates_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

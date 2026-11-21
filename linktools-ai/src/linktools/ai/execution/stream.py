@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Mapping
@@ -22,8 +23,13 @@ if TYPE_CHECKING:
 _MAX_BYTES = 1024 * 1024
 _MAX_RECORDS = 256
 _IO_TIMEOUT = 5.0
+_OBSERVATION_INTERVAL = 2.0
+OBSERVATION_TIMEOUT = 6.0
 T = TypeVar("T")
 _positions: ContextVar[Mapping[str, tuple[str, int]] | None] = ContextVar("shared_stream_positions", default=None)
+_observation: ContextVar[Callable[[str, tuple[str, int], dict[str, JsonValue]], None] | None] = ContextVar(
+    "shared_stream_observation", default=None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +55,36 @@ def shared_stream_requested() -> bool:
     return _positions.get() is not None
 
 
+@contextmanager
+def shared_stream_observation(
+    observe: Callable[[str, tuple[str, int], dict[str, JsonValue]], None],
+) -> Iterator[None]:
+    previous = _observation.get()
+
+    def combined(execution_id: str, position: tuple[str, int], record: dict[str, JsonValue]) -> None:
+        if previous is not None:
+            previous(execution_id, position, record)
+        observe(execution_id, position, record)
+
+    token = _observation.set(combined)
+    try:
+        yield
+    finally:
+        _observation.reset(token)
+
+
+def deliver_shared_observation(execution_id: str, position: tuple[str, int], record: dict[str, JsonValue]) -> None:
+    observe = _observation.get()
+    if observe is not None:
+        observe(execution_id, position, record)
+
+
+def is_fresh_observation_coverage(record: Mapping[str, JsonValue]) -> bool:
+    issued = record.get("published_at")
+    now = time.time()
+    return type(issued) in (int, float) and now - OBSERVATION_TIMEOUT < issued < now + OBSERVATION_TIMEOUT
+
+
 def stream_key(namespace: str, tenant_id: str, execution_id: str, generation: int, claim: str) -> bytes:
     return canonical_json_bytes(["execution-preview", namespace, tenant_id, execution_id, generation, claim])
 
@@ -58,7 +94,7 @@ def decode_stream_record(payload: bytes) -> dict[str, JsonValue]:
         value = json.loads(payload)
     except (ValueError, UnicodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(value, dict) or value.get("kind") not in {"delta", "event", "seal", "gap"}:
+    if not isinstance(value, dict) or value.get("kind") not in ("delta", "event", "seal", "gap"):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
 
@@ -73,6 +109,9 @@ class _Producer:
         self.wakeup = asyncio.Event()
         self.finished = False
         self.failed = False
+        self.model_coverage = False
+        self.tree_coverage = False
+        self.durable_high_water = 0
         self.operations: set[asyncio.Task[object]] = set()
         self.task = asyncio.create_task(self.run(), name="execution-preview-publisher")
         self.task.add_done_callback(lambda _: self.settled(self))
@@ -90,7 +129,8 @@ class _Producer:
                              truncated=previous["truncated"] or value["truncated"])
                 old, _ = self.queue.pop()
                 self.size -= len(old)
-            elif value.get("kind") == previous.get("kind") == "event":
+            elif (value.get("kind") == previous.get("kind") == "event"
+                  and "observation" not in value and "observation" not in previous):
                 old, _ = self.queue.pop()
                 self.size -= len(old)
         payload = canonical_json_bytes(value)
@@ -109,6 +149,14 @@ class _Producer:
         if not task.cancelled():
             task.exception()
         self.settled(self)
+
+    def coverage(self) -> dict[str, JsonValue]:
+        return {"kind": "coverage", "model": self.model_coverage, "tree": self.tree_coverage,
+                "published_at": time.time()}
+
+    def observe(self, record: dict[str, JsonValue]) -> None:
+        if self.durable_high_water:
+            self.put({"kind": "event", "durable": self.durable_high_water, "observation": record})
 
     async def invoke(self, operation: Awaitable[T]) -> T:
         task = asyncio.create_task(operation)
@@ -130,17 +178,29 @@ class _Producer:
             # Admission owns this sole attempt. Unknown creation is never retried.
             writer = await self.invoke(self.backend.open_stream(self.key, uuid.uuid4().bytes))
             sequence = 0
+            loop = asyncio.get_running_loop()
+            heartbeat = loop.time() + _OBSERVATION_INTERVAL
             while True:
                 if not self.queue:
                     self.wakeup.clear()
-                    await self.wakeup.wait()
-                while self.queue:
+                    if self.durable_high_water and (self.model_coverage or self.tree_coverage):
+                        try:
+                            await asyncio.wait_for(self.wakeup.wait(), timeout=max(0.0, heartbeat - loop.time()))
+                        except TimeoutError:
+                            pass
+                    else:
+                        await self.wakeup.wait()
+                if self.queue:
                     payload, seal = self.queue.popleft()
                     self.size -= len(payload)
                     sequence += 1
                     await self.invoke(writer.seal(sequence, payload) if seal else writer.append(sequence, payload))
                     if seal:
                         return
+                if (self.durable_high_water and (self.model_coverage or self.tree_coverage)
+                        and not self.finished and loop.time() >= heartbeat):
+                    self.observe(self.coverage())
+                    heartbeat = loop.time() + _OBSERVATION_INTERVAL
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -161,8 +221,16 @@ class SharedStreamPublisher:
         self.owned: set[_Producer] = set()
         self.closed = False
 
-    def admit(self, execution_id: str, generation: int, claim: str) -> None:
-        if self.closed or self.generations.get(execution_id) == (generation, claim):
+    def admit(self, execution_id: str, generation: int, claim: str, *, durable_seq: int = 0) -> None:
+        if self.closed:
+            return
+        if self.generations.get(execution_id) == (generation, claim):
+            producer = self.producers.get(execution_id)
+            if producer is not None and durable_seq > producer.durable_high_water:
+                first = producer.durable_high_water == 0
+                producer.durable_high_water = durable_seq
+                if first and (producer.model_coverage or producer.tree_coverage):
+                    producer.observe(producer.coverage())
             return
         self.generations[execution_id] = (generation, claim)
         previous = self.producers.get(execution_id)
@@ -171,6 +239,7 @@ class SharedStreamPublisher:
         producer = _Producer(
             self.backend, stream_key(self.namespace, self.tenant_id, execution_id, generation, claim), self.release,
         )
+        producer.durable_high_water = durable_seq
         self.producers[execution_id] = producer
         self.owned.add(producer)
 
@@ -198,7 +267,46 @@ class SharedStreamPublisher:
         if producer is None or producer.finished or producer.failed:
             return
         if durable_seq is not None:
+            first = producer.durable_high_water == 0
+            producer.durable_high_water = max(producer.durable_high_water, durable_seq)
             producer.put({"kind": "event", "durable": durable_seq})
+            if first and (producer.model_coverage or producer.tree_coverage):
+                producer.observe(producer.coverage())
+
+    def cover_models(self, execution_id: str, generation: int, claim: str) -> None:
+        producer = self.producers.get(execution_id)
+        if self.generations.get(execution_id) == (generation, claim) and producer is not None:
+            producer.model_coverage = True
+            producer.observe(producer.coverage())
+
+    def model(self, execution_id: str, generation: int, claim: str, item: JsonValue) -> None:
+        producer = self.producers.get(execution_id)
+        if (self.generations.get(execution_id) == (generation, claim)
+                and producer is not None and producer.model_coverage):
+            if item is None:
+                producer.model_coverage = False
+                producer.observe(producer.coverage())
+            else:
+                producer.observe({"kind": "model", "item": item})
+
+    def cover_tree(self, execution_id: str, generation: int) -> None:
+        producer = self.producers.get(execution_id)
+        authority = self.generations.get(execution_id)
+        if producer is not None and authority is not None and authority[0] == generation:
+            producer.tree_coverage = True
+            producer.observe(producer.coverage())
+
+    def child(self, execution_id: str, generation: int, child_id: str | None) -> None:
+        producer = self.producers.get(execution_id)
+        authority = self.generations.get(execution_id)
+        if (producer is None or authority is None or authority[0] != generation
+                or not producer.tree_coverage):
+            return
+        if child_id is None:
+            producer.tree_coverage = False
+            producer.observe(producer.coverage())
+        else:
+            producer.observe({"kind": "child", "execution_id": child_id})
 
     def complete(self, execution_id: str) -> None:
         self.generations.pop(execution_id, None)
@@ -234,4 +342,6 @@ class SharedStreamPublisher:
 
 
 __all__ = ["SharedStreamPublisher", "SharedStreamEvent", "stream_key", "decode_stream_record",
-           "shared_stream_positions", "shared_stream_position", "shared_stream_requested"]
+           "shared_stream_positions", "shared_stream_position", "shared_stream_requested",
+           "OBSERVATION_TIMEOUT", "shared_stream_observation", "deliver_shared_observation",
+           "is_fresh_observation_coverage"]

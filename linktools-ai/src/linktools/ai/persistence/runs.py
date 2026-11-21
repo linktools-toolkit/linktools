@@ -157,6 +157,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._step_boundaries: dict[str, Callable[..., Awaitable[StepWriteReceipt | None]]] = {}
         self._step_boundary_guards: dict[str, Callable[[], None]] = {}
         self._projection_confirmations: dict[str, Callable[[StateStore, StoredRecord, StoredRecord], None]] = {}
+        self._model_progress: dict[str, Callable[[tuple[ModelInteractionRecord, ...] | None], None]] = {}
         self._atomic_step_runs: set[str] = set()
         self._execution_persistence: dict[str, tuple[bool, bool, bool]] = {}
         self._checkpoint_transcript_starts: dict[str, int] = {}
@@ -360,6 +361,7 @@ class RuntimeAgentRunStore(AgentRunStore):
     def bind_execution_producer(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
         conversation: bool = True, restart_checkpoints: bool = True, durable_trace: bool = True,
+        model_progress: Callable[[tuple[ModelInteractionRecord, ...] | None], None] | None = None,
     ) -> None:
         if not agent_run_id or not execution_id or isinstance(producer_generation, bool) or producer_generation < 0:
             raise ValueError("execution producer identity is invalid")
@@ -374,6 +376,27 @@ class RuntimeAgentRunStore(AgentRunStore):
         if previous is not None and previous != value:
             self.invalidate_step_run(agent_run_id)
         self._execution_producers[agent_run_id] = value
+        if model_progress is not None:
+            self._model_progress[agent_run_id] = model_progress
+        else:
+            self._model_progress.pop(agent_run_id, None)
+
+    @property
+    def supports_committed_model_progress(self) -> bool:
+        return type(self._archives.get(PersistenceDomain.TRACE)) is ModelInteractionStateStepArchive
+
+    def _report_model_progress(
+        self, agent_run_id: str, producer: tuple[str, int | None],
+        records: tuple[ModelInteractionRecord, ...] | None,
+    ) -> None:
+        if self._execution_producers.get(agent_run_id) != producer:
+            return
+        observer = self._model_progress.get(agent_run_id)
+        if observer is not None:
+            try:
+                observer(records)
+            except Exception:
+                _logger.warning("committed model progress publication failed", exc_info=True)
 
     def bind_execution_persistence(
         self, agent_run_id: str, *, conversation: bool, restart_checkpoints: bool, durable_trace: bool,
@@ -465,6 +488,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._step_boundaries.clear()
         self._step_boundary_guards.clear()
         self._projection_confirmations.clear()
+        self._model_progress.clear()
         self._atomic_step_runs.clear()
         self._checkpoint_transcript_starts.clear()
         self._checkpoint_transcript_runs.clear()
@@ -2021,6 +2045,11 @@ class RuntimeAgentRunStore(AgentRunStore):
                 confirmed_interaction_producer=(execution_id, captured.producer_generation)
                     if execution_id is not None and captured.producer_generation is not None else None,
             )
+            if interactions or result.error is not None:
+                self._report_model_progress(
+                    captured.run.agent_run_id, (execution_id, captured.producer_generation),
+                    tuple(interactions) if result.error is None else None,
+                )
             if (result.error is None and projection_receipt is not None and confirmation is not None
                     and self._projection_confirmations.get(captured.run.agent_run_id) is confirmation):
                 try:
@@ -2035,6 +2064,9 @@ class RuntimeAgentRunStore(AgentRunStore):
                 raise result.error
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         elif result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+            self._report_model_progress(
+                captured.run.agent_run_id, (execution_id, captured.producer_generation), None,
+            )
             integrity = AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
                 "projection commit left partial durable state",
@@ -2042,6 +2074,9 @@ class RuntimeAgentRunStore(AgentRunStore):
             await self._fence_durability_flight(flight, integrity)
             raise integrity from result.error
         else:
+            self._report_model_progress(
+                captured.run.agent_run_id, (execution_id, captured.producer_generation), None,
+            )
             _logger.error(
                 "projection commit unresolved; flight retained: agent_run=%s token=%s",
                 flight.agent_run_id,
@@ -2331,6 +2366,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         self._step_boundaries.pop(agent_run_id, None)
                         self._step_boundary_guards.pop(agent_run_id, None)
                         self._projection_confirmations.pop(agent_run_id, None)
+                        self._model_progress.pop(agent_run_id, None)
                         self._atomic_step_runs.discard(agent_run_id)
                         self.invalidate_step_run(agent_run_id)
                         if producer is not None and self.capability_writes is not None:
@@ -2594,6 +2630,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._step_boundaries.clear()
         self._step_boundary_guards.clear()
         self._projection_confirmations.clear()
+        self._model_progress.clear()
         self._atomic_step_runs.clear()
         self._checkpoint_transcript_starts.clear()
         self._checkpoint_transcript_runs.clear()
