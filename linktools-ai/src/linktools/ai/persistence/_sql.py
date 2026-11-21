@@ -4,7 +4,6 @@
 
 import asyncio
 import hashlib
-import json
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -15,7 +14,7 @@ from uuid import uuid4
 
 from linktools.core import environ
 
-from ..core import canonical_json_bytes, validate_resource_id
+from ..core import validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..storage import (
     CacheBackend,
@@ -36,7 +35,6 @@ from ._content_reference_projection import (
 )
 from ._record_owner import EXECUTION_SHELL_KIND, RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
-from ._state_payload_sql import state_payload_document
 from ._record_cache import StateRecordCache
 from .state import state_content_members
 from .state import (
@@ -2353,14 +2351,11 @@ class _SqlTransaction:
         if nodes or contents:
             yield tuple(nodes), tuple(contents)
 
-    def _payload_field(self, column: "ColumnElement", field: str) -> "ColumnElement":
-        return state_payload_document(column, self._context.dialect.name)[field].as_string()
-
     def _archive_link(self, column: "ColumnElement", field: str) -> "ColumnElement":
         from sqlalchemy import LargeBinary, cast, func
         from sqlalchemy.dialects.mysql import BINARY
 
-        text = self._payload_field(column, field)
+        text = column[field].as_string()
         if self._context.dialect.name == "postgresql":
             return func.convert_to(text, "UTF8", type_=LargeBinary())
         return cast(text, BINARY() if self._context.dialect.name == "mysql" else LargeBinary())
@@ -3789,7 +3784,7 @@ def _record_values(record: StoredRecord) -> dict[str, object]:
         "lease_fence": record.lease_fence,
         "lease_expires_at": (None if record.lease_expires_at is None
                              else record.lease_expires_at.astimezone(timezone.utc)),
-        "payload_json": canonical_json_bytes(stored_data).decode("utf-8"),
+        "payload_json": stored_data,
         "payload_bytes": record.payload_bytes,
     }
     values.update(references)
@@ -3872,7 +3867,7 @@ def _fact_values(fact: StoredFact) -> dict[str, object]:
         if fact.subject_id is None
         else fact.subject_id.encode("utf-8"),
         "state": fact.state,
-        "payload_json": canonical_json_bytes(dict(fact.data)).decode("utf-8"),
+        "payload_json": dict(fact.data),
     }
 
 
@@ -3904,7 +3899,7 @@ def _operation_values(value: StoredOperation) -> dict[str, object]:
         "sequence": value.sequence,
         "state": value.state,
         "compactable": value.compactable,
-        "payload_json": canonical_json_bytes(dict(value.data)).decode("utf-8"),
+        "payload_json": dict(value.data),
     }
     return values
 
@@ -4019,12 +4014,9 @@ def _row_bool(value: object) -> bool:
 
 
 def _row_mapping(value: object) -> dict[str, object]:
-    if not isinstance(value, str):
+    if not isinstance(value, dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    value = json.loads(value)
-    if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return dict(value)
+    return value
 
 
 def _datetime_or_none(value: object) -> datetime | None:

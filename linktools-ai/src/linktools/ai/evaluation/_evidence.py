@@ -12,7 +12,7 @@ from typing import Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from ..asset import AssetVersionRef
-from ..core import ImmutableJsonMapping, JsonValue, UsageMetrics, canonical_sha256, validate_idempotency_key
+from ..core import ImmutableJsonMapping, JsonValue, UsageMetrics, semantic_json_sha256, validate_idempotency_key
 from ..storage import ObjectRef
 from ._contracts import CaseRef, InlineValue, LabelProvenance, ScorerContract, TargetTrialRef
 
@@ -175,7 +175,7 @@ class EvidenceBundle:
 
     @property
     def digest(self) -> str:
-        return canonical_sha256(self.content_mapping())
+        return semantic_json_sha256(self.content_mapping())
 
 
 class ScoreNotApplicable(BaseModel):

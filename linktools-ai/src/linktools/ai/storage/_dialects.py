@@ -1222,15 +1222,6 @@ def column_type_matches(
         dialect_name, expected_type, actual_type
     ):
         return False
-    if expected.name == "payload_json":
-        # Canonical StateStore documents need the full declared text capacity;
-        # a narrower text-family column would pass reflection but corrupt writes.
-        from sqlalchemy import Text
-        from sqlalchemy.dialects.mysql import LONGTEXT
-
-        required = LONGTEXT if dialect_name == "mysql" else Text
-        if isinstance(expected_type, required) and not isinstance(actual_type, required):
-            return False
     if isinstance(expected_type, JSON) and not _json_compatible(
         expected_type, actual_type
     ):

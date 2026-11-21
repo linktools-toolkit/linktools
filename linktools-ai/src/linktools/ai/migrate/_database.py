@@ -18,7 +18,7 @@ _logger = environ.get_logger("ai.migrate.database")
 
 # Bump when the complete standard SQL schema changes. This is not a data-wire
 # version and is used only by an explicitly acquired local SQLite writer.
-_SQLITE_SCHEMA_VERSION = 2
+_SQLITE_SCHEMA_VERSION = 1
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData

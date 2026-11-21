@@ -17,7 +17,6 @@ from ..storage import (
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from ._state_payload_sql import state_payload_text
 from .state import STORE_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
@@ -43,6 +42,7 @@ def build_runtime_sql_metadata(
     from sqlalchemy import (
         TIMESTAMP,
         BigInteger,
+        JSON,
         Boolean,
         Column,
         LargeBinary,
@@ -144,9 +144,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            state_payload_text(),
+            JSON(),
             nullable=False,
-            comment="Canonical immutable fact JSON text preserving numeric representations.",
+            comment="Canonical immutable fact JSON object.",
         ),
         Column("stream_locator", sql_sha256(), nullable=False,
                comment="Single SHA-256 lookup projection of the complete stream_key; raw identity must also match."),
@@ -234,9 +234,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            state_payload_text(),
+            JSON(),
             nullable=False,
-            comment="Canonical operation JSON text preserving numeric representations.",
+            comment="Canonical operation JSON object.",
         ),
         Column("operation_locator", sql_sha256(), nullable=False,
                comment="Single SHA-256 lookup projection of the complete operation_key; raw identity must also match."),

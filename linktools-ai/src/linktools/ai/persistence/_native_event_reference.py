@@ -15,7 +15,6 @@ from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeS
 from ..errors import AIError, ErrorCode
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
-from ._state_payload_sql import state_payload_document
 from ._sql import SqlStateStore
 from ._step_contracts import AgentRunRecord, StepEvent
 from ._official_step_reader import OfficialStepReader
@@ -390,7 +389,7 @@ class NativeEventReferences:
                     request_identity=None, request_number=None, message_identity=None, tool_call_id=None, error_code=None,
                     history_identity=None, agent_conversation_id=None, parent_agent_run_id=None,
                     agent_id=None, tool_name=None, error=None, idempotency_key=None)
-                payload = json.loads(row["payload_json"]) if isinstance(row["payload_json"], str) else row["payload_json"]
+                payload = row["payload_json"]
                 if (any(row[name] != value for name, value in expected.items()) or payload != dict(fact.data)
                         or (reference["run"], reference["replay"]) != (source.run_id, source.idempotency_key)
                         or fact.kind != "step_event" or fact.state != event.event_type or fact.subject_id is not None
@@ -437,9 +436,8 @@ class NativeEventReferences:
         from sqlalchemy import and_, cast, func, or_, select
 
         facts, events, runs = self._facts, self._events, self._runs
-        payload = state_payload_document(facts.c.payload_json, self._state.context.dialect.name)
-        reference = payload["value"]["payload"]
-        replay = reference["replay"].as_string()
+        payload = facts.c.payload_json
+        replay = payload[("value", "payload", "replay")].as_string()
         if self._state.context.dialect.name == "postgresql":
             replay = func.convert_to(replay, "UTF8")
         else:
@@ -449,7 +447,7 @@ class NativeEventReferences:
         statement = select(facts, *(column.label("native_" + name) for name, column in columns.items()),
                            *registration_columns, or_(*invalid).label("invalid_native_reference")).select_from(
             facts.outerjoin(events, and_(facts.c.kind == "step_event", events.c.store_locator == self._store_locator, events.c.store_key == self._store_key,
-                                         events.c.run_id == reference["run"].as_string(),
+                                         events.c.run_id == payload[("value", "payload", "run")].as_string(),
                                          events.c.idempotency_key == replay)).outerjoin(runs, and_(
                 *(() if full_source else (inherited != 0,)), runs.c.store_locator == events.c.store_locator, runs.c.store_key == events.c.store_key,
                 runs.c.run_id == events.c.run_id,

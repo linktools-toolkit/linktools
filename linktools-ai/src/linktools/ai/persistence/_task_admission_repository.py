@@ -970,7 +970,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
     ) -> CommitObservation[TaskGraphView]:
         admission = await self._select_admission_identity(transaction, admission, graph)
         head = await self._submission_in_transaction(
-            transaction, TaskGraphSubmission(self._namespace, admission, graph).ref,
+            transaction, TaskSubmissionRef.from_admission(self._namespace, admission),
         )
         if head is not None and head.state == "cancelled" and await transaction.get_record(
             self._graph_key(graph.graph_id)

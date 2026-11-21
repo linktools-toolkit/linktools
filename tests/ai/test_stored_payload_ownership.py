@@ -8,7 +8,7 @@ import json
 import pytest
 from pydantic_ai.messages import BinaryContent, TextContent
 
-from linktools.ai.core import JsonValue, PromptLimits
+from linktools.ai.core import JsonValue, PromptLimits, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import MaterializedUserContent, StoredUserInput
 from linktools.ai.inputs import ExecutionInputMaterializer
@@ -56,7 +56,7 @@ def test_inline_json_preserves_root_wire_values(value: JsonValue) -> None:
         "$dataclass": "stored_payload",
         "fields": {
             "kind": "inline", "encoding": "json", "digest": payload.digest,
-            "size": payload.size, "value": encode_domain(value), "ref": None,
+            "size": payload.size, "value": canonical_json_bytes(value).decode("utf-8"), "ref": None,
         },
     }
     assert decode_domain(encoded, StoredPayload) == payload
@@ -101,7 +101,7 @@ def test_payload_reader_rejects_changed_inline_integrity(field: str) -> None:
 def test_domain_payload_reader_rejects_changed_inline_integrity(field: str) -> None:
     wire = encode_domain(StoredPayload.inline_json({"nested": ["original"]}))
     wire["fields"][field] = {
-        "digest": "a" * 64, "size": 0, "value": encode_domain({"nested": ["changed"]}),
+        "digest": "a" * 64, "size": 0, "value": '{"nested":["changed"]}',
     }[field]
 
     with pytest.raises(AIError) as caught:

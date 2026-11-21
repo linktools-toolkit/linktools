@@ -15,7 +15,7 @@ from ..agent import AgentInputCaptureRef
 from ..asset import AssetVersionRef
 from ..core import (
     ImmutableJsonMapping, JsonValue, Principal, WorkspaceFileInput,
-    canonical_sha256, principal_identity_payload, validate_idempotency_key, validate_resource_id,
+    semantic_json_sha256, principal_identity_payload, validate_idempotency_key, validate_resource_id,
 )
 from ..errors import AIError
 from ..task import (
@@ -576,7 +576,7 @@ class CaseContract:
 
     @property
     def digest(self) -> str:
-        return canonical_sha256(self.to_mapping())
+        return semantic_json_sha256(self.to_mapping())
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,7 +602,7 @@ class DatasetContract:
 
     @property
     def digest(self) -> str:
-        return canonical_sha256(self.to_mapping())
+        return semantic_json_sha256(self.to_mapping())
 
 
 @dataclass(frozen=True, slots=True)
@@ -650,7 +650,7 @@ class CandidateContract:
 
     @property
     def digest(self) -> str:
-        return canonical_sha256(self.to_mapping())
+        return semantic_json_sha256(self.to_mapping())
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,7 +706,7 @@ class ScorerContract:
 
     @property
     def digest(self) -> str:
-        return canonical_sha256(self.to_mapping())
+        return semantic_json_sha256(self.to_mapping())
 
 
 @dataclass(frozen=True, slots=True)
@@ -796,7 +796,7 @@ class EvaluationManifest:
 
     @property
     def digest(self) -> str:
-        return canonical_sha256(self.to_mapping())
+        return semantic_json_sha256(self.to_mapping())
 
 
 __all__ = [

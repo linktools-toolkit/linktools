@@ -18,7 +18,6 @@ from ._record_owner import record_owner_columns, record_owner_rows
 from ._run_counters import run_counter_address, run_counter_streams
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
-from ._state_payload_sql import state_payload_document
 from ._sql import SqlStateStore
 from ._step_contracts import AgentRunRecord
 from ._step_schema import build_step_sql_metadata
@@ -139,13 +138,12 @@ class NativeRunReferences:
                                     include_run_counters=include_run_counters,
                                     scan_kind="k:agent_run" if query is not None else None)
         runs = self._runs
-        payload = state_payload_document(records.c.payload_json, self._state.context.dialect.name)
-        reference = payload["value"]["payload"]
-        source_run = reference["run_id"].as_string()
+        payload = records.c.payload_json
+        source_run = payload[("value", "payload", "run_id")].as_string()
         run_join = and_(
             records.c.kind == "agent_run", runs.c.store_locator == self._store_locator, runs.c.store_key == self._store_key,
             runs.c.run_id == source_run,
-            runs.c.registration_id.is_not_distinct_from(reference["registration_id"].as_string()),
+            runs.c.registration_id.is_not_distinct_from(payload[("value", "payload", "registration_id")].as_string()),
         )
         source_columns = tuple(column.label("native_" + column.name) for column in runs.c)
         expected = expected_start if expected_start is not None else expected_terminal

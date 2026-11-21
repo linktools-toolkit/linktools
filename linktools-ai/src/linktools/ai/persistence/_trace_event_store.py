@@ -3,7 +3,6 @@
 """Trace-owned immutable events and query projections."""
 
 import copy
-import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -160,8 +159,6 @@ class SqlTraceEventStore:
             if row["request_number"] != _request_number(_text(row["request_identity"])):
                 raise ValueError("Trace numeric request projection differs")
             payload = copy.deepcopy(row["payload_json"])
-            if isinstance(payload, str):
-                payload = json.loads(payload)
             if not isinstance(payload, dict):
                 raise ValueError("Trace payload must be an object")
             if payload.get("type") == "step_event":
