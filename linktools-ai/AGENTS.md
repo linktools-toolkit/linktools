@@ -97,12 +97,14 @@ These describe the current architecture and may evolve; they are not rules by th
 | `storage` | Generic storage, overlays, revisions, locks, SQL primitives |
 | `asset` | Raw Asset keys, metadata, `AssetStore`, backends |
 | `spec` | Agent/Skill/MCP declarations and codecs |
-| `model` | Model routes, credentials, registries, materialization |
+| `model` | Model bindings, protocol adapters, and input materialization |
 | `observe` | Metrics contracts, facade, stores, codecs, and query semantics |
 | `capability` | Capability composition, loaders, Skill/MCP/workspace projection |
 | `task` | Task graph, DAG, lease, launcher contracts |
 | `agent` | Agent compilation, definitions, output contracts, execution binding |
-| `runtime` | Composition root, execution, persistence contracts, service APIs |
+| `runtime` | Runtime lifecycle, live feature composition, and domain facades |
+| `persistence` | Durable store composition, schemas, and transactional storage |
+| `execution` / `session` / `history` | Executions, sessions, and conversation history contracts |
 | `workspace` | Workspace paths, policy, configuration, sandbox contracts |
 | `migrate` | Explicit database schema provisioning |
 

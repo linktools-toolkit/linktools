@@ -62,7 +62,8 @@ def test_task_node_projection_preserves_resolved_execution_semantics() -> None:
     )
     assert TaskGraphAdmission.from_request(request).initial_request_digest == canonical_sha256({
         "principal": principal_identity_payload(request.principal),
-        "graph_id": "graph", "nodes": [TaskNode("upstream").to_mapping(), expected],
+        "graph_id": "graph",
+        "nodes": [TaskNode("upstream").to_mapping(), {**expected, "timeout_seconds": 5, "retry_delay_seconds": 1}],
         "limits": {"max_nodes": 128, "max_depth": 8, "max_budget": 1000, "max_concurrency": 8},
     })
 

@@ -1,41 +1,40 @@
 # SQL state payload storage
 
-The SQL StateStore stores `ai_state_records.payload_json`,
-`ai_state_facts.payload_json`, and `ai_state_operations.payload_json` in **JSON
-columns whose values are JSON strings**. Each string contains the canonical JSON
-text of the domain payload. Canonical SQLAlchemy metadata declares `JSON` for
-MySQL, PostgreSQL and SQLite; the MySQL `migrations/init_schema.sql` also declares
-`JSON`, not `TEXT` or `LONGTEXT`. SQLite's underlying storage does not change
-this declared schema or the encoding contract.
+These Runtime StateStore tables store **native JSON objects** in their
+`payload_json` columns: `ai_state_records`, `ai_execution_records`,
+`ai_task_graphs`, `ai_step_tool_operations`, `ai_step_run_admissions`,
+`ai_state_facts` and `ai_state_operations`.
+
+The SQLAlchemy metadata and [MySQL schema](../migrations/init_schema.sql) declare
+these columns as JSON, not TEXT. SQLite's underlying storage does not change
+the declared schema or the object contract.
 
 ## Encoding and reading
 
-There are two JSON layers:
+The StateStore passes a domain mapping to SQLAlchemy's JSON binding. For example,
+a payload containing `{"value": 1.0}` is a JSON object, not a JSON string
+containing escaped JSON text. A normal typed SQLAlchemy read returns a mapping;
+the StateStore rejects a string, array or scalar in its place. Column type
+validation alone does not validate this row-level encoding.
 
-1. The StateStore writer serializes the domain mapping with
-   `canonical_json_bytes(...).decode("utf-8")`.
-2. SQLAlchemy's JSON binding encodes that Python string as a JSON string value
-   in the column. For example, the domain payload `{"value": 1.0}` has inner
-   canonical text `{"value":1.0}` and outer JSON representation
-   `"{\"value\":1.0}"`.
+Native JSON stores values, not the original spelling of numbers. A database may
+round-trip an integral floating-point value such as `1.0` as `1`. For known
+fields whose domain contract declares a float, the reader accepts an equivalent
+integer as a float. This is not a recursive conversion of arbitrary JSON
+numbers; genuine integers stay integers, booleans are not numbers, and IDs that
+require exact representation are strings. Do not depend on numeric formatting
+or retention of an arbitrary number's original lexical form in a SQL JSON
+object. The database still defines the range and precision of untyped numbers;
+use strings for identifiers and other exact decimals outside that range.
 
-On a normal typed SQLAlchemy read, the JSON result processing removes the outer
-layer and returns the inner text as a Python `str`. The StateStore then decodes
-that text and requires a mapping. A raw SQL read may still expose the outer JSON
-representation; it is not the same as the typed reader's input.
-
-Do not write a native JSON object directly into these columns. The reader rejects
-a decoded mapping in place of the required string, as well as invalid inner JSON
-or an inner value that is not a mapping. Column type validation alone does not
-validate this row-level encoding.
-
-Native database JSON processing of a payload object may change the lexical
-representation of numbers. For example, turning `1.0` into `1` loses the
-distinction required by typed domain readers and generic JSON payload hashes.
-Keeping the payload as text **inside** the JSON string prevents the outer JSON
-layer from interpreting its numbers. Integers, floats, signed zero, booleans and
-null retain their existing semantics. Domain validation, semantic hashes and
-idempotency keys are unchanged.
+The SQL representation does not define semantic identities, idempotency keys or
+content digests. They stay with their existing owning contracts. Task and
+Evaluation request and evidence identities that describe JSON values treat
+numerically equal integers and integral floats alike, without modifying values
+stored in SQL. There is no separate digest of the stored row. Only existing
+byte-addressed content keeps its exact encoding; for example, the inner body
+of an inline JSON content reference retains its bytes even though its record
+is a JSON object.
 
 ## SQL link extraction
 
@@ -62,25 +61,21 @@ share one SQL read without database-side JSON extraction on the normal read
 path. Full scope and integrity checks still apply; other native message ranges
 use the exact range reader.
 
-Archive traversal and native run/event reference queries unwrap the outer JSON
-string before extracting fields from the inner payload. The SQLAlchemy
-expressions first select the JSON root as a string, then access fields as JSON:
-
-- SQLite uses JSON extraction to unwrap the root and extract the inner fields.
-- MySQL uses JSON extraction/unquoting to unwrap the root and read string fields.
-- PostgreSQL extracts the root as text and explicitly casts that text to JSON
-  before accessing inner fields.
+Archive traversal and native run/event reference queries select fields directly
+from the JSON object using the backend's JSON field operators. They do not unwrap
+an outer JSON string or reparse inner text. Extracting a scalar string from a
+JSON field is distinct from decoding the entire payload.
 
 These expressions resolve links and references, not replacement payloads. Full
-StateStore payloads still pass through the typed read and inner-text decoder;
-they are not reconstructed from server-parsed objects. Compare-and-swap
-revisions, leases, fences and transaction boundaries continue to use the
-existing state columns. Snapshots retain their logical record/fact/operation
-representation and restore through the same StateStore writer.
+StateStore payloads still pass through the typed read and domain decoder.
+Compare-and-swap revisions, leases, fences and transaction boundaries continue
+to use the existing state columns. Snapshots retain their logical
+record/fact/operation representation and restore through the same StateStore
+writer.
 
 ## Provisioning
 
-Canonical metadata and `migrations/init_schema.sql` describe the required new
+Canonical metadata and `migrations/init_schema.sql` describe the required
 schema. Provision shared schemas explicitly through the deployment process.
 Runtime startup does not ALTER existing tables; the local SQLite state backend
 may initialize its own schema.
@@ -96,6 +91,13 @@ the restored state before switching over. Restore packs the reference
 columns from logical records; these SQL details are not part of the portable
 wire representation.
 
+For built-in SQL Runtime turn admissions, offline restore preserves the execution
+and request identities, fencing generation and stored operation proof, but expires
+any imported active grant. The old grant cannot renew or retire, and its prior
+renewal receipt no longer confirms a live lease. A completed release remains
+confirmable; restore does not synthesize a release. Normal takeover can continue
+the same execution with the next fencing generation.
+
 A future migration of a populated, released v1 store would require an
 explicit cutover coordinated with its deployment. Preserve exact encoded keys,
 logical payloads, revision and lease state, and timestamps; preserve opaque
@@ -103,16 +105,11 @@ custom rows in their owning store. Do not mix writers that use different
 physical owners. The v1 schema does not provide an in-place migrator.
 
 The schema validator requires the JSON type family and JSON compatibility for
-these columns. `TEXT`/`LONGTEXT` columns do not satisfy it, and PostgreSQL `JSONB`
-is not interchangeable with the declared `JSON`. A correctly declared JSON
-column containing native payload objects can pass schema validation but still
-fail payload reads. Verify both schema and newly written data through the
-supported StateStore path.
-
-There is no compatibility reader or automatic migration for superseded
-development payload shapes. This contract does not reconstruct numeric
-distinctions already lost in old data. Use the current schema and writer for
-new data rather than restoring the old text-column or native-object contract.
+these columns. `TEXT`/`LONGTEXT` columns do not satisfy it, and PostgreSQL
+`JSONB` is not interchangeable with the declared `JSON`. A correctly declared
+JSON column containing an old string-wrapped payload can pass schema validation
+but fail the current object reader. Verify both schema and newly written data
+through the supported StateStore path.
 
 ## Upgrading a released schema
 
@@ -131,10 +128,11 @@ Use newly created data with the same SDK version for write, read, shutdown,
 reopen and recovery. Check dataset/case publication, evaluation execution,
 scoring, report/export, duplicate requests, cancellation and unknown-commit
 readback. Include integral floats, fractional values, signed zero, integers,
-booleans, null, nested JSON and payloads larger than 64 KiB. Check all three
-StateStore primitive families, archive traversal, batch CAS and snapshot
-restore. SQLite and compilation tests do not replace execution through the
-actual MySQL or PostgreSQL server and driver used by a deployment.
+booleans, null, nested JSON, string IDs and payloads larger than 64 KiB.
+Check typed numeric semantics rather than the original numeric spelling, and
+cover all three StateStore primitive families, archive traversal, batch CAS and
+snapshot restore. SQLite and compilation tests do not replace execution through
+the actual MySQL or PostgreSQL server and driver used by a deployment.
 
 Independent Asset and Observe stores have their own SQL payload contracts;
 this document describes only the Runtime StateStore tables.

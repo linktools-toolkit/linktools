@@ -155,12 +155,11 @@ async def test_scoped_tool_join_preserves_empty_owners_order_and_limit(tmp_path:
             value = deepcopy(decode_envelope(record.data).value)
             value["payload"]["schema"] = 999
             from sqlalchemy import update
-            from linktools.ai.core import canonical_json_bytes
             group = repository.state_store.storage_group
             table = group.metadata.tables["ai_step_tool_operations"]
             async with group.context.engine.begin() as connection:
                 await connection.execute(update(table).where(table.c.key == record.key).values(
-                    payload_json=canonical_json_bytes(encode_envelope(value)).decode("utf-8")))
+                    payload_json=encode_envelope(value)))
         for method, identity in ((repository.list_by_execution, "execution"), (repository.list_by_agent_run, "run")):
             with pytest.raises(AIError) as missing:
                 await method(identity, tenant_id="tenant")

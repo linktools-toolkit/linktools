@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.core import ToolOperationStatus
+from linktools.ai.core import ToolOperationStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, _sql
 from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
@@ -83,7 +83,7 @@ async def test_exact_tool_lookup_bounds_materialized_payloads(tmp_path: Path, mo
 
         def materialize(row):
             counters["rows"] += 1
-            counters["payload_bytes"] += len(row["payload_json"].encode("utf-8"))
+            counters["payload_bytes"] += len(canonical_json_bytes(row["payload_json"]))
             return original_row(row)
 
         async def read(callback):

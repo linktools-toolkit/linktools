@@ -27,7 +27,7 @@ from ...asset import AssetStoreReader, AssetVersionRef
 from ...core import (
     AuthorizationAction, AuthorizationPolicy, CursorPayload, CursorSigner, HmacCursorSigner,
     ExecutionContext, ExecutionStatus, IdempotencyStatus, JsonValue, Page, Principal,
-    ResourceKind, ResourceRef, TaskStatus, UsageMetrics, canonical_json_bytes, canonical_sha256, deterministic_id,
+    ResourceKind, ResourceRef, TaskStatus, UsageMetrics, canonical_json_bytes, canonical_sha256, deterministic_id, semantic_json_sha256,
     normalize_json_value, principal_identity_payload, validate_idempotency_key,
     validate_page_limit,
 )
@@ -521,7 +521,7 @@ class Evaluations:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "dataset input kinds differ")
         dataset = DatasetContract(spec.ref, tuple(case.ref for case in cases), kinds.pop(), spec.selection,
             tuple(case.expected for case in cases if isinstance(case.expected, AssetVersionRef)))
-        digest = canonical_sha256({"principal": principal_identity_payload(principal),
+        digest = semantic_json_sha256({"principal": principal_identity_payload(principal),
             "dataset": dataset.to_mapping(), "cases": [case.to_mapping() for case in cases],
             "content_expires_at": None if content_expires_at is None else content_expires_at.isoformat()})
         now = _now()
@@ -554,7 +554,7 @@ class Evaluations:
         cursor: str | None = None, limit: int = 100,
     ) -> Page[CaseContract]:
         dataset = await self.get_dataset(ref, principal=principal)
-        digest = canonical_sha256({"dataset": dataset.to_mapping(), "principal": principal_identity_payload(principal)})
+        digest = semantic_json_sha256({"dataset": dataset.to_mapping(), "principal": principal_identity_payload(principal)})
         position = self._cursor_position(cursor, "evaluation.cases", digest, principal) if cursor else "0"
         index = int(position)
         validate_page_limit(limit)
@@ -642,7 +642,7 @@ class Evaluations:
             trial_scope_required=scope_required)
         payload = manifest.to_mapping()
         payload.pop("experiment_id")
-        digest = canonical_sha256(payload)
+        digest = semantic_json_sha256(payload)
         now = _now()
         deadlines = ([] if source_expires_at is None else [source_expires_at])
         if spec.policy.content_retention_seconds is not None:

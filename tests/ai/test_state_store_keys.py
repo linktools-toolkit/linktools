@@ -194,7 +194,6 @@ def test_raw_store_and_partition_names_are_not_in_object_representations() -> No
 async def test_native_publication_checks_scoped_targets_without_owner_edge_queries(
     kind: str, known_group: bool,
 ) -> None:
-    import json
     from types import SimpleNamespace
     from sqlalchemy.sql import Select
     from sqlalchemy.dialects import mysql, postgresql, sqlite
@@ -212,13 +211,13 @@ async def test_native_publication_checks_scoped_targets_without_owner_edge_queri
     scope_reads, target_reads = [], []
     available = True
 
-    async def scalar(statement: Select) -> str:
+    async def scalar(statement: Select) -> dict[str, str]:
         scope_reads.append(statement)
         for dialect in (mysql.dialect(), postgresql.dialect(), sqlite.dialect()):
             compiled = statement.compile(dialect=dialect)
             assert STATE_GROUP_METADATA_KEY in compiled.params.values()
             assert record_key("", "", "archive", "archive_scope", ("archive_scope_id",)) in compiled.params.values()
-        return json.dumps({"archive_scope_id": group_id})
+        return {"archive_scope_id": group_id}
 
     async def execute(statement: Select) -> SimpleNamespace:
         target_reads.append(statement)

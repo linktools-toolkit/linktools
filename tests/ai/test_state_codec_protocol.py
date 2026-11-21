@@ -217,7 +217,7 @@ def test_repeated_domain_decodes_validate_each_payload(
     (str, "value", 1),
     (bool, True, 1),
     (int, 1, True),
-    (float, 1.5, 1),
+    (float, 1.5, True),
 ))
 def test_scalar_domain_values_preserve_declared_types(
     target: type, value: object, wrong: object,
@@ -228,6 +228,12 @@ def test_scalar_domain_values_preserve_declared_types(
     with pytest.raises(AIError) as raised:
         decode_domain(None, target)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_float_domain_values_accept_integral_json_numbers() -> None:
+    decoded = decode_domain(1, float)
+    assert type(decoded) is float
+    assert decoded == 1.0
 
 
 @pytest.mark.parametrize("value", (float("nan"), float("inf"), -float("inf")))

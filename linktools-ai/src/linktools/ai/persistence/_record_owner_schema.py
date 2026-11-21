@@ -114,9 +114,9 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
             JSON(),
             nullable=False,
             comment=(
-                "Domain JSON string; execution reference digests are stored in typed columns."
+                "Domain JSON object; execution reference digests are stored in typed columns."
                 if name == "ai_execution_records" else
-                "Canonical domain JSON encoded as a JSON string preserving numeric representations."
+                "Canonical domain JSON object."
             ),
         ),
         Column("payload_bytes", sql_blob(), nullable=True,

@@ -582,15 +582,13 @@ def _decode_v1_task_node(
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    timeout_seconds = raw_fields.get("timeout_seconds")
-    if timeout_seconds is not None and type(timeout_seconds) is not float:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    max_attempts = raw_fields.get("max_attempts", 1)
-    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    retry_delay_seconds = raw_fields.get("retry_delay_seconds", 0.0)
-    if type(retry_delay_seconds) is not float:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    timeout_seconds = _decode_domain(
+        raw_fields.get("timeout_seconds"), float | None, codec, persisted=persisted,
+    )
+    max_attempts = _decode_domain(raw_fields.get("max_attempts", 1), int, codec, persisted=persisted)
+    retry_delay_seconds = _decode_domain(
+        raw_fields.get("retry_delay_seconds", 0.0), float, codec, persisted=persisted,
+    )
     output_contract = raw_fields.get("output_contract")
     if output_contract is not None and not isinstance(output_contract, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -651,7 +649,8 @@ def _decode_v1_task_node(
             codec,
             persisted=persisted,
         ),
-        budget_cost=int(
+        budget_cost=cast(
+            int,
             _decode_domain(
                 raw_fields["budget_cost"], int, codec, persisted=persisted
             )
@@ -669,8 +668,8 @@ def _decode_v1_task_node(
         input_capture=_decode_domain(raw_fields.get("input_capture"), TaskInvocationInputRef | None, codec, persisted=persisted),
         original_input=_decode_domain(raw_fields.get("original_input"), Mapping[str, JsonValue] | None, codec, persisted=persisted),
         timeout_seconds=cast("float | None", timeout_seconds),
-        max_attempts=max_attempts,
-        retry_delay_seconds=retry_delay_seconds,
+        max_attempts=cast(int, max_attempts),
+        retry_delay_seconds=cast(float, retry_delay_seconds),
         output_contract=cast(
             Mapping[str, JsonValue] | None,
             output_contract,
@@ -896,12 +895,14 @@ def _encode_v1_stored_payload(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, StoredPayload):
         raise TypeError("V1 stored_payload encoder received the wrong type")
+    # Only this byte-addressed body needs its original JSON representation.
+    body = value.inline_json_text() if value.encoding == "json" else value.value
     return {
         "kind": _encode_domain(value.kind, codec, persisted=persisted),
         "encoding": _encode_domain(value.encoding, codec, persisted=persisted),
         "digest": _encode_domain(value.digest, codec, persisted=persisted),
         "size": _encode_domain(value.size, codec, persisted=persisted),
-        "value": _encode_domain(value.value, codec, persisted=persisted),
+        "value": _encode_domain(body, codec, persisted=persisted),
         "ref": _encode_domain(value.ref, codec, persisted=persisted),
     }
 
@@ -914,18 +915,23 @@ def _decode_v1_stored_payload(
     _require_required_keys(
         raw_fields, frozenset({"kind", "encoding", "digest", "size", "value", "ref"}),
     )
-    return StoredPayload(
+    encoding = _decode_domain(raw_fields["encoding"], str | None, codec, persisted=persisted)
+    encoded = raw_fields["value"]
+    body = (json.loads(_decode_domain(encoded, str, codec, persisted=persisted)) if encoding == "json"
+            else _decode_domain(encoded, JsonValue, codec, persisted=persisted))
+    payload = StoredPayload(
         kind=cast(str, _decode_domain(raw_fields["kind"], str, codec, persisted=persisted)),
-        encoding=cast(str | None, _decode_domain(
-            raw_fields["encoding"], str | None, codec, persisted=persisted,
-        )),
+        encoding=encoding,
         digest=cast(str, _decode_domain(raw_fields["digest"], str, codec, persisted=persisted)),
         size=cast(int, _decode_domain(raw_fields["size"], int, codec, persisted=persisted)),
-        value=cast(JsonValue, _decode_domain(raw_fields["value"], JsonValue, codec, persisted=persisted)),
+        value=body,
         ref=cast(ObjectRef | None, _decode_domain(
             raw_fields["ref"], ObjectRef | None, codec, persisted=persisted,
         )),
     )
+    if encoding == "json" and payload.inline_json_text() != encoded:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return payload
 
 
 def _encode_v1_stored_user_input(
@@ -2833,12 +2839,17 @@ def _decode_domain(
     if target is str or target is bool or target is int or target is float:
         if value is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(value, target) or (
-            target is int and isinstance(value, bool)
-        ):
-            raise TypeError("scalar value has the wrong type")
         if target is float:
-            return _require_finite_wire_float(value)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError("scalar value has the wrong type")
+            # A native JSON store may return a whole-valued float as an int.
+            try:
+                number = value if isinstance(value, float) else float(value)
+            except OverflowError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            return _require_finite_wire_float(number)
+        if not isinstance(value, target) or (target is int and isinstance(value, bool)):
+            raise TypeError("scalar value has the wrong type")
         return value
     if target is Any or target is object:
         return _decode_any(value, codec, persisted=persisted)

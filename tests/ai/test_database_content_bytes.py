@@ -3,7 +3,6 @@
 """Database content keeps binary bodies separate from queryable state metadata."""
 
 import hashlib
-import json
 import random
 from dataclasses import replace
 from pathlib import Path
@@ -67,7 +66,7 @@ async def test_archive_body_is_binary_in_database_and_round_trips_portable_codec
             ))).mappings().one()
         assert type(physical["payload_bytes"]) is bytes
         assert physical["payload_bytes"] == encoded
-        assert json.loads(physical["payload_json"]) == dict(record.data)
+        assert physical["payload_json"] == dict(record.data)
         cold = ContentArchive(store, "binary", namespace="test", tenant_id="tenant", object_store=None)
         assert await cold.read_contents(identities, codec="text") == (body,)
         altered = replace(record, payload_bytes=encoded + b"changed")

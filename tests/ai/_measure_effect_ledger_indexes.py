@@ -20,7 +20,7 @@ def main() -> None:
             parent = f'{tenant}/execution/{run // 4}'.encode()
             for call in range(128):
                 key = f'{tenant}/{run:04}/{call:04}'.encode()
-                rows.append(dict(store_key=str(tenant).encode(), key=key, scope_key=scope, subject_id=str(call).encode(), parent_key=parent, sort_key=key, state='completed', storage_revision=1, lease_owner=None, lease_fence=1, lease_expires_at=None, payload_json='{}', key_locator=hashlib.sha256(key).hexdigest(), scope_locator=hashlib.sha256(scope).hexdigest(), parent_locator=hashlib.sha256(parent).hexdigest(), sort_prefix=key[:128]))
+                rows.append(dict(store_key=str(tenant).encode(), key=key, scope_key=scope, subject_id=str(call).encode(), parent_key=parent, sort_key=key, state='completed', storage_revision=1, lease_owner=None, lease_fence=1, lease_expires_at=None, payload_json={}, key_locator=hashlib.sha256(key).hexdigest(), scope_locator=hashlib.sha256(scope).hexdigest(), parent_locator=hashlib.sha256(parent).hexdigest(), sort_prefix=key[:128]))
     with e.begin() as conn:
         conn.execute(insert(t), rows)
     c = e.raw_connection()

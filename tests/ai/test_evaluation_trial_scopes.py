@@ -110,7 +110,7 @@ def test_manifest_wire_defaults_scope_flag_and_scoped_mode_changes_identity() ->
     unscoped = decode_domain(wire, EvaluationManifest)
     assert not unscoped.trial_scope_required
     assert encode_domain(unscoped) == wire
-    assert unscoped.digest == "bba3e1f0b12a4ed3432f9aed120b7faceb73b331817113d0826b0a9bb0b65eec"
+    assert unscoped.digest == "e3e3dbc2ebe07015c918f5bc0c1d1b9638408e8ede5f694cd7c8d3fcef994136"
     start = unscoped.to_mapping()
     start.pop("experiment_id")
     assert "trial_scope_required" not in start
