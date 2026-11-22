@@ -54,9 +54,19 @@ class Policy:
         await self.default.authorize(principal, action, resource)
 
 
+async def assert_coordinator_completed(evaluations: Evaluations, run: EvaluationRun) -> None:
+    # This fixture needs the real producer to finish, not a second concurrent
+    # status polling loop. Keep authoritative completion and the same timeout.
+    coordinator = evaluations._watchers.get(run.experiment_id)
+    async with asyncio.timeout(EVALUATION_COMPLETION_TIMEOUT_SECONDS):
+        if coordinator is not None:
+            await asyncio.shield(coordinator)
+        assert (await run.inspect()).completion == "complete"
+
+
 @asynccontextmanager
 async def completed(
-    path: Path, *, count: int = 2, memory_tasks: bool = False, experiment_id: str | None = None,
+    path: Path, *, count: int = 2, memory_tasks: bool = False, experiment_id: str | None = None, coordinator_only: bool = False,
 ) -> AsyncIterator[tuple[Evaluations, Persistence, EvaluationRun, Task, Policy]]:
     storage = PersistenceStorage.sqlite(path / "state.sqlite")
     if memory_tasks:
@@ -76,7 +86,10 @@ async def completed(
                 run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                     (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
                     policy=EvaluationPolicy(allow_volatile=memory_tasks)), PRINCIPAL, "run"))
-                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+                if coordinator_only:
+                    await assert_coordinator_completed(evaluations, run)
+                else:
+                    assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             else:
                 run = await evaluations.get(experiment_id, principal=PRINCIPAL)
             policy.calls.clear()
@@ -186,13 +199,12 @@ async def test_snapshot_full_source_reads_are_bounded_and_source_owner_is_preser
     tmp_path: Path,
 ) -> None:
     # Only source-record SQL reads are measured; task graphs never cross a reopen boundary.
-    async with completed(tmp_path, count=3, memory_tasks=True) as (evaluations, storage, run, scorer, policy):
+    async with completed(tmp_path, count=3, memory_tasks=True, coordinator_only=True) as (evaluations, storage, run, scorer, policy):
         source_id = run.experiment_id
         for rescore in (False, True):
             if rescore:
                 run = await run.rescore(RescoreRequest((rule_scorer(scorer),), "rescore"))
-                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-            await asyncio.gather(*evaluations._watchers.values())
+                await assert_coordinator_completed(evaluations, run)
             source = await storage.evaluation.records.get(source_id, tenant_id=PRINCIPAL.tenant_id)
             source_key = storage.evaluation.records._key("evaluation", (source_id,))
             source_locator = sha256(source_key).hexdigest()
