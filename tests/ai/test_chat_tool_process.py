@@ -36,28 +36,28 @@ def test_committed_chat_process_pairs_explicit_results_without_payloads() -> Non
         ]),
     )
     assert [asdict(item) for item in project_turn_tool_process(messages)] == [
-        {"kind": "tool", "key": "tool:a", "tool_name": "search", "status": "SUCCEEDED"},
-        {"kind": "tool", "key": "tool:b", "tool_name": "search", "status": "FAILED"},
-        {"kind": "tool", "key": "tool:c", "tool_name": "notify", "status": "UNCONFIRMED"},
-        {"kind": "tool", "key": "tool:d", "tool_name": "archive", "status": "INTERRUPTED"},
+        {"kind": "tool", "key": "tool:a", "tool_name": "search", "status": "SUCCEEDED", "position": (1, 1)},
+        {"kind": "tool", "key": "tool:b", "tool_name": "search", "status": "FAILED", "position": (1, 2)},
+        {"kind": "tool", "key": "tool:c", "tool_name": "notify", "status": "UNCONFIRMED", "position": (1, 3)},
+        {"kind": "tool", "key": "tool:d", "tool_name": "archive", "status": "INTERRUPTED", "position": (1, 4)},
     ]
 
 
 def test_live_chat_process_uses_the_same_key_and_omits_diagnostics() -> None:
     started = project_tool_process_event(
-        "TOOL_CALL_STARTED", {"call_id": "a", "tool_name": "search", "arguments": "private"},
+        "TOOL_CALL_STARTED", {"call_id": "a", "tool_name": "search", "arguments": "private", "tool_position": [2, 0]},
     )
     finished = project_tool_process_event(
         "TOOL_CALL_FINISHED", {
             "call_id": "a", "tool_name": "search", "status": "FAILED", "result": "private",
-            "error_code": "internal error",
+            "error_code": "internal error", "tool_position": [2, 0],
         },
     )
     assert started is not None and asdict(started) == {
-        "kind": "tool", "key": "tool:a", "tool_name": "search", "status": "RUNNING",
+        "kind": "tool", "key": "tool:a", "tool_name": "search", "status": "RUNNING", "position": (2, 0),
     }
     assert finished is not None and asdict(finished) == {
-        "kind": "tool", "key": "tool:a", "tool_name": "search", "status": "FAILED",
+        "kind": "tool", "key": "tool:a", "tool_name": "search", "status": "FAILED", "position": (2, 0),
     }
     assert project_tool_process_event("ASSISTANT_THINKING_DELTA", {"text": "private"}) is None
     assert project_tool_process_event(

@@ -25,6 +25,7 @@ class ToolProcessItem:
     key: str
     tool_name: str
     status: ToolProcessStatus
+    position: tuple[int, int] | None = None
     kind: Literal["tool"] = field(default="tool", init=False)
 
 
@@ -45,19 +46,27 @@ def project_tool_process_event(event_type: str, payload: JsonValue) -> ToolProce
         status = cast(ToolProcessStatus, value)
     else:
         return None
-    return ToolProcessItem(f"tool:{call_id}", name, status)
+    position = None
+    raw_position = payload.get("tool_position")
+    if isinstance(raw_position, (list, tuple)) and len(raw_position) == 2:
+        message_seq, part_index = raw_position
+        if type(message_seq) is int and message_seq > 0 and type(part_index) is int and part_index >= 0:
+            position = (message_seq, part_index)
+    return ToolProcessItem(f"tool:{call_id}", name, status, position)
 
 
 def project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[ToolProcessItem, ...]:
     """Summarize root transcript tool calls in occurrence order, without inferring outcomes."""
     calls: dict[str, ToolProcessItem] = {}
-    for message in messages:
+    for message_seq, message in enumerate(messages, start=1):
         if isinstance(message, ModelResponse):
-            for part in message.parts:
+            for part_index, part in enumerate(message.parts):
                 if isinstance(part, ToolCallPart):
                     calls.setdefault(
                         part.tool_call_id,
-                        ToolProcessItem(f"tool:{part.tool_call_id}", part.tool_name, "UNCONFIRMED"),
+                        ToolProcessItem(
+                            f"tool:{part.tool_call_id}", part.tool_name, "UNCONFIRMED", (message_seq, part_index),
+                        ),
                     )
         elif isinstance(message, ModelRequest):
             for part in message.parts:

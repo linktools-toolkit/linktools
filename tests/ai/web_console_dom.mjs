@@ -821,35 +821,38 @@ if(process.argv[3]==='tools') {
   const event=(event_type,payload)=>emit('event',{execution_id:id,depth:0,event:{event_type,payload}});
   const article=()=>descendants(node('conversation')).find(item=>item.dataset.execution===id);
   const processArea=()=>article()?.children.find(item=>item.className==='turn-process');
-  const tool={kind:'tool',key:'tool:call',tool_name:'lookup',status:'RUNNING'};
+  const tool={kind:'tool',key:'tool:call',tool_name:'lookup',status:'RUNNING',position:[2,0]};
+  const laterTool={kind:'tool',key:'tool:later',tool_name:'secondary',status:'RUNNING',position:[2,1]};
   const summary={kind:'reasoning_summary',key:'summary',text:'Public summary'};
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
   assert.equal(calls.findLast(call=>call.key==='/api/executions/'+id+'/events').query.view,'chat');
   event('ASSISTANT_THINKING_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,text:'Not a supported summary'});
   event('ASSISTANT_TEXT_DELTA',{text:'Answer'});
-  emit('process',tool,'tool-cursor');emit('process',summary,'summary-cursor');
+  emit('process',laterTool,'later-tool-cursor');emit('process',tool,'tool-cursor');emit('process',summary,'summary-cursor');
   await until('live process and answer share the turn',()=>processArea().textContent.includes('lookupIn progress') && article().textContent.includes('Answer'));
   assert.ok(article().contains(node('live')));
   assert.doesNotMatch(article().textContent,/Not a supported summary/);
   const detail=processArea().children[1], first=processArea().children[2];
+  assert.deepEqual(processArea().children.slice(2).map(row=>row.name.textContent),['lookup','secondary']);
   detail.open=true;detail.ontoggle();detail.children[0].focus();
   assert.equal(first.status.getAttribute('aria-live'),'polite');
-  emit('process',{...tool,status:'SUCCEEDED'});emit('process',tool);
+  const unranked={...tool,position:null};
+  emit('process',{...unranked,status:'SUCCEEDED'});emit('process',unranked);
   await until('completed tool cannot be reopened by replay',()=>first.status.textContent==='Completed');
   assert.equal(processArea().children[2],first);
   assert.equal(document.activeElement,detail.children[0]);
 
   const old=streamBlocks.get(id).controller;old.close();
   await until('process stream reconnected',()=>streamBlocks.get(id).controller!==old);
-  emit('process',tool);await settle();
-  assert.match(processArea().textContent,/lookupCompleted/);
+  emit('process',unranked);await settle();
+  assert.deepEqual(processArea().children.slice(2).map(row=>row.textContent),['lookupCompleted','secondaryIn progress']);
   assert.equal(processArea().children[1].open,true);
 
   const saved={...turn,status:'SUCCEEDED',conversation_committed:true,items:[
     {item_kind:'thinking',content:'Raw saved thinking'},
     {item_kind:'tool_result',content:'Private saved result'},
     {item_kind:'assistant',content:'Answer'},
-  ],process:[summary,{...tool,status:'SUCCEEDED'}]};
+  ],process:[summary,{...tool,status:'SUCCEEDED'},{...laterTool,status:'UNCONFIRMED'}]};
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
   event('MODEL_REQUEST_FINISHED',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,status:'SUCCEEDED'});
@@ -862,11 +865,13 @@ if(process.argv[3]==='tools') {
   const current=processArea();
   assert.equal(current.children[1].open,true);
   assert.equal(document.activeElement,current.children[1].children[0]);
-  assert.deepEqual(current.children.map(item=>item.textContent),['Process','Thinking summaryPublic summary','lookupCompleted']);
+  assert.deepEqual(current.children.map(item=>item.textContent),['Process','Thinking summaryPublic summary','lookupCompleted','secondaryOutcome unconfirmed']);
   assert.equal(article().textContent.match(/Answer/g).length,1);
   assert.equal(modelReads(),readsBeforeCommit,'Chat terminal readback never loads retained model contents');
   assert.doesNotMatch(article().textContent,/Raw saved thinking|Private saved result/);
   await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/Public summary|lookupCompleted/);
+  await select('#session=a');
+  assert.deepEqual(processArea().children.slice(2).map(row=>row.textContent),['lookupCompleted','secondaryOutcome unconfirmed']);
   console.log('Public process survives reconnect and commits in the same turn without duplicating the answer');process.exit(0);
 }
 if(process.argv[3]==='thinking') {

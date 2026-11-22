@@ -1040,7 +1040,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
 
     principal = Principal("runtime", "default")
     raw_marker = "NOT-FOR-CHAT"
-    process = ToolProcessItem("tool:id", "lookup", "SUCCEEDED")
+    process = ToolProcessItem("tool:id", "lookup", "SUCCEEDED", (2, 1))
     now = datetime.now(timezone.utc)
 
     class History:
@@ -1073,7 +1073,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
             for n, (kind, payload, depth) in enumerate((
                 ("ASSISTANT_THINKING_DELTA", {"text": raw_marker}, 0),
                 ("TOOL_CALL_FINISHED", {"call_id": "id", "tool_name": "lookup", "status": "SUCCEEDED",
-                                        "result": raw_marker}, 0),
+                                        "result": raw_marker, "tool_position": [2, 1]}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": "answer", "internal": raw_marker}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": raw_marker}, 1),
                 ("MODEL_ATTEMPT_FINISHED", {"status": "SUCCEEDED", "provider_request": raw_marker}, 0),
@@ -1101,7 +1101,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         assert raw_marker not in history.text
         turn = history.json()["timeline"]["items"][0]
         assert [item["content"] for item in turn["items"]] == ["answer"]
-        assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup", "status": "SUCCEEDED"}]
+        assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup", "status": "SUCCEEDED", "position": [2, 1]}]
 
         response = await http.get("/api/executions/execution/events?view=chat")
         assert response.status_code == 200, response.text
@@ -1111,3 +1111,72 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         assert frames[0]["item"] == turn["process"][0]
         assert frames[1]["item"]["event"]["payload"] == {"text": "answer"}
         assert frames[-1]["status"] == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_positions_match_history_when_parallel_results_finish_out_of_order() -> None:
+    from linktools.ai.capability import AgentContext
+    from linktools.ai.session import project_tool_process_event
+    from pydantic_ai.messages import (
+        ModelMessage,
+        ModelResponse,
+        TextPart,
+        ToolCallPart,
+        ToolReturnPart,
+    )
+    from pydantic_ai.models.function import AgentInfo
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+    release_first = asyncio.Event()
+
+    async def lookup(context: AgentContext[None], label: str) -> str:
+        if label == "first":
+            await release_first.wait()
+        return label
+
+    def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        if any(isinstance(part, ToolReturnPart) for part in messages[-1].parts):
+            return ModelResponse(parts=[TextPart("done")])
+        return ModelResponse(parts=[
+            ToolCallPart("lookup", {"label": "first"}, tool_call_id="z"),
+            ToolCallPart("lookup", {"label": "second"}, tool_call_id="a"),
+        ])
+
+    features = _persistence_capabilities()
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.tool(lookup, effect_policy="none")
+    features.agent("default", model="default", allow_tools=("lookup",))
+    model = _Models(_UsageFunctionModel(respond))
+    async with Persistence.open("web-tool-order", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(model, features),
+    ) as runtime, client(create_app(runtime=runtime)) as http:
+        created = await http.post("/api/sessions", headers=_HEADERS,
+                                  json={"session_id": "tools", "request_id": "create"})
+        assert created.status_code == 201, created.text
+        accepted = await http.post("/api/session/messages?session_id=tools", headers=_HEADERS,
+                                   json={"prompt": "lookup", "request_id": "turn"})
+        assert accepted.status_code == 202, accepted.text
+        execution = await runtime.executions.get(accepted.json()["execution_id"])
+        live_order = []
+        try:
+            async with asyncio.timeout(10):
+                async for observation in execution.watch():
+                    event = observation.event
+                    item = project_tool_process_event(event.event_type, event.payload)
+                    if item is not None and item.status == "SUCCEEDED":
+                        live_order.append(item)
+                        if item.key == "tool:a":
+                            release_first.set()
+        finally:
+            release_first.set()
+        assert (result := (await execution.wait()).result).status.value == "SUCCEEDED", result
+        replay = await http.get("/api/session?session_id=tools")
+        assert replay.status_code == 200, replay.text
+        turn = replay.json()["timeline"]["items"][0]
+        assert [item.key for item in live_order] == ["tool:a", "tool:z"], turn
+        assert turn["conversation_committed"]
+        assert [item["key"] for item in turn["process"]] == ["tool:z", "tool:a"]
+        assert {item["key"]: item["position"] for item in turn["process"]} == {
+            item.key: list(item.position) for item in live_order
+        }

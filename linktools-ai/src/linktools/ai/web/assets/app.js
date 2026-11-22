@@ -556,12 +556,21 @@ function renderTurnPickers() {
   }
 }
 const processToolStatus={RUNNING:'In progress',SUCCEEDED:'Completed',FAILED:'Failed',INTERRUPTED:'Interrupted',CANCELLED:'Cancelled',UNCONFIRMED:'Outcome unconfirmed'};
+function mergeProcessRow(previous,row) {
+  if(!previous)return row;
+  const position=previous.position ?? row.position;
+  const next=row.status==='RUNNING' && previous.status!=='RUNNING' ? previous : row;
+  return next.position===position ? next : {...next,position};
+}
 function renderTurnProcess(section, executionId, rows) {
   section.rows ||= new Map();
   const children=[section.heading];
   const keys=new Set();
   const publicRows=rows || [];
-  for(const row of [...publicRows.filter(row=>row.kind==='reasoning_summary'),...publicRows.filter(row=>row.kind==='tool')]) {
+  const tools=publicRows.filter(row=>row.kind==='tool');
+  const ranked=tools.filter(row=>row.position).sort((a,b)=>a.position[0]-b.position[0] || a.position[1]-b.position[1]);
+  let index=0;
+  for(const row of [...publicRows.filter(row=>row.kind==='reasoning_summary'),...tools.map(row=>row.position?ranked[index++]:row)]) {
     if(typeof row.key!=='string' || keys.has(row.key))continue;
     const summary=row.kind==='reasoning_summary' && typeof row.text==='string' && row.text.trim();
     const tool=row.kind==='tool' && typeof row.tool_name==='string' && Object.hasOwn(processToolStatus,row.status);
@@ -799,10 +808,7 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   renderLiveAttempts(live,wanted,process);
   if(process) {
     const rows=new Map((article?.savedProcess || []).map(row=>[row.key,row]));
-    for(const row of state.liveProcess.values()) {
-      const saved=rows.get(row.key);
-      if(row.status!=='RUNNING' || !saved || saved.status==='RUNNING')rows.set(row.key,row);
-    }
+    for(const row of state.liveProcess.values())rows.set(row.key,mergeProcessRow(rows.get(row.key),row));
     const section=article?.processNode || (live.processNode ||= turnProcess());
     renderTurnProcess(section,state.observedExecution,[...rows.values()]);
     if(article)article.savedAnswers.hidden=Boolean(state.liveText || wanted.some(node=>node.previewHasAnswer));
@@ -1493,10 +1499,8 @@ async function watchExecution(id,generation) {
         }
         if(envelope.type==='process') {
           if(!committed && item?.key) {
-            const previous=state.liveProcess.get(item.key);
-            if(item.status!=='RUNNING' || !previous || previous.status==='RUNNING') {
-              state.liveProcess.set(item.key,item);scheduleLiveRender();
-            }
+            const previous=state.liveProcess.get(item.key),row=mergeProcessRow(previous,item);
+            if(row!==previous){state.liveProcess.set(item.key,row);scheduleLiveRender();}
           }
         } else if(envelope.type==='model') {
           const previous=state.models.get(modelKey(item.item));upsertModel(state.models,item.item);

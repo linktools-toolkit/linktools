@@ -93,7 +93,10 @@ root execution's live tool events, call
 `linktools.ai.session.project_tool_process_event(event_type, payload)`.
 It returns the same `ToolProcessItem` shape (or no item). Keep items keyed by
 `(execution_id, item.key)`; an update replaces the same row, not a new row.
-When the committed turn becomes available, use its saved list as authority.
+Sort positioned rows by `item.position` (turn message number, then response
+part index), not by event arrival or tool call ID. Keep a known position when
+a later update has no position. When the turn commits, use its saved list as
+authority.
 The helper does not read storage, authorize access, or interpret a transport
 cursor as a tool identity. Frontends retain ownership of labels and styling.
 
