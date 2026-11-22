@@ -20,6 +20,8 @@ dev-dependencies:
   - aiosqlite==0.22.1
   - asyncpg
   - asyncmy
+  - aiomysql==0.3.2
+  - PyMySQL==1.2.4
 
 release-dependencies:
   - linktools>=0.10.0

@@ -13,6 +13,7 @@ from linktools.core import environ
 from ..core import JsonValue, validate_asset_namespace, validate_idempotency_key
 from ..errors import AIError, ErrorCode
 from ..storage import (
+    sql_binary,
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
@@ -68,8 +69,7 @@ _ASSET_INFO_FIELDS = frozenset(
 
 
 def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData":
-    from sqlalchemy import JSON, BigInteger, Column, LargeBinary, MetaData, Table
-    from sqlalchemy.dialects.mysql import VARBINARY
+    from sqlalchemy import JSON, BigInteger, Column, MetaData, Table
 
     if metadata is None:
         metadata = MetaData()
@@ -106,7 +106,7 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
         ),
         Column("kind", sql_text_key(128), nullable=False, comment="Original Asset kind namespace."),
         Column(
-            "asset_id", LargeBinary(512).with_variant(VARBINARY(512), "mysql"),
+            "asset_id", sql_binary(512),
             nullable=False, comment="Exact UTF-8 bytes of the opaque Asset identifier.",
         ),
         Column("entry_revision", BigInteger, nullable=False, comment="Latest committed per-asset revision."),

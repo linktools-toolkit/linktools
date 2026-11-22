@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from ..core import RESOURCE_ID_MAX_BYTES
 from ..storage import (
+    sql_binary,
     sql_audit_columns,
     sql_audit_indexes,
     sql_blob,
@@ -29,7 +30,7 @@ from ._turn_sql_schema import TURN_SESSION_MAX_BYTES
 
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
     """Build one physical owner with the common optimistic record contract."""
-    from sqlalchemy import TIMESTAMP, BigInteger, SmallInteger, JSON, Column, LargeBinary, String, Table, Text, text
+    from sqlalchemy import TIMESTAMP, BigInteger, SmallInteger, JSON, Column, String, Table, Text, text
     from sqlalchemy.dialects import mysql
 
     if name in metadata.tables:
@@ -38,31 +39,31 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         sql_id_column(),
         Column(
             "store_key",
-            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
+            sql_binary(STORE_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "key",
-            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
+            sql_binary(RECORD_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the persisted runtime record.",
         ),
         Column(
             "scope_key",
-            LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
+            sql_binary(RELATION_KEY_MAX_BYTES),
             nullable=True,
             comment="Bounded binary grouping identity used by the record kind's primary list query.",
         ),
         Column(
             "subject_id",
-            LargeBinary(RESOURCE_ID_MAX_BYTES).with_variant(mysql.VARBINARY(RESOURCE_ID_MAX_BYTES), "mysql"),
+            sql_binary(RESOURCE_ID_MAX_BYTES),
             nullable=True,
             comment="Exact UTF-8 subject identifier used for lookups within a record scope.",
         ),
         Column(
             "parent_key",
-            LargeBinary(PARENT_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(PARENT_KEY_MAX_BYTES), "mysql"),
+            sql_binary(PARENT_KEY_MAX_BYTES),
             nullable=True,
             comment="Bounded binary parent identity used by hierarchical list queries.",
         ),
@@ -127,7 +128,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                comment="Single SHA-256 lookup projection of the complete scope_key; raw identity must also match."),
         Column("parent_locator", sql_sha256(), nullable=True,
                comment="Single SHA-256 lookup projection of the complete parent_key; raw identity must also match."),
-        Column("sort_prefix", LargeBinary(128).with_variant(mysql.VARBINARY(128), "mysql"), nullable=False,
+        Column("sort_prefix", sql_binary(128), nullable=False,
                comment="First 128 bytes of the full sort key; non-unique query projection only."),
         *(Column(column, sql_sha256(), nullable=True, comment=(
             "Canonical execution reference SHA-256." if name == "ai_execution_records" else
@@ -143,9 +144,9 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
     if name == "ai_execution_records":
         columns[-2:-2] = [
             Column("turn_slot_kind", SmallInteger, nullable=True, comment="Runtime slot family of the exact source owner."),
-            Column("turn_slot_key", LargeBinary(TURN_SESSION_MAX_BYTES).with_variant(mysql.VARBINARY(TURN_SESSION_MAX_BYTES), "mysql"),
+            Column("turn_slot_key", sql_binary(TURN_SESSION_MAX_BYTES),
                    nullable=True, comment="Raw runtime slot identity, separate from its family."),
-            Column("turn_token", LargeBinary(32).with_variant(mysql.VARBINARY(32), "mysql"),
+            Column("turn_token", sql_binary(32),
                    nullable=True, comment="Exact generated runtime lease token."),
             Column("turn_fence", BigInteger, nullable=True, comment="Session fencing generation of the coordinated execution."),
             Column("turn_expiry", TIMESTAMP(timezone=True).with_variant(mysql.DATETIME(fsp=6), "mysql"),

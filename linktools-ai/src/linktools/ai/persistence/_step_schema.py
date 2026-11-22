@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from ..core import RESOURCE_ID_MAX_BYTES
 from ..steps import NATIVE_STORE_KEY_MAX_BYTES, NATIVE_REPLAY_KEY_MAX_BYTES
 from ..storage import (
+    sql_binary,
     sql_audit_columns,
     sql_audit_indexes,
     sql_blob,
@@ -28,9 +29,9 @@ if TYPE_CHECKING:
 
 def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData":
     """Build scoped upstream run, event, snapshot and message tables."""
-    from sqlalchemy import BigInteger, Boolean, Column, JSON, LargeBinary, MetaData, SmallInteger, String, Table
+    from sqlalchemy import BigInteger, Boolean, Column, JSON, MetaData, SmallInteger, String, Table
     from sqlalchemy import text as sql_text
-    from sqlalchemy.dialects.mysql import SMALLINT, VARBINARY
+    from sqlalchemy.dialects.mysql import SMALLINT
 
     if metadata is None:
         metadata = MetaData()
@@ -42,13 +43,11 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         return Column(name, sql_text_key(RESOURCE_ID_MAX_BYTES), nullable=nullable, comment=comment)
 
     def partition() -> "Column":
-        return Column("store_key", LargeBinary(NATIVE_STORE_KEY_MAX_BYTES).with_variant(
-            VARBINARY(NATIVE_STORE_KEY_MAX_BYTES), "mysql"), nullable=False,
+        return Column("store_key", sql_binary(NATIVE_STORE_KEY_MAX_BYTES), nullable=False,
             comment="Exact bounded binary native namespace and tenant partition.")
 
     def replay() -> "Column":
-        return Column("idempotency_key", LargeBinary(NATIVE_REPLAY_KEY_MAX_BYTES).with_variant(
-            VARBINARY(NATIVE_REPLAY_KEY_MAX_BYTES), "mysql"), nullable=False,
+        return Column("idempotency_key", sql_binary(NATIVE_REPLAY_KEY_MAX_BYTES), nullable=False,
                       comment="Exact UTF-8 replay key or a reserved unique occurrence key for an unkeyed append.")
 
     def digest(name: str, comment: str, *, nullable: bool = False) -> "Column":
@@ -77,8 +76,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             text("metadata", "Upstream string metadata encoded as JSON.", nullable=False),
             Column("started_at", String(64), nullable=False, comment="Original ISO 8601 run start time."),
             text("registration_id", "Upstream registration invocation identifier."),
-            Column("managed_start_key", LargeBinary(NATIVE_REPLAY_KEY_MAX_BYTES).with_variant(
-                VARBINARY(NATIVE_REPLAY_KEY_MAX_BYTES), "mysql"), nullable=True,
+            Column("managed_start_key", sql_binary(NATIVE_REPLAY_KEY_MAX_BYTES), nullable=True,
                 comment="Exact first managed start identity; NULL means metadata admission only."),
         )
         sql_unique(runs, "store_locator", "run_id")

@@ -434,6 +434,7 @@ def test_mysql_all_table_columns_and_comments_match_reviewed_ddl() -> None:
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
 def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: str) -> None:
     from sqlalchemy import BigInteger, Integer, LargeBinary, String
+    from sqlalchemy.types import TypeDecorator
     from linktools.ai.persistence.state import STORE_KEY_MAX_BYTES
     from linktools.ai.persistence._step_schema import build_step_sql_metadata
     from linktools.ai.steps import NATIVE_STORE_KEY_MAX_BYTES
@@ -455,8 +456,9 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
                 continue
             size = 0
             for column in index.columns:
-                if isinstance(column.type, LargeBinary):
-                    size += column.type.length
+                kind = column.type.impl if isinstance(column.type, TypeDecorator) else column.type
+                if isinstance(kind, LargeBinary):
+                    size += kind.length
                 elif isinstance(column.type, String):
                     size += column.type.length * 4
                 elif isinstance(column.type, (BigInteger, Integer)):
@@ -475,6 +477,7 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
 def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullable(dialect_name: str) -> None:
     from sqlalchemy import LargeBinary, String, UniqueConstraint
+    from sqlalchemy.types import TypeDecorator
     from sqlalchemy.dialects import postgresql, sqlite
     from sqlalchemy.schema import CreateTable
 
@@ -499,8 +502,9 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
         for index, unique in indexes:
             assert 1 <= len(index.columns) <= 3, (table.name, index.name)
             for column in index.columns:
-                if isinstance(column.type, (LargeBinary, String)):
-                    assert column.type.length is not None and column.type.length <= 128, (table.name, column.name)
+                kind = column.type.impl if isinstance(column.type, TypeDecorator) else column.type
+                if isinstance(kind, (LargeBinary, String)):
+                    assert kind.length is not None and kind.length <= 128, (table.name, column.name)
                 if unique:
                     assert not column.nullable, (
                         table.name, index.name, column.name,

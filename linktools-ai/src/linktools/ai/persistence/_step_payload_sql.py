@@ -68,13 +68,16 @@ class StepPayloadSql:
                 value = value.op("||")(part)
             return cast(value, LargeBinary())
 
-        logical_key = concatenate(literal(encode_key_components(("record",), 768)),
+        def binary_literal(value: bytes):
+            return literal(value, type_=table.c.store_key.type)
+
+        logical_key = concatenate(binary_literal(encode_key_components(("record",), 768)),
             func.substr(table.c.store_key, len(tag) + 1),
-            literal(encode_key_components(("archive", "archive_content"), 768) + b"\x00Rexecution-payload:"), digest)
-        sort_key = concatenate(literal(b"execution-payload:"), digest)
-        conditions = [func.substr(table.c.store_key, 1, len(tag)) == tag]
+            binary_literal(encode_key_components(("archive", "archive_content"), 768) + b"\x00Rexecution-payload:"), digest)
+        sort_key = concatenate(binary_literal(b"execution-payload:"), digest)
+        conditions = [func.substr(table.c.store_key, 1, len(tag)) == binary_literal(tag)]
         if after is not None:
-            conditions.append(logical_key > after)
+            conditions.append(logical_key > binary_literal(after))
         if query is not None:
             if query.kind not in (None, "archive_content") or query.parent_key is not None or query.states is not None:
                 return ()
@@ -85,10 +88,11 @@ class StepPayloadSql:
                     return ()
                 conditions += [table.c.store_locator == payload_store_locator(store), table.c.store_key == store]
             if query.sort_key_prefix is not None:
-                conditions.append(func.substr(sort_key, 1, len(query.sort_key_prefix)) == query.sort_key_prefix)
+                conditions.append(func.substr(sort_key, 1, len(query.sort_key_prefix)) == binary_literal(query.sort_key_prefix))
             if query.after_sort_key is not None:
-                conditions.append(sort_key > query.after_sort_key if query.after_key is None else or_(
-                    sort_key > query.after_sort_key, and_(sort_key == query.after_sort_key, logical_key > query.after_key)))
+                marker = binary_literal(query.after_sort_key)
+                conditions.append(sort_key > marker if query.after_key is None else or_(
+                    sort_key > marker, and_(sort_key == marker, logical_key > binary_literal(query.after_key))))
         statement = select(table).where(*conditions).order_by(
             *((table.c.sha256, table.c.store_key) if query is not None else (table.c.store_key, table.c.sha256)))
         if limit is not None:

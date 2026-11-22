@@ -16,8 +16,10 @@ from ._dialects import (
     dialect_for_name,
     sql_audit_columns,
     sql_audit_indexes,
+    sql_binary,
     sql_blob,
     sql_id_column,
+    sql_insert_many,
     sql_sha256,
     sql_table_options,
     sql_text_key,
@@ -161,7 +163,7 @@ class SqlObjectStore:
                     break
                 for row in rows:
                     row["object_id"] = object_id
-                await self._context.run_statement(session.execute(insert(chunks), rows))
+                await self._context.run_statement(sql_insert_many(session, insert(chunks), rows))
                 index += len(rows)
 
         await self._context.run_mutation(execute, domain="storage.object")
@@ -441,8 +443,7 @@ class SqlObjectStore:
 
 
 def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
-    from sqlalchemy import BigInteger, Column, LargeBinary, MetaData, Table
-    from sqlalchemy.dialects.mysql import VARBINARY
+    from sqlalchemy import BigInteger, Column, MetaData, Table
 
     if metadata is None:
         metadata = MetaData()
@@ -461,7 +462,7 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
         ),
         Column(
             "object_key",
-            LargeBinary(_OBJECT_KEY_MAX_BYTES).with_variant(VARBINARY(_OBJECT_KEY_MAX_BYTES), "mysql"),
+            sql_binary(_OBJECT_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact UTF-8 bytes of the opaque ObjectStore key.",
         ),

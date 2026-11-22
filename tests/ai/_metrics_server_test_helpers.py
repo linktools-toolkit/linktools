@@ -81,7 +81,7 @@ def _server_process(name: str) -> Iterator[tuple[str, list[str]]]:
                 process = subprocess.Popen(
                     [server, "--no-defaults", f"--datadir={data}", f"--socket={root / 'mysql.sock'}",
                      f"--pid-file={root / 'server.pid'}", f"--log-error={root / 'server.log'}", "--skip-networking",
-                     "--mysqlx=OFF", "--innodb-buffer-pool-size=32M"],
+                     "--loose-mysqlx=OFF", "--innodb-buffer-pool-size=32M"],
                     stdout=log, stderr=subprocess.STDOUT,
                 )
                 try:

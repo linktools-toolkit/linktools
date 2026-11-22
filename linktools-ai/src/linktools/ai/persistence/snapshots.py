@@ -33,7 +33,7 @@ from ..errors import AIError, ErrorCode
 from ..steps import native_store_locator, NativeStepSource, rekey_native_step_sources, encode_native_store_key
 from ._step_backup import NativeStepBackup
 from ._native_backup_projection import NativeBackupProjections
-from ..storage import ObjectRef, ObjectStore, read_object
+from ..storage import ObjectRef, ObjectStore, read_object, sql_insert_many
 from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
 from ._run_registration import RunRegistrationStore, RunRegistrationReference, RunRegistrationCleanupResult
@@ -1834,7 +1834,7 @@ async def restore_snapshot(
 
                         for name, rows in ((TURN_SLOT_TABLE, slots), (TURN_ADMISSION_TABLE, admissions)):
                             if rows:
-                                await session.execute(metadata.tables[name].insert(), rows)
+                                await sql_insert_many(session, metadata.tables[name].insert(), rows)
 
                     state_records = tuple(row for row in records if row.kind not in TURN_SNAPSHOT_KINDS)
                 else:

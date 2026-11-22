@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from pydantic import TypeAdapter
 
 from ..errors import AIError, ErrorCode
+from ..storage import sql_insert_many
 from ._record_key import decode_key_components
 from ._run_counters import run_counter_address
 from ._schema import build_runtime_sql_metadata
@@ -419,7 +420,7 @@ class SqlTraceEventStore:
             self.row_to_fact(row)
         async def write(session: "AsyncSession") -> None:
             for offset in range(0, len(values), 32):
-                await self.state.context.run_statement(session.execute(insert(self.table), values[offset:offset + 32]))
+                await self.state.context.run_statement(sql_insert_many(session, insert(self.table), values[offset:offset + 32]))
         await transaction.run_sql(self.state.context, write)
 
     async def scan(self, transaction: StateTransaction, *, after: tuple[bytes, int] | None = None,

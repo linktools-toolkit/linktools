@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from ..core import RESOURCE_ID_MAX_BYTES
 from ..storage import (
+    sql_binary,
     sql_audit_columns,
     sql_audit_indexes,
     sql_blob,
@@ -45,14 +46,12 @@ def build_runtime_sql_metadata(
         JSON,
         Boolean,
         Column,
-        LargeBinary,
         MetaData,
         String,
         Table,
         Text,
         text,
     )
-    from sqlalchemy.dialects import mysql
 
     if metadata is None:
         metadata = MetaData()
@@ -102,13 +101,13 @@ def build_runtime_sql_metadata(
         sql_id_column(),
         Column(
             "store_key",
-            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
+            sql_binary(STORE_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "stream_key",
-            LargeBinary(STREAM_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STREAM_KEY_MAX_BYTES), "mysql"),
+            sql_binary(STREAM_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the append-only fact stream.",
         ),
@@ -120,7 +119,7 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "owner_key",
-            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
+            sql_binary(RECORD_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the runtime record that owns this fact.",
         ),
@@ -132,7 +131,7 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "subject_id",
-            LargeBinary(RESOURCE_ID_MAX_BYTES).with_variant(mysql.VARBINARY(RESOURCE_ID_MAX_BYTES), "mysql"),
+            sql_binary(RESOURCE_ID_MAX_BYTES),
             nullable=True,
             comment="Exact UTF-8 subject identifier grouping facts such as one tool call.",
         ),
@@ -167,13 +166,13 @@ def build_runtime_sql_metadata(
         sql_id_column(),
         Column(
             "store_key",
-            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
+            sql_binary(STORE_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "stream_key",
-            LargeBinary(STREAM_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STREAM_KEY_MAX_BYTES), "mysql"),
+            sql_binary(STREAM_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the monotonic sequence counter.",
         ),
@@ -198,19 +197,19 @@ def build_runtime_sql_metadata(
         sql_id_column(),
         Column(
             "store_key",
-            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
+            sql_binary(STORE_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "operation_key",
-            LargeBinary(OPERATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(OPERATION_KEY_MAX_BYTES), "mysql"),
+            sql_binary(OPERATION_KEY_MAX_BYTES),
             nullable=False,
             comment="Binary operation address, at most 768 bytes.",
         ),
         Column(
             "stream_key",
-            LargeBinary(STREAM_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STREAM_KEY_MAX_BYTES), "mysql"),
+            sql_binary(STREAM_KEY_MAX_BYTES),
             nullable=False,
             comment="Exact bounded binary identity of the ordered operation stream.",
         ),

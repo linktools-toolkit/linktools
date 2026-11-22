@@ -37,12 +37,12 @@ if TYPE_CHECKING:
 
     from collections.abc import Mapping, Sequence
 
+    from sqlalchemy import Insert, TypeEngine
     from sqlalchemy import (
         CHAR,
         BigInteger,
         Column,
         Index,
-        LargeBinary,
         String,
         Table,
     )
@@ -647,10 +647,8 @@ class MySQLDialect(SQLiteDialect):
         from sqlalchemy.exc import IntegrityError
 
         statement = insert(table)
-        parameters = [dict(row) for row in rows]
-        # Let the driver batch escaped values within its statement-size limit.
         try:
-            await session.execute(statement, parameters)
+            await sql_insert_many(session, statement, rows)
         except IntegrityError as error:
             if _read_mysql_errno(error.orig) != 1062:
                 raise
@@ -659,10 +657,7 @@ class MySQLDialect(SQLiteDialect):
         else:
             return len(rows)
         column = index_elements[0]
-        await session.execute(
-            statement.on_duplicate_key_update(**{column: statement.inserted[column]}),
-            parameters,
-        )
+        await sql_insert_many(session, statement.on_duplicate_key_update(**{column: statement.inserted[column]}), rows)
         # FOUND_ROWS makes an ignored duplicate indistinguishable from an insert.
         return None
 
@@ -698,8 +693,8 @@ class MySQLDialect(SQLiteDialect):
         statement = statement.on_duplicate_key_update(**{
             conflict_column: case((matches, current), else_=changed),
         })
-        result = await session.execute(statement, [dict(row) for row in rows])
-        if result.rowcount != len(rows):
+        count = await sql_insert_many(session, statement, rows)
+        if count != len(rows):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def upsert(
@@ -779,12 +774,9 @@ class MySQLDialect(SQLiteDialect):
         from sqlalchemy.dialects.mysql import insert
 
         statement = insert(table)
-        await session.execute(
-            statement.on_duplicate_key_update(
-                **{column: statement.inserted[column] for column in set_columns}
-            ),
-            [dict(row) for row in rows],
-        )
+        await sql_insert_many(session, statement.on_duplicate_key_update(
+            **{column: statement.inserted[column] for column in set_columns}
+        ), rows)
 
     async def upsert_increment_many(
         self,
@@ -812,10 +804,7 @@ class MySQLDialect(SQLiteDialect):
         if "updated_at" in table.c:
             set_values["updated_at"] = (case((matches, sql_audit_now()), else_=table.c.updated_at)
                                         if identity_columns else sql_audit_now())
-        await session.execute(
-            insert_statement.on_duplicate_key_update(**set_values),
-            [dict(row) for row in rows],
-        )
+        await sql_insert_many(session, insert_statement.on_duplicate_key_update(**set_values), rows)
         predicates = tuple(
             and_(
                 *(
@@ -989,11 +978,24 @@ def sql_sort_key() -> "String":
     )
 
 
-def sql_blob() -> "LargeBinary":
-    from sqlalchemy import LargeBinary
-    from sqlalchemy.dialects import mysql
+async def sql_insert_many(
+    session: "AsyncSession", statement: "Insert", rows: "Sequence[Mapping[str, object]]",
+) -> int:
+    """Keep the configured driver's bulk INSERT behavior."""
+    from ._sql_binary import execute_binary_insert_many
 
-    return LargeBinary().with_variant(mysql.LONGBLOB(), "mysql")
+    return await execute_binary_insert_many(session, statement, rows)
+
+
+def sql_binary(length: int | None = None) -> "TypeEngine[bytes]":
+    """Bind binary values without changing their column representation."""
+    from ._sql_binary import SqlBinary
+
+    return SqlBinary(length)
+
+
+def sql_blob() -> "TypeEngine[bytes]":
+    return sql_binary()
 
 
 def sql_table_options() -> "Mapping[str, str]":
@@ -1202,8 +1204,11 @@ def column_type_matches(
 ) -> bool:
     """Return whether an expected column type is compatible with the reflected one."""
     from sqlalchemy import JSON, LargeBinary
+    from ._sql_binary import SqlBinary
 
     expected_type = expected.type.dialect_impl(connection.dialect)
+    if isinstance(expected_type, SqlBinary):
+        expected_type = expected_type.impl
     actual_type = actual.get("type")
     dialect_name = connection.dialect.name
     if dialect_name == "mysql" and expected.name == "lease_expires_at":
@@ -1457,6 +1462,8 @@ __all__ = [
     "sql_audit_columns",
     "sql_audit_now",
     "sql_audit_indexes",
+    "sql_binary",
+    "sql_insert_many",
     "sql_blob",
     "sql_digest",
     "sql_id_column",

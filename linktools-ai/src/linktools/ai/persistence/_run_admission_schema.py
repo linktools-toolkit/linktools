@@ -5,6 +5,7 @@
 from typing import TYPE_CHECKING
 
 from ..storage import (
+    sql_binary,
     sql_audit_columns, sql_audit_indexes, sql_blob, sql_id_column,
     sql_sha256, sql_table_options, sql_unique,
 )
@@ -16,20 +17,19 @@ if TYPE_CHECKING:
 
 def build_run_admission_sql_metadata(metadata: "MetaData") -> None:
     """Keep local publication atomic without copying the canonical run body."""
-    from sqlalchemy import BigInteger, Column, JSON, LargeBinary, Table
-    from sqlalchemy.dialects.mysql import VARBINARY
+    from sqlalchemy import BigInteger, Column, JSON, Table
 
     if "ai_step_run_admissions" in metadata.tables:
         return
     table = Table(
         "ai_step_run_admissions", metadata, sql_id_column(),
-        Column("store_key", LargeBinary(STORE_KEY_MAX_BYTES).with_variant(VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
+        Column("store_key", sql_binary(STORE_KEY_MAX_BYTES),
                nullable=False, comment="Exact namespace, tenant and domain partition admitting this run."),
-        Column("key", LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
+        Column("key", sql_binary(RECORD_KEY_MAX_BYTES),
                nullable=False, comment="Canonical local run admission identity, independent of the registration owner."),
-        Column("scope_key", LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
+        Column("scope_key", sql_binary(RELATION_KEY_MAX_BYTES),
                nullable=True, comment="Conversation lookup identity derived from the validated domain projection."),
-        Column("parent_key", LargeBinary(PARENT_KEY_MAX_BYTES).with_variant(VARBINARY(PARENT_KEY_MAX_BYTES), "mysql"),
+        Column("parent_key", sql_binary(PARENT_KEY_MAX_BYTES),
                nullable=True, comment="Parent-run lookup identity derived from the validated domain projection."),
         Column("sort_key", sql_blob(), nullable=False,
                comment="Stable ordering by projected start time and complete admission identity."),
@@ -43,7 +43,7 @@ def build_run_admission_sql_metadata(metadata: "MetaData") -> None:
                comment="SHA-256 lookup projection of the projected conversation scope."),
         Column("parent_locator", sql_sha256(), nullable=True,
                comment="SHA-256 lookup projection of the projected parent-run identity."),
-        Column("sort_prefix", LargeBinary(128).with_variant(VARBINARY(128), "mysql"), nullable=False,
+        Column("sort_prefix", sql_binary(128), nullable=False,
                comment="First 128 sort-key bytes used only for ordered lookup."),
         Column("event_high_water", BigInteger, nullable=True,
                comment="Last allocated local event sequence; NULL means no event counter."),

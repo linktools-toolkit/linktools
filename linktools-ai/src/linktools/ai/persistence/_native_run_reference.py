@@ -161,8 +161,11 @@ class NativeRunReferences:
             events = self._events if prefix == "start" else self._events.alias("terminal_source")
             joined = joined.outerjoin(events, and_(events.c.store_locator == runs.c.store_locator, events.c.store_key == runs.c.store_key,
                 events.c.run_id == runs.c.run_id,
-                events.c.idempotency_key == bindparam("source_event_key" if prefix == "start" else "source_terminal_key",
-                                                encode_native_replay_key(event.idempotency_key))))
+                events.c.idempotency_key == bindparam(
+                    "source_event_key" if prefix == "start" else "source_terminal_key",
+                    encode_native_replay_key(event.idempotency_key),
+                    type_=events.c.idempotency_key.type,
+                )))
             names = tuple(field.name for field in fields(NativeStepEvent)) + (
                 "outcome", "store_key", "run_fields", "body_sha256", "fields_sha256",
             )

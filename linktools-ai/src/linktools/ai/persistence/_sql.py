@@ -557,7 +557,10 @@ class SqlStateStorageGroup:
             ]
             if key == STATE_GROUP_ARCHIVE_KEY:
                 messages = _payload_table(self._metadata)
-                statements.append(select(literal(key)).where(func.substr(messages.c.store_key, 1, 14) == b"\x00\x0cstep_payload"))
+                key_type = messages.c.store_key.type
+                statements.append(select(literal(key, type_=key_type)).where(
+                    func.substr(messages.c.store_key, 1, 14, type_=key_type) == b"\x00\x0cstep_payload",
+                ))
             async with self._session() as session:
                 result = await self._context.run_statement(session.execute(union(*statements).limit(1)))
                 if result.first() is None:
@@ -651,7 +654,7 @@ class SqlStateStorageGroup:
             for name in RECORD_OWNER_TABLES]
         messages = _payload_table(self._metadata)
         statements.append(select(literal(1)).select_from(messages).where(
-            func.substr(messages.c.store_key, 1, 14) == b"\x00\x0cstep_payload"))
+            func.substr(messages.c.store_key, 1, 14, type_=messages.c.store_key.type) == b"\x00\x0cstep_payload"))
         occupied = await self._context.run_statement(session.execute(union_all(*statements).limit(1)))
         if occupied.first() is not None:
             # Under READ COMMITTED another writer can publish between the two
@@ -711,8 +714,8 @@ class SqlStateStorageGroup:
                          "ai_state_counters", "ai_state_operations")
         ]
         messages = _payload_table(self._metadata)
-        statements.append(select(literal(STATE_GROUP_ARCHIVE_KEY)).where(
-            func.substr(messages.c.store_key, 1, 14) == b"\x00\x0cstep_payload"))
+        statements.append(select(literal(STATE_GROUP_ARCHIVE_KEY, type_=messages.c.store_key.type)).where(
+            func.substr(messages.c.store_key, 1, 14, type_=messages.c.store_key.type) == b"\x00\x0cstep_payload"))
         async with self._session() as session:
             result = await self._context.run_statement(session.execute(union(*statements)))
             keys = tuple(_row_store_key(value) for value in result.scalars())
@@ -2874,12 +2877,19 @@ class _SqlTransaction:
         if owners == ("ai_step_messages",):
             await self._delete_payload_records(unique_keys)
             return
-        from sqlalchemy import delete, tuple_, update
+        from sqlalchemy import delete, literal, tuple_, update
 
         table = self._table(owners[0])
         facts = self._table("ai_state_facts")
         deleted_keys: set[bytes] = set()
         statement_count = 0
+        aiomysql = self._context.engine.dialect.name == "mysql" and self._context.engine.dialect.driver == "aiomysql"
+
+        def match_revisions(rows: Sequence[tuple[bytes, int]]) -> "ColumnElement[bool]":
+            # Tuple expansion does not compile the bind expression on individual cells.
+            entries = ([tuple_(literal(key, type_=table.c.key.type), revision) for key, revision in rows]
+                       if aiomysql else rows)
+            return tuple_(table.c.key, table.c.storage_revision).in_(entries)
         try:
             for offset in range(0, len(unique_keys), _RECORD_DELETE_BATCH_SIZE):
                 current = await self.get_records(
@@ -2897,7 +2907,7 @@ class _SqlTransaction:
                 guarded = await self._execute(update(table).where(
                     table.c.store_key == self._store_key,
                     _keys_match(table.c.key, record_keys),
-                    tuple_(table.c.key, table.c.storage_revision).in_(cas_conditions),
+                    match_revisions(cas_conditions),
                 ).values(storage_revision=table.c.storage_revision + 1, updated_at=sql_audit_now()))
                 if guarded.rowcount != len(current):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -2907,7 +2917,7 @@ class _SqlTransaction:
                     delete(table).where(
                         table.c.store_key == self._store_key,
                         _keys_match(table.c.key, record_keys),
-                        tuple_(table.c.key, table.c.storage_revision).in_(cas_conditions),
+                        match_revisions(cas_conditions),
                     )
                 )
                 if result.rowcount != len(current):

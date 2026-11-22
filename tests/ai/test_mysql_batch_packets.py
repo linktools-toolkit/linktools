@@ -3,6 +3,7 @@
 """MySQL bulk writes retain driver packet limits and outer transaction ownership."""
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from asyncmy.connection import Connection
@@ -80,6 +81,9 @@ class _PacketSession:
         self.cursor = cursor
         self.selects = 0
         self.rowcount = 0
+
+    def get_bind(self):
+        return SimpleNamespace(dialect=mysql_dialect())
 
     async def execute(
         self, statement: ClauseElement, parameters: list[dict[str, SqlValue]] | None = None,
@@ -164,7 +168,6 @@ async def test_mysql_event_retry_does_not_replay_neighboring_unkeyed_events() ->
              for index in range(64)]
     class EventSession(_PacketSession):
         def all(self):
-            from types import SimpleNamespace
             # The packet fake models the successful replay's existing keyed rows.
             return [SimpleNamespace(run_id=value.run_id,
                                     idempotency_key=value.idempotency_key.encode("utf-8"),
