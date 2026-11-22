@@ -207,7 +207,7 @@ class LocalRuntime:
     metrics: Metrics
     capabilities: tuple[dict[str, str | int], ...]
     status: "Mapping[str, object]"
-    runtime_root: Path
+    workspace: Workspace
 
 
 class _LocalSessionFeed:
@@ -261,15 +261,16 @@ async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "
     from ._session_notices import session_notice_publisher, session_notice_receiver
 
     feed = _LocalSessionFeed(local.runtime)
+    runtime_root = _local_runtime_root(local.workspace)
     async with AsyncExitStack() as stack:
-        offer = await stack.enter_async_context(session_notice_publisher(local.runtime_root))
+        offer = await stack.enter_async_context(session_notice_publisher(runtime_root))
 
         def publish(notice: "LocalSessionTurnNotice") -> None:
             offer({**asdict(notice), "source": feed.source}, discover=notice.kind != "tool")
 
         stack.callback(local.runtime.sessions.observe_local_turns(publish))
         if receive:
-            await stack.enter_async_context(session_notice_receiver(local.runtime_root, feed.receive))
+            await stack.enter_async_context(session_notice_receiver(runtime_root, feed.receive))
         yield feed if receive else None
 
 
@@ -310,7 +311,7 @@ async def _open_local_runtime(
         yield LocalRuntime(runtime, metrics, declarations, {
             "workspace": str(workspace.root), "asset_root": str(workspace.storage_root),
             **({} if status is None else status),
-        }, _local_runtime_root(workspace))
+        }, workspace)
 
 
 def run_local(

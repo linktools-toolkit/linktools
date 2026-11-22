@@ -248,6 +248,11 @@ declaration controls retention and commit; workspace
 capability remains built in. A cache attached only to storage does not enable
 turn or stream coordination.
 
+ACP uses absolute working directories at its protocol boundary. Runtime keeps
+workspace-relative session directories; a session with no directory uses the
+workspace root. List filtering matches that effective directory, and loading
+replays the stored session without changing its directory.
+
 `PersistenceStorage(..., coordination=cache)` explicitly supplies shared turn
 coordination and live streams. The execution route cache only serves hot
 execution record reads. Session metadata/display and Conversation content

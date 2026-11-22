@@ -11,6 +11,7 @@ import pytest
 from linktools.ai.acp import ACPAgent
 from linktools.ai.core import Page, Principal, SessionStatus
 from linktools.ai.execution import ListSessionRequest, SessionView
+from linktools.ai.workspace import Workspace
 
 
 def _schema_object(**values: object) -> dict[str, object]:
@@ -19,12 +20,15 @@ def _schema_object(**values: object) -> dict[str, object]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sdk", (False, True))
-@pytest.mark.parametrize("cwd", (None, "/selected"))
+@pytest.mark.parametrize("filter_cwd", (False, True))
 async def test_acp_session_listing_advertises_and_preserves_pagination(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     sdk: bool,
-    cwd: str | None,
+    filter_cwd: bool,
 ) -> None:
+    workspace = Workspace(tmp_path, {})
+    cwd = str(workspace.root / "selected") if filter_cwd else None
     if sdk:
         acp = pytest.importorskip("acp")
         schema = pytest.importorskip("acp.schema")
@@ -46,18 +50,19 @@ async def test_acp_session_listing_advertises_and_preserves_pagination(
         requests.append(request)
         if request.cursor is None:
             return Page(
-                (SessionView("first", "agent", SessionStatus.OPEN, cwd="/first"),),
+                (SessionView("first", "agent", SessionStatus.OPEN, cwd="first"),),
                 "opaque-next-page",
             )
         assert request.cursor == "opaque-next-page"
         return Page((
-            SessionView("second", "agent", SessionStatus.OPEN, cwd="/selected"),
+            SessionView("second", "agent", SessionStatus.OPEN, cwd="selected"),
             SessionView("unknown", "agent", SessionStatus.OPEN),
         ), None)
 
     agent = ACPAgent(
         SimpleNamespace(sessions=SimpleNamespace(list=list_sessions)),
         principal=principal,
+        workspace=workspace,
     )
     initialized = await agent.initialize(acp.PROTOCOL_VERSION)
     initialize_payload = initialized.model_dump(by_alias=True) if sdk else initialized
@@ -69,14 +74,15 @@ async def test_acp_session_listing_advertises_and_preserves_pagination(
     first_payload = first.model_dump(by_alias=True) if sdk else first
     assert first_payload["nextCursor"] == "opaque-next-page"
     assert [(item["sessionId"], item["cwd"]) for item in first_payload["sessions"]] == (
-        [("first", "/first")] if cwd is None else []
+        [("first", str(workspace.root / "first"))] if cwd is None else []
     )
 
     second = await agent.list_sessions(cwd=cwd, cursor=first_payload["nextCursor"])
     second_payload = second.model_dump(by_alias=True) if sdk else second
     assert second_payload["nextCursor"] is None
     assert [(item["sessionId"], item["cwd"]) for item in second_payload["sessions"]] == (
-        [("second", "/selected"), ("unknown", "")] if cwd is None else [("second", "/selected")]
+        [("second", str(workspace.root / "selected")), ("unknown", str(workspace.root))]
+        if cwd is None else [("second", cwd)]
     )
     assert requests == [
         ListSessionRequest(principal, cursor=None, limit=200),

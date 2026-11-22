@@ -79,8 +79,11 @@ async def test_acp_admission_busy_is_a_safe_protocol_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_acp_load_replays_only_committed_public_history_in_turn_order() -> None:
+async def test_acp_load_replays_only_committed_public_history_in_turn_order(tmp_path) -> None:
     acp = pytest.importorskip("acp")
+    from linktools.ai.workspace import Workspace
+
+    workspace = Workspace(tmp_path, {})
     principal = Principal("caller", "tenant")
 
     def turn(text, *, committed=True, process=()):
@@ -95,20 +98,23 @@ async def test_acp_load_replays_only_committed_public_history_in_turn_order() ->
             ),
         )
 
-    async def timeline(session_id, *, principal, cursor):
+    async def session_detail(session_id, *, principal, cursor):
         assert session_id == "session" and principal == expected_principal
         if cursor is None:
-            return SimpleNamespace(items=(turn("new"), turn("uncommitted", committed=False)), next_cursor="older")
-        assert cursor == "older"
-        return SimpleNamespace(items=(turn("old", process=(ToolProcessItem("tool:c-1", "search", "SUCCEEDED"),)),),
-                               next_cursor=None)
+            page = SimpleNamespace(items=(turn("new"), turn("uncommitted", committed=False)), next_cursor="older")
+        else:
+            assert cursor == "older"
+            page = SimpleNamespace(items=(turn("old", process=(ToolProcessItem("tool:c-1", "search", "SUCCEEDED"),)),),
+                                   next_cursor=None)
+        return SimpleNamespace(session=SimpleNamespace(cwd=None), timeline=page)
 
     expected_principal = principal
-    agent = ACPAgent(SimpleNamespace(history=SimpleNamespace(session_timeline=timeline)), principal=principal)
+    agent = ACPAgent(SimpleNamespace(history=SimpleNamespace(session_detail=session_detail)),
+                     principal=principal, workspace=workspace)
     connection = SimpleNamespace(session_update=AsyncMock())
     agent.on_connect(connection)
     await agent.initialize(acp.PROTOCOL_VERSION)
-    await agent.load_session("/workspace", "session")
+    await agent.load_session(str(workspace.root), "session")
 
     updates = [request.args[1] for request in connection.session_update.await_args_list]
     assert [value.session_update for value in updates] == [

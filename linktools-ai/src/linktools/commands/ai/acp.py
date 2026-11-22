@@ -29,7 +29,9 @@ class Command(BaseCommand):
 
         async def execute(local: "LocalRuntime") -> int:
             async with local_turn_notices(local):
-                await serve_stdio(ACPAgent(local.runtime, principal=local.runtime.default_principal))
+                await serve_stdio(ACPAgent(
+                    local.runtime, principal=local.runtime.default_principal, workspace=local.workspace,
+                ))
             return 0
 
         return run_local(args, execute)

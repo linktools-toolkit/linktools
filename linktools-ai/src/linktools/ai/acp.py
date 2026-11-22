@@ -4,6 +4,7 @@
 
 import asyncio
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
@@ -53,9 +54,10 @@ class ACPTextContent(Protocol):
 class ACPAgent:
     """Translate ACP requests into Runtime calls and durable event reads."""
 
-    def __init__(self, runtime: Runtime, *, principal: Principal) -> None:
+    def __init__(self, runtime: Runtime, *, principal: Principal, workspace: Workspace | None = None) -> None:
         self._runtime = runtime
         self._principal = principal
+        self._workspace = workspace
         self._connection: ACPConnection | None = None
         self._initialized = False
         self._prompts: dict[str, asyncio.Future[Execution | None]] = {}
@@ -73,9 +75,9 @@ class ACPAgent:
         return schema.InitializeResponse(
             protocolVersion=protocol_version,
             agentCapabilities=schema.AgentCapabilities(
-                loadSession=True,
+                loadSession=self._workspace is not None,
                 sessionCapabilities=schema.SessionCapabilities(
-                    list=schema.SessionListCapabilities(),
+                    list=None if self._workspace is None else schema.SessionListCapabilities(),
                 ),
             ),
             authMethods=[],
@@ -84,12 +86,15 @@ class ACPAgent:
 
     async def new_session(self, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
-        session = await self._runtime.agents.get().create_session(
-            uuid4().hex,
-            principal=self._principal,
-            cwd=cwd,
-        )
+        acp, schema = _require_acp()
+        session_id = uuid4().hex
+        try:
+            logical_cwd = self._workspace_cwd(cwd)
+            session = await self._runtime.agents.get().create_session(
+                session_id, principal=self._principal, cwd=logical_cwd,
+            )
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id) from error
         return schema.NewSessionResponse(sessionId=session.session_id)
 
     async def load_session(self, cwd: str, session_id: str, **kwargs: JsonValue) -> JsonValue:
@@ -99,10 +104,14 @@ class ACPAgent:
         cursor = None
         pages = []
         try:
+            logical_cwd = self._workspace_cwd(cwd)
             while True:
-                page = await self._runtime.history.session_timeline(
+                detail = await self._runtime.history.session_detail(
                     session_id, principal=self._principal, cursor=cursor,
                 )
+                if (detail.session.cwd or ".") != logical_cwd:
+                    raise acp.RequestError.invalid_params({"reason": "workspace_cwd_mismatch"})
+                page = detail.timeline
                 pages.append(page.items)
                 cursor = page.next_cursor
                 if cursor is None:
@@ -137,15 +146,22 @@ class ACPAgent:
         **kwargs: JsonValue,
     ) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
+        acp, schema = _require_acp()
+        workspace = self._workspace
+        if workspace is None:
+            raise acp.RequestError.invalid_params({"reason": "workspace_required"})
+        try:
+            logical_cwd = None if cwd is None else self._workspace_cwd(cwd)
+        except AIError:
+            return schema.ListSessionsResponse(sessions=[])
         page = await self._runtime.sessions.list(
             ListSessionRequest(self._principal, cursor=cursor, limit=200),
         )
         return schema.ListSessionsResponse(
             sessions=[
-                schema.SessionInfo(sessionId=item.session_id, cwd=item.cwd or "")
+                schema.SessionInfo(sessionId=item.session_id, cwd=str(workspace.root / (item.cwd or ".")))
                 for item in page.items
-                if cwd is None or item.cwd == cwd
+                if logical_cwd is None or (item.cwd or ".") == logical_cwd
             ],
             nextCursor=page.next_cursor,
         )
@@ -155,16 +171,38 @@ class ACPAgent:
 
     async def fork_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
+        acp, schema = _require_acp()
         from .execution import ForkSessionRequest
 
-        source = await self._runtime.sessions.get(session_id, principal=self._principal)
-        session = await self._runtime.sessions.fork(
-            source.agent_id,
-            session_id,
-            ForkSessionRequest(self._principal, uuid4().hex, uuid4().hex, cwd),
-        )
+        try:
+            logical_cwd = self._workspace_cwd(cwd)
+            source = await self._runtime.sessions.get(session_id, principal=self._principal)
+            session = await self._runtime.sessions.fork(
+                source.agent_id, session_id,
+                ForkSessionRequest(self._principal, uuid4().hex, uuid4().hex, logical_cwd),
+            )
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id) from error
         return schema.ForkSessionResponse(sessionId=session.session_id)
+
+    def _workspace_cwd(self, cwd: str) -> str:
+        workspace = self._workspace
+        if workspace is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"field": "cwd", "reason": "workspace_required"})
+        try:
+            path = Path(cwd)
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError
+            resolved = path.resolve()
+            relative = resolved.relative_to(workspace.root)
+            # Keep an in-workspace logical alias after checking physical containment.
+            if path.is_relative_to(workspace.root):
+                relative = path.relative_to(workspace.root)
+            return workspace.validate_path(relative.as_posix())
+        except (OSError, RuntimeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"field": "cwd", "reason": "invalid_workspace_cwd"}) from error
 
     async def close_session(self, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
@@ -320,6 +358,7 @@ class ACPApplication:
                 ACPAgent(
                     runtime,
                     principal=runtime.default_principal,
+                    workspace=self.workspace,
                 )
             )
 
