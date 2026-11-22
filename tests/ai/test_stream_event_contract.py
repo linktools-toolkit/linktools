@@ -11,7 +11,7 @@ from linktools.ai.execution.handle import ExecutionBinding
 
 import pytest
 
-from linktools.ai.acp import ACPAgent, _acp_update
+from linktools.ai.acp import ACPAgent
 from linktools.ai.core import (
     ExecutionDeltaType,
     ExecutionEventType,
@@ -206,10 +206,6 @@ class _ACPSchema:
         return {"schema_type": "message", **kwargs}
 
     @staticmethod
-    def AgentThoughtChunk(**kwargs: object) -> dict[str, object]:
-        return {"schema_type": "thought", **kwargs}
-
-    @staticmethod
     def ToolCallStart(**kwargs: object) -> dict[str, object]:
         return {"schema_type": "tool-start", **kwargs}
 
@@ -222,6 +218,7 @@ class _ACPSchema:
         return kwargs
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("event_type", "payload", "expected_kind"),
     (
@@ -233,7 +230,7 @@ class _ACPSchema:
         (
             ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value,
             {"text": "reason"},
-            "thought",
+            None,
         ),
         (
             ExecutionEventType.TOOL_CALL_STARTED.value,
@@ -242,33 +239,34 @@ class _ACPSchema:
         ),
         (
             ExecutionEventType.TOOL_CALL_FINISHED.value,
-            {"call_id": "call", "status": "SUCCEEDED"},
+            {"call_id": "call", "tool_name": "read_file", "status": "SUCCEEDED"},
             "tool-progress",
         ),
+        ("FUTURE_EXECUTION_EVENT", {}, None),
     ),
 )
-def test_acp_maps_string_stream_event_types(
+async def test_acp_public_prompt_filters_string_stream_events(
+    monkeypatch: pytest.MonkeyPatch,
     event_type: str,
     payload: dict[str, object],
-    expected_kind: str,
+    expected_kind: str | None,
 ) -> None:
-    update = _acp_update(
-        _ACPSchema,  # type: ignore[arg-type]
-        event_type,
-        payload,  # type: ignore[arg-type]
+    execution = _ACPExecution(_acp_result(ExecutionStatus.SUCCEEDED), (_tree_event(event_type, payload),))
+    agent = ACPAgent(
+        _ACPAgentRuntime(execution),  # type: ignore[arg-type]
+        principal=Principal("principal", "tenant", "service"),
     )
+    agent._initialized = True
+    monkeypatch.setattr("linktools.ai.acp._require_acp", lambda: (SimpleNamespace(), _ACPSchema))
+    updates = []
 
-    assert isinstance(update, dict)
-    assert update["schema_type"] == expected_kind
+    async def session_update(session_id: str, update: dict[str, object]) -> None:
+        assert session_id == "session"
+        updates.append(update["schema_type"])
 
-
-def test_acp_ignores_unknown_additive_stream_event() -> None:
-    assert _acp_update(
-        _ACPSchema,  # type: ignore[arg-type]
-        "FUTURE_EXECUTION_EVENT",
-        {},
-    ) is None
-
+    agent.on_connect(SimpleNamespace(session_update=session_update))
+    await agent.prompt("session", [SimpleNamespace(text="prompt")])
+    assert updates == ([] if expected_kind is None else [expected_kind])
 
 class _ACPExecution:
     execution_id = "execution"
@@ -354,30 +352,22 @@ def _acp_result(status: ExecutionStatus) -> ExecutionResult:
 class _ACPAgentRuntime:
     def __init__(self, execution: _ACPExecution) -> None:
         self._execution = execution
-        self.sessions = SimpleNamespace(get=self._get_session)
-        self.agents = SimpleNamespace(get=self._get_agent)
+        self.sessions = SimpleNamespace(start=self._start_session)
+        self.request_id: str | None = None
 
-    async def _get_session(self, session_id: str, *, principal: Principal) -> object:
-        del session_id, principal
-        return SimpleNamespace(agent_id="agent")
-
-    def _get_agent(self, agent_id: str) -> object:
-        assert agent_id == "agent"
-        execution = self._execution
-
-        class BoundAgent:
-            async def start(
-                self,
-                prompt: str,
-                *,
-                principal: Principal,
-                session_id: str,
-            ) -> Execution:
-                del prompt, principal, session_id
-                return execution.handle
-
-        return BoundAgent()
-
+    async def _start_session(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        principal: Principal,
+        idempotency_key: str,
+    ) -> Execution:
+        assert (session_id, prompt, principal) == (
+            "session", "prompt", Principal("principal", "tenant", "service"),
+        )
+        self.request_id = idempotency_key
+        return self._execution.handle
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -453,8 +443,9 @@ async def test_acp_surfaces_sanitized_execution_failures(
     expected_code: ErrorCode,
 ) -> None:
     execution = _ACPExecution(result)
+    runtime = _ACPAgentRuntime(execution)
     agent = ACPAgent(
-        _ACPAgentRuntime(execution),  # type: ignore[arg-type]
+        runtime,  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
     )
     agent._initialized = True
@@ -467,7 +458,7 @@ async def test_acp_surfaces_sanitized_execution_failures(
     assert error.value.code == -32603
     assert isinstance(error.value.data, dict)
     assert error.value.data["code"] == expected_code.value
-    assert error.value.data["operation_id"] == "execution"
+    assert runtime.request_id and error.value.data["operation_id"] == runtime.request_id
     assert error.value.data["safe_details"] == {"execution_id": "execution"}
     assert "secret" not in str(error.value.data)
     assert execution.stream_finished
@@ -536,7 +527,7 @@ async def test_acp_streamed_chunks_are_not_repeated_from_final_result(
     agent.on_connect(SimpleNamespace(session_update=session_update))
     response = await agent.prompt("session", [SimpleNamespace(text="prompt")])
     assert response["stopReason"] == "end_turn"
-    assert [update["content"]["text"] for update in updates] == ["hello ", "reason", "world"]
+    assert [update["content"]["text"] for update in updates] == ["hello ", "world"]
 
 
 @pytest.mark.asyncio
