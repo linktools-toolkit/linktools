@@ -1793,3 +1793,57 @@ async def test_activity_waiter_generations_release_independently() -> None:
     await asyncio.wait_for(first, 1)
     assert not broker._activity
     assert not broker._activity_waiters
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["register", "handoff"])
+async def test_local_only_observation_handles_admission_and_handoff_without_remote_poll(mode: str) -> None:
+    from linktools.ai.execution.stream import local_execution_stream
+
+    broker = LiveExecutionEventBroker()
+    pending = asyncio.get_running_loop().create_future()
+    authorization_started, authorize = asyncio.Event(), asyncio.Event()
+
+    class Executions(_ExecutionReader):
+        async def get_header(self, execution_id: str, *, tenant_id: str) -> object:
+            authorization_started.set()
+            await authorize.wait()
+            return await super().get_header(execution_id, tenant_id=tenant_id)
+
+    class Events(_EventReader):
+        async def list(self, *args, **kwargs):
+            pytest.fail("local-only observation must not poll remote events")
+
+    if mode == "handoff":
+        broker.register_local_producer("execution", 0)
+    else:
+        broker.prepare_local_producer("execution")
+    service = DefaultEventService(
+        Executions(_execution()), Events({}), _AllowAll(), lambda execution_id, tenant_id: None,
+        broker, local_admission=(lambda _: pending) if mode == "register" else None,
+    )
+
+    async def observe():
+        with local_execution_stream():
+            return [event async for event in service.stream("execution", principal=Principal("owner", "tenant"))]
+
+    assert service.has_local_producer("execution")
+    task = asyncio.create_task(observe())
+    try:
+        await asyncio.wait_for(authorization_started.wait(), 1)
+        if mode == "handoff":
+            broker.handoff("execution")
+        authorize.set()
+        if mode == "register":
+            await asyncio.sleep(0)
+            assert not task.done()
+            broker.register_local_producer("execution", 0)
+            broker.publish_event("execution", ExecutionEventType.EXECUTION_SUCCEEDED, {}, durable_seq=1)
+            broker.complete("execution")
+            pending.set_result(None)
+        events = await asyncio.wait_for(task, 2)
+        assert [e.event_type for e in events] == (["EXECUTION_SUCCEEDED"] if mode == "register" else [])
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

@@ -299,7 +299,9 @@ function watchSession(id, {restart=false}={}) {
   const prior=sessionWatch?.id===id?sessionWatch:null;
   stopSessionWatch();
   const source=new EventSource(sessionURL(id,'events'));
-  const watch={id,source,ready:false,snapshot:prior?.snapshot || null,revision:prior?.revision ?? null,releasedExecution:null,refresh:prior?.refresh || {attempt:null,failed:false,reconnect:0}};
+  const watch={id,source,ready:false,snapshot:prior?.snapshot || null,revision:prior?.revision ?? null,
+    externalOwner:prior?.externalOwner ?? null,releasedExecution:prior?.releasedExecution ?? null,
+    externalProcess:prior?.externalProcess || new Map(),refresh:prior?.refresh || {attempt:null,failed:false,reconnect:0}};
   if(prior)watch.refresh.reconnect++;
   sessionWatch=watch;
   const current=()=>sessionWatch===watch && state.selectedSession===id && !watch.failed;
@@ -307,6 +309,18 @@ function watchSession(id, {restart=false}={}) {
     if(current()){source.close();watch.failed=true;watch.ready=false;setDisabled();}
   });
   source.onerror=()=>{if(current()){watch.ready=false;watch.refresh.reconnect++;setDisabled();}};
+  source.addEventListener('session_process',event=>{
+    if(!current() || !watch.ready)return;
+    let value;
+    try{value=JSON.parse(event.data);}catch{return;}
+    const id=value?.execution_id,item=value?.item;
+    if(!id || id!==watch.externalOwner || item?.kind!=='tool' || !item.key
+      || state.turns.some(turn=>turn.execution_id===id && turn.conversation_committed))return;
+    let rows=watch.externalProcess.get(id);
+    if(!rows){rows=new Map();watch.externalProcess.set(id,rows);}
+    const previous=rows.get(item.key),row=mergeProcessRow(previous,item);
+    if(row!==previous){rows.set(row.key,row);scheduleLiveRender();}
+  });
   source.onmessage=event=>{
     if(!current())return;
     let value;
@@ -319,26 +333,33 @@ function watchSession(id, {restart=false}={}) {
       watch.ready=false;setDisabled();return;
     }
     if(watch.revision!==null && value.revision<watch.revision)return;
-    const previous=watch.snapshot,previousRevision=watch.revision,reconnected=!watch.ready;
+    const previous=watch.snapshot,previousRevision=watch.revision,reconnected=!watch.ready,previousExternal=watch.externalOwner;
     watch.revision=value.revision;
     if(previous?.active_execution_id && previous.active_execution_id!==value.active_execution_id)
       watch.releasedExecution=previous.active_execution_id;
     watch.snapshot={status:value.status,active_execution_id:value.active_execution_id};
+    watch.externalOwner=value.local_execution===false ? value.active_execution_id : null;
     watch.ready=true;
+    if(watch.externalOwner && state.observedExecution===watch.externalOwner && state.stream)stopStream();
     if(state.session)Object.assign(state.session,watch.snapshot);
     setDisabled();
     const previousOwner=previous?.active_execution_id;
+    for(const key of watch.externalProcess.keys())if(key!==previousOwner && key!==value.active_execution_id)watch.externalProcess.delete(key);
     const timelineRevision=previousOwner ? state.session?.revision : previousRevision ?? state.session?.revision;
     // An open execution stream reads the timeline at its tail. A fast turn
     // may release before that stream opens, leaving the session watch to catch up.
     const streamWillRefresh=previousOwner && state.observedExecution===previousOwner && state.stream;
-    if(state.session && !value.active_execution_id && !streamWillRefresh
+    const releasedExternal=previousExternal && previousExternal!==value.active_execution_id ? previousExternal
+      : reconnected && watch.refresh.failed ? watch.refresh.releasedExternal : null;
+    if(releasedExternal)watch.refresh.releasedExternal=releasedExternal;
+    if(state.session && releasedExternal)refreshSessionTimeline(watch,value.active_execution_id,releasedExternal);
+    else if(state.session && !value.active_execution_id && !streamWillRefresh
       && (reconnected && watch.refresh.failed || Number.isSafeInteger(timelineRevision) && value.revision>timelineRevision))refreshSessionTimeline(watch);
-    if(state.session && value.active_execution_id
-      && (reconnected || value.revision!==previousRevision || value.active_execution_id!==previous?.active_execution_id))
+    if(!releasedExternal && state.session && value.active_execution_id
+      && (reconnected || value.revision!==previousRevision || value.active_execution_id!==previousOwner))
       refreshActiveTurn(watch);
-    if(!state.session || previous && previous.status===value.status
-      && previous.active_execution_id===value.active_execution_id)return;
+    if(!state.session || !reconnected && previousExternal===watch.externalOwner && previous && previous.status===value.status
+      && previousOwner===value.active_execution_id)return;
     if(value.active_execution_id)void syncObservation().catch(error=>{if(current())showError(error);});
   };
 }
@@ -349,15 +370,21 @@ function refreshActiveTurn(watch) {
     refreshSessionTimeline(watch,executionId);
 }
 function reconcileLiveHistory(timeline) {
-  if(!timeline?.items.some(turn=>turn.execution_id===state.observedExecution && turn.conversation_committed))return;
+  if(!timeline)return;
+  if(sessionWatch)for(const turn of timeline.items)if(turn.conversation_committed) {
+    sessionWatch.externalProcess.delete(turn.execution_id);
+    if(sessionWatch.refresh.releasedExternal===turn.execution_id)sessionWatch.refresh.releasedExternal=null;
+  }
+  if(!timeline.items.some(turn=>turn.execution_id===state.observedExecution && turn.conversation_committed))return;
   state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.liveTools.clear();state.liveProcess.clear();state.events.clear();
 }
-function refreshSessionTimeline(watch, executionId=null) {
+function refreshSessionTimeline(watch, executionId=null, releasedExternal=null) {
   const refresh=watch.refresh,generation=state.generation,revision=watch.revision,reconnect=refresh.reconnect;
   const previous=refresh.attempt;
-  if(previous?.generation===generation && previous.revision===revision && previous.executionId===executionId)return;
-  const attempt={generation,revision,executionId};
-  refresh.attempt=attempt;refresh.failed=false;
+  if(previous?.generation===generation && previous.revision===revision && previous.executionId===executionId
+    && previous.releasedExternal===releasedExternal)return;
+  const attempt={generation,revision,executionId,releasedExternal};
+  refresh.attempt=attempt;refresh.failed=false;refresh.releasedExternal=releasedExternal;
   const current=()=>sessionWatch?.refresh===refresh && state.selectedSession===watch.id && generation===state.generation;
   const failed=()=>{
     if(refresh.attempt!==attempt)return;
@@ -365,7 +392,8 @@ function refreshSessionTimeline(watch, executionId=null) {
   };
   const retryAfterReconnect=()=>{
     if(!refresh.failed || refresh.reconnect===reconnect || !sessionWatch.ready)return;
-    if(sessionWatch.snapshot?.active_execution_id)refreshActiveTurn(sessionWatch);
+    if(releasedExternal)refreshSessionTimeline(sessionWatch,sessionWatch.snapshot?.active_execution_id,releasedExternal);
+    else if(sessionWatch.snapshot?.active_execution_id)refreshActiveTurn(sessionWatch);
     else refreshSessionTimeline(sessionWatch);
   };
   void readSession(watch.id).then(payload=>{
@@ -377,6 +405,7 @@ function refreshSessionTimeline(watch, executionId=null) {
     reconcileLiveHistory(payload.timeline);
     if(executionId && sessionWatch.snapshot?.active_execution_id===executionId
       && !state.turns.some(turn=>turn.execution_id===executionId))failed();
+    if(releasedExternal && !state.turns.some(turn=>turn.execution_id===releasedExternal && turn.conversation_committed))failed();
     renderConversation();setDisabled();
     retryAfterReconnect();
   }).catch(error=>{if(current()){failed();if(!unavailableSelection(error))retryAfterReconnect();showError(error);}});
@@ -516,7 +545,9 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
         reconcileLiveHistory(payload.timeline);
       }
       else if(!state.session)return;
-      refreshActiveTurn(sessionWatch);
+      if(sessionWatch?.ready && sessionWatch.refresh.releasedExternal)
+        refreshSessionTimeline(sessionWatch,sessionWatch.snapshot.active_execution_id,sessionWatch.refresh.releasedExternal);
+      else refreshActiveTurn(sessionWatch);
       renderSessionHeader();
       executionId=executionId || state.session.active_execution_id || state.turns.at(-1)?.execution_id;
       renderConversation();
@@ -612,6 +643,13 @@ function turnProcess() {
   section.setAttribute('aria-label','Process');section.heading=element('div','message-label','Process');
   return section;
 }
+function conversationProcessRows(executionId, saved, live) {
+  const rows=new Map((saved || []).map(row=>[row.key,row]));
+  for(const source of [sessionWatch?.externalProcess.get(executionId),live]) {
+    if(source)for(const row of source.values())rows.set(row.key,mergeProcessRow(rows.get(row.key),row));
+  }
+  return [...rows.values()];
+}
 function attachLiveTurn(live) {
   const container=$('conversation');
   const article=state.observedExecution?[...container.children].find(node=>node.dataset.openExecution===state.observedExecution):null;
@@ -638,7 +676,8 @@ function renderConversation({prepend=false}={}) {
   } else state.turns.forEach(turn => {
     const section=element('article','turn');section.dataset.execution=turn.execution_id;
     section.append(userMessage(turn.user_input));
-    const process=turnProcess();renderTurnProcess(process,turn.execution_id,turn.process);
+    const process=turnProcess();
+    renderTurnProcess(process,turn.execution_id,turn.conversation_committed?turn.process:conversationProcessRows(turn.execution_id,turn.process));
     section.append(process);
     if(!turn.conversation_committed) {
       section.dataset.openExecution=turn.execution_id;section.savedProcess=turn.process || [];section.processNode=process;
@@ -807,10 +846,8 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   if(!process)renderLiveTools(live,wanted);
   renderLiveAttempts(live,wanted,process);
   if(process) {
-    const rows=new Map((article?.savedProcess || []).map(row=>[row.key,row]));
-    for(const row of state.liveProcess.values())rows.set(row.key,mergeProcessRow(rows.get(row.key),row));
     const section=article?.processNode || (live.processNode ||= turnProcess());
-    renderTurnProcess(section,state.observedExecution,[...rows.values()]);
+    renderTurnProcess(section,state.observedExecution,conversationProcessRows(state.observedExecution,article?.savedProcess,state.liveProcess));
     if(article)article.savedAnswers.hidden=Boolean(state.liveText || wanted.some(node=>node.previewHasAnswer));
     else if(!section.hidden)wanted.unshift(section);
   }
@@ -1431,7 +1468,9 @@ async function syncObservation({refresh=false}={}) {
   const watch=state.view==='sessions'?sessionWatch:null;
   if(!terminal(info.status) && watch?.id===state.selectedSession && watch.releasedExecution===id && watch.snapshot?.active_execution_id!==id)return;
   info=observedInfo(info);setDisabled();
-  if(info && !terminal(info.status) && !state.config.read_only && !state.stream)watchExecution(id,generation).catch(showError);
+  if(!terminal(info.status) && !state.config.read_only && !state.stream
+    && (!watch || watch.ready && watch.externalOwner!==id))
+    watchExecution(id,generation).catch(showError);
 }
 function reconcileCancellation(info, session, revision) {
   if(state.cancellationNoticeId!==info.execution_id || revision!==state.noticeRevision || !terminal(info.status))return;

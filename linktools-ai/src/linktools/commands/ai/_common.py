@@ -5,9 +5,10 @@
 import asyncio
 import os
 from argparse import Namespace
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from secrets import token_hex
 from typing import TYPE_CHECKING
 
 from linktools.cli import CommandError
@@ -19,10 +20,11 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
+from linktools.ai.core import DEFAULT_DISCOVERY_POLICY, ExecutionEventType
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_sqlite
 from linktools.ai.observe import Metrics
+from linktools.ai.session import ToolProcessItem, project_tool_process_event
 from linktools.ai.storage import FilesystemMutationLock, StorageOverlay
 from linktools.ai.workspace import Workspace
 
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding
     from linktools.ai.runtime import Runtime
+    from linktools.ai.session import LocalSessionTurnNotice
     from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
@@ -205,6 +208,68 @@ class LocalRuntime:
     metrics: Metrics
     capabilities: tuple[dict[str, str | int], ...]
     status: "Mapping[str, object]"
+    runtime_root: Path
+
+
+class _LocalSessionFeed:
+    def __init__(self, runtime: "Runtime") -> None:
+        self.runtime = runtime
+        self.source = token_hex(16)
+        self._callbacks: dict[str, set["Callable[[str, ToolProcessItem], None]"]] = {}
+
+    def subscribe(
+        self, session_id: str, on_process: "Callable[[str, ToolProcessItem], None]",
+    ) -> "Callable[[], None]":
+        callbacks = self._callbacks.setdefault(session_id, set())
+        callbacks.add(on_process)
+
+        def unsubscribe() -> None:
+            callbacks.discard(on_process)
+            if not callbacks:
+                self._callbacks.pop(session_id, None)
+
+        return unsubscribe
+
+    def receive(self, value: dict[str, object]) -> None:
+        if value.get("source") == self.source:
+            return
+        kind, session_id, execution_id = value.get("kind"), value.get("session_id"), value.get("execution_id")
+        if not isinstance(session_id, str) or not session_id or not isinstance(execution_id, str) or not execution_id:
+            return
+        if kind in ("admitted", "terminal"):
+            self.runtime.sessions.invalidate(session_id)
+        elif kind == "tool" and self._callbacks.get(session_id):
+            row = value.get("process")
+            if not isinstance(row, dict):
+                return
+            key = row.get("key")
+            if not isinstance(key, str) or not key.startswith("tool:"):
+                return
+            event_type = ExecutionEventType.TOOL_CALL_STARTED if row.get("status") == "RUNNING" else ExecutionEventType.TOOL_CALL_FINISHED
+            item = project_tool_process_event(event_type.value, {
+                "call_id": key[5:], "tool_name": row.get("tool_name"),
+                "status": row.get("status"), "tool_position": row.get("position"),
+            })
+            if item is not None:
+                for callback in tuple(self._callbacks.get(session_id, ())):
+                    callback(execution_id, item)
+
+
+@asynccontextmanager
+async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "AsyncIterator[_LocalSessionFeed | None]":
+    from ._session_notices import session_notice_publisher, session_notice_receiver
+
+    feed = _LocalSessionFeed(local.runtime)
+    async with AsyncExitStack() as stack:
+        offer = await stack.enter_async_context(session_notice_publisher(local.runtime_root))
+
+        def publish(notice: "LocalSessionTurnNotice") -> None:
+            offer({**asdict(notice), "source": feed.source}, discover=notice.kind != "tool")
+
+        stack.callback(local.runtime.sessions.observe_local_turns(publish))
+        if receive:
+            await stack.enter_async_context(session_notice_receiver(local.runtime_root, feed.receive))
+        yield feed if receive else None
 
 
 @asynccontextmanager
@@ -244,7 +309,7 @@ async def _open_local_runtime(
         yield LocalRuntime(runtime, metrics, declarations, {
             "workspace": str(workspace.root), "asset_root": str(workspace.storage_root),
             **({} if status is None else status),
-        })
+        }, _local_runtime_root(workspace))
 
 
 def run_local(
@@ -266,4 +331,4 @@ def run_local(
         raise CommandError(str(error)) from error
 
 
-__all__ = ["LocalRuntime", "add_local_runtime_arguments", "run_local"]
+__all__ = ["LocalRuntime", "add_local_runtime_arguments", "local_turn_notices", "run_local"]

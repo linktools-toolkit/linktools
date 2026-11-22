@@ -29,6 +29,16 @@ class ToolProcessItem:
     kind: Literal["tool"] = field(default="tool", init=False)
 
 
+@dataclass(frozen=True, slots=True)
+class LocalSessionTurnNotice:
+    """Best-effort local producer notice; never an authorization or state source."""
+
+    kind: Literal["admitted", "tool", "terminal"]
+    session_id: str
+    execution_id: str
+    process: ToolProcessItem | None = None
+
+
 def project_tool_process_event(event_type: str, payload: JsonValue) -> ToolProcessItem | None:
     """Project a tool lifecycle event after the caller authorizes its observation."""
     if not isinstance(payload, Mapping):
@@ -91,4 +101,4 @@ def project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[ToolP
     return tuple(calls.values())
 
 
-__all__ = ["ToolProcessItem", "ToolProcessStatus", "project_tool_process_event", "project_turn_tool_process"]
+__all__ = ["LocalSessionTurnNotice", "ToolProcessItem", "ToolProcessStatus", "project_tool_process_event", "project_turn_tool_process"]

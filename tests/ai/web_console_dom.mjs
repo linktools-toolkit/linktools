@@ -79,7 +79,8 @@ globalThis.EventSource=class {
     sessionSources.push(this);queueMicrotask(()=>{if(!this.closed)this.snapshot();});
   }
   addEventListener(name,callback){this.listeners.set(name,callback);}
-  snapshot(){const value=sessions.get(this.id);if(value)this.onmessage?.({data:JSON.stringify({status:value.status,revision:value.revision,active_execution_id:value.active_execution_id ?? null})});}
+  snapshot(){const value=sessions.get(this.id);if(value)this.onmessage?.({data:JSON.stringify({status:value.status,revision:value.revision,active_execution_id:value.active_execution_id ?? null,local_execution:value.local_execution})});}
+  process(execution_id,item){this.listeners.get('session_process')?.({data:JSON.stringify({execution_id,item})});}
   close(){this.closed=true;}
 };
 const executions=new Map([['a-run',info('a-run')],['b-run',info('b-run')]]);
@@ -872,7 +873,62 @@ if(process.argv[3]==='tools') {
   await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/Public summary|lookupCompleted/);
   await select('#session=a');
   assert.deepEqual(processArea().children.slice(2).map(row=>row.textContent),['lookupCompleted','secondaryOutcome unconfirmed']);
-  console.log('Public process survives reconnect and commits in the same turn without duplicating the answer');process.exit(0);
+
+  const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
+  const remoteTurn={...turn,execution_id:remote,user_input:'External question'};
+  const replacementTurn={...remoteTurn,execution_id:replacement,user_input:'Replacement question'};
+  const executionRequests=()=>calls.filter(call=>[remote,replacement].some(id=>call.key==='/api/executions/'+id+'/events'));
+  const readCount=()=>calls.filter(call=>call.key==='/api/sessions/a' && call.method==='GET').length;
+  const remoteArticle=id=>descendants(node('conversation')).find(item=>item.dataset.execution===id);
+  const remoteTool={...tool,key:'tool:remote',tool_name:'External lookup'};
+  const remoteResult={...remoteTool,status:'SUCCEEDED'};
+  const historyRelease=deferred('GET /api/sessions/a'),source=sessionSources.at(-1);
+  source.process(remote,{...remoteTool,key:'tool:too-early',tool_name:'Before occupancy'});
+  session.local_execution=false;executions.set(remote,{...info(remote,'a'),status:'STARTED'});
+  session.active_execution_id=remote;
+  await historyRelease.requested;
+  const initialReadCount=readCount();
+  source.process('older-execution',{...remoteTool,tool_name:'Must not render'});
+  source.process(remote,remoteTool);source.process(remote,remoteResult);
+  await until('remote process renders without execution SSE',()=>node('conversation').textContent.includes('External lookupCompleted'));
+  assert.equal(readCount(),initialReadCount,'tool notices cannot trigger history reads');
+  assert.equal(executionRequests().length,0,'external owner never opens the polling execution event endpoint');
+  assert.equal(calls.filter(call=>call.key==='/api/executions/'+remote).length,1,'external owner metadata is read once');
+  const activeTimeline={items:[saved,remoteTurn],next_cursor:null};
+  timelineOverrides.set('a',activeTimeline);
+  historyRelease({session:{...session},timeline:activeTimeline});
+  await until('remote committed input uses the same external process preview',()=>remoteArticle(remote)?.textContent.includes('External lookupCompleted'));
+
+  const replacementRead=deferred('GET /api/sessions/a');
+  executions.set(replacement,{...info(replacement,'a'),status:'STARTED'});
+  session.active_execution_id=replacement; // Deliberately same revision.
+  await replacementRead.requested;
+  source.process(remote,{...remoteTool,tool_name:'Stale terminal frame'});
+  source.process(replacement,{...remoteTool,tool_name:'New lookup'});
+  await until('replacement process isolated',()=>node('conversation').textContent.includes('New lookupIn progress'));
+  assert.match(remoteArticle(remote).textContent,/External lookupCompleted/,'keep known old tool state until canonical readback');
+  assert.doesNotMatch(node('conversation').textContent,/Before occupancy|Must not render|Stale terminal frame/);
+  assert.equal(node('send').disabled,true);
+  const finishedRemote={...remoteTurn,status:'SUCCEEDED',conversation_committed:true,process:[remoteResult],items:[{item_kind:'assistant',content:'External answer'}]};
+  const replacementTimeline={items:[saved,finishedRemote,replacementTurn],next_cursor:null};
+  timelineOverrides.set('a',replacementTimeline);
+  replacementRead({session:{...session},timeline:replacementTimeline});
+  await until('same-revision replacement reads the previous committed turn',()=>remoteArticle(remote)?.textContent.includes('External answer'));
+  assert.equal(node('send').disabled,true,'older completion must not unlock a replacement owner');
+
+  const terminalRead=deferred('GET /api/sessions/a');
+  session.active_execution_id=null; // Another same-revision authoritative release.
+  await terminalRead.requested;
+  source.process(replacement,{...remoteTool,tool_name:'Stale after release'});
+  const finishedReplacement={...replacementTurn,status:'SUCCEEDED',conversation_committed:true,process:[],items:[{item_kind:'assistant',content:'Replacement answer'}]};
+  const terminalTimeline={items:[saved,finishedRemote,finishedReplacement],next_cursor:null};
+  timelineOverrides.set('a',terminalTimeline);
+  terminalRead({session:{...session},timeline:terminalTimeline});
+  await until('same-revision remote release reads committed history',()=>remoteArticle(replacement)?.textContent.includes('Replacement answer'));
+  assert.doesNotMatch(node('conversation').textContent,/Stale after release|New lookup/);
+  assert.equal(executionRequests().length,0);
+  assert.equal(node('send').disabled,false);
+  console.log('Public process survives reconnect, commit and external-owner transitions without polling the execution');process.exit(0);
 }
 if(process.argv[3]==='thinking') {
   assert.equal(node('thinking').value,'0','the first visible effort is Low');

@@ -153,7 +153,7 @@ from ..persistence.contracts import (
     SessionRepository,
     ToolOperationRecord,
 )
-from ..session import ConversationCursor, SessionRecord, SessionTurnRef
+from ..session import ConversationCursor, LocalSessionTurnNotice, SessionRecord, SessionTurnRef, project_tool_process_event
 from ..execution import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
@@ -277,6 +277,7 @@ class _OwnedExecutionTurn:
     principal: Principal
     scope: TurnScope | None = None
     admitting: bool = True
+    notice_admitted: bool = False
     producer_generation: int | None = None
     attempt: _InitialAttemptCapture | None = None
     boundary: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -345,6 +346,7 @@ class LocalExecutionBackend:
     ) -> None:
         if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
             raise ValueError("Execution requires sync or terminal commit")
+        self._local_turn_observers: set[Callable[[LocalSessionTurnNotice], None]] = set()
         self._commit = commit
         self._trace_commit = trace_commit
         self._execution_buffer = None if commit.buffer is None else _ExecutionPayloadBuffer(commit.buffer)
@@ -793,6 +795,13 @@ class LocalExecutionBackend:
     ) -> None:
         if self._terminal_publication is not None:
             self._terminal_publication(committed if isinstance(committed, ExecutionTerminalPublication) else committed.execution)
+        if session_id is not None and self._local_turn_observers and isinstance(committed, ExecutionTerminalPublication) and committed.session_released:
+            owner = self._turn_owners.get(committed.execution.execution_id)
+            if owner is not None and owner.notice_admitted:
+                owner.notice_admitted = False
+                self._notify_local_turn(LocalSessionTurnNotice(
+                    "terminal", session_id, committed.execution.execution_id,
+                ))
         recorder = self._metric_recorder
         if recorder is None:
             return
@@ -1795,9 +1804,34 @@ class LocalExecutionBackend:
         await self._validate_start(request, reservation.execution)
         return await self._expected_session_cursor(reservation.execution, session=session) == session.continuation
 
-    @staticmethod
+    def local_admission(self, execution_id: str) -> asyncio.Future[ExecutionHandle] | None:
+        owner = self._turn_owners.get(execution_id)
+        if owner is None or not owner.admitting or owner.stopping:
+            return None
+        return owner.admission
+
+    def observe_local_turns(self, on_notice: Callable[[LocalSessionTurnNotice], None]) -> Callable[[], None]:
+        store = self._execution.executions.state_store
+        context = getattr(store.storage_group, "context", None)
+        if (not isinstance(context, SqlStorageContext) or context.dialect.name != "sqlite"
+                or not context.owns_engine or context.engine.url.database in (None, "", ":memory:")):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        # A wrapper gives each subscription independent unsubscribe semantics.
+        def callback(notice: LocalSessionTurnNotice) -> None:
+            on_notice(notice)
+
+        self._local_turn_observers.add(callback)
+        return lambda: self._local_turn_observers.discard(callback)
+
+    def _notify_local_turn(self, notice: LocalSessionTurnNotice) -> None:
+        for callback in tuple(self._local_turn_observers):
+            try:
+                callback(notice)
+            except (Exception, asyncio.CancelledError) as error:
+                _logger.warning("Local turn observer failed: %s", type(error).__name__)
+
     def _capture_reserved_start(
-        owner: _OwnedExecutionTurn, result: ExecutionStartReservationResult | None,
+        self, owner: _OwnedExecutionTurn, result: ExecutionStartReservationResult | None,
     ) -> None:
         if result is not None and result.created and result.execution.recovery is not None:
             owner.attempt = _InitialAttemptCapture(result.execution, result.session)
@@ -1805,6 +1839,18 @@ class LocalExecutionBackend:
                 owner.observed = result.observed
                 owner.reservation = replace(owner.reservation, idempotency=result.idempotency)
                 owner.session_turn = result.turn
+                if (self._local_turn_observers and result.turn is not None
+                        and result.session is not None
+                        and result.session.active_execution_id == result.execution.execution_id):
+                    if owner.scope is not None:
+                        try:
+                            owner.scope.require_active()
+                        except AIError:
+                            return
+                    owner.notice_admitted = True
+                    self._notify_local_turn(LocalSessionTurnNotice(
+                        "admitted", result.turn.session_id, result.execution.execution_id,
+                    ))
 
     async def prepare_reserved_start(
         self, request: ExecutionRequest, reservation: ExecutionStartReservation,
@@ -4482,6 +4528,20 @@ class LocalExecutionBackend:
                     return
                 await self._append_event(current, emission.event_type, emission.payload,
                     producer_generation=producer_generation)
+                if self._local_turn_observers and current.session_id is not None and current.parent_execution_id is None:
+                    owner = self._turn_owners.get(current.execution_id)
+                    if (owner is not None and owner.notice_admitted and not owner.stopping
+                            and owner.producer_generation == producer_generation):
+                        if owner.scope is not None:
+                            try:
+                                owner.scope.require_active()
+                            except AIError:
+                                return
+                        process = project_tool_process_event(emission.event_type.value, emission.payload)
+                        if process is not None:
+                            self._notify_local_turn(LocalSessionTurnNotice(
+                                "tool", current.session_id, current.execution_id, process,
+                            ))
 
             subagent_refs = binding.binding_contract.subagents
             subagent_available = (

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 
-from ._common import add_local_runtime_arguments, run_local
+from ._common import add_local_runtime_arguments, local_turn_notices, run_local
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -28,7 +28,8 @@ class Command(BaseCommand):
             raise CommandError("ai acp requires the agent-client-protocol dependency") from error
 
         async def execute(local: "LocalRuntime") -> int:
-            await serve_stdio(ACPAgent(local.runtime, principal=local.runtime.default_principal))
+            async with local_turn_notices(local):
+                await serve_stdio(ACPAgent(local.runtime, principal=local.runtime.default_principal))
             return 0
 
         return run_local(args, execute)

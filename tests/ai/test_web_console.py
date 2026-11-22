@@ -1158,14 +1158,19 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
                                    json={"prompt": "lookup", "request_id": "turn"})
         assert accepted.status_code == 202, accepted.text
         execution = await runtime.executions.get(accepted.json()["execution_id"])
-        live_order = []
+        started = []
+        finished = []
         try:
             async with asyncio.timeout(10):
                 async for observation in execution.watch():
                     event = observation.event
                     item = project_tool_process_event(event.event_type, event.payload)
-                    if item is not None and item.status == "SUCCEEDED":
-                        live_order.append(item)
+                    if item is None:
+                        continue
+                    if item.status == "RUNNING":
+                        started.append(item)
+                    elif item.status == "SUCCEEDED":
+                        finished.append(item)
                         if item.key == "tool:a":
                             release_first.set()
         finally:
@@ -1174,9 +1179,50 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         replay = await http.get("/api/session?session_id=tools")
         assert replay.status_code == 200, replay.text
         turn = replay.json()["timeline"]["items"][0]
-        assert [item.key for item in live_order] == ["tool:a", "tool:z"], turn
+        assert [item.key for item in started] == ["tool:z", "tool:a"], turn
+        assert [item.key for item in finished] == ["tool:a", "tool:z"], turn
         assert turn["conversation_committed"]
         assert [item["key"] for item in turn["process"]] == ["tool:z", "tool:a"]
-        assert {item["key"]: item["position"] for item in turn["process"]} == {
-            item.key: list(item.position) for item in live_order
-        }
+        saved = {item["key"]: tuple(item["position"]) for item in turn["process"]}
+        assert {item.key: item.position for item in started} == saved
+        assert {item.key: item.position for item in finished} == saved
+
+
+@pytest.mark.asyncio
+async def test_passive_session_tool_notice_requires_event_authorization() -> None:
+    from types import SimpleNamespace
+
+    from linktools.ai.core import Principal, SessionStatus
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.session import ToolProcessItem
+
+    class Feed:
+        def subscribe(self, identity, on_process):
+            assert identity == "session"
+            self.deliver = on_process
+            return lambda: None
+
+    feed = Feed()
+    end = asyncio.Event()
+
+    async def watch(identity, *, principal):
+        assert identity == "session" and principal.principal_id == "runtime"
+        yield SimpleNamespace(status=SessionStatus.OPEN, active_execution_id="external", revision=1)
+        await end.wait()
+
+    async def deny(identity, *, principal):
+        assert identity == "external" and principal.principal_id == "runtime"
+        feed.deliver("external", ToolProcessItem("tool:private", "private", "RUNNING"))
+        asyncio.get_running_loop().call_later(0.05, end.set)
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    runtime = SimpleNamespace(
+        history=None, default_principal=Principal("runtime", "default"),
+        sessions=SimpleNamespace(watch=watch),
+        events=SimpleNamespace(has_local_producer=lambda _: False, authorize_read=deny),
+    )
+    async with client(create_app(runtime=runtime, session_notices=feed)) as http:
+        response = await http.get("/api/session/events?session_id=session")
+    assert response.status_code == 200, response.text
+    assert "session_process" not in response.text and "private" not in response.text
+    assert '"active_execution_id": "external"' in response.text

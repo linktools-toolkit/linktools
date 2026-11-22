@@ -224,6 +224,18 @@ and read-only consoles read the same committed history. Independent sessions
 can run concurrently; a second execution in the same session is rejected with
 `SESSION_BUSY`.
 
+On POSIX, CLI processes of the same user in the same local workspace, PID and
+network namespace can notify Web of admission, tool progress and release. A passive Web view gets key updates
+through its session stream, not a second execution stream or database poll.
+The authorized session read supplies the prompt and committed result; tool
+notices contain display metadata only. An ACP editor still receives native
+updates for its own prompt and can load committed history.
+
+Notices are best-effort. If local IPC is unavailable, or the producer stops
+after committing but before delivering the final notice, use **Refresh** to
+reconnect and read the saved session. Refresh does not resume the turn.
+Missed live tool updates are not replayed; the committed view is authoritative.
+
 SQL startup does not infer that an unfinished execution is abandoned. A stopped
 process can leave `PENDING_START`, `STARTED`, or `CANCELLING` visible. Refresh and
 observation never take ownership. After confirming the previous executor has

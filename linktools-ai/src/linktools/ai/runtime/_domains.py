@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
-from ..session import SessionAdmission, PublishedSessionTurn
+from ..session import LocalSessionTurnNotice, SessionAdmission, PublishedSessionTurn
 from ..agent import AgentBindingContract
 from ..core import BudgetUsage, Principal
 from ..observe import WaitResult, RuntimeMetricsControl
@@ -313,6 +313,22 @@ class RuntimeSessions(Generic[AppT]):
         """
         self._ensure_open()
         return self._service.observe_changes(session_id, on_invalidate)
+
+    def observe_local_turns(
+        self, on_notice: Callable[[LocalSessionTurnNotice], None],
+    ) -> Callable[[], None]:
+        """Subscribe a trusted host to best-effort, payload-free local turn notices.
+
+        The callback must not block or do I/O. It grants no authorization and
+        carries no replay or snapshot; read state through the authorized API.
+        """
+        self._ensure_open()
+        return self._service.observe_local_turns(on_notice)
+
+    def invalidate(self, session_id: str) -> None:
+        """Wake existing local watches to reread current authorized session state."""
+        self._ensure_open()
+        self._service.invalidate(session_id)
 
     def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
         """Observe this Runtime's session changes; external writes need explicit refresh."""

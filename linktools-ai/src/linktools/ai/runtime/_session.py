@@ -55,7 +55,7 @@ from ..execution import (
     SessionView,
 )
 from ..persistence.objects import runtime_object_source_reads
-from ..session import ConversationCursor, SessionRecord, SessionAdmission, SessionTurnRef, PublishedSessionTurn
+from ..session import ConversationCursor, LocalSessionTurnNotice, SessionRecord, SessionAdmission, SessionTurnRef, PublishedSessionTurn
 from ..persistence.contracts import ConversationRepositories, ExecutionRepository, ExecutionTerminalPublication
 from ..execution import ExecutionRecord
 from ..persistence.repositories import SessionRepositoryImpl
@@ -282,6 +282,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
     ) -> None:
         self._watches: dict[str, _SessionWatch] = {}
         self._watches_closed = False
+        self._observe_local_turns: Callable[[Callable[[LocalSessionTurnNotice], None]], Callable[[], None]] | None = None
         self._change_subscriptions: set[Callable[[], None]] = set()
         self._current_policy = current_policy
         self._admission_execution = execution
@@ -346,6 +347,31 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 )
                 return None if turn is None else PublishedSessionTurn(turn, commit.turn_seq, image.session_revision)
             yield read
+
+    def bind_local_turn_observer(self, subscribe: Callable[[Callable[[LocalSessionTurnNotice], None]], Callable[[], None]]) -> None:
+        self._observe_local_turns = subscribe
+
+    def observe_local_turns(self, on_notice: Callable[[LocalSessionTurnNotice], None]) -> Callable[[], None]:
+        if self._watches_closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if self._observe_local_turns is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        remove = self._observe_local_turns(on_notice)
+
+        def unsubscribe() -> None:
+            self._change_subscriptions.discard(unsubscribe)
+            remove()
+
+        self._change_subscriptions.add(unsubscribe)
+        return unsubscribe
+
+    def invalidate(self, session_id: str) -> None:
+        if self._watches_closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        repository = self._runtime_conversation.sessions
+        if type(repository) is not SessionRepositoryImpl:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        repository.notify_session_change(session_id, tenant_id=repository.tenant_id)
 
     def observe_changes(self, session_id: str, on_invalidate: Callable[[], None]) -> Callable[[], None]:
         if self._watches_closed:

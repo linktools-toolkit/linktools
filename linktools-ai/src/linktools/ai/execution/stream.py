@@ -26,6 +26,7 @@ _IO_TIMEOUT = 5.0
 _OBSERVATION_INTERVAL = 2.0
 OBSERVATION_TIMEOUT = 6.0
 T = TypeVar("T")
+_local_only: ContextVar[bool] = ContextVar("local_execution_stream_only", default=False)
 _positions: ContextVar[Mapping[str, tuple[str, int]] | None] = ContextVar("shared_stream_positions", default=None)
 _observation: ContextVar[Callable[[str, tuple[str, int], dict[str, JsonValue]], None] | None] = ContextVar(
     "shared_stream_observation", default=None,
@@ -35,6 +36,20 @@ _observation: ContextVar[Callable[[str, tuple[str, int], dict[str, JsonValue]], 
 @dataclass(frozen=True, slots=True)
 class SharedStreamEvent(ExecutionStreamEvent):
     position: tuple[str, int] = ("", 0)
+
+
+@contextmanager
+def local_execution_stream() -> Iterator[None]:
+    """Opt out of remote durable polling for this live observation."""
+    token = _local_only.set(True)
+    try:
+        yield
+    finally:
+        _local_only.reset(token)
+
+
+def local_execution_stream_requested() -> bool:
+    return _local_only.get()
 
 
 @contextmanager
@@ -343,5 +358,6 @@ class SharedStreamPublisher:
 
 __all__ = ["SharedStreamPublisher", "SharedStreamEvent", "stream_key", "decode_stream_record",
            "shared_stream_positions", "shared_stream_position", "shared_stream_requested",
+           "local_execution_stream", "local_execution_stream_requested",
            "OBSERVATION_TIMEOUT", "shared_stream_observation", "deliver_shared_observation",
            "is_fresh_observation_coverage"]

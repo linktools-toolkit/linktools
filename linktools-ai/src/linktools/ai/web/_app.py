@@ -6,13 +6,13 @@ import asyncio
 import base64
 import json
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from contextlib import aclosing, suppress
+from contextlib import aclosing, nullcontext, suppress
 from dataclasses import asdict, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from importlib.util import find_spec
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import anyio
 import httpx2
@@ -28,10 +28,12 @@ from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
 from ..history import History
 from ..execution import CreateSessionRequest, ExecutionTreeEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
-from ..session import SessionTurn, project_tool_process_event
+from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from starlette.types import ASGIApp, Receive, Scope, Send
 
 _logger = environ.get_logger("ai.web")
@@ -261,11 +263,17 @@ class _SSEStream(StreamingResponse):
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
+class _SessionNoticeFeed(Protocol):
+    def subscribe(
+        self, session_id: str, on_process: "Callable[[str, ToolProcessItem], None]",
+    ) -> "Callable[[], None]": ...
+
+
 class _Console:
     def __init__(
         self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
         status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]],
-        shutdown_event: asyncio.Event | None,
+        shutdown_event: asyncio.Event | None, session_notices: _SessionNoticeFeed | None,
     ) -> None:
         self.runtime = runtime
         self.history = runtime.history if runtime is not None else history
@@ -273,6 +281,7 @@ class _Console:
         self.status = dict(status)
         self.capabilities = tuple(capabilities)
         self._shutdown_event = shutdown_event
+        self._session_notices = session_notices
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
         )
@@ -373,19 +382,74 @@ class _Console:
         identity = _text(request.query_params, "session_id")
 
         async def stream() -> AsyncGenerator[str, None]:
+            feed = self._session_notices
+            queue: asyncio.Queue[tuple[str, ToolProcessItem]] = asyncio.Queue(maxsize=16)
+
+            def collect(execution_id: str, item: ToolProcessItem) -> None:
+                if not queue.full():
+                    queue.put_nowait((execution_id, item))
+
+            unsubscribe = feed.subscribe(identity, collect) if feed is not None else None
             watch = runtime.sessions.watch(identity, principal=self.principal)
+            state_task = None
+            tool_task = None
+            authorized_execution = None
+            last_active = None
             try:
-                async for session in watch:
+                if feed is not None:
+                    state_task = asyncio.create_task(anext(watch, None))
+                    tool_task = asyncio.create_task(queue.get())
+                while True:
+                    if feed is None:
+                        session = await anext(watch, None)
+                    else:
+                        done, _ = await asyncio.wait((state_task, tool_task), return_when=asyncio.FIRST_COMPLETED)
+                        if state_task not in done:
+                            execution_id, item = tool_task.result()
+                            tool_task = asyncio.create_task(queue.get())
+                            # A transport hint never grants access or identifies a session owner.
+                            if execution_id == authorized_execution:
+                                payload = {"execution_id": execution_id, "item": _wire(item)}
+                                yield "event: session_process\ndata: " + json.dumps(payload) + "\n\n"
+                            continue
+                        session = state_task.result()
+                    if session is None:
+                        break
+                    active = session.active_execution_id
+                    local_execution = None
+                    if feed is not None and active is not None:
+                        local_execution = runtime.events.has_local_producer(active)
+                        if active != last_active:
+                            authorized_execution = None
+                            if not local_execution:
+                                try:
+                                    await runtime.events.authorize_read(active, principal=self.principal)
+                                except AIError as error:
+                                    _debug_error(request, error)
+                                else:
+                                    authorized_execution = active
+                    else:
+                        authorized_execution = None
+                    last_active = active
                     payload = {
                         "status": session.status.value,
-                        "active_execution_id": session.active_execution_id,
+                        "active_execution_id": last_active,
                         "revision": session.revision,
                     }
+                    if feed is not None:
+                        state_task = asyncio.create_task(anext(watch, None))
+                        if last_active is not None:
+                            payload["local_execution"] = local_execution
                     yield "data: " + json.dumps(payload) + "\n\n"
             except AIError as error:
                 _debug_error(request, error)
                 yield "event: session_error\ndata: " + json.dumps({"error_code": error.code.value}) + "\n\n"
             finally:
+                if unsubscribe is not None:
+                    unsubscribe()
+                    state_task.cancel()
+                    tool_task.cancel()
+                    await asyncio.gather(state_task, tool_task, return_exceptions=True)
                 await watch.aclose()
 
         return _SSEStream(stream(), self._shutdown_event)
@@ -501,28 +565,31 @@ class _Console:
     async def events(self, request: Request) -> Response:
         if environ.debug:
             request.state.phase = "execution.watch"
-        execution = await self.require_runtime().executions.get(
+        runtime = self.require_runtime()
+        execution = await runtime.executions.get(
             request.path_params["execution_id"], principal=self.principal,
         )
         cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or None
         chat = request.query_params.get("view") == "chat"
         watch = execution.watch(cursor=cursor, include_content=True, include_model_interactions=not chat)
+        local_only = chat and self._session_notices is not None
 
         async def stream() -> AsyncGenerator[str, None]:
             try:
-                async for observation in watch:
-                    item = observation.event
-                    if chat:
-                        if not isinstance(item, ExecutionTreeEvent):
-                            continue
-                        payload = _chat_frame(item, observation.cursor)
-                        if payload is None:
-                            continue
-                    else:
-                        payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
-                                   "item": _wire(item), "cursor": observation.cursor}
-                    prefix = "" if observation.cursor is None else f"id: {observation.cursor}\n"
-                    yield prefix + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+                with local_execution_stream() if local_only else nullcontext():
+                    async for observation in watch:
+                        item = observation.event
+                        if chat:
+                            if not isinstance(item, ExecutionTreeEvent):
+                                continue
+                            payload = _chat_frame(item, observation.cursor)
+                            if payload is None:
+                                continue
+                        else:
+                            payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
+                                       "item": _wire(item), "cursor": observation.cursor}
+                        prefix = "" if observation.cursor is None else f"id: {observation.cursor}\n"
+                        yield prefix + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
                 # Completion of an observer is not the execution's terminal verdict.
                 if environ.debug:
                     request.state.phase = "execution.metadata"
@@ -612,6 +679,7 @@ def create_app(
     metrics: Metrics | None = None, status: Mapping[str, object] | None = None,
     capabilities: Sequence[Mapping[str, object]] = (),
     shutdown_event: asyncio.Event | None = None,
+    session_notices: _SessionNoticeFeed | None = None,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
 
@@ -621,7 +689,7 @@ def create_app(
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
-    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event)
+    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices)
     app = Starlette(routes=[
         Route("/", _asset), Route("/assets/{name}", _asset),
         Route("/api/config", console.config),
