@@ -24,7 +24,6 @@ from linktools.ai.core import DEFAULT_DISCOVERY_POLICY, ExecutionEventType
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_sqlite
 from linktools.ai.observe import Metrics
-from linktools.ai.session import ToolProcessItem, project_tool_process_event
 from linktools.ai.storage import FilesystemMutationLock, StorageOverlay
 from linktools.ai.workspace import Workspace
 
@@ -33,7 +32,7 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding
     from linktools.ai.runtime import Runtime
-    from linktools.ai.session import LocalSessionTurnNotice
+    from linktools.ai.session import LocalSessionTurnNotice, ToolProcessItem
     from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
@@ -245,6 +244,8 @@ class _LocalSessionFeed:
             key = row.get("key")
             if not isinstance(key, str) or not key.startswith("tool:"):
                 return
+            from linktools.ai.session import project_tool_process_event
+
             event_type = ExecutionEventType.TOOL_CALL_STARTED if row.get("status") == "RUNNING" else ExecutionEventType.TOOL_CALL_FINISHED
             item = project_tool_process_event(event_type.value, {
                 "call_id": key[5:], "tool_name": row.get("tool_name"),

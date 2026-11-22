@@ -3,6 +3,7 @@
 """`lt ai web`: serve a local Runtime console."""
 
 import asyncio
+import signal
 from argparse import Namespace
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from ._common import LocalRuntime
     from socket import socket
+    from types import FrameType
 
 
 class Command(BaseCommand):
@@ -36,6 +38,13 @@ class Command(BaseCommand):
             shutdown_event = asyncio.Event()
 
             class Server(uvicorn.Server):
+                interrupted = False
+
+                def handle_exit(self, sig: int, frame: "FrameType | None") -> None:
+                    if sig == signal.SIGINT:
+                        self.interrupted = True
+                    super().handle_exit(sig, frame)
+
                 async def shutdown(self, sockets: "list[socket] | None" = None) -> None:
                     # Uvicorn waits for HTTP streams before dispatching ASGI lifespan shutdown.
                     shutdown_event.set()
@@ -67,7 +76,9 @@ class Command(BaseCommand):
                     if browser_task is not None:
                         browser_task.cancel()
                         await asyncio.gather(browser_task, return_exceptions=True)
-            return 0
+            # Uvicorn may consume Ctrl-C after graceful shutdown instead of
+            # letting the base CLI translate a replayed KeyboardInterrupt.
+            return 128 + signal.SIGINT if server.interrupted else 0
 
         return run_local(args, serve)
 

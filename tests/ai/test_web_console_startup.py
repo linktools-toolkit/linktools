@@ -16,7 +16,8 @@ from urllib.request import ProxyHandler, Request, build_opener
 import pytest
 
 
-def test_web_cli_exits_cleanly_with_an_idle_observer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("replay_signal", [True, False], ids=["uvicorn-default", "consumed-signal"])
+def test_web_cli_exits_cleanly_with_an_idle_observer(tmp_path: Path, replay_signal: bool) -> None:
     pytest.importorskip("starlette")
     pytest.importorskip("uvicorn")
     source_root = Path(__file__).parents[2]
@@ -33,10 +34,14 @@ def test_web_cli_exits_cleanly_with_an_idle_observer(tmp_path: Path) -> None:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-    arguments = [
-        sys.executable, "-m", "linktools", "ai", "web",
-        "--project", str(tmp_path / "workspace"), "--port", str(port),
-    ]
+    arguments = [sys.executable]
+    if replay_signal:
+        arguments.extend(("-m", "linktools"))
+    else:
+        # Only suppress in-process replay. The parent still sends a real SIGINT.
+        arguments.extend(("-c", "import runpy, signal; signal.raise_signal = lambda sig: None; "
+                          "runpy.run_module('linktools', run_name='__main__', alter_sys=True)"))
+    arguments.extend(("ai", "web", "--project", str(tmp_path / "workspace"), "--port", str(port)))
     # Opening Runtime must not require a provider request or live credentials.
     arguments.extend(("--model", "startup-test", "--base-url", "http://127.0.0.1:1",
                       "--api-key", "offline-test-key"))
