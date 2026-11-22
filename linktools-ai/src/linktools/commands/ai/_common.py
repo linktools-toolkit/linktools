@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from linktools.ai.model import ModelBinding
     from linktools.ai.runtime import Runtime
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.storage import TurnCoordinationBackend
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
 MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
@@ -88,12 +87,10 @@ def _local_runtime_assets(workspace: Workspace) -> AssetStore:
     )
 
 
-def _local_runtime_storage(
-    workspace: Workspace, *, coordination: "TurnCoordinationBackend | None" = None,
-) -> "PersistenceStorage":
+def _local_runtime_storage(workspace: Workspace) -> "PersistenceStorage":
     from linktools.ai.persistence import PersistenceStorage
 
-    return PersistenceStorage.from_root(_local_runtime_root(workspace), coordination=coordination)
+    return PersistenceStorage.from_root(_local_runtime_root(workspace))
 
 
 async def _local_metrics(workspace: Workspace) -> Metrics:
@@ -216,7 +213,6 @@ async def _open_local_runtime(
     *,
     model: "ModelBinding",
     status: "Mapping[str, object] | None" = None,
-    coordination: "TurnCoordinationBackend | None" = None,
 ) -> "AsyncIterator[LocalRuntime]":
     from linktools.ai.capability import (
         AssetCapability, ExecutionCapability, FileSystem, MemoryCapability,
@@ -235,7 +231,7 @@ async def _open_local_runtime(
     features.capability(TraceCapability())
     metrics = await _local_metrics(workspace)
     async with Runtime.open(
-        "default", storage=_local_runtime_storage(workspace, coordination=coordination), features=features, metrics=metrics,
+        "default", storage=_local_runtime_storage(workspace), features=features, metrics=metrics,
     ) as runtime:
         source = runtime.features
         assert source is not None
@@ -252,8 +248,7 @@ async def _open_local_runtime(
 
 
 def run_local(
-    args: Namespace, execute: "Callable[[LocalRuntime], Awaitable[int]]", *,
-    coordination: "TurnCoordinationBackend | None" = None,
+    args: Namespace, execute: "Callable[[LocalRuntime], Awaitable[int]]",
 ) -> int:
     """Run a command while owning its Runtime and local resource lifetime."""
     async def run() -> int:
@@ -261,7 +256,7 @@ def run_local(
         options = _ModelOptions.load(workspace, args)
         model = options.create_model()
         async with _open_local_runtime(
-            workspace, model=model, status=options.status(model), coordination=coordination,
+            workspace, model=model, status=options.status(model),
         ) as local:
             return await execute(local)
 

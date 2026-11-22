@@ -80,6 +80,23 @@ and working directory are under an optional disclosure. Successful turns do not
 repeat technical status badges or expanded diagnostics. Failures, incomplete
 responses, occupied sessions and unconfirmed cancellation remain visible.
 
+Conversation uses one process panel per turn, with one row per root tool
+call. A tool's finished state updates its existing row; the saved turn replaces
+the preview in place. An unconfirmed tool outcome is not reported as success.
+Ordinary conversation delivery excludes native reasoning and raw tool inputs
+or results. Inspecting the underlying records is an explicit diagnostic action.
+
+**Reuse tool progress in another host.**
+
+Use the already-authorized `SessionTurn.process` for the history view. For a
+root execution's live tool events, call
+`linktools.ai.session.project_tool_process_event(event_type, payload)`.
+It returns the same `ToolProcessItem` shape (or no item). Keep items keyed by
+`(execution_id, item.key)`; an update replaces the same row, not a new row.
+When the committed turn becomes available, use its saved list as authority.
+The helper does not read storage, authorize access, or interpret a transport
+cursor as a tool identity. Frontends retain ownership of labels and styling.
+
 The primary views are **Conversation**, **Model messages** and **Activity**.
 Model messages opens the selected turn's actual captured input directly: indexed
 role and content rows follow the native `messages` array order. A single request

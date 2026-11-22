@@ -67,10 +67,7 @@ class Command(BaseCommand):
                     await asyncio.gather(browser_task, return_exceptions=True)
             return 0
 
-        from linktools.ai.storage import InMemoryCacheBackend
-
-        # One server owns live turns; durable storage and content caches stay independent.
-        return run_local(args, serve, coordination=InMemoryCacheBackend(max_bytes=0))
+        return run_local(args, serve)
 
 
 command = Command()

@@ -1027,3 +1027,87 @@ async def test_web_memory_uses_runtime_configuration(extra: dict[str, object]) -
             await execution.wait()
             record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert record.memory_scope == "host-memory"
+
+
+@pytest.mark.asyncio
+async def test_chat_transport_uses_public_tool_progress_and_excludes_native_content() -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Page, Principal
+    from linktools.ai.execution import ExecutionStreamEvent, ExecutionTreeEvent
+    from linktools.ai.session import SessionTurn, SessionTurnItem, ToolProcessItem
+
+    principal = Principal("runtime", "default")
+    raw_marker = "NOT-FOR-CHAT"
+    process = ToolProcessItem("tool:id", "lookup", "SUCCEEDED")
+    now = datetime.now(timezone.utc)
+
+    class History:
+        async def inspect_session(self, identity, **kwargs):
+            return {"session_id": identity}
+
+        async def session_timeline(self, identity, **kwargs):
+            return Page((SessionTurn(
+                "execution", ExecutionStatus.SUCCEEDED, now, now, "user", True,
+                (SessionTurnItem(1, "thinking", raw_marker),
+                 SessionTurnItem(2, "tool_call", raw_marker),
+                 SessionTurnItem(3, "tool_result", raw_marker),
+                 SessionTurnItem(4, "assistant", "answer")),
+                process=(process,),
+            ),))
+
+        async def inspect_execution(self, identity, **kwargs):
+            from linktools.ai.history import ExecutionInfo
+            return ExecutionInfo(
+                identity, "agent", "default", None, ExecutionStatus.SUCCEEDED,
+                ExecutionLineageKind.RUN, None, identity, None, "session", now, now,
+                None, safe_error_details={"value": raw_marker},
+            )
+
+    class Execution:
+        execution_id = "execution"
+
+        async def watch(self, *, cursor, include_content, include_model_interactions):
+            assert include_content and not include_model_interactions
+            for n, (kind, payload, depth) in enumerate((
+                ("ASSISTANT_THINKING_DELTA", {"text": raw_marker}, 0),
+                ("TOOL_CALL_FINISHED", {"call_id": "id", "tool_name": "lookup", "status": "SUCCEEDED",
+                                        "result": raw_marker}, 0),
+                ("ASSISTANT_TEXT_DELTA", {"text": "answer", "internal": raw_marker}, 0),
+                ("ASSISTANT_TEXT_DELTA", {"text": raw_marker}, 1),
+                ("MODEL_ATTEMPT_FINISHED", {"status": "SUCCEEDED", "provider_request": raw_marker}, 0),
+            )):
+                execution = "execution" if not depth else "child"
+                yield SimpleNamespace(
+                    event=ExecutionTreeEvent(
+                        execution, "default",
+                        ExecutionLineageKind.RUN if not depth else ExecutionLineageKind.SUBAGENT,
+                        "execution" if depth else None, "execution", "invocation" if depth else None, depth,
+                        ExecutionStreamEvent(execution, n + 1, kind, payload),
+                    ),
+                    cursor=str(n + 1),
+                )
+
+    async def get_execution(identity, **kwargs):
+        assert identity == "execution" and kwargs["principal"] == principal
+        return Execution()
+
+    runtime = SimpleNamespace(history=History(), default_principal=principal,
+                              executions=SimpleNamespace(get=get_execution))
+    async with client(create_app(runtime=runtime)) as http:
+        history = await http.get("/api/session?session_id=session")
+        assert history.status_code == 200, history.text
+        assert raw_marker not in history.text
+        turn = history.json()["timeline"]["items"][0]
+        assert [item["content"] for item in turn["items"]] == ["answer"]
+        assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup", "status": "SUCCEEDED"}]
+
+        response = await http.get("/api/executions/execution/events?view=chat")
+        assert response.status_code == 200, response.text
+        assert raw_marker not in response.text
+        frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert [frame.get("type") for frame in frames] == ["process", "event", "event", None]
+        assert frames[0]["item"] == turn["process"][0]
+        assert frames[1]["item"]["event"]["payload"] == {"text": "answer"}
+        assert frames[-1]["status"] == "SUCCEEDED"

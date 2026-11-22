@@ -23,18 +23,21 @@ from .persistence import PersistenceStorage
 from .core import (
     AuthorizationPolicy,
     ExecutionDeltaType,
-    ExecutionEventType,
     ExecutionStatus,
     JsonValue,
     Principal,
 )
 from .errors import AIError, ErrorCode
-from .execution import CancelExecutionRequest, ExecutionTreeEvent, ListSessionRequest
+from .execution import ExecutionTreeEvent, ListSessionRequest
 from .runtime import Runtime
+from .session import project_tool_process_event
 from .workspace import Workspace
 
 if TYPE_CHECKING:
     from acp.schema import ResourceContentBlock
+
+    from .execution import Execution
+    from .session import ToolProcessItem
 
 _logger = environ.get_logger("ai.acp")
 
@@ -55,8 +58,11 @@ class ACPAgent:
         self._principal = principal
         self._connection: ACPConnection | None = None
         self._initialized = False
+        self._prompts: dict[str, asyncio.Future[Execution | None]] = {}
 
     def on_connect(self, connection: ACPConnection) -> None:
+        if self._connection is not connection:
+            self._prompts.clear()
         self._connection = connection
 
     async def initialize(self, protocol_version: int, **kwargs: JsonValue) -> JsonValue:
@@ -88,8 +94,40 @@ class ACPAgent:
 
     async def load_session(self, cwd: str, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
-        await self._runtime.sessions.get(session_id, principal=self._principal)
+        acp, schema = _require_acp()
+        connection = self._connection
+        cursor = None
+        pages = []
+        try:
+            while True:
+                page = await self._runtime.history.session_timeline(
+                    session_id, principal=self._principal, cursor=cursor,
+                )
+                pages.append(page.items)
+                cursor = page.next_cursor
+                if cursor is None:
+                    break
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id) from error
+        if connection is not None:
+            for turns in reversed(pages):
+                for turn in turns:
+                    if not turn.conversation_committed:
+                        continue
+                    for text in _history_text(turn.user_input):
+                        await connection.session_update(session_id, schema.UserMessageChunk(
+                            content=schema.TextContentBlock(type="text", text=text), sessionUpdate="user_message_chunk",
+                        ))
+                    process_by_key = {item.key: item for item in turn.process}
+                    for item in turn.items:
+                        if item.item_kind == "assistant" and isinstance(item.content, str) and item.content:
+                            await connection.session_update(session_id, _assistant_chunk(schema, item.content))
+                        elif item.item_kind == "tool_call" and item.tool_call_id is not None:
+                            process = process_by_key.pop(f"tool:{item.tool_call_id}", None)
+                            if process is not None:
+                                await connection.session_update(
+                                    session_id, _acp_tool_update(schema, turn.execution_id, process, replay=True),
+                                )
         return schema.LoadSessionResponse()
 
     async def list_sessions(
@@ -165,29 +203,39 @@ class ACPAgent:
                 parts.append("\n" + "\n".join(fields) + "\n")
             else:
                 raise acp.RequestError.invalid_params({"reason": "unsupported_prompt_content"})
-        text = "".join(parts)
-        loaded = await self._runtime.sessions.get(session_id, principal=self._principal)
-        execution = await self._runtime.agents.get(loaded.agent_id).start(
-            text,
-            principal=self._principal,
-            session_id=session_id,
-        )
+        if session_id in self._prompts:
+            raise _acp_error(acp, AIError(ErrorCode.SESSION_BUSY), session_id=session_id)
+        connection = self._connection
+        admitted: asyncio.Future[Execution | None] = asyncio.get_running_loop().create_future()
+        self._prompts[session_id] = admitted
+        execution_id = None
+        request_id = uuid4().hex
+
         async def on_event(item: ExecutionTreeEvent) -> None:
-            if item.depth != 0:
+            if item.depth != 0 or connection is None or connection is not self._connection:
                 return
             event = item.event
-            if self._connection is not None:
-                update = _acp_update(schema, event.event_type, event.payload)
-                if update is not None:
-                    await self._connection.session_update(session_id, update)
+            payload = event.payload
+            if event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
+                if isinstance(payload, dict) and isinstance(text := payload.get("text"), str) and text:
+                    await connection.session_update(session_id, _assistant_chunk(schema, text))
+            else:
+                process = project_tool_process_event(event.event_type, payload)
+                if process is not None:
+                    await connection.session_update(session_id, _acp_tool_update(schema, item.execution_id, process))
 
         try:
+            execution = await self._runtime.sessions.start(
+                session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
+            )
+            execution_id = execution.execution_id
+            admitted.set_result(execution)
             outcome = await execution.wait(on_event=on_event, include_event_content=True)
             result = outcome.result
             if outcome.observation_error is not None:
                 _logger.warning(
                     "ACP prompt observation incomplete: execution_id=%s code=%s",
-                    execution.execution_id, outcome.observation_error.code.value,
+                    execution_id, outcome.observation_error.code.value,
                 )
             if result.status is ExecutionStatus.FAILED:
                 try:
@@ -196,27 +244,29 @@ class ACPAgent:
                     code = ErrorCode.EXECUTION_FAILED
                 raise AIError(code)
         except AIError as error:
-            failure = AIError(
-                error.code,
-                retryable=error.retryable,
-                safe_details={"execution_id": execution.execution_id},
-            )
-            raise acp.RequestError.internal_error(asdict(
-                failure.to_safe_error(operation_id=execution.execution_id)
-            )) from error
+            raise _acp_error(acp, error, session_id=session_id, operation_id=request_id,
+                             execution_id=execution_id) from error
+        finally:
+            if self._prompts.get(session_id) is admitted:
+                del self._prompts[session_id]
+            if not admitted.done():
+                admitted.set_result(None)
         stop_reason = "cancelled" if result.status is ExecutionStatus.CANCELLED else "end_turn"
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
-        loaded = await self._runtime.sessions.reconcile(
-            session_id,
-            principal=self._principal,
-        )
-        if loaded.active_execution_id is not None:
-            await self._runtime.executions.cancel(
-                loaded.active_execution_id,
-                CancelExecutionRequest(self._principal, uuid4().hex, True),
-            )
+        self._require_initialized()
+        acp, _ = _require_acp()
+        admitted = self._prompts.get(session_id)
+        if admitted is None:
+            return
+        execution = await asyncio.shield(admitted)
+        if execution is None or self._prompts.get(session_id) is not admitted:
+            return
+        try:
+            await execution.cancel()
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id, execution_id=execution.execution_id) from error
 
     async def ext_method(self, method: str, params: "dict[str, JsonValue]") -> None:
         acp, _ = _require_acp()
@@ -289,22 +339,60 @@ def _require_acp() -> "tuple[ModuleType, ModuleType]":
     return _acp, _acp_schema
 
 
-def _acp_update(
-    schema: ModuleType,
-    event_type: str,
-    payload: JsonValue,
-) -> "JsonValue | None":
-    if not isinstance(payload, dict):
-        return None
-    if event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
-        return schema.AgentMessageChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_message_chunk")
-    if event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
-        return schema.AgentThoughtChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_thought_chunk")
-    if event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
-        return schema.ToolCallStart(toolCallId=str(payload.get("call_id", "")), title=str(payload.get("tool_name", "tool")), kind="execute", status="in_progress", sessionUpdate="tool_call")
-    if event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
-        return schema.ToolCallProgress(toolCallId=str(payload.get("call_id", "")), kind="execute", status="completed" if payload.get("status") == "SUCCEEDED" else "failed", sessionUpdate="tool_call_update")
-    return None
+def _acp_error(
+    acp: ModuleType, error: AIError, *, session_id: str,
+    operation_id: str | None = None, execution_id: str | None = None,
+) -> Exception:
+    if error.code in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.AUTHORIZATION_DENIED}:
+        return acp.RequestError(-32002, "Resource not found", {"sessionId": session_id})
+    safe = AIError(
+        error.code, retryable=error.retryable,
+        safe_details={} if execution_id is None else {"execution_id": execution_id},
+    )
+    data = asdict(safe.to_safe_error(operation_id=operation_id or execution_id or uuid4().hex))
+    if error.code is ErrorCode.SESSION_BUSY:
+        return acp.RequestError(-32901, "Session busy", data)
+    if error.code is ErrorCode.REQUEST_FIELD_INVALID:
+        return acp.RequestError.invalid_params(data)
+    return acp.RequestError.internal_error(data)
+
+
+def _history_text(value: JsonValue) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if isinstance(value, dict):
+        if value.get("version") == 1:
+            return _history_text(value.get("prompt"))
+        if value.get("kind") == "text" and isinstance(text := value.get("text"), str) and text:
+            return (text,)
+        if value.get("kind") == "items" and isinstance(items := value.get("items"), list):
+            return tuple(text for item in items for text in _history_text(item))
+    return ()
+
+
+def _assistant_chunk(schema: ModuleType, text: str) -> JsonValue:
+    return schema.AgentMessageChunk(
+        content=schema.TextContentBlock(type="text", text=text), sessionUpdate="agent_message_chunk",
+    )
+
+
+def _acp_tool_update(
+    schema: ModuleType, execution_id: str, process: "ToolProcessItem", *, replay: bool = False,
+) -> JsonValue:
+    call_id = f"{execution_id}:{process.key.removeprefix('tool:')}"
+    status = {
+        "RUNNING": "in_progress",
+        "UNCONFIRMED": "pending",
+        "SUCCEEDED": "completed",
+        "FAILED": "failed",
+        "INTERRUPTED": "failed",
+        "CANCELLED": "failed",
+    }[process.status]
+    if replay or process.status == "RUNNING":
+        return schema.ToolCallStart(
+            toolCallId=call_id, title=process.tool_name, kind="execute", status=status, sessionUpdate="tool_call",
+        )
+    return schema.ToolCallProgress(toolCallId=call_id, status=status, sessionUpdate="tool_call_update")
 
 
 __all__ = ["ACPAgent", "ACPApplication", "ACPConnection", "run_stdio", "serve_stdio"]

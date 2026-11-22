@@ -7,7 +7,7 @@ import base64
 import json
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import aclosing, suppress
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import asdict, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from importlib.util import find_spec
@@ -22,13 +22,14 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route
 
 from linktools.core import environ
-from ..core import Principal, PrincipalKind
+from ..core import Page, Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
 from ..history import History
-from ..execution import CreateSessionRequest, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..execution import CreateSessionRequest, ExecutionTreeEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
 from ..runtime import Runtime
+from ..session import SessionTurn, project_tool_process_event
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
@@ -92,6 +93,45 @@ def _wire(value: object) -> object:
     if isinstance(value, (tuple, list)):
         return [_wire(item) for item in value]
     return value
+
+
+def _chat_timeline(page: Page[SessionTurn]) -> Page[SessionTurn]:
+    # The inspector has its own explicit content reads. Chat receives answers
+    # and the public process projection, not raw transcript parts.
+    return replace(page, items=tuple(
+        replace(turn, items=tuple(item for item in turn.items if item.item_kind == "assistant"),
+                safe_error_details={})
+        for turn in page.items
+    ))
+
+
+_CHAT_STREAM_POSITION = {"agent_run_seq", "model_request_seq", "stream_attempt_seq"}
+_CHAT_STREAM_FIELDS = {
+    "ASSISTANT_TEXT_DELTA": _CHAT_STREAM_POSITION | {"text", "part_index", "part_start", "stream_truncated"},
+    "MODEL_ATTEMPT_STARTED": _CHAT_STREAM_POSITION,
+    "MODEL_ATTEMPT_FINISHED": _CHAT_STREAM_POSITION | {"status"},
+    "MODEL_REQUEST_FINISHED": _CHAT_STREAM_POSITION | {"status"},
+    "STREAM_RESET": {"stream_truncated"},
+    "EXECUTION_FAILED": set(),
+    "EXECUTION_CANCELLED": set(),
+}
+
+
+def _chat_frame(item: ExecutionTreeEvent, cursor: str | None) -> dict[str, object] | None:
+    if item.depth != 0:
+        return None
+    event = item.event
+    process = project_tool_process_event(event.event_type, event.payload)
+    if process is not None:
+        return {"type": "process", "item": _wire(process), "cursor": cursor}
+    allowed = _CHAT_STREAM_FIELDS.get(event.event_type)
+    if allowed is None or not isinstance(event.payload, Mapping):
+        return None
+    return {"type": "event", "cursor": cursor, "item": {
+        "execution_id": item.execution_id, "depth": 0,
+        "event": {"event_type": event.event_type, "durable_seq": event.durable_seq,
+                  "payload": {key: value for key, value in event.payload.items() if key in allowed}},
+    }}
 
 
 def _response_display(response: ModelClientResponse) -> tuple[str | None, str | None]:
@@ -287,7 +327,8 @@ class _Console:
         if include_timeline == "true" and self.runtime is not None and type(history) is History:
             if environ.debug:
                 request.state.phase = "session.timeline"
-            return _json(await history.session_detail(identity, principal=self.principal, **_paging(request)))
+            detail = await history.session_detail(identity, principal=self.principal, **_paging(request))
+            return _json(replace(detail, timeline=_chat_timeline(detail.timeline)))
         if environ.debug:
             request.state.phase = "session.metadata"
         session = await history.inspect_session(identity, principal=self.principal)
@@ -295,7 +336,7 @@ class _Console:
         if include_timeline == "true":
             if environ.debug:
                 request.state.phase = "session.timeline"
-            timeline = await history.session_timeline(identity, principal=self.principal, **_paging(request))
+            timeline = _chat_timeline(await history.session_timeline(identity, principal=self.principal, **_paging(request)))
         return _json({"session": session, "timeline": timeline})
 
     async def session_action(self, request: Request) -> Response:
@@ -464,24 +505,37 @@ class _Console:
             request.path_params["execution_id"], principal=self.principal,
         )
         cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or None
-        watch = execution.watch(cursor=cursor, include_content=True, include_model_interactions=True)
+        chat = request.query_params.get("view") == "chat"
+        watch = execution.watch(cursor=cursor, include_content=True, include_model_interactions=not chat)
 
         async def stream() -> AsyncGenerator[str, None]:
             try:
                 async for observation in watch:
                     item = observation.event
-                    payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
-                               "item": _wire(item), "cursor": observation.cursor}
+                    if chat:
+                        if not isinstance(item, ExecutionTreeEvent):
+                            continue
+                        payload = _chat_frame(item, observation.cursor)
+                        if payload is None:
+                            continue
+                    else:
+                        payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
+                                   "item": _wire(item), "cursor": observation.cursor}
                     prefix = "" if observation.cursor is None else f"id: {observation.cursor}\n"
                     yield prefix + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
                 # Completion of an observer is not the execution's terminal verdict.
                 if environ.debug:
                     request.state.phase = "execution.metadata"
                 info = await self.require_history().inspect_execution(execution.execution_id, principal=self.principal)
+                if chat:
+                    info = replace(info, safe_error_details={}, error_diagnostics=None)
                 yield "event: snapshot\ndata: " + json.dumps(_wire(info), ensure_ascii=False) + "\n\n"
             except AIError as error:
                 _debug_error(request, error)
-                payload = {"error_code": error.code.value, "safe_details": error.safe_details}
+                details = error.safe_details
+                if chat:
+                    details = {key: value for key, value in details.items() if key == "cleanup_pending"}
+                payload = {"error_code": error.code.value, "safe_details": details}
                 if isinstance(error, ObservationError):
                     payload.update(cursor=error.cursor, origin=error.origin)
                 yield "event: observation_error\ndata: " + json.dumps(payload) + "\n\n"

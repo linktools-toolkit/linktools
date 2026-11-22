@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Session lifecycle and conversation membership contracts."""
 
+from ._process import ToolProcessItem, ToolProcessStatus, project_tool_process_event, project_turn_tool_process
+
 from ._contracts import (
     SessionContext,
     normalize_session_context,
@@ -40,6 +42,10 @@ from ._service import (
 )
 
 __all__ = [
+    "ToolProcessItem",
+    "ToolProcessStatus",
+    "project_tool_process_event",
+    "project_turn_tool_process",
     "SessionContext",
     "normalize_session_context",
     "SessionManager",
