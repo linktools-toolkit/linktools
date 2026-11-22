@@ -99,6 +99,7 @@ from ..capability import ToolResponseFixture
 from ..execution import CancelExecutionRequest, ExecutionHistoryReader, SessionHistoryReader
 from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
+from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.runs import RuntimeAgentRunStore
 from ..persistence.runs import StagingAgentRunStore
 
@@ -814,6 +815,8 @@ async def _build_local_components(
             ),
         )
         runtime_bridge.bind(backend)
+        if live_broker.shared is not None and type(state.execution.executions) is ExecutionRepositoryImpl:
+            runtime_bridge.child_topology = live_broker.shared.child
         runtime_bridge.prepare_reserved_start = backend.prepare_reserved_start
         runtime_bridge.pending_start = backend.start_pending
         runtime_bridge.run_turn = backend.run_turn

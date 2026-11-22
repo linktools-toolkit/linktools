@@ -9,11 +9,13 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from typing import Protocol
 
-from ..core import ExecutionLineageKind, Page, Principal
+from ..core import ExecutionLineageKind, JsonValue, Page, Principal
 from ..errors import AIError, ErrorCode
 from .events import project_event_payload
 from ._tree_ready import ExecutionTreeReady
-from ..execution.stream import shared_stream_positions
+from .stream import (
+    OBSERVATION_TIMEOUT, is_fresh_observation_coverage, shared_stream_observation, shared_stream_positions,
+)
 from ..observe.cursors import ExecutionWatchPositions, get_preview_positions
 from ..observe.stream import is_observation_cleanup, drain_stream_tasks, await_stream_cleanup, report_observation_error
 from . import ExecutionStreamEvent, ExecutionEvent, ExecutionTreeEvent, ExecutionView
@@ -21,6 +23,7 @@ from ..observe.stream import ExecutionStreamFailure
 
 _DISCOVERY_BACKOFF_INITIAL = 1.0
 _DISCOVERY_BACKOFF_MAX = 30.0
+_MAX_REMOTE_CHILD_HINTS = 256
 
 
 class _ExecutionTreeReader(Protocol):
@@ -142,6 +145,13 @@ def _capture_views(
     return tuple(captured)
 
 
+class _LiveTreeSample:
+    def __init__(self) -> None:
+        self.references = 0
+        self.task: asyncio.Task[tuple[tuple[ExecutionView, int, int], ...]] | None = None
+        self.expires_at = 0.0
+
+
 class ExecutionTreeStreamer:
     """Merge an execution subtree with relative depths and per-stream ordering."""
 
@@ -154,6 +164,7 @@ class ExecutionTreeStreamer:
         self._executions = executions
         self._events = events
         self._broker = broker
+        self._live_samples: dict[tuple[str, Principal], _LiveTreeSample] = {}
 
     async def capture(
         self,
@@ -320,6 +331,53 @@ class ExecutionTreeStreamer:
         observing = False
         shared = ready if isinstance(ready, ExecutionTreeReady) and ready.positions is not None else None
         preparation_failure: ExecutionStreamFailure | None = None
+        sample_key = (execution_id, principal)
+        live_sample: _LiveTreeSample | None = None
+        remote_coverage: dict[str, tuple[str, float]] = {}
+        remote_baselines: set[str] = set()
+        remote_children: dict[tuple[str, str], str] = {}
+        remote_changed = asyncio.Event()
+        remote_wait: asyncio.Task[bool] | None = None
+
+        def invalidate_topology(parent_id: str) -> None:
+            remote_coverage.pop(parent_id, None)
+            remote_baselines.add(parent_id)
+            remote_changed.set()
+
+        def observe_topology(parent_id: str, position: tuple[str, int], record: dict[str, JsonValue]) -> None:
+            if parent_id not in subscriptions:
+                return
+            identity, _ = position
+            kind = record.get("kind")
+            now = asyncio.get_running_loop().time()
+            coverage = remote_coverage.get(parent_id)
+            if kind == "coverage":
+                authority = record.get("authority_deadline")
+                if (record.get("tree") is True and type(authority) in (int, float)
+                        and authority > now and is_fresh_observation_coverage(record)):
+                    remote_coverage[parent_id] = (identity, min(authority, now + OBSERVATION_TIMEOUT))
+                    if coverage is None or coverage[0] != identity or coverage[1] <= now:
+                        remote_baselines.add(parent_id)
+                        remote_changed.set()
+                elif coverage is not None:
+                    invalidate_topology(parent_id)
+            elif kind == "gap":
+                if coverage is not None:
+                    invalidate_topology(parent_id)
+            elif kind == "child" and coverage is not None and coverage[0] == identity:
+                child_id = record.get("execution_id")
+                if (not isinstance(child_id, str) or not child_id or child_id == parent_id
+                        or len(remote_children) >= _MAX_REMOTE_CHILD_HINTS):
+                    invalidate_topology(parent_id)
+                else:
+                    remote_children[(parent_id, child_id)] = identity
+                    remote_changed.set()
+
+        def next_event(stream: AsyncIterator[ExecutionStreamEvent], member_id: str) -> asyncio.Task[ExecutionStreamEvent]:
+            if include_descendants:
+                with shared_stream_observation(observe_topology):
+                    return _next_event_task(stream, member_id, after_event_seqs)
+            return _next_event_task(stream, member_id, after_event_seqs)
 
         def start(view: ExecutionView) -> None:
             stream = self._events.stream(
@@ -328,7 +386,7 @@ class ExecutionTreeStreamer:
                 after_event_seq=after_event_seqs.get(view.execution_id, 0),
             )
             streams[view.execution_id] = stream
-            pending[view.execution_id] = _next_event_task(stream, view.execution_id, after_event_seqs)
+            pending[view.execution_id] = next_event(stream, view.execution_id)
 
         def wait_for_children(parent_id: str) -> None:
             if not include_descendants:
@@ -438,24 +496,90 @@ class ExecutionTreeStreamer:
             except Exception as error:
                 raise ExecutionStreamFailure(error) from error
 
+        async def discover_remote() -> None:
+            baselines, hints = tuple(remote_baselines), tuple(remote_children.items())
+            remote_baselines.clear()
+            remote_children.clear()
+            remote_changed.clear()
+            if baselines:
+                await discover_persisted_children(baselines)
+            for (parent_id, child_id), identity in hints:
+                coverage = remote_coverage.get(parent_id)
+                if coverage is None or coverage[0] != identity:
+                    continue
+                try:
+                    child = views.get(child_id)
+                    if child is None:
+                        child = await self._executions.inspect(child_id, principal=principal)
+                    if child.execution_id != child_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    _validate_child(views[parent_id], child)
+                except Exception:
+                    # A transport hint is not proof of a child. Re-read the
+                    # authenticated index, leaving true storage errors visible.
+                    invalidate_topology(parent_id)
+                    continue
+                if add_child(parent_id, child):
+                    await discover_persisted_children((child_id,))
+
         async def discover_ready(done: set[asyncio.Task]) -> None:
-            nonlocal discovery_wait, discovery_backoff
+            nonlocal discovery_wait, discovery_backoff, remote_wait
+            observed = len(views)
+            members = tuple(pending)
+            if remote_wait in done:
+                await discover_remote()
+                remote_wait = asyncio.create_task(remote_changed.wait())
             for parent_id, task in tuple(child_waits.items()):
                 if task in done:
                     for child_id in broker_result(task):
                         await discover_child(parent_id, child_id)
                     wait_for_children(parent_id)
+            if shared is not None and len(views) != observed:
+                shared.snapshot = _capture_views(views, depths, {})
+                shared.sampled.set()
 
             if discovery_wait in done:
-                if shared is not None:
+                now = asyncio.get_running_loop().time()
+                # A member attached in this round just read its child index.
+                covered = members and all(
+                    member not in remote_baselines and member in remote_coverage
+                    and remote_coverage[member][1] > now for member in members
+                )
+                if covered:
+                    # The baseline and terminal pass still use the authoritative
+                    # index; covered facts only replace steady reconciliation.
+                    discovery_backoff = _DISCOVERY_BACKOFF_INITIAL
+                elif shared is not None:
                     assert shared.positions is not None
-                    snapshot = await self.capture(
-                        execution_id, principal=principal, after_event_seqs=shared.positions(),
-                        include_descendants=include_descendants,
-                    )
+                    assert live_sample is not None
+                    positions = shared.positions()
+                    now = asyncio.get_running_loop().time()
+                    sample_task = live_sample.task
+                    if sample_task is None or (
+                        sample_task.done() and (
+                            now >= live_sample.expires_at or sample_task.cancelled()
+                            or sample_task.exception() is not None
+                        )
+                    ):
+                        sample_task = asyncio.create_task(
+                            self.capture(execution_id, principal=principal, include_descendants=include_descendants),
+                        )
+                        live_sample.task = sample_task
+                        live_sample.expires_at = now + _DISCOVERY_BACKOFF_INITIAL
+                    snapshot = await asyncio.shield(sample_task)
+                    cutoffs = {view.execution_id: cutoff for view, _, cutoff in snapshot}
+                    if ((set(positions) | set(get_preview_positions(positions))) - cutoffs.keys()
+                            or any(sequence > cutoffs[member] for member, sequence in positions.items())):
+                        # A cached sample need not cover a newer live cursor.
+                        # Recheck its membership and durable watermark from
+                        # authority using the position captured at read start.
+                        snapshot = await self.capture(
+                            execution_id, principal=principal, after_event_seqs=positions,
+                            include_descendants=include_descendants,
+                        )
                     for view, depth, _ in snapshot:
                         add_view(view, depth)
-                    shared.snapshot = snapshot
+                    shared.snapshot = _capture_views(views, depths, {})
                     shared.sampled.set()
                 else:
                     added = await discover_persisted_children(tuple(views))
@@ -488,7 +612,11 @@ class ExecutionTreeStreamer:
                 ready.set()
 
             discovery_backoff = _DISCOVERY_BACKOFF_INITIAL
+            if shared is not None:
+                live_sample = self._live_samples.setdefault(sample_key, _LiveTreeSample())
+                live_sample.references += 1
             if include_descendants:
+                remote_wait = asyncio.create_task(remote_changed.wait())
                 discovery_wait = asyncio.create_task(
                     asyncio.sleep(discovery_backoff),
                     name=f"execution-tree-discovery-{execution_id}",
@@ -530,6 +658,8 @@ class ExecutionTreeStreamer:
                     wait_tasks += tuple(child_waits.values())
                     if discovery_wait is not None:
                         wait_tasks += (discovery_wait,)
+                    if remote_wait is not None:
+                        wait_tasks += (remote_wait,)
                 done, _ = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
 
                 # Contract failures and cancellation outrank optional transport
@@ -550,7 +680,7 @@ class ExecutionTreeStreamer:
                     discovery.result()
                     discovery = None
                 if not final_discovery and discovery is None and (
-                    discovery_wait in done or any(task in done for task in child_waits.values())
+                    discovery_wait in done or remote_wait in done or any(task in done for task in child_waits.values())
                 ):
                     discovery = asyncio.create_task(discover_ready(done))
 
@@ -563,6 +693,7 @@ class ExecutionTreeStreamer:
                         event = task.result()
                     except StopAsyncIteration:
                         streams.pop(key, None)
+                        remote_coverage.pop(key, None)
                         continue
                     view = views[key]
                     yield ExecutionTreeEvent(
@@ -575,15 +706,23 @@ class ExecutionTreeStreamer:
                         depths[key],
                         _project_stream_event(event, include_content, include_output_preview=include_output_preview),
                     )
-                    pending[key] = _next_event_task(streams[key], key, after_event_seqs)
+                    pending[key] = next_event(streams[key], key)
         finally:
             active_error = sys.exc_info()[1]
 
             async def cleanup() -> None:
                 errors = await drain_stream_tasks((discovery,)) if discovery is not None else []
+                if live_sample is not None:
+                    live_sample.references -= 1
+                    if not live_sample.references:
+                        self._live_samples.pop(sample_key)
+                        if live_sample.task is not None:
+                            errors.extend(await drain_stream_tasks((live_sample.task,)))
                 wait_tasks = tuple(child_waits.values()) + tuple(pending.values())
                 if discovery_wait is not None:
                     wait_tasks += (discovery_wait,)
+                if remote_wait is not None:
+                    wait_tasks += (remote_wait,)
                 broker_tasks = set(child_waits.values())
 
                 def map_error(task: asyncio.Task, error: BaseException) -> BaseException:

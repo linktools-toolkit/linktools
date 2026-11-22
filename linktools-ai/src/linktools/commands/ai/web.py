@@ -12,6 +12,7 @@ from ._common import add_local_runtime_arguments, run_local
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from ._common import LocalRuntime
+    from socket import socket
 
 
 class Command(BaseCommand):
@@ -32,13 +33,21 @@ class Command(BaseCommand):
             raise CommandError("port must be between 1 and 65535")
 
         async def serve(local: "LocalRuntime") -> int:
+            shutdown_event = asyncio.Event()
+
+            class Server(uvicorn.Server):
+                async def shutdown(self, sockets: "list[socket] | None" = None) -> None:
+                    # Uvicorn waits for HTTP streams before dispatching ASGI lifespan shutdown.
+                    shutdown_event.set()
+                    await super().shutdown(sockets=sockets)
+
             app = create_app(
                 runtime=local.runtime, metrics=local.metrics,
-                status=local.status, capabilities=local.capabilities,
+                status=local.status, capabilities=local.capabilities, shutdown_event=shutdown_event,
             )
             url = f"http://127.0.0.1:{args.port}"
             self.logger.info("AI Web console: %s", url)
-            server = uvicorn.Server(uvicorn.Config(
+            server = Server(uvicorn.Config(
                 app, host="127.0.0.1", port=args.port, log_config=None,
                 access_log=False, proxy_headers=False, timeout_graceful_shutdown=5,
             ))
