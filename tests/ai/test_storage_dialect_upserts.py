@@ -382,6 +382,8 @@ async def test_counter_batch_returns_binary_identity_without_text_conversion(dia
                   Column("value", Integer, nullable=False))
 
     class Result:
+        rowcount = 1
+
         def all(self) -> list[tuple[bytes, int]]:
             return [(key, 3)]
 

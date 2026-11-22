@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
-from sqlalchemy import LargeBinary, String, delete, select
+from sqlalchemy import String, delete, select
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
@@ -77,8 +77,11 @@ def test_native_schema_and_joins_preserve_binary_keys_within_index_and_bind_budg
     metadata = build_step_sql_metadata()
     for table_name in ("events", "snapshots"):
         table = metadata.tables["ai_step_" + table_name]
-        assert isinstance(table.c.store_key.type, LargeBinary) and table.c.store_key.type.length == 274
-        assert isinstance(table.c.idempotency_key.type, LargeBinary) and table.c.idempotency_key.type.length == 128
+        for column, width in ((table.c.store_key, 274), (table.c.idempotency_key, 128)):
+            assert column.type.python_type is bytes and column.type.length == width
+            assert column.type.compile(dialect=dialect) == {
+                "mysql": f"VARBINARY({width})", "postgresql": "BYTEA", "sqlite": "BLOB",
+            }[name]
         assert not table.c.idempotency_key.nullable
         keys = [index for index in table.indexes if index.unique]
         assert {tuple(index.columns.keys()) for index in keys} == {("store_locator", "run_id", "idempotency_key")}

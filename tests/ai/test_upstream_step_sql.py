@@ -478,9 +478,7 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
             assert "(" + ", ".join(columns) + ")" in ddl
             if dialect.name == "mysql":
                 # MySQL budgets declared characters, not the application's byte limit.
-                from sqlalchemy import LargeBinary
-
-                key_bytes = sum(column.type.length * (1 if isinstance(column.type, LargeBinary) else 4)
+                key_bytes = sum(column.type.length * (1 if column.type.python_type is bytes else 4)
                                 if getattr(column.type, "length", None) else 1
                                 for column in (table.c[name] for name in columns))
                 assert key_bytes == (896 if "idempotency_key" in columns else 769 if "pruned" in columns else 768)
