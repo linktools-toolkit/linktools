@@ -28,7 +28,7 @@ async def test_observe_turns_follows_owned_boundaries(tmp_path: Path, backend: s
             return ModelResponse(parts=[TextPart("answer")])
         return ModelResponse(parts=[ToolCallPart("lookup", {"value": "not-for-notices"}, tool_call_id="call")])
 
-    features = RuntimeFeatures("local-notices")
+    features = RuntimeFeatures("turn-notices")
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.capability(ExecutionCapability(retain_history=True))
     if backend != "memory":
