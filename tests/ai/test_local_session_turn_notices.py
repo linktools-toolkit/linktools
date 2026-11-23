@@ -5,6 +5,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import CreateSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -58,3 +59,60 @@ async def test_file_sqlite_local_turn_notices_follow_owned_boundaries(tmp_path: 
         assert "not-for-notices" not in repr(notices)
         unsubscribe()
         unsubscribe_failed()
+
+
+@pytest.mark.asyncio
+async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admission(tmp_path: Path) -> None:
+    from linktools.ai.workspace import Workspace
+    from linktools.commands.ai._common import _open_local_runtime
+
+    workspace = Workspace.initialize(tmp_path)
+    entered = asyncio.Event()
+
+    async def hold(_messages, _info):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def answer(_messages, _info):
+        return ModelResponse(parts=[TextPart("recovered answer")])
+
+    async with _open_local_runtime(workspace, model=_Models(_UsageFunctionModel(hold))) as initial:
+        actor = initial.runtime.default_principal
+        await initial.runtime.sessions.create("default", CreateSessionRequest(actor, "session", "create"))
+        turn = await initial.runtime.sessions.start("session", "ask", principal=actor, idempotency_key="turn")
+        await asyncio.wait_for(entered.wait(), 10)
+        rejected_notices = []
+        unsubscribe = initial.runtime.sessions.observe_local_turns(rejected_notices.append)
+        try:
+            with pytest.raises(AIError) as error:
+                await initial.runtime.executions.recover(
+                    turn.execution_id, principal=actor, idempotency_key="rejected",
+                )
+            assert error.value.code is ErrorCode.STORAGE_CONFLICT
+            await asyncio.wait_for(initial.runtime.handoff(), 10)
+            assert not rejected_notices
+        finally:
+            unsubscribe()
+
+    async with _open_local_runtime(workspace, model=_Models(_UsageFunctionModel(answer))) as successor:
+        runtime = successor.runtime
+        actor = runtime.default_principal
+        assert (await runtime.executions.inspect(turn.execution_id, principal=actor)).status.value == "STARTED"
+        notices = []
+        unsubscribe = runtime.sessions.observe_local_turns(notices.append)
+        try:
+            recovered = await runtime.executions.recover(turn.execution_id, principal=actor, idempotency_key="recover")
+            assert recovered.execution_id == turn.execution_id
+            result = await runtime.executions.wait(turn.execution_id, principal=actor, timeout_seconds=10)
+            assert result.result.output == {"text": "recovered answer"}
+            replay = await runtime.executions.recover(turn.execution_id, principal=actor, idempotency_key="recover")
+            assert replay.execution_id == turn.execution_id
+            detail = await runtime.history.session_detail("session", principal=actor)
+            assert detail.session.active_execution_id is None
+            saved, = detail.timeline.items
+            assert saved.conversation_committed and saved.execution_id == turn.execution_id
+            assert [(notice.kind, notice.session_id, notice.execution_id) for notice in notices] == [
+                ("terminal", "session", turn.execution_id),
+            ]
+        finally:
+            unsubscribe()

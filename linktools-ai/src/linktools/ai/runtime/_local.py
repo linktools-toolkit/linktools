@@ -278,6 +278,7 @@ class _OwnedExecutionTurn:
     scope: TurnScope | None = None
     admitting: bool = True
     notice_admitted: bool = False
+    notice_recovery_terminal: bool = False
     producer_generation: int | None = None
     attempt: _InitialAttemptCapture | None = None
     boundary: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -797,8 +798,8 @@ class LocalExecutionBackend:
             self._terminal_publication(committed if isinstance(committed, ExecutionTerminalPublication) else committed.execution)
         if session_id is not None and self._local_turn_observers and isinstance(committed, ExecutionTerminalPublication) and committed.session_released:
             owner = self._turn_owners.get(committed.execution.execution_id)
-            if owner is not None and owner.notice_admitted:
-                owner.notice_admitted = False
+            if owner is not None and (owner.notice_admitted or owner.notice_recovery_terminal):
+                owner.notice_admitted = owner.notice_recovery_terminal = False
                 self._notify_local_turn(LocalSessionTurnNotice(
                     "terminal", session_id, committed.execution.execution_id,
                 ))
@@ -2110,6 +2111,9 @@ class LocalExecutionBackend:
             initial_attempt = _InitialAttemptCapture(current, session)
         if owner is not None:
             self._require_turn_dispatch(owner)
+            if recovery_operation is not None and session is not None and self._local_turn_observers:
+                # The claimed recovery still owns the existing Session turn; it is not a new admission.
+                owner.notice_recovery_terminal = True
         self._terminal_events[execution.execution_id] = asyncio.Event()
         run = (self._run(request, execution, resume, producer_generation=producer_generation)
                if initial_attempt is None else
