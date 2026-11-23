@@ -480,6 +480,7 @@ class _Console:
             authorized_execution = None
             last_active = last_local = watching = None
             ended_while_started = False
+            occupancy: dict[str, object] | None = None
 
             def stop_execution() -> None:
                 nonlocal producer, frame_task, watching
@@ -510,8 +511,8 @@ class _Console:
                                     authorized_execution = await authorize_remote(watching)
                                     last_local = False
                                     watching = None
-                                    if not state_task.done():
-                                        yield _sse_frame("message", {**payload, "local_execution": False})
+                                    if occupancy is not None and not state_task.done():
+                                        yield _sse_frame("message", {**occupancy, "local_execution": False})
                             else:
                                 frame_task = asyncio.create_task(execution_frames.get())
                                 event, data, cursor = frame
@@ -551,15 +552,15 @@ class _Console:
                         execution_frames = asyncio.Queue(maxsize=1)
                         producer = asyncio.create_task(pump(active, execution_frames))
                         frame_task = asyncio.create_task(execution_frames.get())
-                    payload = {
+                    occupancy = {
                         "status": session.status.value,
                         "active_execution_id": active,
                         "revision": session.revision,
                     }
                     if active is not None and local_execution is not None:
-                        payload["local_execution"] = local_execution
+                        occupancy["local_execution"] = local_execution
                     state_task = asyncio.create_task(anext(watch, None))
-                    yield _sse_frame("message", payload)
+                    yield _sse_frame("message", occupancy)
             except AIError as error:
                 _debug_error(request, error)
                 yield _sse_frame("session_error", {"error_code": error.code.value})
