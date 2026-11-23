@@ -911,11 +911,17 @@ if(process.argv[3]==='tools') {
   replacementRead({session:{...session},timeline:replacementTimeline});
   await until('same-revision replacement reads the previous committed turn',()=>remoteArticle(remote)?.textContent.includes('External answer'));
   assert.equal(node('send').disabled,true,'older completion must not unlock a replacement owner');
+  assert.match(remoteArticle(replacement).textContent,/New lookupIn progress/);
 
   const terminalRead=deferred('GET /api/sessions/a');
   session.active_execution_id=null; // Another same-revision authoritative release.
   await terminalRead.requested;
   source.process(replacement,{...remoteTool,tool_name:'Stale after release'});
+  const pendingReads=readCount();
+  source.snapshot(); // A duplicate idle snapshot can arrive before terminal History returns.
+  node('chat-mode').click();
+  assert.match(remoteArticle(replacement).textContent,/New lookupIn progress/,'duplicate idle keeps observed tool rows until canonical readback');
+  assert.equal(readCount(),pendingReads,'duplicate idle must not repeat the terminal read');
   const finishedReplacement={...replacementTurn,status:'SUCCEEDED',conversation_committed:true,process:[],items:[{item_kind:'assistant',content:'Replacement answer'}]};
   const terminalTimeline={items:[saved,finishedRemote,finishedReplacement],next_cursor:null};
   timelineOverrides.set('a',terminalTimeline);

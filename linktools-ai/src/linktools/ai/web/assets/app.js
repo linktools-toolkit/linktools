@@ -344,7 +344,9 @@ function watchSession(id, {restart=false}={}) {
     if(state.session)Object.assign(state.session,watch.snapshot);
     setDisabled();
     const previousOwner=previous?.active_execution_id;
-    for(const key of watch.externalProcess.keys())if(key!==previousOwner && key!==value.active_execution_id)watch.externalProcess.delete(key);
+    for(const key of watch.externalProcess.keys())
+      if(key!==previousOwner && key!==value.active_execution_id && key!==watch.refresh.releasedExternal)
+        watch.externalProcess.delete(key);
     const timelineRevision=previousOwner ? state.session?.revision : previousRevision ?? state.session?.revision;
     // An open execution stream reads the timeline at its tail. A fast turn
     // may release before that stream opens, leaving the session watch to catch up.
