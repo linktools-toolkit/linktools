@@ -206,6 +206,10 @@ class _ACPSchema:
         return {"schema_type": "message", **kwargs}
 
     @staticmethod
+    def AgentThoughtChunk(**kwargs: object) -> dict[str, object]:
+        return {"schema_type": "thinking", **kwargs}
+
+    @staticmethod
     def ToolCallStart(**kwargs: object) -> dict[str, object]:
         return {"schema_type": "tool-start", **kwargs}
 
@@ -230,7 +234,7 @@ class _ACPSchema:
         (
             ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value,
             {"text": "reason"},
-            None,
+            "thinking",
         ),
         (
             ExecutionEventType.TOOL_CALL_STARTED.value,
@@ -527,7 +531,11 @@ async def test_acp_streamed_chunks_are_not_repeated_from_final_result(
     agent.on_connect(SimpleNamespace(session_update=session_update))
     response = await agent.prompt("session", [SimpleNamespace(text="prompt")])
     assert response["stopReason"] == "end_turn"
-    assert [update["content"]["text"] for update in updates] == ["hello ", "world"]
+    assert [(update["sessionUpdate"], update["content"]["text"]) for update in updates] == [
+        ("agent_message_chunk", "hello "),
+        ("agent_thought_chunk", "reason"),
+        ("agent_message_chunk", "world"),
+    ]
 
 
 @pytest.mark.asyncio
