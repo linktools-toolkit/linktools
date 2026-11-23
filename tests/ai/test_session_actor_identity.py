@@ -103,7 +103,7 @@ async def test_shared_session_preserves_actor_in_live_and_portable_history(
     async with Persistence.open("shared-session", storage=storage, read_only=True) as state:
         async with History.open(persistence=state, authorization=policy) as history:
             for actor in (owner, peer):
-                assert (await history.session_timeline("shared", principal=actor)).items == expected
+                assert (await history.session_detail("shared", principal=actor)).timeline.items == expected
         reference = await state.export_snapshot(object_store=archive, limits=limits)
     root = tmp_path / "restored"
     await Persistence.restore_snapshot(reference, object_store=archive, root=root, limits=limits)
@@ -112,7 +112,7 @@ async def test_shared_session_preserves_actor_in_live_and_portable_history(
         assert (await state.conversation.sessions.get("shared", tenant_id="default")).owner_principal_id == "owner"
         async with History.open(persistence=state, authorization=policy) as history:
             for actor in (owner, peer):
-                assert (await history.session_timeline("shared", principal=actor)).items == expected
+                assert (await history.session_detail("shared", principal=actor)).timeline.items == expected
         roundtrip = await state.export_snapshot(object_store=archive, limits=limits)
         original_manifest = json.loads(await read_object(archive, reference.key, expected_digest=reference.digest, expected_size=reference.size))
         restored_manifest = json.loads(await read_object(archive, roundtrip.key, expected_digest=roundtrip.digest, expected_size=roundtrip.size))

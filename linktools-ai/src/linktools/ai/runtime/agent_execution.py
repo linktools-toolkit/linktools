@@ -23,7 +23,8 @@ from ..execution.handle import ExecutionBinding, ExecutionTreeWatcher
 from ..model import CanonicalUserInput, normalize_input_files
 if TYPE_CHECKING:
     from ._execution import DefaultExecutionService
-    from ..execution import ExecutionRecord, SessionService
+    from ..execution import ExecutionRecord
+    from ..session import SessionService
     from ..task import TaskNodeInvocation
     from ..inputs import InputCaptures
     from ..persistence import Persistence

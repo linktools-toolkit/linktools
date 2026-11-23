@@ -143,7 +143,7 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as history_persistence_145, History.open(persistence=history_persistence_145) as history:
         assert (await history.result(execution_id, principal=principal)).output == result.output
         with pytest.raises(AIError) as raised:
-            await history.session_timeline("s", principal=principal)
+            await history.session_detail("s", principal=principal)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

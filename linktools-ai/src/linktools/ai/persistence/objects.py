@@ -14,7 +14,7 @@ from ..storage import (
     ObjectStore,
     read_object,
 )
-from ._plan import PersistenceDomain, runtime_domain_uses_object_store
+from ._plan import PersistenceDomain
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -27,8 +27,8 @@ class ObjectKeyFactory:
         validate_persistence_namespace(self.namespace)
 
     def key(self, runtime_domain: PersistenceDomain, tenant_id: str, digest: str) -> str:
-        if not runtime_domain_uses_object_store(runtime_domain):
-            raise ValueError("Runtime object identity is invalid")
+        if not isinstance(runtime_domain, PersistenceDomain):
+            raise TypeError("domain must be PersistenceDomain")
         tenant_id = validate_tenant_id(tenant_id)
         if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
             raise ValueError("Runtime object digest is invalid")
@@ -67,4 +67,4 @@ async def read_runtime_object(store: ObjectStore, reference: ObjectRef) -> bytes
 from ._object_cleanup import ObjectCleanupResult
 from ._object_router import runtime_object_source_reads
 
-__all__ = ['ObjectCleanupResult', 'ObjectKeyFactory', 'put_runtime_object', 'read_runtime_object', 'runtime_domain_uses_object_store', 'runtime_object_source_reads']
+__all__ = ['ObjectCleanupResult', 'ObjectKeyFactory', 'put_runtime_object', 'read_runtime_object', 'runtime_object_source_reads']

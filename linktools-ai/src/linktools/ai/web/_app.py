@@ -127,7 +127,7 @@ _CHAT_PART_POSITION = ("agent_run_seq", "model_request_seq", "stream_attempt_seq
 _ExecutionFrame = tuple[str, dict[str, object], str | None]
 
 
-def _chat_frame(item: ExecutionTreeEvent, *, compact: bool) -> _ExecutionFrame | None:
+def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
     if item.depth != 0:
         return None
     cursor = item.cursor
@@ -139,7 +139,7 @@ def _chat_frame(item: ExecutionTreeEvent, *, compact: bool) -> _ExecutionFrame |
     if allowed is None or not isinstance(event.payload, Mapping):
         return None
     source = event.payload
-    kind = _CHAT_DELTA_EVENTS.get(event.event_type) if compact else None
+    kind = _CHAT_DELTA_EVENTS.get(event.event_type)
     if kind:
         text = source.get("text")
         start = source.get("part_start")
@@ -393,13 +393,9 @@ class _Console:
                 try:
                     turn = await history.session_turn(identity, execution_id, principal=self.principal)
                 except AIError as error:
-                    if error.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE:
-                        items = ()
-                    elif error.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY:
-                        # Split storage may not support the exact committed-turn reader.
-                        turn_state = "active"
-                    else:
+                    if error.code is not ErrorCode.SESSION_HISTORY_UNAVAILABLE:
                         raise
+                    items = ()
                 else:
                     items = (turn,)
             if turn_state == "active":
@@ -409,7 +405,7 @@ class _Console:
             else:
                 session = await history.inspect_session(identity, principal=self.principal)
             return _json({"session": session, "timeline": _chat_timeline(Page(items, None))})
-        if include_timeline == "true" and self.runtime is not None and type(history) is History:
+        if include_timeline == "true":
             if environ.debug:
                 request.state.phase = "session.timeline"
             detail = await history.session_detail(identity, principal=self.principal, **_paging(request))
@@ -417,12 +413,7 @@ class _Console:
         if environ.debug:
             request.state.phase = "session.metadata"
         session = await history.inspect_session(identity, principal=self.principal)
-        timeline = None
-        if include_timeline == "true":
-            if environ.debug:
-                request.state.phase = "session.timeline"
-            timeline = _chat_timeline(await history.session_timeline(identity, principal=self.principal, **_paging(request)))
-        return _json({"session": session, "timeline": timeline})
+        return _json({"session": session, "timeline": None})
 
     async def session_action(self, request: Request) -> Response:
         if environ.debug:
@@ -478,7 +469,7 @@ class _Console:
                         cursor=resume_cursor if execution_id == resume_id else None,
                         include_content=True, include_descendants=False, include_model_interactions=False,
                     )
-                    frames = self._execution_frames(request, execution_id, watch, chat=True, local_only=True, compact=True)
+                    frames = self._execution_frames(request, execution_id, watch, chat=True)
                     async with aclosing(frames):
                         async for frame in frames:
                             if task.cancelling():
@@ -723,6 +714,9 @@ class _Console:
         return _json({"execution_id": result.execution_id}, 202)
 
     async def events(self, request: Request) -> Response:
+        if "view" in request.query_params:
+            # The diagnostics stream must not satisfy a request for filtered Chat data.
+            raise ValueError("select the session stream for the Chat view")
         if environ.debug:
             request.state.phase = "execution.watch"
         runtime = self.require_runtime()
@@ -730,15 +724,13 @@ class _Console:
             request.path_params["execution_id"], principal=self.principal,
         )
         cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or None
-        chat = request.query_params.get("view") == "chat"
         watch = execution.watch(
-            cursor=cursor, include_content=True, include_descendants=not chat,
-            include_model_interactions=not chat,
+            cursor=cursor, include_content=True, include_descendants=True,
+            include_model_interactions=True,
         )
-        local_only = chat and self._session_notices is not None
 
         async def stream() -> AsyncGenerator[str, None]:
-            frames = self._execution_frames(request, execution.execution_id, watch, chat=chat, local_only=local_only)
+            frames = self._execution_frames(request, execution.execution_id, watch, chat=False)
             async with aclosing(frames):
                 async for event, data, cursor in frames:
                     yield _sse_frame(event, data, cursor)
@@ -748,13 +740,13 @@ class _Console:
     async def _execution_frames(
         self, request: Request, execution_id: str,
         watch: "AsyncIterator[ExecutionTreeEvent | ExecutionObservationEvent]",
-        *, chat: bool, local_only: bool, compact: bool = False,
+        *, chat: bool,
     ) -> AsyncGenerator[_ExecutionFrame, None]:
         try:
-            with local_execution_stream() if local_only else nullcontext():
+            with local_execution_stream() if chat else nullcontext():
                 async for observation in watch:
                     if chat:
-                        frame = _chat_frame(observation, compact=compact)
+                        frame = _chat_frame(observation)
                         if frame is not None:
                             yield frame
                     else:
@@ -830,8 +822,9 @@ async def _error(request: Request, error: Exception) -> Response:
         _debug_error(request, error)
         code = error.code.value
         status = 404 if code in {"AUTHORIZATION_DENIED", "SESSION_NOT_FOUND", "EXECUTION_NOT_FOUND"} else (
-            409 if any(part in code for part in ("CONFLICT", "BUSY", "CLOSED", "MISMATCH")) else (
-                400 if any(part in code for part in ("INVALID", "REQUIRED")) else 503
+            409 if code == "SESSION_TURN_PENDING" or any(part in code for part in ("CONFLICT", "BUSY", "CLOSED", "MISMATCH")) else (
+                400 if error.code is not ErrorCode.STORAGE_RECOVERY_REQUIRED
+                and any(part in code for part in ("INVALID", "REQUIRED")) else 503
             )
         )
         return _json(asdict(error.to_safe_error(operation_id=_operation_id(request, error))), status)

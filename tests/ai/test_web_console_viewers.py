@@ -400,7 +400,7 @@ class _UnavailableSessionTimeline:
             history_quality="complete",
         )
 
-    async def session_timeline(
+    async def session_detail(
         self, session_id: str, *, principal: Principal, cursor: str | None,
         limit: int,
     ) -> Page[object]:

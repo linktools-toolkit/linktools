@@ -172,7 +172,7 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     await _seed_current_history(path)
     principal = Principal("runtime", "default", "local_trusted")
     async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_184, History.open(persistence=history_persistence_184) as history:
-        timeline = await history.session_timeline("session", principal=principal)
+        timeline = (await history.session_detail("session", principal=principal)).timeline
         execution_id = timeline.items[0].execution_id
         evidence = await _execution_evidence(history, execution_id, principal)
     state = Persistence(PersistenceStorage.sqlite(path))

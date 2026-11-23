@@ -74,11 +74,11 @@ from ..execution import (
     ForkExecutionRequest,
     ForkSessionRequest,
     RetryExecutionRequest,
-    SessionService,
     SessionView,
     UpdateSessionRequest,
     ExecutionTreeEvent,
 )
+from ..session import SessionService
 from ..persistence import Persistence, PersistenceStatus, PersistenceStorage
 from ..persistence.runs import RuntimeAgentRunStore
 from ..task import Task, TaskExpander

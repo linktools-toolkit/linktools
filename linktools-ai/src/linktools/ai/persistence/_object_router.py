@@ -31,7 +31,7 @@ from ..storage import (
 from ._memory import InMemoryStateStorageGroup
 from ._sql import SqlStateStorageGroup
 from .state import StateStore
-from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
+from ._plan import PersistenceDomain, PersistencePlan
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 _OBJECT_MAX_AGE_SECONDS = 3.0
@@ -287,8 +287,6 @@ def build_runtime_object_router(
     close_guard_stores: list[ObjectStore] = []
     sql_objects: dict[int, SqlObjectStore] = {}
     for domain in PersistenceDomain:
-        if not runtime_domain_uses_object_store(domain):
-            continue
         route = plan.route(domain)
         if route.retention is StorageRetentionMode.DURABLE and external is not None:
             values[domain] = external

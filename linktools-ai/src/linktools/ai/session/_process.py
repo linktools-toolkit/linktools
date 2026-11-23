@@ -3,17 +3,8 @@
 """User-facing tool progress without tool inputs, results, or diagnostics."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Literal, cast
-
-from pydantic_ai.messages import (
-    SYNTHESIZED_TOOL_RETURN_METADATA_KEY,
-    ModelMessage,
-    ModelRequest,
-    ModelResponse,
-    ToolCallPart,
-    ToolReturnPart,
-)
 
 from ..core import ExecutionEventType, JsonValue
 
@@ -65,40 +56,4 @@ def project_tool_process_event(event_type: str, payload: JsonValue) -> ToolProce
     return ToolProcessItem(f"tool:{call_id}", name, status, position)
 
 
-def project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[ToolProcessItem, ...]:
-    """Summarize root transcript tool calls in occurrence order, without inferring outcomes."""
-    calls: dict[str, ToolProcessItem] = {}
-    for message_seq, message in enumerate(messages, start=1):
-        if isinstance(message, ModelResponse):
-            for part_index, part in enumerate(message.parts):
-                if isinstance(part, ToolCallPart):
-                    calls.setdefault(
-                        part.tool_call_id,
-                        ToolProcessItem(
-                            f"tool:{part.tool_call_id}", part.tool_name, "UNCONFIRMED", (message_seq, part_index),
-                        ),
-                    )
-        elif isinstance(message, ModelRequest):
-            for part in message.parts:
-                if not isinstance(part, ToolReturnPart):
-                    continue
-                call = calls.get(part.tool_call_id)
-                if call is None or part.tool_name != call.tool_name:
-                    continue
-                status: ToolProcessStatus
-                if part.outcome == "success":
-                    status = "SUCCEEDED"
-                elif part.outcome in ("failed", "denied", "retried"):
-                    status = "FAILED"
-                elif part.outcome == "interrupted" and not (
-                    isinstance(part.metadata, Mapping)
-                    and part.metadata.get(SYNTHESIZED_TOOL_RETURN_METADATA_KEY) is True
-                ):
-                    status = "INTERRUPTED"
-                else:
-                    continue
-                calls[part.tool_call_id] = replace(call, status=status)
-    return tuple(calls.values())
-
-
-__all__ = ["SessionTurnNotice", "ToolProcessItem", "ToolProcessStatus", "project_tool_process_event", "project_turn_tool_process"]
+__all__ = ["SessionTurnNotice", "ToolProcessItem", "ToolProcessStatus", "project_tool_process_event"]

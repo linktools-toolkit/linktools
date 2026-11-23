@@ -30,7 +30,7 @@ from .contracts import (
 )
 from ._memory import InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
-from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
+from ._plan import PersistenceDomain, PersistencePlan
 from .repositories import (
     OperationLedgerRepositoryImpl,
     ToolRepositoryImpl,
@@ -118,7 +118,7 @@ async def materialize_runtime_storage(
         build_runtime_sql_metadata(frozenset({domain}), metadata=metadata)
         if plan.route(domain).kind == "sqlite":
             build_step_domain_sql_metadata((domain,), metadata=metadata)
-        if object_store is None and runtime_domain_uses_object_store(domain):
+        if object_store is None:
             build_object_sql_metadata(metadata=metadata)
 
     requests = tuple(

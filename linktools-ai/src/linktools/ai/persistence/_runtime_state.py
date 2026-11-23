@@ -24,7 +24,7 @@ from ..storage import (
     StorageRetentionMode,
 )
 from ._root import PersistenceStorage, StateTurnResources, _validate_storage_configuration
-from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
+from ._plan import PersistenceDomain, PersistencePlan
 from .contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
                          ExecutionRepositories, MemoryRepositories, CheckpointRepositories, TaskRepositories)
 from .coordination import PendingTurnCoordination
@@ -659,8 +659,7 @@ class Persistence:
         return SnapshotResources(
             namespace=self.namespace, tenant_id=self.tenant_id,
             durable_domains=self.plan.durable_domains, stores=self._stores,
-            object_stores={domain: self.object_store(domain) for domain in PersistenceDomain
-                           if runtime_domain_uses_object_store(domain)},
+            object_stores={domain: self.object_store(domain) for domain in PersistenceDomain},
             archive_object_stores={domain: self.archive_object_store(domain) for domain in PersistenceDomain},
             capability_stores=self.capability_stores,
             read_only=self.read_only,

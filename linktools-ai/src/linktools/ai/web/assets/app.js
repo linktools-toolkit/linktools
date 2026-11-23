@@ -488,7 +488,19 @@ function refreshSessionTimeline(watch, executionId=null, releasedTurn=null) {
     if(releasedTurn && refresh.failed && sessionWatch.revision>revision && !sessionWatch.snapshot?.active_execution_id)
       refreshSessionTimeline(sessionWatch);
     else retryAfterReconnect();
-  }).catch(error=>{if(current()){failed();if(!unavailableSelection(error))retryAfterReconnect();showError(error);}});
+  }).catch(error=>{
+    if(!current())return;
+    failed();
+    if(error.code==='SESSION_TURN_PENDING') {
+      // Wait for an authoritative occupancy edge or a reconnect, not a timer.
+      if(releasedTurn && sessionWatch.revision>revision && sessionWatch.snapshot?.active_execution_id!==releasedTurn)
+        refreshSessionTimeline(sessionWatch,sessionWatch.snapshot?.active_execution_id,releasedTurn);
+      else retryAfterReconnect();
+      return;
+    }
+    if(!unavailableSelection(error))retryAfterReconnect();
+    showError(error);
+  });
 }
 
 function reconcileAdmissionWatch(id, executionId=null) {
@@ -523,7 +535,7 @@ async function readSession(id, {metadataOnly=false,executionId=null,active=false
   try {
     try {return {...await api(sessionURL(id,'',query)),readGeneration};}
     catch(error) {
-      if(metadataOnly || error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
+      if(metadataOnly || executionId || error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
       const payload=await api(sessionURL(id,'',{include_timeline:'false'}));
       return {...payload,timeline_error:error.message,readGeneration};
     }
@@ -1583,7 +1595,7 @@ async function refreshObservation(id, generation, snapshot=null) {
       finally {if(terminalHistoryRead===read)terminalHistoryRead=null;}
     }
   }
-  catch(error){if(current()){unavailableSelection(error);throw error;}return;}
+  catch(error){if(current()){if(error.code!=='SESSION_TURN_PENDING')unavailableSelection(error);throw error;}return;}
   if(!current()){
     if(state.view==='sessions' && sessionId===state.selectedSession && sessionGeneration===state.generation)
       reconcileOlderTurn(payload,id);
@@ -1670,6 +1682,7 @@ function receiveExecutionFrames(id) {
 }
 async function settleSessionExecution(watch, id, generation, snapshot=null) {
   const current=()=>sessionWatch===watch && watch.execution?.id===id && generation===state.observationGeneration && id===state.observedExecution;
+  const revision=watch.revision,reconnect=watch.refresh.reconnect;
   try {
     await refreshObservation(id,generation,snapshot);
     if(!current())return;
@@ -1677,7 +1690,12 @@ async function settleSessionExecution(watch, id, generation, snapshot=null) {
     if(terminal(status)){connection('Complete');watch.execution=null;}
     else if(status==='RECOVERY_REQUIRED'){connection('Recovery required',true);watch.execution=null;}
   } catch(error) {
-    if(current()) {
+    if(current() && error.code==='SESSION_TURN_PENDING') {
+      watch.refresh.failed=true;watch.refresh.releasedTurn=id;
+      const owner=watch.snapshot?.active_execution_id;
+      if(owner!==id && (watch.revision!==revision || watch.refresh.reconnect!==reconnect))
+        refreshSessionTimeline(watch,owner,id);
+    } else if(current()) {
       watch.execution.paused=true;
       connection('Paused · Runtime read unavailable · refresh to retry',true);
     }

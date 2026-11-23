@@ -84,13 +84,17 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
         assert oldest.items == expected[:1]
         assert oldest.next_cursor is None
 
+    async def read_history_page(history, principal, **paging):
+        detail = await history.session_detail("child", principal=principal, **paging)
+        return detail.timeline
+
     async with Persistence.open('default', storage=storage) as persistence_86, Runtime.attach(persistence=persistence_86, features=model_features(RuntimeUsageModels(), application)) as runtime:
         principal = runtime.default_principal
         parent = await runtime.agents.get("default").create_session("parent")
         assert (await parent.timeline()).items == ()
-        assert (await runtime.history.session_timeline(
+        assert (await runtime.history.session_detail(
             "parent", principal=principal,
-        )).items == ()
+        )).timeline.items == ()
         parent_turn = (await parent.run("before fork", timeout_seconds=10)).result
         assert parent_turn.status is ExecutionStatus.SUCCEEDED
 
@@ -112,14 +116,14 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
         assert all(turn.items for turn in page.items)
         await check_pages(child.timeline, page.items)
         await check_pages(
-            partial(runtime.history.session_timeline, "child", principal=principal),
+            partial(read_history_page, runtime.history, principal),
             page.items,
         )
 
     if backend == "exclusive_sqlite":
         async with Persistence.open('default', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="default", read_only=True) as history_persistence_118, History.open(persistence=history_persistence_118) as history:
             await check_pages(
-                partial(history.session_timeline, "child", principal=principal),
+                partial(read_history_page, history, principal),
                 page.items,
             )
 
@@ -150,7 +154,7 @@ async def test_session_timeline_reads_only_captured_tail_during_append(
         for n in range(turn_count):
             result = (await session.run(f"repeat {n % 2}", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
-        full = await runtime.history.session_timeline("session", principal=principal)
+        full = (await runtime.history.session_detail("session", principal=principal)).timeline
         previous_capture = history_module.capture_session_timeline
         get_facts = _SqlTransaction.get_facts
         requested: list[tuple[int, ...]] = []
@@ -169,10 +173,10 @@ async def test_session_timeline_reads_only_captured_tail_during_append(
         with monkeypatch.context() as patch:
             patch.setattr(_SqlTransaction, "get_facts", read_facts)
             patch.setattr(history_module, "capture_session_timeline", capture_then_append)
-            page = await runtime.history.session_timeline("session", principal=principal, limit=limit)
+            page = (await runtime.history.session_detail("session", principal=principal, limit=limit)).timeline
         assert page.items == full.items[-limit:]
         assert requested == [sequences]
-        older = await runtime.history.session_timeline("session", principal=principal, cursor=page.next_cursor)
+        older = (await runtime.history.session_detail("session", principal=principal, cursor=page.next_cursor)).timeline
         assert older.items == full.items[:-limit]
 
 
@@ -234,5 +238,5 @@ async def test_session_timeline_rejects_invalid_captured_tail(
         monkeypatch.setattr(TranscriptRepository, "decode_chunk", decode)
         monkeypatch.setattr(history_module, "capture_session_timeline", capture_bad_head)
         with pytest.raises(AIError) as error:
-            await runtime.history.session_timeline("session", principal=runtime.default_principal, limit=1)
+            await runtime.history.session_detail("session", principal=runtime.default_principal, limit=1)
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

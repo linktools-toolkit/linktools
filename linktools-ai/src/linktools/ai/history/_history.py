@@ -1042,7 +1042,7 @@ class History:
         Compression changes the model's working context, not this transcript.
         Pending or paused staging is excluded. Failed/cancelled turns expose
         only their committed messages; zero-message outcomes remain available
-        through ``session_timeline``.
+        through ``session_detail``.
         """
         limit = validate_page_limit(limit)
         sessions, authorization = self._require_session_reader()
@@ -1327,18 +1327,6 @@ class History:
         if cache_key is not None and record.timeline_parent_session_id is None:
             await display_cache.write(cache_key, state, detail, started, max_age)
         return detail
-
-    async def session_timeline(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-        cursor: "str | None" = None,
-        limit: int = 100,
-    ) -> Page[SessionTurn]:
-        return (await self.session_detail(
-            session_id, principal=principal, cursor=cursor, limit=limit,
-        )).timeline
 
     async def session_turn(
         self,

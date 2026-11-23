@@ -125,7 +125,7 @@ async def test_snapshot_roundtrips_turn_references_and_execution_payload_owners(
     root = tmp_path / "restored"
     await Persistence.restore_snapshot(snapshot, object_store=archive, root=root, limits=limits)
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_root(root), tenant_id="default", read_only=True) as history_persistence_139, History.open(persistence=history_persistence_139) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == expected
+        assert (await history.session_detail("session", principal=principal)).timeline.items == expected
     restored = PersistenceStorage.from_root(root)
     restored = Persistence(restored)
     await restored.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)

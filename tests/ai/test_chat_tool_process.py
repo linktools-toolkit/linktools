@@ -12,7 +12,8 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
-from linktools.ai.session import project_tool_process_event, project_turn_tool_process
+from linktools.ai.history._session_timeline import _project_turn_tool_process
+from linktools.ai.session import project_tool_process_event
 
 
 def test_committed_chat_process_pairs_explicit_results_without_payloads() -> None:
@@ -35,7 +36,7 @@ def test_committed_chat_process_pairs_explicit_results_without_payloads() -> Non
             ToolReturnPart(tool_name="other", content="unmatched", tool_call_id="unmatched"),
         ]),
     )
-    assert [asdict(item) for item in project_turn_tool_process(messages)] == [
+    assert [asdict(item) for item in _project_turn_tool_process(messages)] == [
         {"kind": "tool", "key": "tool:a", "tool_name": "search", "status": "SUCCEEDED", "position": (1, 1)},
         {"kind": "tool", "key": "tool:b", "tool_name": "search", "status": "FAILED", "position": (1, 2)},
         {"kind": "tool", "key": "tool:c", "tool_name": "notify", "status": "UNCONFIRMED", "position": (1, 3)},

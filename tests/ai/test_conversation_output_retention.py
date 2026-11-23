@@ -105,14 +105,14 @@ async def test_completed_output_uses_execution_owner_after_reopen(
         assert owner is not None and owner.result.output.decode() == output
         assert owner.stored_user_input.payload.decode() == "original user input"
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend), tenant_id="default", read_only=True) as history_persistence_115, History.open(persistence=history_persistence_115) as history:
-        page = await history.session_timeline("session", principal=principal)
+        page = (await history.session_detail("session", principal=principal)).timeline
         assert page.items == live
         assert page.items[0].output == output
         with pytest.raises(AIError) as denied:
-            await history.session_timeline("session", principal=Principal("other-owner", principal.tenant_id))
+            await history.session_detail("session", principal=Principal("other-owner", principal.tenant_id))
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
         with pytest.raises(AIError) as foreign:
-            await history.session_timeline("session", principal=Principal(principal.principal_id, "foreign-tenant"))
+            await history.session_detail("session", principal=Principal(principal.principal_id, "foreign-tenant"))
         assert foreign.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
@@ -129,7 +129,7 @@ async def test_missing_execution_owner_never_falls_back_to_conversation_payloads
         )) == 1
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), read_only=True) as persistence, History.open(persistence=persistence) as history:
         with pytest.raises(AIError) as missing:
-            await history.session_timeline("session", principal=principal)
+            await history.session_detail("session", principal=principal)
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -210,7 +210,7 @@ async def test_terminal_execution_facts_are_immutable_but_control_updates_preser
         assert updated.completed_at == owner.completed_at
         assert (await session.timeline()).items == timeline
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend), read_only=True) as persistence, History.open(persistence=persistence) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == timeline
+        assert (await history.session_detail("session", principal=principal)).timeline.items == timeline
 
 
 async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
@@ -268,7 +268,7 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
     finally:
         await storage.close()
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, objects=objects), tenant_id="default", read_only=True) as history_persistence_175, History.open(persistence=history_persistence_175) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
     storage = _storage(tmp_path, objects=objects)
     storage = Persistence(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
@@ -307,10 +307,10 @@ async def test_fork_retains_only_selected_history_and_independent_turn_outputs(
         assert [item.output for item in live] == [{"turn": 1}, {"turn": 3}]
         assert [item.user_input["prompt"]["text"] for item in live] == ["first", "child only"]
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_219, History.open(persistence=history_persistence_219) as history:
-        assert (await history.session_timeline("child", principal=principal)).items == live
-        newest = await history.session_timeline("child", principal=principal, limit=1)
+        assert (await history.session_detail("child", principal=principal)).timeline.items == live
+        newest = (await history.session_detail("child", principal=principal, limit=1)).timeline
         assert newest.items == live[-1:] and newest.next_cursor is not None
-        oldest = await history.session_timeline("child", principal=principal, limit=1, cursor=newest.next_cursor)
+        oldest = (await history.session_detail("child", principal=principal, limit=1, cursor=newest.next_cursor)).timeline
         assert oldest.items == live[:1] and oldest.next_cursor is None
 
 
@@ -363,7 +363,7 @@ async def test_zero_message_failure_keeps_input_and_never_reuses_prior_output(
         assert len(commits) == 3 and commits[1].execution_id == failed.execution_id
         assert commits[1].start_message_index == commits[1].end_message_index
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_282, History.open(persistence=history_persistence_282) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
 
 
 async def test_cancelled_turn_retains_original_input_without_completed_output(tmp_path: Path) -> None:
@@ -388,7 +388,7 @@ async def test_cancelled_turn_retains_original_input_without_completed_output(tm
         assert live[0].output is None
         assert live[0].user_input["prompt"]["text"] == "cancelled original input"
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_314, History.open(persistence=history_persistence_314) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
 
 
 async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
@@ -447,7 +447,7 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
         monkeypatch.setattr(type(group), "mutate", original_mutate)
         monkeypatch.setattr(type(group), "read_many", original_read)
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_380, History.open(persistence=history_persistence_380) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
 
 
 async def test_completed_display_cache_avoids_full_execution_and_transcript_reads(
@@ -544,7 +544,7 @@ async def test_split_route_never_publishes_completed_output_before_execution_ter
         monkeypatch.setattr(executions, "commit_terminal_in_transaction", original_terminal)
         monkeypatch.setattr(sessions.state_store, "mutate", original_mutate)
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as history_persistence_485, History.open(persistence=history_persistence_485) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
 
 
 async def test_display_cache_five_refresh_measurement(tmp_path: Path) -> None:
@@ -615,7 +615,7 @@ async def test_split_object_stores_read_canonical_result_and_binary_input_after_
             assert await conversation_objects.stat(ref.key) is None
         live = (await session.timeline()).items
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as persistence, History.open(persistence=persistence) as history:
-        page = await history.session_timeline("session", principal=principal)
+        page = (await history.session_detail("session", principal=principal)).timeline
         assert page.items == live and page.items[0].output == output
         owner = await persistence.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
         restored = await ExecutionInputMaterializer(

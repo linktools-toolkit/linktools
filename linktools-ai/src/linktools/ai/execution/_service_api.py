@@ -12,12 +12,9 @@ from ._api import (
 )
 
 from ..session import (
-    SessionTurnNotice,
     SessionHistoryItem,
     SessionTurnItem,
     SessionTurn,
-    PublishedSessionTurn,
-    SessionAdmission,
     SessionHistoryReader,
     CreateSessionRequest,
     ListSessionRequest,
@@ -30,7 +27,6 @@ from ..session import (
 )
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1339,90 +1335,6 @@ class ExecutionService(Protocol):
     ) -> "Page[ModelInteractionItem]": ...
 
 
-class SessionService(Protocol):
-    def capture_published_turn(
-        self, session_id: str, execution_id: str, *, principal: Principal,
-    ) -> AbstractContextManager[Callable[[], Awaitable[PublishedSessionTurn | None]]]: ...
-
-    def observe_changes(self, session_id: str, on_invalidate: Callable[[], None]) -> Callable[[], None]: ...
-
-    def observe_turns(self, on_notice: Callable[[SessionTurnNotice], None]) -> Callable[[], None]: ...
-
-    def invalidate(self, session_id: str) -> None: ...
-
-    def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]: ...
-
-    async def wait_inactive(
-        self, session_id: str, *, principal: Principal, timeout_seconds: float | None = None,
-        observation_timeout_seconds: float | None = None,
-    ) -> SessionView: ...
-
-    async def lookup_admission(
-        self, session_id: str, *, principal: Principal, idempotency_key: str,
-    ) -> SessionAdmission | None: ...
-
-    async def create(
-        self, agent_id: str, request: CreateSessionRequest
-    ) -> SessionView: ...
-    async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
-    async def reconcile(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-    ) -> SessionView: ...
-    async def refresh(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-        cursor: str | None = None,
-        limit: int = 100,
-        max_age: float = 0,
-    ) -> SessionDetail:
-        """Read a complete display; positive max_age permits bounded stale display values."""
-        ...
-    async def list(self, request: ListSessionRequest) -> "Page[SessionView]": ...
-    async def history(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-        cursor: "str | None" = None,
-        limit: int = 100,
-    ) -> "Page[SessionHistoryItem]": ...
-    async def timeline(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-        cursor: "str | None" = None,
-        limit: int = 100,
-    ) -> "Page[SessionTurn]": ...
-    async def resume(
-        self,
-        agent_id: str,
-        binding_digest: str,
-        session_id: str,
-        request: ResumeSessionRequest,
-        *,
-        binding_contract: "AgentBindingContract | None" = None,
-        resolved_binding: "AgentBinding | None" = None,
-        dependency_hold_id: "str | None" = None,
-        requires_task_invocation_capture: bool = False,
-        budget_scope_id: str | None = None,
-    ) -> ExecutionHandle: ...
-    async def fork(
-        self, agent_id: str, session_id: str, request: ForkSessionRequest
-    ) -> SessionView: ...
-    async def update(
-        self, agent_id: str, session_id: str, request: UpdateSessionRequest
-    ) -> SessionView: ...
-    async def close(
-        self, session_id: str, request: CloseSessionRequest
-    ) -> SessionView: ...
-
-
 class ApprovalService(Protocol):
     async def list(
         self, execution_id: str, *, principal: Principal
@@ -1524,7 +1436,6 @@ __all__ = [
     "SessionDetail",
     "SessionHistoryItem",
     "SessionHistoryReader",
-    "SessionService",
     "SessionTurn",
     "SessionTurnItem",
     "SessionView",

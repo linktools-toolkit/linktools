@@ -404,7 +404,8 @@ Server shutdown uses
 Runtime's normal close behavior rather than creating browser-owned executions.
 
 A writable Conversation uses one `/api/session/events?session_id=…&view=chat`
-connection. The first event reports current occupancy; later occupancy events
+connection. The per-execution stream is for diagnostics, not Chat. The first
+event reports current occupancy; later occupancy events
 report changes. Local text and tool previews share this connection. A session
 release does not wait for an execution observer. If its final preview frame
 does not arrive, read the released turn by execution ID, not the history page.

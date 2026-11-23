@@ -156,7 +156,7 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
         state = Persistence(state)
         await _populate(state)
         principal = Principal("owner", "tenant")
-        expected = await _history(state).session_timeline("session", principal=principal)
+        expected = (await _history(state).session_detail("session", principal=principal)).timeline
         injected = {}
         if phase == "executions":
             repository = state.execution.executions
@@ -170,7 +170,7 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
             ) if subclass else ParallelSessions(repository, phase)
             adapter.phase = phase
             injected["sessions"] = adapter
-        actual = await _history(state, **injected).session_timeline("session", principal=principal)
+        actual = (await _history(state, **injected).session_detail("session", principal=principal)).timeline
         assert actual == expected
         assert [turn.execution_id for turn in actual.items] == ["failed", "active"]
         assert [turn.conversation_committed for turn in actual.items] == [True, False]
@@ -223,7 +223,7 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(
         event.listen(engine, "before_cursor_execute", statement)
         event.listen(engine, "begin", begin)
         try:
-            result = await _history(state).session_timeline("session", principal=Principal("owner", "tenant"))
+            result = (await _history(state).session_detail("session", principal=Principal("owner", "tenant"))).timeline
         finally:
             event.remove(engine, "before_cursor_execute", statement)
             event.remove(engine, "begin", begin)
@@ -324,9 +324,9 @@ async def test_exact_committed_turn_remains_stable_after_a_newer_turn(tmp_path: 
         await sessions.create(replace(_session(), session_id="other-session"))
         principal = Principal("owner", "tenant")
         history = _history(state)
-        timeline = await history.session_timeline("session", principal=principal)
+        timeline = (await history.session_detail("session", principal=principal)).timeline
         older = next(turn for turn in timeline.items if turn.execution_id == "failed")
-        latest = await history.session_timeline("session", principal=principal, limit=1)
+        latest = (await history.session_detail("session", principal=principal, limit=1)).timeline
         assert older.conversation_committed is True
         assert latest.items[0].conversation_committed is True
         assert latest.items[0].execution_id == "newer"
@@ -394,7 +394,7 @@ async def test_exact_turn_uses_session_visibility_for_committed_tool_content(tmp
             with pytest.raises(AIError) as denied:
                 await history.execution_detail("success", session_id="shared", principal=peer)
             assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
-            canonical = (await history.session_timeline("shared", principal=peer)).items[0]
+            canonical = (await history.session_detail("shared", principal=peer)).timeline.items[0]
             assert canonical.conversation_committed is True
             assert [item.item_kind for item in canonical.items] == ["tool_result", "assistant"]
             assert canonical.items[-1].content == "visible answer"
