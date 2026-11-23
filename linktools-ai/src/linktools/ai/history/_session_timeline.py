@@ -620,9 +620,18 @@ async def project_session_turn(
         if (execution is None or execution.session_id != session_id
                 or execution.parent_execution_id is not None):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        pending = (
+            root.active_execution_id == execution_id
+            and root.status in {SessionStatus.OPEN, SessionStatus.CLOSING}
+            and execution.completed_at is None
+            and execution.status in {
+                ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.FINALIZING,
+                ExecutionStatus.WAITING_DEFERRED, ExecutionStatus.WAITING_RETRY, ExecutionStatus.CANCELLING,
+            }
+        )
         commit = await sessions.pending_turn_commit_in_transaction(
             group.transaction(sessions.state_store), session_id=session_id,
-            execution_id=execution_id, allow_unadmitted=True,
+            execution_id=execution_id, allow_unadmitted=True, allow_pending=pending,
         )
         if commit is None:
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)

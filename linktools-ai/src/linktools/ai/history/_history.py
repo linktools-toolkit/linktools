@@ -1350,9 +1350,9 @@ class History:
         """Read an exact committed turn belonging to the authorized session.
 
         This is not a page of session history and does not consult the active or
-        latest execution. Pending, uncommitted and inherited turns are not
-        substituted for the requested execution. The built-in session and
-        execution repositories must share a storage group.
+        latest execution for a substitute. A requested active turn not yet
+        published raises SESSION_TURN_PENDING; inherited turns are not resolved.
+        The built-in session and execution repositories must share a storage group.
         """
         if self._conversation is None or self._session_transcript_store is None or self._session_cursor_signer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

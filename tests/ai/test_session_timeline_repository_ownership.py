@@ -241,6 +241,73 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(
         await state.close()
 
 
+async def test_exact_turn_distinguishes_active_pending_from_recovery(tmp_path: Path) -> None:
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "pending-exact-turn.db"))
+    try:
+        await _populate(state)
+        history = _history(state)
+        owner = Principal("owner", "tenant")
+        with pytest.raises(AIError) as pending:
+            await history.session_turn("session", "active", principal=owner)
+        assert pending.value.code is ErrorCode.SESSION_TURN_PENDING
+
+        with pytest.raises(AIError) as denied:
+            await history.session_turn("session", "active", principal=Principal("other", "tenant"))
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+        sessions = state.conversation.sessions
+        no_fact = replace(
+            _execution("no-fact", status=ExecutionStatus.STARTED, prompt="missing admission fact"),
+            session_id="no-fact-session",
+        )
+        await sessions.create(replace(_session(), session_id="no-fact-session", active_execution_id="no-fact"))
+        await state.execution.executions.create(no_fact)
+        with pytest.raises(AIError) as unavailable:
+            await history.session_turn("no-fact-session", "no-fact", principal=owner)
+        assert unavailable.value.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE
+
+        await sessions.release_execution("session", tenant_id="tenant", execution_id="active")
+        for status in (ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.FAILED):
+            broken = _execution(f"broken-{status}", status=status, prompt="recover")
+            await state.execution.executions.create(broken)
+            await sessions.admit_execution("session", tenant_id="tenant", execution_id=broken.execution_id, expected=None)
+            with pytest.raises(AIError) as recovery:
+                await history.session_turn("session", broken.execution_id, principal=owner)
+            assert recovery.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+            await sessions.release_execution("session", tenant_id="tenant", execution_id=broken.execution_id)
+    finally:
+        await state.close()
+
+
+async def test_releasing_published_failed_turn_advances_the_session_once(tmp_path: Path) -> None:
+    state = Persistence(PersistenceStorage.sqlite(tmp_path / "failed-turn-release.db"))
+    try:
+        await state.initialize(namespace="timeline-owner", tenant_id="tenant")
+        sessions = state.conversation.sessions
+        await sessions.create(_session())
+        execution = _execution("failed", status=ExecutionStatus.FAILED, prompt="failed")
+        await state.execution.executions.create(execution)
+        admitted = await sessions.admit_execution(
+            "session", tenant_id="tenant", execution_id=execution.execution_id, expected=None,
+        )
+        await _commit_empty_turn(state, execution)
+        released = await sessions.release_execution(
+            "session", tenant_id="tenant", execution_id=execution.execution_id, require_turn_commit=True,
+        )
+        assert released.active_execution_id is None
+        assert released.revision == admitted.revision + 1
+        assert (await _history(state).session_turn(
+            "session", execution.execution_id, principal=Principal("owner", "tenant"),
+        )).status is ExecutionStatus.FAILED
+
+        repeated = await sessions.release_execution(
+            "session", tenant_id="tenant", execution_id=execution.execution_id, require_turn_commit=True,
+        )
+        assert repeated == released
+    finally:
+        await state.close()
+
+
 async def test_exact_committed_turn_remains_stable_after_a_newer_turn(tmp_path: Path) -> None:
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "exact-turn.db"))
     try:

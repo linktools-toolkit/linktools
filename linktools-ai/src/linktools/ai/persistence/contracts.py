@@ -1388,7 +1388,7 @@ class SessionRepository(SessionRepositoryContract, RuntimeRepository, Protocol):
 
     async def pending_turn_commit_in_transaction(
         self, transaction: StateTransaction, *, session_id: str, execution_id: str,
-        allow_unadmitted: bool = False,
+        allow_unadmitted: bool = False, allow_pending: bool = False,
     ) -> SessionTurnCommit | None: ...
 
     async def commit_timeline_turn_in_transaction(
