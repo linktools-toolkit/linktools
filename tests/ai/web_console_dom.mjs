@@ -98,9 +98,12 @@ globalThis.EventSource=class {
           const lines=pending.slice(0,boundary).split('\n');pending=pending.slice(boundary+2);
           const event=lines.find(line=>line.startsWith('event: '))?.slice(7) || 'message';
           const data=JSON.parse(lines.find(line=>line.startsWith('data: ')).slice(6));
-          if(event!=='message')ended=true;
+          if(event==='snapshot' || event==='observation_error')ended=true;
+          const wireId=lines.find(line=>line.startsWith('id: '))?.slice(4);
+          if(wireId)[this.lastExecution,this.lastCursor]=JSON.parse(wireId);
           if(data.cursor){this.lastExecution=id;this.lastCursor=data.cursor;delete data.cursor;}
-          this.execution(id,event,data);
+          if(event==='text' || event==='thinking')this.listeners.get(event)?.({data:JSON.stringify(data),lastEventId:wireId});
+          else this.execution(id,event,data);
         }
       },
       close:()=>{if(!ended && this.owner===id)this.disconnect();},
@@ -865,6 +868,8 @@ if(process.argv[3]==='tools') {
   await select('#session=a');await until('tool stream opened',()=>streamBlocks.get(id).controller);
   const emit=(type,item,cursor=null)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type,item,cursor})+'\n\n'));
   const event=(event_type,payload)=>emit('event',{execution_id:id,depth:0,event:{event_type,payload}});
+  const delta=(name,part,fields,cursor)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode(
+    'id: '+JSON.stringify([id,cursor])+'\nevent: '+name+'\ndata: '+JSON.stringify({execution_id:id,part,...fields})+'\n\n'));
   const article=()=>descendants(node('conversation')).find(item=>item.dataset.execution===id);
   const processArea=()=>article()?.children.find(item=>item.className==='turn-process');
   const tool={kind:'tool',key:'tool:call',tool_name:'lookup',status:'RUNNING',position:[2,0]};
@@ -873,11 +878,14 @@ if(process.argv[3]==='tools') {
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
   assert.equal(sessionSources.at(-1).url.searchParams.get('view'),'chat');
   assert.equal(calls.filter(call=>call.key==='/api/executions/'+id+'/events').length,0,'Chat uses its session EventSource only');
-  event('ASSISTANT_THINKING_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,part_index:0,part_start:true,text:sdkThinking});
-  event('ASSISTANT_TEXT_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,part_index:1,part_start:true,text:'Answer'});
+  delta('thinking','1.1.1.0',{start:true,text:sdkThinking},'thinking-start');
+  delta('text','1.1.1.1',{start:true,text:'Superseded preview'},'old-text');
+  delta('text','1.1.1.1',{start:true},'empty-start');
+  delta('text','1.1.1.1',{text:'Answer'},'answer');
   emit('process',laterTool,'later-tool-cursor');emit('process',tool,'tool-cursor');
   await until('live process and answer share the turn',()=>processArea().textContent.includes('lookupIn progress') && article().textContent.includes('Answer') && article().textContent.includes(sdkThinking));
   assert.ok(article().contains(node('live')));
+  assert.doesNotMatch(article().textContent,/Superseded preview/,'an empty part start replaces content');
   const liveThought=node('live').children.find(item=>item.className==='stream-attempt').thinking;
   assert.equal(liveThought.open,true,'live positioned thinking is visible without clicking');
   assert.equal(liveThought.hidden,false);
@@ -891,11 +899,15 @@ if(process.argv[3]==='tools') {
 
   const old=streamBlocks.get(id).controller;old.close();
   await until('process stream reconnected',()=>streamBlocks.get(id).controller!==old);
+  assert.equal(streamBlocks.get(id).resumeCursor,'tool-cursor');
+  const completedThinking=sdkThinking+' + continuation';
+  delta('thinking','1.1.1.0',{text:' + continuation'},'resume-thinking');
+  await until('stable native part continues after reconnect',()=>liveThought.body.textContent===completedThinking);
   emit('process',unranked);await settle();
   assert.deepEqual(processArea().children.slice(1).map(row=>row.textContent),['lookupCompleted','secondaryIn progress']);
 
   const saved={...turn,status:'SUCCEEDED',conversation_committed:true,items:[
-    {item_kind:'thinking',content:sdkThinking},
+    {item_kind:'thinking',content:completedThinking},
     {item_kind:'tool_result',content:'Private saved result'},
     {item_kind:'assistant',content:'Answer'},
   ],process:[{...tool,status:'SUCCEEDED'},{...laterTool,status:'UNCONFIRMED'}]};
@@ -906,7 +918,7 @@ if(process.argv[3]==='tools') {
   const modelPreview=node('live').children.find(item=>item.className==='stream-attempt');
   assert.equal(modelPreview.label.hidden,true,'normal model status belongs to the Activity disclosure, not Chat');
   assert.equal(modelPreview.label.textContent,'');
-  assert.equal(modelPreview.thinking.body.textContent,sdkThinking,'thinking remains visible until History replaces the preview');
+  assert.equal(modelPreview.thinking.body.textContent,completedThinking,'thinking remains visible until History replaces the preview');
   assert.equal(modelPreview.body.hidden,false,'a completed model request is still a visible Chat preview until History arrives');
   assert.equal(modelPreview.body.children[0].textContent.trim(),'Answer');
   timelineOverrides.set('a',{items:[saved],next_cursor:null});
@@ -916,7 +928,7 @@ if(process.argv[3]==='tools') {
   await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && processArea().textContent.includes('lookupCompleted'));
   const current=processArea();
   assert.deepEqual(current.children.map(item=>item.textContent),['Process','lookupCompleted','secondaryOutcome unconfirmed']);
-  const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===sdkThinking);
+  const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===completedThinking);
   assert.equal(savedThought.length,1);
   assert.equal(savedThought[0].open,false,'committed History keeps thinking collapsed');
   assert.equal(article().textContent.match(/Answer/g).length,1);
@@ -925,7 +937,7 @@ if(process.argv[3]==='tools') {
   await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/SDK thinking|lookupCompleted/);
   await select('#session=a');
   assert.deepEqual(processArea().children.slice(1).map(row=>row.textContent),['lookupCompleted','secondaryOutcome unconfirmed']);
-  assert.ok(descendants(article()).some(item=>item.tagName==='PRE' && item.textContent===sdkThinking));
+  assert.ok(descendants(article()).some(item=>item.tagName==='PRE' && item.textContent===completedThinking));
 
   const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
   const remoteTurn={...turn,execution_id:remote,user_input:'External question'};
@@ -1128,13 +1140,15 @@ if(process.argv[3]==='streaming') {
   assert.equal(frames.size,1,'Incoming deltas share a pending frame');assert.doesNotMatch(node('live').textContent,/Hello/);
   flushFrame();let expected='**Hello 你好🌱**';
   const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0],copy=message.children[1];
-  copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emit('ASSISTANT_THINKING_DELTA','thinking');
+  const emitThinking=text=>stream.controller.enqueue(new TextEncoder().encode(
+    'event: thinking\ndata: '+JSON.stringify({execution_id:id,text})+'\n\n'));
+  copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emitThinking('thinking');
   await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
   assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);
   const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking'));
   assert.equal(thinking.open,true,'live fallback thinking is visible without clicking');
   thinking.open=false;
-  emit('ASSISTANT_THINKING_DELTA',' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
+  emitThinking(' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
   await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
   assert.equal(thinking.open,false,'additional deltas must not reopen thinking the user collapsed');assert.match(thinking.textContent,/thinking continued/);await copy.click();assert.equal(copied,expected);
   const {renderMarkdown}=await import(messageURL);assert.equal(body.innerHTML,renderMarkdown(expected));

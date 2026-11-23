@@ -1165,6 +1165,28 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         assert frames[-1]["status"] == "SUCCEEDED"
 
 
+def test_compact_chat_part_boundary_and_append_share_identity() -> None:
+    from linktools.ai.core import ExecutionLineageKind
+    from linktools.ai.execution import ExecutionStreamEvent, ExecutionTreeEvent
+    from linktools.ai.web._app import _chat_frame
+
+    def frame(text: str, *, start: bool = False, truncated: bool = False):
+        return _chat_frame(ExecutionTreeEvent(
+            "run", "default", ExecutionLineageKind.RUN, None, "run", None, 0,
+            ExecutionStreamEvent("run", None, "ASSISTANT_THINKING_DELTA", {
+                "agent_run_seq": 1, "model_request_seq": 2, "stream_attempt_seq": 3,
+                "part_index": 0, "part_start": start, "text": text, "stream_truncated": truncated,
+            }),
+            cursor="checkpoint",
+        ), compact=True)
+
+    identity = {"execution_id": "run", "part": "1.2.3.0"}
+    assert frame("", start=True) == ("thinking", {**identity, "start": True}, "checkpoint")
+    assert frame(" 中 ") == ("thinking", {**identity, "text": " 中 "}, "checkpoint")
+    assert frame("", truncated=True) == ("thinking", {**identity, "truncated": True}, "checkpoint")
+    assert frame("") is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("session_stream", [False, True], ids=["execution-endpoint", "session-endpoint"])
 async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
@@ -1178,6 +1200,7 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
     thinking, answer, signature = "  SDK thinking  ", "First answer ", "opaque-provider-signature"
     release, finish, preview, last_delta, idle = (asyncio.Event() for _ in range(5))
     observed = []
+    compact = []
     terminal = []
     cursor = None
 
@@ -1212,6 +1235,13 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
             assert turn["execution_id"] == execution_id and not turn["conversation_committed"]
         path = "/api/session/events" if session_stream else f"/api/executions/{execution_id}/events"
 
+        def record_delta(kind: str, text: str) -> None:
+            observed.append((kind, text))
+            if len(observed) == 2:
+                preview.set()
+            elif len(observed) == 3:
+                last_delta.set()
+
         async def connect(disconnected: asyncio.Event, ready: asyncio.Event, resume: str | None = None) -> None:
             initial = True
 
@@ -1238,6 +1268,16 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                         payload = json.loads(line[6:])
                         name = event_name
                         if session_stream:
+                            if event_name in ("thinking", "text"):
+                                assert payload["execution_id"] == execution_id and cursor
+                                assert payload.keys() <= {"execution_id", "part", "text", "start", "truncated"}
+                                if "part" in payload:
+                                    assert len(payload["part"].split(".")) == 4
+                                compact.append((event_name, payload))
+                                if "text" in payload:
+                                    kind = "THINKING" if event_name == "thinking" else "TEXT"
+                                    record_delta(f"ASSISTANT_{kind}_DELTA", payload["text"])
+                                continue
                             if event_name != "execution":
                                 assert event_name == "message", payload
                                 if payload["active_execution_id"] == execution_id:
@@ -1254,11 +1294,8 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                             terminal.append(payload["status"])
                         event = payload.get("item", {}).get("event", {})
                         if event.get("event_type") in ("ASSISTANT_THINKING_DELTA", "ASSISTANT_TEXT_DELTA"):
-                            observed.append((event["event_type"], event["payload"]["text"]))
-                            if len(observed) == 2:
-                                preview.set()
-                            elif len(observed) == 3:
-                                last_delta.set()
+                            assert not session_stream, "positioned Chat deltas use the named compact frames"
+                            record_delta(event["event_type"], event["payload"]["text"])
 
             scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
                      "scheme": "http", "path": path, "raw_path": path.encode(),
@@ -1292,6 +1329,8 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                 ("ASSISTANT_THINKING_DELTA", thinking), ("ASSISTANT_TEXT_DELTA", answer),
                 ("ASSISTANT_TEXT_DELTA", "and last"),
             ]
+            if session_stream:
+                assert {kind for kind, _ in compact} == {"thinking", "text"}
             if terminal or not session_stream:
                 assert terminal == ["SUCCEEDED"]
             async with client(app) as http:

@@ -403,14 +403,41 @@ it never treats a conflict as success or retries cancellation automatically.
 Server shutdown uses
 Runtime's normal close behavior rather than creating browser-owned executions.
 
-SSE passes through Runtime watch cursors and metadata-only model projections.
-Model rows are replaced by `(execution_id, agent_run_seq, model_request_seq)`;
-usage is never added a second time on replay. Terminal request metadata is not
-replaced by a stale RUNNING projection. Transient response text is discarded on
-a broken stream and reconciled from authoritative history before reconnecting,
-rather than appended twice. A finished stream is followed by an authoritative
-execution read. Cursor/authorization/integrity failures do not silently become
-success or restart an execution.
+A writable Conversation uses one `/api/session/events?session_id=…&view=chat`
+connection. The first event reports current occupancy; later occupancy events
+report changes. Local text and tool previews share this connection. A session
+release does not wait for an execution observer. If its final preview frame
+does not arrive, read the released turn by execution ID, not the history page.
+
+For clients adapting the Chat protocol, positioned deltas have SSE event name
+`thinking` or `text`. For example, these are the data bodies for two successive
+`thinking` frames:
+
+```json
+{"execution_id":"run-id","part":"1.2.1.0","start":true}
+{"execution_id":"run-id","part":"1.2.1.0","text":"first chunk"}
+```
+
+The dotted part identifies the agent run, model request, stream attempt, and
+part index in that order. The first three numbers start at one; the index starts
+at zero. It is scoped to an execution, not a browser connection. `start: true`
+starts or replaces that part, even with no text. Otherwise append the text to
+that part. A frame may both start a part and carry text. `truncated: true` means
+the preview is incomplete; normal appends omit it. Preserve whitespace. On
+native EventSource reconnect, the browser supplies `Last-Event-ID`; treat it as
+an opaque cursor, not a part identifier. A resumed append identifies its part
+without a connection-local registration table. If the Runtime has no part
+coordinates, the frame omits `part`; append to the execution's text or thinking
+preview for that event name. The `execution` event continues to carry tool,
+attempt, reset, and terminal updates. On committed readback, replace the
+preview with the authoritative turn.
+
+Independent execution diagnostics keep the Runtime watch format and metadata-only
+model projections. Model rows are replaced by
+`(execution_id, agent_run_seq, model_request_seq)`; replay does not add usage a
+second time, and stale RUNNING projections do not replace terminal metadata.
+Cursor, authorization and integrity failures do not silently become success or
+restart an execution.
 
 SDK record/trace/prompt bodies load only for the visible selected Details tab.
 Original client bodies load when the main original timeline or its inspector tab
@@ -476,18 +503,18 @@ forwarded headers to establish the connection peer.
 Cross-site fetch rejection, the mutation request header, and the absence of
 permissive CORS remain in force. Serve the UI and API at the same external origin.
 
-Keep proxy response buffering and caching disabled for the existing
-`/api/executions/{id}/events` SSE route, and allow long-lived responses. The
+Keep proxy response buffering and caching disabled for both
+`/api/session/events` and `/api/executions/{id}/events`, and allow long-lived responses. The
 server sends `X-Accel-Buffering: no` and `Cache-Control: private, no-store,
 no-transform`; a proxy must not override these directives or cache the stream.
 Compression middleware that honors `no-transform`, including code-server's port
 proxy, leaves these events uncompressed instead of buffering them for compression.
 See the [NGINX response buffering contract](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering)
 and [Express compression's streaming guidance](https://github.com/expressjs/compression#server-sent-events).
-A dropped stream reattaches with the Runtime cursor using
-bounded backoff, even if an intervening canonical read also fails. A terminal
-read or explicit recovery boundary ends observation; neither transport failure
-nor proxy silence permits taking over the executor.
+The Conversation continues using its session stream across turns. A dropped
+diagnostic execution stream reattaches with its Runtime cursor using bounded
+backoff. Neither transport failure nor proxy silence permits taking over the
+executor.
 
 ## Verification
 

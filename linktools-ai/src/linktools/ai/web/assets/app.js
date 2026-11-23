@@ -324,14 +324,18 @@ function watchSession(id, {restart=false}={}) {
     if(watch.execution)connection('Reconnecting',true);
     setDisabled();
   }};
-  source.addEventListener('execution',message=>{
+  const receiveFrame=(message,delta=null)=>{
     if(!current() || !watch.ready)return;
     let frame;
     try {frame=JSON.parse(message.data);} catch {return;}
     const connectionWatch=watch.execution;
     if(!connectionWatch || connectionWatch.paused || connectionWatch.settling
-      || frame.execution_id!==connectionWatch.id || frame.execution_id!==state.observedExecution)return;
+      || frame?.execution_id!==connectionWatch.id || frame.execution_id!==state.observedExecution)return;
     const {id, receive}=connectionWatch,generation=state.observationGeneration;
+    if(delta) {
+      frame=chatDeltaFrame(frame,delta);
+      if(!frame)return;
+    }
     try {
       const snapshot=receive(frame);
       if(snapshot) {
@@ -349,7 +353,9 @@ function watchSession(id, {restart=false}={}) {
       connection(`Paused · ${error.message} · refresh to retry`,true);
       void settleSessionExecution(watch,id,generation);
     }
-  });
+  };
+  source.addEventListener('execution',receiveFrame);
+  for(const delta of ['text','thinking'])source.addEventListener(delta,message=>receiveFrame(message,delta));
   source.addEventListener('session_process',event=>{
     if(!current() || !watch.ready)return;
     let value;
@@ -1599,6 +1605,19 @@ async function refreshObservation(id, generation, snapshot=null) {
   }
   if(id===state.selectedExecution && terminal(info.status) && (state.view==='sessions' && state.conversationMode==='original' || state.tab==='models' && !$('inspector').hidden))await loadNativeTimeline(false,true);
   setDisabled();return true;
+}
+function chatDeltaFrame(delta,kind) {
+  const {execution_id,part,text='',start,truncated}=delta;
+  const payload={text,stream_truncated:truncated===true};
+  if(part!==undefined) {
+    if(typeof part!=='string')return null;
+    const coordinates=part.split('.').map(Number);
+    if(coordinates.length!==4 || coordinates.some((value,index)=>!Number.isSafeInteger(value) || value<(index===3?0:1)))return null;
+    [payload.agent_run_seq,payload.model_request_seq,payload.stream_attempt_seq,payload.part_index]=coordinates;
+    payload.part_start=start===true;
+  }
+  const event_type=kind==='text'?'ASSISTANT_TEXT_DELTA':'ASSISTANT_THINKING_DELTA';
+  return {event:'message',data:{type:'event',item:{execution_id,depth:0,event:{event_type,payload}}}};
 }
 function receiveExecutionFrames(id) {
   let checkedTurns=null,committed=false;

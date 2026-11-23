@@ -121,24 +121,50 @@ _CHAT_STREAM_FIELDS = {
 }
 
 
-def _chat_frame(item: ExecutionTreeEvent, cursor: str | None) -> dict[str, object] | None:
+_CHAT_DELTA_EVENTS = {"ASSISTANT_TEXT_DELTA": "text", "ASSISTANT_THINKING_DELTA": "thinking"}
+_CHAT_PART_POSITION = ("agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index")
+
+_ExecutionFrame = tuple[str, dict[str, object], str | None]
+
+
+def _chat_frame(item: ExecutionTreeEvent, *, compact: bool) -> _ExecutionFrame | None:
     if item.depth != 0:
         return None
+    cursor = item.cursor
     event = item.event
     process = project_tool_process_event(event.event_type, event.payload)
     if process is not None:
-        return {"type": "process", "item": _wire(process), "cursor": cursor}
+        return "message", {"type": "process", "item": _wire(process), "cursor": cursor}, cursor
     allowed = _CHAT_STREAM_FIELDS.get(event.event_type)
     if allowed is None or not isinstance(event.payload, Mapping):
         return None
-    return {"type": "event", "cursor": cursor, "item": {
+    source = event.payload
+    kind = _CHAT_DELTA_EVENTS.get(event.event_type) if compact else None
+    if kind:
+        text = source.get("text")
+        start = source.get("part_start")
+        truncated = source.get("stream_truncated") is True
+        if not (text or start is True or truncated):
+            return None
+        part = tuple(source.get(key) for key in _CHAT_PART_POSITION)
+        positioned = type(start) is bool and all(type(value) is int for value in part)
+        # The SDK can emit text before a model attempt position is available.
+        if positioned or start is None and all(value is None for value in part):
+            payload: dict[str, object] = {"execution_id": item.execution_id}
+            if positioned:
+                payload["part"] = ".".join(map(str, part))
+            if text:
+                payload["text"] = text
+            if start:
+                payload["start"] = True
+            if truncated:
+                payload["truncated"] = True
+            return kind, payload, cursor
+    return "message", {"type": "event", "cursor": cursor, "item": {
         "execution_id": item.execution_id, "depth": 0,
         "event": {"event_type": event.event_type, "durable_seq": event.durable_seq,
-                  "payload": {key: value for key, value in event.payload.items() if key in allowed}},
-    }}
-
-
-_ExecutionFrame = tuple[str, dict[str, object], str | None]
+                  "payload": {key: value for key, value in source.items() if key in allowed}},
+    }}, cursor
 
 
 def _sse_frame(event: str, data: object, cursor: str | None = None) -> str:
@@ -450,7 +476,7 @@ class _Console:
                         cursor=resume_cursor if execution_id == resume_id else None,
                         include_content=True, include_descendants=False, include_model_interactions=False,
                     )
-                    frames = self._execution_frames(request, execution_id, watch, chat=True, local_only=True)
+                    frames = self._execution_frames(request, execution_id, watch, chat=True, local_only=True, compact=True)
                     async with aclosing(frames):
                         async for frame in frames:
                             await queue.put(frame)
@@ -522,7 +548,10 @@ class _Console:
                                 if event == "snapshot":
                                     ended_while_started = isinstance(data, Mapping) and data.get("status") == "STARTED"
                                 event_id = None if cursor is None else json.dumps((watching, cursor), separators=(",", ":"))
-                                yield _sse_frame("execution", {"execution_id": watching, "event": event, "data": data}, event_id)
+                                if event in ("text", "thinking"):
+                                    yield _sse_frame(event, data, event_id)
+                                else:
+                                    yield _sse_frame("execution", {"execution_id": watching, "event": event, "data": data}, event_id)
                             continue
                     if state_task not in done:
                         execution_id, item = tool_task.result()
@@ -709,20 +738,20 @@ class _Console:
     async def _execution_frames(
         self, request: Request, execution_id: str,
         watch: "AsyncIterator[ExecutionTreeEvent | ExecutionObservationEvent]",
-        *, chat: bool, local_only: bool,
+        *, chat: bool, local_only: bool, compact: bool = False,
     ) -> AsyncGenerator[_ExecutionFrame, None]:
         try:
             with local_execution_stream() if local_only else nullcontext():
                 async for observation in watch:
                     if chat:
-                        payload = _chat_frame(observation, observation.cursor)
-                        if payload is None:
-                            continue
+                        frame = _chat_frame(observation, compact=compact)
+                        if frame is not None:
+                            yield frame
                     else:
                         item = observation.event
                         payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
                                    "item": _wire(item), "cursor": observation.cursor}
-                    yield "message", payload, observation.cursor
+                        yield "message", payload, observation.cursor
             # Completion of an observer is not the execution's terminal verdict.
             if environ.debug:
                 request.state.phase = "execution.metadata"
