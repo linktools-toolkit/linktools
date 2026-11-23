@@ -5,7 +5,7 @@ const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, listSessionReads:new Map(), session:null, sessionError:false, executionError:false, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
   execution:null, executionReadGeneration:0, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'models', traceSelection:null, conversationMode:'chat', nativeTimeline:null, readerSelection:null, readerRaw:false, readerHttp:false, readerCache:null, readerExpanded:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
-  liveText:'', liveThinking:'', liveTools:new Map(), liveProcess:new Map(), processOpen:new Set(), liveAttempts:new Map(), liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
+  liveText:'', liveThinking:'', liveTools:new Map(), liveProcess:new Map(), liveAttempts:new Map(), liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
 const text = value => typeof value === 'string' ? value : json(value);
 const short = value => value ? String(value).slice(0, 12) : '—';
@@ -593,7 +593,7 @@ function mergeProcessRow(previous,row) {
   const next=row.status==='RUNNING' && previous.status!=='RUNNING' ? previous : row;
   return next.position===position ? next : {...next,position};
 }
-function renderTurnProcess(section, executionId, rows) {
+function renderTurnProcess(section, rows) {
   section.rows ||= new Map();
   const children=[section.heading];
   const keys=new Set();
@@ -601,34 +601,19 @@ function renderTurnProcess(section, executionId, rows) {
   const tools=publicRows.filter(row=>row.kind==='tool');
   const ranked=tools.filter(row=>row.position).sort((a,b)=>a.position[0]-b.position[0] || a.position[1]-b.position[1]);
   let index=0;
-  for(const row of [...publicRows.filter(row=>row.kind==='reasoning_summary'),...tools.map(row=>row.position?ranked[index++]:row)]) {
+  for(const row of tools.map(row=>row.position?ranked[index++]:row)) {
     if(typeof row.key!=='string' || keys.has(row.key))continue;
-    const summary=row.kind==='reasoning_summary' && typeof row.text==='string' && row.text.trim();
-    const tool=row.kind==='tool' && typeof row.tool_name==='string' && Object.hasOwn(processToolStatus,row.status);
-    if(!summary && !tool)continue;
+    if(typeof row.tool_name!=='string' || !Object.hasOwn(processToolStatus,row.status))continue;
     keys.add(row.key);
     let node=section.rows.get(row.key);
     if(!node) {
-      if(summary) {
-        const focusKey=JSON.stringify(['process',executionId,row.key]);
-        node=element('details','tool-message');
-        node.open=state.processOpen.has(focusKey);
-        node.ontoggle=()=>{if(node.isConnected){if(node.open)state.processOpen.add(focusKey);else state.processOpen.delete(focusKey);}};
-        const label=element('summary','','Thinking summary');label.dataset.requestFocus=focusKey;
-        node.body=element('pre');node.append(label,node.body);
-      } else {
-        node=element('div','live-tool');node.name=element('span','tool-name');node.status=element('span','tool-status');
-        node.status.setAttribute('role','status');node.status.setAttribute('aria-live','polite');node.append(node.name,node.status);
-      }
+      node=element('div','live-tool');node.name=element('span','tool-name');node.status=element('span','tool-status');
+      node.status.setAttribute('role','status');node.status.setAttribute('aria-live','polite');node.append(node.name,node.status);
       section.rows.set(row.key,node);
     }
-    if(summary) {
-      if(node.body.textContent!==row.text)node.body.textContent=row.text;
-    } else {
-      if(node.name.textContent!==row.tool_name)node.name.textContent=row.tool_name;
-      if(node.status.textContent!==processToolStatus[row.status])node.status.textContent=processToolStatus[row.status];
-      node.classList.toggle('error',row.status==='FAILED');
-    }
+    if(node.name.textContent!==row.tool_name)node.name.textContent=row.tool_name;
+    if(node.status.textContent!==processToolStatus[row.status])node.status.textContent=processToolStatus[row.status];
+    node.classList.toggle('error',row.status==='FAILED');
     children.push(node);
   }
   for(const key of section.rows.keys())if(!keys.has(key))section.rows.delete(key);
@@ -661,6 +646,10 @@ function attachLiveTurn(live) {
   }
   return article;
 }
+function thinkingMessage(label,text='') {
+  const node=element('details','tool-message');node.body=element('pre','',text);
+  node.append(element('summary','',label),node.body);return node;
+}
 function renderConversation({prepend=false}={}) {
   const liveFocus=document.activeElement?.dataset?.liveFocus,requestFocus=requestFocusWithin($('conversation'));
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
@@ -677,7 +666,7 @@ function renderConversation({prepend=false}={}) {
     const section=element('article','turn');section.dataset.execution=turn.execution_id;
     section.append(userMessage(turn.user_input));
     const process=turnProcess();
-    renderTurnProcess(process,turn.execution_id,turn.conversation_committed?turn.process:conversationProcessRows(turn.execution_id,turn.process));
+    renderTurnProcess(process,turn.conversation_committed?turn.process:conversationProcessRows(turn.execution_id,turn.process));
     section.append(process);
     if(!turn.conversation_committed) {
       section.dataset.openExecution=turn.execution_id;section.savedProcess=turn.process || [];section.processNode=process;
@@ -686,6 +675,7 @@ function renderConversation({prepend=false}={}) {
     section.savedAnswers=element('div','turn-saved-answers');section.append(section.savedAnswers);
     for (const item of turn.items) {
       if (item.item_kind==='assistant') section.savedAnswers.append(typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
+      else if (item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) section.savedAnswers.append(thinkingMessage('Thinking',item.content));
     }
     if (!turn.conversation_committed) section.append(element('p','muted','Incomplete turn; history is not yet committed.'));
     if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
@@ -761,22 +751,19 @@ function renderLiveAttempts(live,wanted,process) {
     let node=live.attemptNodes.get(key);
     if(!node) {
       node=element('section','stream-attempt');node.label=element('div','message-label');
-      node.thinking=element('details','tool-message');node.thinkingBody=element('pre');
-      node.thinking.append(element('summary','',process?'Thinking summary':'Thinking · SDK display'),node.thinkingBody);
-      node.body=markdownMessage('');node.append(node.label);
-      if(!process)node.append(node.thinking);
-      node.append(node.body);live.attemptNodes.set(key,node);
+      node.thinking=thinkingMessage(process?'Thinking':'Thinking · SDK display');
+      node.body=markdownMessage('');node.append(node.label,node.thinking,node.body);live.attemptNodes.set(key,node);
     }
     const preview=streamResponsePreview(request),canonical=request.canonicalResponse;
     const responseText=kind=>canonical.parts.filter(part=>part.part_kind===kind && typeof part.content==='string').map(part=>part.content).join('');
     const content=canonical?responseText('text'):request.status==='SUCCEEDED'?'':preview.text;
-    const thinking=process?'':canonical?responseText('thinking'):request.status==='SUCCEEDED'?'':preview.thinking;
+    const thinking=canonical?responseText('thinking'):!process && request.status==='SUCCEEDED'?'':preview.thinking;
     const status=canonical?'COMPLETED MODEL RESPONSE · committed SDK text':request.status==='SUCCEEDED'?`MODEL REQUEST SUCCEEDED · ${request.canonicalError || 'awaiting committed response'}`:['FAILED','CANCELLED'].includes(request.status)?`INCOMPLETE RESPONSE · ${request.status}`:'LIVE RESPONSE · incomplete SDK display';
     const label=`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${!canonical && preview.truncated?' · preview GAP · noncontiguous fragment':''}`;
     if(node.label.textContent!==label)node.label.textContent=label;
     node.label.hidden=Boolean(process && !(request.status==='SUCCEEDED' && !canonical) && !preview.truncated && !['FAILED','CANCELLED'].includes(request.status));
-    node.thinking.hidden=!thinking.trim();if(node.thinkingBody.textContent!==thinking)node.thinkingBody.textContent=thinking;
-    node.previewHasAnswer=Boolean(content);
+    node.thinking.hidden=!thinking.trim();if(node.thinking.body.textContent!==thinking)node.thinking.body.textContent=thinking;
+    node.previewHasText=Boolean(content || thinking.trim());
     if(!node.reload){node.reload=button('Load committed response',()=>readLiveResponse(request,true));node.append(node.reload);}
     node.reload.hidden=state.view==='sessions' || request.status!=='SUCCEEDED' || Boolean(canonical);node.reload.disabled=Boolean(request.canonicalPending);
     updateMarkdownMessage(node.body,content);node.body.hidden=!content;wanted.push(node);
@@ -829,9 +816,9 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   const container=$('conversation'), follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40,wanted=[];
   const process=state.view==='sessions' && state.conversationMode==='chat';
   const article=process?attachLiveTurn(live):null;
-  if (!process && state.liveThinking.trim()) {
-    if(!live.thinkingNode){live.thinkingNode=element('details','tool-message');live.thinkingBody=element('pre');live.thinkingNode.append(element('summary','',process?'Thinking summary':'Live thinking · incomplete SDK response'),live.thinkingBody);}
-    if(live.thinkingSource!==state.liveThinking){live.thinkingBody.textContent=state.liveThinking;live.thinkingSource=state.liveThinking;}
+  if (state.liveThinking.trim()) {
+    live.thinkingNode ||= thinkingMessage(process?'Thinking':'Live thinking · incomplete SDK response');
+    if(live.thinkingSource!==state.liveThinking){live.thinkingNode.body.textContent=state.liveThinking;live.thinkingSource=state.liveThinking;}
     wanted.push(live.thinkingNode);
   }
   if (state.liveText) {
@@ -847,8 +834,8 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   renderLiveAttempts(live,wanted,process);
   if(process) {
     const section=article?.processNode || (live.processNode ||= turnProcess());
-    renderTurnProcess(section,state.observedExecution,conversationProcessRows(state.observedExecution,article?.savedProcess,state.liveProcess));
-    if(article)article.savedAnswers.hidden=Boolean(state.liveText || wanted.some(node=>node.previewHasAnswer));
+    renderTurnProcess(section,conversationProcessRows(state.observedExecution,article?.savedProcess,state.liveProcess));
+    if(article)article.savedAnswers.hidden=Boolean(state.liveText || state.liveThinking.trim() || wanted.some(node=>node.previewHasText));
     else if(!section.hidden)wanted.unshift(section);
   }
   const events=[...state.events.values()].slice(-12);
@@ -1556,7 +1543,6 @@ async function watchExecution(id,generation) {
           const attemptHandled=item.depth===0 && updateStreamAttempts(state.liveAttempts,item);
           if(item.depth===0 && event.event_type==='STREAM_RESET'){
             state.liveText='';state.liveThinking='';
-            for(const [key,row] of state.liveProcess)if(row.kind==='reasoning_summary')state.liveProcess.delete(key);
           }
           else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
           else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA')state.liveThinking+=payload.text || '';

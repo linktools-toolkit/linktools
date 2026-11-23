@@ -824,36 +824,32 @@ if(process.argv[3]==='tools') {
   const processArea=()=>article()?.children.find(item=>item.className==='turn-process');
   const tool={kind:'tool',key:'tool:call',tool_name:'lookup',status:'RUNNING',position:[2,0]};
   const laterTool={kind:'tool',key:'tool:later',tool_name:'secondary',status:'RUNNING',position:[2,1]};
-  const summary={kind:'reasoning_summary',key:'summary',text:'Public summary'};
+  const sdkThinking='  SDK thinking\n<literal>  ';
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
   assert.equal(calls.findLast(call=>call.key==='/api/executions/'+id+'/events').query.view,'chat');
-  event('ASSISTANT_THINKING_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,text:'Not a supported summary'});
+  event('ASSISTANT_THINKING_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,text:sdkThinking});
   event('ASSISTANT_TEXT_DELTA',{text:'Answer'});
-  emit('process',laterTool,'later-tool-cursor');emit('process',tool,'tool-cursor');emit('process',summary,'summary-cursor');
-  await until('live process and answer share the turn',()=>processArea().textContent.includes('lookupIn progress') && article().textContent.includes('Answer'));
+  emit('process',laterTool,'later-tool-cursor');emit('process',tool,'tool-cursor');
+  await until('live process and answer share the turn',()=>processArea().textContent.includes('lookupIn progress') && article().textContent.includes('Answer') && article().textContent.includes(sdkThinking));
   assert.ok(article().contains(node('live')));
-  assert.doesNotMatch(article().textContent,/Not a supported summary/);
-  const detail=processArea().children[1], first=processArea().children[2];
-  assert.deepEqual(processArea().children.slice(2).map(row=>row.name.textContent),['lookup','secondary']);
-  detail.open=true;detail.ontoggle();detail.children[0].focus();
+  const first=processArea().children[1];
+  assert.deepEqual(processArea().children.slice(1).map(row=>row.name.textContent),['lookup','secondary']);
   assert.equal(first.status.getAttribute('aria-live'),'polite');
   const unranked={...tool,position:null};
   emit('process',{...unranked,status:'SUCCEEDED'});emit('process',unranked);
   await until('completed tool cannot be reopened by replay',()=>first.status.textContent==='Completed');
-  assert.equal(processArea().children[2],first);
-  assert.equal(document.activeElement,detail.children[0]);
+  assert.equal(processArea().children[1],first);
 
   const old=streamBlocks.get(id).controller;old.close();
   await until('process stream reconnected',()=>streamBlocks.get(id).controller!==old);
   emit('process',unranked);await settle();
-  assert.deepEqual(processArea().children.slice(2).map(row=>row.textContent),['lookupCompleted','secondaryIn progress']);
-  assert.equal(processArea().children[1].open,true);
+  assert.deepEqual(processArea().children.slice(1).map(row=>row.textContent),['lookupCompleted','secondaryIn progress']);
 
   const saved={...turn,status:'SUCCEEDED',conversation_committed:true,items:[
-    {item_kind:'thinking',content:'Raw saved thinking'},
+    {item_kind:'thinking',content:sdkThinking},
     {item_kind:'tool_result',content:'Private saved result'},
     {item_kind:'assistant',content:'Answer'},
-  ],process:[summary,{...tool,status:'SUCCEEDED'},{...laterTool,status:'UNCONFIRMED'}]};
+  ],process:[{...tool,status:'SUCCEEDED'},{...laterTool,status:'UNCONFIRMED'}]};
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
   event('MODEL_REQUEST_FINISHED',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,status:'SUCCEEDED'});
@@ -864,15 +860,15 @@ if(process.argv[3]==='tools') {
   streamBlocks.get(id).controller.close();
   await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && processArea().textContent.includes('lookupCompleted'));
   const current=processArea();
-  assert.equal(current.children[1].open,true);
-  assert.equal(document.activeElement,current.children[1].children[0]);
-  assert.deepEqual(current.children.map(item=>item.textContent),['Process','Thinking summaryPublic summary','lookupCompleted','secondaryOutcome unconfirmed']);
+  assert.deepEqual(current.children.map(item=>item.textContent),['Process','lookupCompleted','secondaryOutcome unconfirmed']);
+  assert.equal(descendants(article()).filter(item=>item.tagName==='PRE' && item.textContent===sdkThinking).length,1);
   assert.equal(article().textContent.match(/Answer/g).length,1);
   assert.equal(modelReads(),readsBeforeCommit,'Chat terminal readback never loads retained model contents');
-  assert.doesNotMatch(article().textContent,/Raw saved thinking|Private saved result/);
-  await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/Public summary|lookupCompleted/);
+  assert.doesNotMatch(article().textContent,/Private saved result/);
+  await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/SDK thinking|lookupCompleted/);
   await select('#session=a');
-  assert.deepEqual(processArea().children.slice(2).map(row=>row.textContent),['lookupCompleted','secondaryOutcome unconfirmed']);
+  assert.deepEqual(processArea().children.slice(1).map(row=>row.textContent),['lookupCompleted','secondaryOutcome unconfirmed']);
+  assert.ok(descendants(article()).some(item=>item.tagName==='PRE' && item.textContent===sdkThinking));
 
   const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
   const remoteTurn={...turn,execution_id:remote,user_input:'External question'};
@@ -1068,12 +1064,11 @@ if(process.argv[3]==='streaming') {
   assert.equal(frames.size,1,'Incoming deltas share a pending frame');assert.doesNotMatch(node('live').textContent,/Hello/);
   flushFrame();let expected='**Hello 你好🌱**';
   const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0],copy=message.children[1];
-  const summary=text=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'process',item:{kind:'reasoning_summary',key:'summary',text}})+'\n\n'));
-  copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');summary('thinking');
+  copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emit('ASSISTANT_THINKING_DELTA','thinking');
   await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
   assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);
-  const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking summary'));thinking.open=true;
-  summary('thinking continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
+  const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking'));thinking.open=true;
+  emit('ASSISTANT_THINKING_DELTA',' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
   await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
   assert.equal(thinking.open,true);assert.match(thinking.textContent,/thinking continued/);await copy.click();assert.equal(copied,expected);
   const {renderMarkdown}=await import(messageURL);assert.equal(body.innerHTML,renderMarkdown(expected));
@@ -1126,8 +1121,7 @@ if(process.argv[3]==='resume') {
     const emit=(event_type,text,cursor,depth=0)=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:depth?'child':id,depth,event:{event_type,payload:{text}}},cursor})+'\n\n'));
     emit('ASSISTANT_TEXT_DELTA','prefix ','checkpoint');
     emit('ASSISTANT_TEXT_DELTA','kept','checkpoint');
-    const summary=(text,cursor)=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'process',item:{kind:'reasoning_summary',key:'summary',text},cursor})+'\n\n'));
-    summary('thought prefix','checkpoint');
+    emit('ASSISTANT_THINKING_DELTA','thought prefix','checkpoint');
     await until(`${transport} initial preview`,()=>node('live').textContent.includes('prefix kept') && node('live').textContent.includes('thought prefix'));
     const disconnected=stream.controller;
     disconnected.close();
@@ -1136,7 +1130,7 @@ if(process.argv[3]==='resume') {
     assert.match(node('live').textContent,/prefix kept/,'Disconnect cannot discard the prefix acknowledged by the resumed cursor');
     assert.match(node('live').textContent,/thought prefix/);
     emit('ASSISTANT_TEXT_DELTA',' + suffix','next');
-    summary('thought prefix + thought suffix','next');
+    emit('ASSISTANT_THINKING_DELTA',' + thought suffix','next');
     await until(`${transport} exact resume`,()=>node('live').textContent.includes('prefix kept + suffix') && node('live').textContent.includes('thought prefix + thought suffix'));
     emit('STREAM_RESET','', 'child-reset',1);
     emit('ASSISTANT_TEXT_DELTA',' + after child','after-child');
@@ -1144,7 +1138,7 @@ if(process.argv[3]==='resume') {
     assert.match(node('live').textContent,/thought prefix \+ thought suffix/);
     emit('STREAM_RESET','', 'root-reset');
     emit('ASSISTANT_TEXT_DELTA','rebuilt answer','rebuilt');
-    summary('rebuilt thought','rebuilt');
+    emit('ASSISTANT_THINKING_DELTA','rebuilt thought','rebuilt');
     await until(`${transport} reset preview rebuilt`,()=>node('live').textContent.includes('rebuilt answer') && node('live').textContent.includes('rebuilt thought'));
     assert.doesNotMatch(node('live').textContent,/prefix kept|thought prefix|after child/);
     await select('#session=b');
@@ -1156,9 +1150,11 @@ if(process.argv[3]==='minimal') {
   const descendants=node=>[node,...node.children.flatMap(descendants)];
   assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && ['Details','Model requests'].includes(item.textContent)),'Default turns have no duplicate diagnostic navigation');
   assert.equal(node('native-mode').className.includes('active'),false);assert.equal(document.getElementById('composer-options'),null);
-  const a=timeline('a').items[0],b={...a,execution_id:'a-two',created_at:'2026-01-02T00:00:00Z',user_input:'second'};
+  const storedThinking='  thought\n<literal>  ';
+  const a=timeline('a').items[0],b={...a,execution_id:'a-two',created_at:'2026-01-02T00:00:00Z',user_input:'second',items:[{item_kind:'thinking',content:storedThinking},...a.items]};
   timelineOverrides.set('a',{items:[a,b],next_cursor:null});executions.set('a-two',info('a-two','a'));
   await select('#session=a');await node('inspector-toggle').click();
+  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='PRE' && item.textContent===storedThinking));
   assert.equal(node('detail-turn').value,'a-two');assert.deepEqual(node('detail-turn').children.map(item=>item.value),['a-run','a-two']);
   node('detail-turn').value='a-run';await node('detail-turn').onchange();assert.match(node('execution-meta').textContent,/a-run/);
   const records=[{execution_id:'a-run',step_event_seq:9,payload:{kind:'TOOL_CALL',tool_name:'search',agent_run_seq:3,step_index:2,call_id:'call-a',child_execution_id:'child-run',status:'SUCCEEDED',duration_ns:2000000}},{execution_id:'child-run',step_event_seq:1,payload:{kind:'MODEL_RESPONSE',agent_run_seq:1,model_request_seq:4,status:'SUCCEEDED'}}];
@@ -1609,7 +1605,7 @@ if(process.argv[3]==='races'){
   node('chat-mode').click();controller=streamBlocks.get(partialId).controller;
   const partialTurn=()=>descendants(node('conversation')).find(item=>item.dataset.execution===partialId);
   controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:partialId,depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:partialText}}}})+'\n\n'));
-  controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'process',item:{kind:'reasoning_summary',key:'summary',text:'Partial thinking'}})+'\n\n'));
+  controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:partialId,depth:0,event:{event_type:'ASSISTANT_THINKING_DELTA',payload:{text:'Partial thinking'}}}})+'\n\n'));
   await until('partial live text and thinking',()=>node('live').textContent.includes(partialText) && partialTurn().textContent.includes('Partial thinking'));assert.match(node('live').textContent,/Received partial content stays incomplete/);
   const stop=deferred(`POST /api/executions/${partialId}/cancel`);
   const stopping=node('cancel').click();await stop.requested;

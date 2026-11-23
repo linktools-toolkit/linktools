@@ -1040,6 +1040,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
 
     principal = Principal("runtime", "default")
     raw_marker = "NOT-FOR-CHAT"
+    thinking = "  SDK thinking\n<literal text>  "
     process = ToolProcessItem("tool:id", "lookup", "SUCCEEDED", (2, 1))
     now = datetime.now(timezone.utc)
 
@@ -1050,7 +1051,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         async def session_timeline(self, identity, **kwargs):
             return Page((SessionTurn(
                 "execution", ExecutionStatus.SUCCEEDED, now, now, "user", True,
-                (SessionTurnItem(1, "thinking", raw_marker),
+                (SessionTurnItem(1, "thinking", thinking),
                  SessionTurnItem(2, "tool_call", raw_marker),
                  SessionTurnItem(3, "tool_result", raw_marker),
                  SessionTurnItem(4, "assistant", "answer")),
@@ -1071,7 +1072,8 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         async def watch(self, *, cursor, include_content, include_model_interactions):
             assert include_content and not include_model_interactions
             for n, (kind, payload, depth) in enumerate((
-                ("ASSISTANT_THINKING_DELTA", {"text": raw_marker}, 0),
+                ("ASSISTANT_THINKING_DELTA", {"text": thinking, "signature": raw_marker}, 0),
+                ("ASSISTANT_THINKING_DELTA", {"text": raw_marker}, 1),
                 ("TOOL_CALL_FINISHED", {"call_id": "id", "tool_name": "lookup", "status": "SUCCEEDED",
                                         "result": raw_marker, "tool_position": [2, 1]}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": "answer", "internal": raw_marker}, 0),
@@ -1100,16 +1102,19 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         assert history.status_code == 200, history.text
         assert raw_marker not in history.text
         turn = history.json()["timeline"]["items"][0]
-        assert [item["content"] for item in turn["items"]] == ["answer"]
+        assert [(item["item_kind"], item["content"]) for item in turn["items"]] == [
+            ("thinking", thinking), ("assistant", "answer"),
+        ]
         assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup", "status": "SUCCEEDED", "position": [2, 1]}]
 
         response = await http.get("/api/executions/execution/events?view=chat")
         assert response.status_code == 200, response.text
         assert raw_marker not in response.text
         frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
-        assert [frame.get("type") for frame in frames] == ["process", "event", "event", None]
-        assert frames[0]["item"] == turn["process"][0]
-        assert frames[1]["item"]["event"]["payload"] == {"text": "answer"}
+        assert [frame.get("type") for frame in frames] == ["event", "process", "event", "event", None]
+        assert frames[0]["item"]["event"]["payload"] == {"text": thinking}
+        assert frames[1]["item"] == turn["process"][0]
+        assert frames[2]["item"]["event"]["payload"] == {"text": "answer"}
         assert frames[-1]["status"] == "SUCCEEDED"
 
 

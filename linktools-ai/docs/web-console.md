@@ -83,8 +83,9 @@ responses, occupied sessions and unconfirmed cancellation remain visible.
 Conversation uses one process panel per turn, with one row per root tool
 call. A tool's finished state updates its existing row; the saved turn replaces
 the preview in place. An unconfirmed tool outcome is not reported as success.
-Ordinary conversation delivery excludes native reasoning and raw tool inputs
-or results. Inspecting the underlying records is an explicit diagnostic action.
+Conversation displays the SDK's thinking text as-is, while streaming and in
+history. Provider signatures and raw tool inputs or results remain outside
+Chat. Inspecting the underlying records is an explicit diagnostic action.
 
 **Reuse tool progress in another host.**
 

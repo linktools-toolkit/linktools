@@ -98,18 +98,19 @@ def _wire(value: object) -> object:
 
 
 def _chat_timeline(page: Page[SessionTurn]) -> Page[SessionTurn]:
-    # The inspector has its own explicit content reads. Chat receives answers
-    # and the public process projection, not raw transcript parts.
+    # Chat receives rendered SDK text, not raw parts or tool payloads.
     return replace(page, items=tuple(
-        replace(turn, items=tuple(item for item in turn.items if item.item_kind == "assistant"),
+        replace(turn, items=tuple(item for item in turn.items if item.item_kind in {"assistant", "thinking"}),
                 safe_error_details={})
         for turn in page.items
     ))
 
 
 _CHAT_STREAM_POSITION = {"agent_run_seq", "model_request_seq", "stream_attempt_seq"}
+_CHAT_TEXT_FIELDS = _CHAT_STREAM_POSITION | {"text", "part_index", "part_start", "stream_truncated"}
 _CHAT_STREAM_FIELDS = {
-    "ASSISTANT_TEXT_DELTA": _CHAT_STREAM_POSITION | {"text", "part_index", "part_start", "stream_truncated"},
+    "ASSISTANT_TEXT_DELTA": _CHAT_TEXT_FIELDS,
+    "ASSISTANT_THINKING_DELTA": _CHAT_TEXT_FIELDS,
     "MODEL_ATTEMPT_STARTED": _CHAT_STREAM_POSITION,
     "MODEL_ATTEMPT_FINISHED": _CHAT_STREAM_POSITION | {"status"},
     "MODEL_REQUEST_FINISHED": _CHAT_STREAM_POSITION | {"status"},
