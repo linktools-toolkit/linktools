@@ -334,6 +334,33 @@ class _Console:
         include_timeline = request.query_params.get("include_timeline", "true")
         if include_timeline not in {"true", "false"}:
             raise ValueError("include_timeline must be true or false")
+        if "execution_id" in request.query_params:
+            execution_id = _text(request.query_params, "execution_id")
+            turn_state = request.query_params.get("turn_state", "committed")
+            if include_timeline != "true" or turn_state not in {"active", "committed"}:
+                raise ValueError("invalid session turn selector")
+            if environ.debug:
+                request.state.phase = "session.turn"
+            if turn_state == "committed":
+                try:
+                    turn = await history.session_turn(identity, execution_id, principal=self.principal)
+                except AIError as error:
+                    if error.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE:
+                        items = ()
+                    elif error.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY:
+                        # Split storage may not support the exact committed-turn reader.
+                        turn_state = "active"
+                    else:
+                        raise
+                else:
+                    items = (turn,)
+            if turn_state == "active":
+                detail = await history.session_detail(identity, principal=self.principal, limit=1)
+                session = detail.session
+                items = tuple(turn for turn in detail.timeline.items if turn.execution_id == execution_id)
+            else:
+                session = await history.inspect_session(identity, principal=self.principal)
+            return _json({"session": session, "timeline": _chat_timeline(Page(items, None))})
         if include_timeline == "true" and self.runtime is not None and type(history) is History:
             if environ.debug:
                 request.state.phase = "session.timeline"
@@ -572,21 +599,22 @@ class _Console:
         )
         cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or None
         chat = request.query_params.get("view") == "chat"
-        watch = execution.watch(cursor=cursor, include_content=True, include_model_interactions=not chat)
+        watch = execution.watch(
+            cursor=cursor, include_content=True, include_descendants=not chat,
+            include_model_interactions=not chat,
+        )
         local_only = chat and self._session_notices is not None
 
         async def stream() -> AsyncGenerator[str, None]:
             try:
                 with local_execution_stream() if local_only else nullcontext():
                     async for observation in watch:
-                        item = observation.event
                         if chat:
-                            if not isinstance(item, ExecutionTreeEvent):
-                                continue
-                            payload = _chat_frame(item, observation.cursor)
+                            payload = _chat_frame(observation, observation.cursor)
                             if payload is None:
                                 continue
                         else:
+                            item = observation.event
                             payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
                                        "item": _wire(item), "cursor": observation.cursor}
                         prefix = "" if observation.cursor is None else f"id: {observation.cursor}\n"

@@ -107,7 +107,15 @@ globalThis.fetch=async(path,options={})=>{
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
   if(detailResponses.has(key)){const value=detailResponses.get(key),result=typeof value==='function'?value(url):value;return result instanceof Response?result:response(result);}
   if(key==='/api/metrics')return response({items:[]});
-  if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id)});}
+  if(url.pathname==='/api/session'){
+    const id=url.searchParams.get('session_id'),executionId=url.searchParams.get('execution_id');
+    if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null});
+    if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);
+    const page=timeline(id),recent=url.searchParams.get('limit')==='1';
+    const history=executionId?{items:page.items.filter(turn=>turn.execution_id===executionId),next_cursor:null}
+      :recent?{items:page.items.slice(-1),next_cursor:null}:page;
+    return response({session:sessions.get(id),timeline:history});
+  }
   const execution=key.match(/^\/api\/executions\/([^/]+)$/);
   if(execution)return response(executions.get(execution[1]) || info(execution[1],null));
   if(key.endsWith('/events') && streamBlocks.has(key.split('/')[3]))return new Response(new ReadableStream({start(controller){streamBlocks.get(key.split('/')[3]).controller=controller;},cancel(){}}));
@@ -832,6 +840,9 @@ if(process.argv[3]==='tools') {
   emit('process',laterTool,'later-tool-cursor');emit('process',tool,'tool-cursor');
   await until('live process and answer share the turn',()=>processArea().textContent.includes('lookupIn progress') && article().textContent.includes('Answer') && article().textContent.includes(sdkThinking));
   assert.ok(article().contains(node('live')));
+  const liveThought=node('live').children.find(item=>item.className==='stream-attempt').thinking;
+  assert.equal(liveThought.open,true,'live positioned thinking is visible without clicking');
+  assert.equal(liveThought.hidden,false);
   const first=processArea().children[1];
   assert.deepEqual(processArea().children.slice(1).map(row=>row.name.textContent),['lookup','secondary']);
   assert.equal(first.status.getAttribute('aria-live'),'polite');
@@ -867,7 +878,9 @@ if(process.argv[3]==='tools') {
   await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && processArea().textContent.includes('lookupCompleted'));
   const current=processArea();
   assert.deepEqual(current.children.map(item=>item.textContent),['Process','lookupCompleted','secondaryOutcome unconfirmed']);
-  assert.equal(descendants(article()).filter(item=>item.tagName==='PRE' && item.textContent===sdkThinking).length,1);
+  const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===sdkThinking);
+  assert.equal(savedThought.length,1);
+  assert.equal(savedThought[0].open,false,'committed History keeps thinking collapsed');
   assert.equal(article().textContent.match(/Answer/g).length,1);
   assert.equal(modelReads(),readsBeforeCommit,'Chat terminal readback never loads retained model contents');
   assert.doesNotMatch(article().textContent,/Private saved result/);
@@ -1079,10 +1092,12 @@ if(process.argv[3]==='streaming') {
   copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emit('ASSISTANT_THINKING_DELTA','thinking');
   await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
   assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);
-  const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking'));thinking.open=true;
+  const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking'));
+  assert.equal(thinking.open,true,'live fallback thinking is visible without clicking');
+  thinking.open=false;
   emit('ASSISTANT_THINKING_DELTA',' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
   await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
-  assert.equal(thinking.open,true);assert.match(thinking.textContent,/thinking continued/);await copy.click();assert.equal(copied,expected);
+  assert.equal(thinking.open,false,'additional deltas must not reopen thinking the user collapsed');assert.match(thinking.textContent,/thinking continued/);await copy.click();assert.equal(copied,expected);
   const {renderMarkdown}=await import(messageURL);assert.equal(body.innerHTML,renderMarkdown(expected));
   // A paused/background animation frame keeps only current accumulated text.
   for(const part of ['\n\n[ref]', '[ref]: https://example.test\n', '\nfinal'])emit('ASSISTANT_TEXT_DELTA',part);
@@ -1619,6 +1634,7 @@ if(process.argv[3]==='races'){
   controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:partialId,depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:partialText}}}})+'\n\n'));
   controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:partialId,depth:0,event:{event_type:'ASSISTANT_THINKING_DELTA',payload:{text:'Partial thinking'}}}})+'\n\n'));
   await until('partial live text and thinking',()=>node('live').textContent.includes(partialText) && partialTurn().textContent.includes('Partial thinking'));assert.match(node('live').textContent,/Received partial content stays incomplete/);
+  const beforeStop=calls.length;
   const stop=deferred(`POST /api/executions/${partialId}/cancel`);
   const stopping=node('cancel').click();await stop.requested;
   executions.get(partialId).status='CANCELLED';sessions.get('a').active_execution_id=null;
@@ -1633,6 +1649,61 @@ if(process.argv[3]==='races'){
   assert.equal(node('current-status').textContent,'Session available');
   assert.match(node('notice').textContent,/Cancellation confirmed.*Session released/);
   assert.equal(calls.filter(item=>item.key===`/api/executions/${partialId}/events`).length,1);
+  const stopCalls=calls.slice(beforeStop);
+  assert.equal(stopCalls.filter(call=>call.method==='GET' &&
+    call.key===`/api/executions/${partialId}`).length,0,'the authorized cancellation snapshot replaces the execution readback');
+  const stopHistory=stopCalls.filter(call=>call.method==='GET' && call.key==='/api/sessions/a');
+  assert.equal(stopHistory.length,1,'Stop and the terminal stream share one canonical History read');
+  assert.equal(stopHistory[0].query.execution_id,partialId,'read the stopped turn, not a page of previous turns');
+  assert.equal(stopHistory[0].query.turn_state,undefined);
+  assert.equal(stopCalls.filter(call=>call.method==='GET' && call.key==='/api/executions/a-run').length,0,
+    'Stop does not refresh an unrelated selected turn');
+  const lateId='stop-response-after-terminal';
+  controller=await activate(lateId);
+  const lateStop=deferred(`POST /api/executions/${lateId}/cancel`);
+  const lateStopping=node('cancel').click();await lateStop.requested;
+  executions.get(lateId).status='CANCELLED';sessions.get('a').active_execution_id=null;
+  snapshot(controller,lateId);
+  await until('Stop reconciles before its mutation response',()=>node('notice').textContent.includes('Session released'));
+  await until('terminal observation finishes',()=>node('connection').textContent==='Observation: Complete');
+  const settledNotice=node('notice').textContent,settledReads=calls.length;
+  lateStop({execution_id:lateId,cancelled:true});await lateStopping;
+  assert.equal(node('notice').textContent,settledNotice,'late mutation response cannot replace confirmed cancellation');
+  assert.equal(calls.length,settledReads,'late mutation response does not read state again');
+  const oldId='old-commit-in-flight',newId='next-turn';
+  const oldTurn={execution_id:oldId,status:'STARTED',created_at:'2026-01-02T00:00:00Z',
+    user_input:'Old in-flight question',conversation_committed:false,items:[]};
+  const oldDone={...oldTurn,status:'CANCELLED',conversation_committed:true,error_code:'EXECUTION_CANCELLED'};
+  timelineOverrides.set('a',{items:[previousTurn,oldTurn],next_cursor:'older-page'});
+  controller=await activate(oldId);
+  executions.get(oldId).status='CANCELLED';sessions.get('a').active_execution_id=null;
+  const oldHistory=deferred('GET /api/sessions/a');
+  snapshot(controller,oldId);await oldHistory.requested;delays.delete('GET /api/sessions/a');
+  await until('composer can send while older History is pending',()=>!node('send').disabled);
+  const nextAdmission=deferred('POST /api/sessions/a/messages');
+  node('prompt').value='Follow-up';const nextSending=node('composer').requestSubmit();
+  await nextAdmission.requested;
+  timelineOverrides.set('a',{items:[previousTurn,oldDone,{...oldTurn,execution_id:newId,user_input:'Follow-up'}],next_cursor:'older-page'});
+  executions.set(newId,{...info(newId,'a'),status:'STARTED'});streamBlocks.set(newId,{});sessions.get('a').active_execution_id=newId;
+  nextAdmission({execution_id:newId});await nextSending;
+  assert.equal(node('send').disabled,true,'newly admitted turn holds the composer');
+  oldHistory({session:{...sessions.get('a'),active_execution_id:null},timeline:{items:[oldDone],next_cursor:null}});
+  await until('previous committed turn updates in place after the successor',()=>node('conversation').textContent.includes('Execution cancelled.'));
+  assert.equal(node('send').disabled,true,'older exact History cannot clear the new owner');
+  assert.equal(node('turns-more').hidden,false,'incremental exact History preserves the earlier page cursor');
+  const thirdId='directly-observed-successor',beforeDirect=calls.length;
+  const nextDone={...oldTurn,execution_id:newId,status:'SUCCEEDED',user_input:'Follow-up',conversation_committed:true,
+    items:[{item_kind:'assistant',content:'Follow-up finish'}]};
+  timelineOverrides.set('a',{items:[previousTurn,oldDone,nextDone,{...oldTurn,execution_id:thirdId,user_input:'Another tab'}],
+    next_cursor:'older-page'});
+  executions.set(newId,info(newId,'a'));executions.set(thirdId,{...info(thirdId,'a'),status:'STARTED'});streamBlocks.set(thirdId,{});
+  sessions.get('a').active_execution_id=thirdId; // New owner arrives before the preceding execution tail.
+  await until('direct replacement reads both specific turns',()=>node('conversation').textContent.includes('Follow-up finish')
+    && node('conversation').textContent.includes('Another tab'));
+  const directHistory=calls.slice(beforeDirect).filter(call=>call.method==='GET' && call.key==='/api/sessions/a');
+  assert.deepEqual(directHistory.map(call=>[call.query.execution_id,call.query.turn_state]),[[newId,undefined],[thirdId,'active']]);
+  assert.equal(node('send').disabled,true);
+  assert.equal(node('turns-more').hidden,false);
   console.log('Observation and End notice race contracts passed');process.exit(0);
 }
 
@@ -1792,10 +1863,15 @@ node('new-dialog').close();
 
 // Repeated submit during one in-flight request invokes start only once.
 await select('#session=a');
+const beforeSend=calls.length;
 const releaseSend=deferred('POST /api/sessions/a/messages');node('prompt').value='Repeated message';
 const send=node('composer').requestSubmit();node('composer').requestSubmit();await releaseSend.requested;
 assert.equal(calls.filter(call=>call.key==='/api/sessions/a/messages').length,1);
 node('prompt').value='Next draft';releaseSend({execution_id:'a-run'});await send;assert.equal(node('prompt').value,'Next draft');
+const sendHistory=calls.slice(beforeSend).filter(call=>call.method==='GET' && call.key==='/api/sessions/a');
+assert.equal(sendHistory.length,1);
+assert.equal(sendHistory[0].query.execution_id,'a-run');
+assert.equal(sendHistory[0].query.turn_state,'active');
 assert.equal(node('inspector').hidden,true,'Send must preserve the conversation-only view');
 for(const open of [false,true]){
   if(node('inspector').hidden===open)node('inspector-toggle').click();
