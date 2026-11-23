@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event, update
+from sqlalchemy import Select, event, update
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
@@ -21,7 +21,7 @@ from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStore, _SqlGroupTransaction
 from linktools.ai.persistence.state import (
     RecordReplacement, StateGroupTransaction, StateStore, StateTransaction,
-    StoredFact, StoredRecord,
+    StoredFact, StoredRecord, record_key,
 )
 from linktools.ai.storage import CacheBackend, InMemoryCacheBackend, SqlStorageContext
 
@@ -57,7 +57,9 @@ async def _database(path: Path, *, cache: CacheBackend | None = None) -> AsyncIt
 
 
 @pytest.mark.asyncio
-async def test_group_reads_bound_parameters_and_keep_partition_keys_exact(tmp_path: Path) -> None:
+async def test_group_reads_bound_parameters_and_keep_partition_keys_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async with _database(tmp_path / "bounded.db") as (engine, first, second):
         key = _key("common")
         one, two = _record("one", key=key), _record("two", key=key)
@@ -81,9 +83,14 @@ async def test_group_reads_bound_parameters_and_keep_partition_keys_exact(tmp_pa
             assert await group.get_records({}) == {}
             assert await group.get_records({first: (), second: ()}) == {first: {}, second: {}}
 
+        def reject_precompile(*_args, **_kwargs):
+            pytest.fail("group reads must not compile again to check their parameter budget")
+
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
-            await first.storage_group.read_many((first, second), read)
+            with monkeypatch.context() as patch:
+                patch.setattr(Select, "compile", reject_precompile)
+                await first.storage_group.read_many((first, second), read)
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert len(parameter_counts) > 1
@@ -418,8 +425,13 @@ async def test_unsupported_and_custom_groups_keep_original_transaction_reads() -
 @pytest.mark.asyncio
 async def test_group_batch_queries_compile_for_supported_sql_dialects(tmp_path: Path) -> None:
     async with _database(tmp_path / "compile.db") as (_, first, second):
-        requests = {first: tuple(_key(f"first-{n}") for n in range(_FULL_PARTITION_KEYS + 1)),
-                    second: tuple(_key(f"second-{n}") for n in range(_FULL_PARTITION_KEYS - 1))}
+        kinds = ("execution", "agent_run", "tool_operation", "task_graph", "probe")
+
+        def mixed_key(partition: str, n: int) -> bytes:
+            return record_key("batch", "tenant", "execution", kinds[n % len(kinds)], (f"{partition}-{n}",))
+
+        requests = {first: tuple(mixed_key("first", n) for n in range(_FULL_PARTITION_KEYS + 1)),
+                    second: tuple(mixed_key("second", n) for n in range(_FULL_PARTITION_KEYS - 1))}
         async def compile_queries(group: StateGroupTransaction) -> None:
             assert isinstance(group, _SqlGroupTransaction)
             dialects = (sqlite.dialect(), mysql.dialect(), postgresql.dialect())
@@ -431,7 +443,7 @@ async def test_group_batch_queries_compile_for_supported_sql_dialects(tmp_path: 
                     statement = group._record_read_statement(batch)
                     compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
                     count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
-                    assert count <= 999
+                    assert count == sum(1 + 2 * len(keys) for keys in batch.values()) <= 999
                     assert "FOR UPDATE" not in str(compiled)
                     assert "WITH RECURSIVE" not in str(compiled)
                 assert batches > 1

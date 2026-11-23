@@ -61,8 +61,8 @@ async def inspect_native_message_tables(
     if actual == {"ai_step_messages"} and required.issubset(actual):
         # Typed archive payloads share the message relation without owning a
         # Native sequence tree. Never skip a Native or malformed partition.
-        from ._step_schema import build_step_sql_metadata
-        table = build_step_sql_metadata().tables["ai_step_messages"]
+        from ._step_schema import native_message_sql_tables
+        table = native_message_sql_tables()["ai_step_messages"]
         async with context.sessions() as session:
             await context.dialect.begin_consistent_read(session)
             if await native_message_partitions(context, session, table):

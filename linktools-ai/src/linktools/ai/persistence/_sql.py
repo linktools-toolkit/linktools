@@ -166,13 +166,6 @@ class _SqlGroupTransaction:
         for batch in self._record_read_batches(missing):
             first = transactions[next(iter(batch))]
             statement = self._record_read_statement(batch)
-            compiled = statement.compile(
-                dialect=first._context.engine.dialect,
-                compile_kwargs={"render_postcompile": True},
-            )
-            count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
-            if count > _GROUP_RECORD_BIND_BUDGET:
-                raise ValueError("group record read exceeds the SQL parameter budget")
             rows = (await first._execute(statement)).mappings().all()
             records: dict[bytes, dict[bytes, StoredRecord]] = {}
             for row in rows:
@@ -449,6 +442,8 @@ class _SqlGroupTransaction:
     def _record_read_batches(
         cls, requests: Mapping[StateStore, Sequence[bytes]],
     ) -> Iterator[Mapping[StateStore, tuple[bytes, ...]]]:
+        # One partition bind and two per key (raw identity and locator).
+        # Owner projection constants are inlined and do not consume binds.
         batch: dict[StateStore, tuple[bytes, ...]] = {}
         used = 0
         for store, keys in requests.items():

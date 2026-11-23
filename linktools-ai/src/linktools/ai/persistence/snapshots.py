@@ -2282,13 +2282,14 @@ async def _read_native_messages(
     store: SqlStateStore, roots: list[NativeMessageRoot], *, budget: _SnapshotCaptureBudget,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     from sqlalchemy import and_, or_, select
-    from ._step_schema import build_step_sql_metadata
+    from ._step_schema import native_message_sql_tables
 
-    metadata = build_step_sql_metadata()
+    tables = native_message_sql_tables()
+
     async def read(transaction: StateTransaction) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         if not isinstance(transaction, SqlStateRowReader):
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        nodes = metadata.tables["ai_step_sequences"]
+        nodes = tables["ai_step_sequences"]
         columns = ("store_key", "sha256", "message_sha256", "tree_count",
                    "left_sha256", "right_sha256", "next_sha256")
         sequences = []
@@ -2315,7 +2316,7 @@ async def _read_native_messages(
             closure.mark(root.store_key, root.slices)
         sequences = [row for row in sequences if (row["store_key"], row["sha256"]) in closure.retained_sequences]
         messages = []
-        table = metadata.tables["ai_step_messages"]
+        table = tables["ai_step_messages"]
         for partition in partitions:
             identities = sorted(identity for scope, identity in closure.retained_messages if scope == partition)
             offset = 0
@@ -2340,13 +2341,14 @@ async def _insert_native_messages(
     transaction: SqlStateTransaction, store: SqlStateStore,
     entries: list[tuple[list[dict[str, object]], list[dict[str, object]]]],
 ) -> None:
-    from ._step_schema import build_step_sql_metadata
+    from ._step_schema import native_message_sql_tables
 
-    metadata = build_step_sql_metadata()
+    tables = native_message_sql_tables()
+
     async def insert(session: "AsyncSession") -> None:
         for sequences, messages in entries:
             for name, rows in (("ai_step_messages", messages), ("ai_step_sequences", sequences)):
-                table = metadata.tables[name]
+                table = tables[name]
                 if not rows:
                     continue
                 # Include the derived locator in the per-row portable bind budget.

@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """SQL metadata for the public upstream step-persistence records."""
 
+from collections.abc import Iterable, Mapping
+from functools import lru_cache
+from types import MappingProxyType
 from typing import TYPE_CHECKING
-from collections.abc import Iterable
 
 from ..core import RESOURCE_ID_MAX_BYTES
 from ..steps import NATIVE_STORE_KEY_MAX_BYTES, NATIVE_REPLAY_KEY_MAX_BYTES
@@ -185,4 +187,13 @@ def build_step_domain_sql_metadata(domains: "Iterable[PersistenceDomain]", *, me
     return metadata
 
 
-__all__ = ["build_step_sql_metadata", "build_step_domain_sql_metadata"]
+@lru_cache(maxsize=1)
+def native_message_sql_tables() -> "Mapping[str, Table]":
+    """Reuse query descriptors without sharing mutable provisioner metadata."""
+    tables = build_step_sql_metadata().tables
+    return MappingProxyType({
+        name: tables[name] for name in ("ai_step_messages", "ai_step_sequences", "ai_step_snapshots")
+    })
+
+
+__all__ = ["build_step_sql_metadata", "build_step_domain_sql_metadata", "native_message_sql_tables"]
