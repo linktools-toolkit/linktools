@@ -94,7 +94,7 @@ async def test_other_process_tools_use_the_web_session_stream_without_idle_sql(t
             path = "/api/session/events"
             scope = {
                 "type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
-                "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"session_id=session",
+                "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"session_id=session&view=chat",
                 "headers": [], "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 12345),
             }
             disconnected = asyncio.Event()

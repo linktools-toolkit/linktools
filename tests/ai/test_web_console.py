@@ -70,6 +70,124 @@ async def test_session_events_expose_only_authorized_occupancy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_release_does_not_wait_for_stalled_chat_observer() -> None:
+    from types import SimpleNamespace
+
+    from linktools.ai.core import Principal, SessionStatus
+
+    watching, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def session_watch(_session_id, *, principal):
+        yield SimpleNamespace(status=SessionStatus.OPEN, active_execution_id="first", revision=1)
+        await release.wait()
+        yield SimpleNamespace(status=SessionStatus.OPEN, active_execution_id="next", revision=2)
+
+    async def execution_watch(*, cursor, **_kwargs):
+        assert cursor is None, "an old execution cursor cannot be passed to the new owner"
+        try:
+            watching.set()
+            await asyncio.Future()
+            yield
+        finally:
+            closed.set()
+
+    async def execution_get(execution_id, *, principal):
+        assert execution_id == "first" and principal.principal_id == "runtime"
+        return SimpleNamespace(watch=execution_watch)
+
+    runtime = SimpleNamespace(
+        history=None, default_principal=Principal("runtime", "default"),
+        sessions=SimpleNamespace(watch=session_watch), executions=SimpleNamespace(get=execution_get),
+        events=SimpleNamespace(has_local_producer=lambda execution_id: execution_id == "first"),
+    )
+    async with client(create_app(runtime=runtime)) as http:
+        request = asyncio.create_task(http.get(
+            "/api/session/events?session_id=chosen&view=chat",
+            headers={"Last-Event-ID": json.dumps(["earlier", "old-cursor"])},
+        ))
+        try:
+            await asyncio.wait_for(watching.wait(), 5)
+            release.set()
+            response = await asyncio.wait_for(request, 5)
+            states = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+            assert [state["active_execution_id"] for state in states] == ["first", "next"]
+            assert closed.is_set()
+        finally:
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_session_disconnect_joins_observer_that_finishes_during_cancellation() -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal, SessionStatus
+    from linktools.ai.history import ExecutionInfo
+
+    watching, disconnected = asyncio.Event(), asyncio.Event()
+    observer = None
+
+    async def session_watch(_session_id, *, principal):
+        yield SimpleNamespace(status=SessionStatus.OPEN, active_execution_id="run", revision=1)
+        await asyncio.Future()
+
+    async def execution_watch(**_kwargs):
+        nonlocal observer
+        observer = asyncio.current_task()
+        watching.set()
+        # An underlying store may finish its operation when cancellation arrives.
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            return
+        yield
+
+    async def inspect_execution(execution_id, *, principal):
+        now = datetime.now(timezone.utc)
+        return ExecutionInfo(
+            execution_id, "agent", "default", None, ExecutionStatus.SUCCEEDED,
+            ExecutionLineageKind.RUN, None, execution_id, None, "chosen", now, now, None,
+        )
+
+    async def execution_get(_execution_id, *, principal):
+        return SimpleNamespace(watch=execution_watch)
+
+    runtime = SimpleNamespace(
+        history=SimpleNamespace(inspect_execution=inspect_execution),
+        default_principal=Principal("runtime", "default"),
+        sessions=SimpleNamespace(watch=session_watch), executions=SimpleNamespace(get=execution_get),
+        events=SimpleNamespace(has_local_producer=lambda _: True),
+    )
+    app = create_app(runtime=runtime, shutdown_event=asyncio.Event())
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
+             "scheme": "http", "path": "/api/session/events", "raw_path": b"/api/session/events",
+             "query_string": b"session_id=chosen&view=chat", "headers": [],
+             "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 12345)}
+
+    async def receive():
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(_message):
+        pass
+
+    stream = asyncio.create_task(app(scope, receive, send))
+    try:
+        await asyncio.wait_for(watching.wait(), 5)
+        disconnected.set()
+        done, _ = await asyncio.wait((stream,), timeout=5)
+        assert stream in done, "a disconnect must not wait for an unread observer frame"
+        stream.result()
+        assert observer.done()
+    finally:
+        disconnected.set()
+        if observer is not None and not observer.done():
+            observer.cancel()
+        await asyncio.gather(stream, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pytest.MonkeyPatch) -> None:
     from pydantic_ai.messages import ModelMessage, ModelResponse
     from pydantic_ai.models.function import AgentInfo
@@ -94,7 +212,7 @@ async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pyt
         app = create_app(runtime=runtime)
         path = "/api/session/events"
         scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
-                 "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"session_id=shared",
+                 "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"session_id=shared&view=chat",
                  "headers": [], "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 12345)}
 
         async def connect(frames: asyncio.Queue, disconnect: asyncio.Event) -> None:
@@ -128,6 +246,7 @@ async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pyt
                     active = await asyncio.gather(*(asyncio.wait_for(frames.get(), 5) for frames in streams))
                     assert active[0] == active[1]
                     assert active[0]["status"] == "OPEN" and active[0]["active_execution_id"] == identity
+                    assert active[0]["local_execution"] is True
                     replay = await http.post("/api/session/messages?session_id=shared", headers=_HEADERS,
                                              json={"prompt": "first", "request_id": "first"})
                     assert replay.status_code == 202 and replay.json()["execution_id"] == identity
@@ -1069,8 +1188,8 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
     class Execution:
         execution_id = "execution"
 
-        async def watch(self, *, cursor, include_content, include_model_interactions):
-            assert include_content and not include_model_interactions
+        async def watch(self, *, cursor, include_content, include_model_interactions, include_descendants):
+            assert include_content and not include_model_interactions and not include_descendants
             for n, (kind, payload, depth) in enumerate((
                 ("ASSISTANT_THINKING_DELTA", {"text": thinking, "signature": raw_marker}, 0),
                 ("ASSISTANT_THINKING_DELTA", {"text": raw_marker}, 1),
@@ -1081,13 +1200,11 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
                 ("MODEL_ATTEMPT_FINISHED", {"status": "SUCCEEDED", "provider_request": raw_marker}, 0),
             )):
                 execution = "execution" if not depth else "child"
-                yield SimpleNamespace(
-                    event=ExecutionTreeEvent(
-                        execution, "default",
-                        ExecutionLineageKind.RUN if not depth else ExecutionLineageKind.SUBAGENT,
-                        "execution" if depth else None, "execution", "invocation" if depth else None, depth,
-                        ExecutionStreamEvent(execution, n + 1, kind, payload),
-                    ),
+                yield ExecutionTreeEvent(
+                    execution, "default",
+                    ExecutionLineageKind.RUN if not depth else ExecutionLineageKind.SUBAGENT,
+                    "execution" if depth else None, "execution", "invocation" if depth else None, depth,
+                    ExecutionStreamEvent(execution, n + 1, kind, payload),
                     cursor=str(n + 1),
                 )
 
@@ -1116,6 +1233,200 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         assert frames[1]["item"] == turn["process"][0]
         assert frames[2]["item"]["event"]["payload"] == {"text": "answer"}
         assert frames[-1]["status"] == "SUCCEEDED"
+
+
+def test_compact_chat_part_boundary_and_append_share_identity() -> None:
+    from linktools.ai.core import ExecutionLineageKind
+    from linktools.ai.execution import ExecutionStreamEvent, ExecutionTreeEvent
+    from linktools.ai.web._app import _chat_frame
+
+    def frame(text: str, *, start: bool = False, truncated: bool = False):
+        return _chat_frame(ExecutionTreeEvent(
+            "run", "default", ExecutionLineageKind.RUN, None, "run", None, 0,
+            ExecutionStreamEvent("run", None, "ASSISTANT_THINKING_DELTA", {
+                "agent_run_seq": 1, "model_request_seq": 2, "stream_attempt_seq": 3,
+                "part_index": 0, "part_start": start, "text": text, "stream_truncated": truncated,
+            }),
+            cursor="checkpoint",
+        ), compact=True)
+
+    identity = {"execution_id": "run", "part": "1.2.3.0"}
+    assert frame("", start=True) == ("thinking", {**identity, "start": True}, "checkpoint")
+    assert frame(" 中 ") == ("thinking", {**identity, "text": " 中 "}, "checkpoint")
+    assert frame("", truncated=True) == ("thinking", {**identity, "truncated": True}, "checkpoint")
+    assert frame("") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_stream", [False, True], ids=["execution-endpoint", "session-endpoint"])
+async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
+    tmp_path: Path, session_stream: bool,
+) -> None:
+    from pydantic_ai.models.function import DeltaThinkingPart, FunctionModel
+
+    from linktools.ai.workspace import Workspace
+    from .test_live_history_readback_integration import _Models
+
+    thinking, answer, signature = "  SDK thinking  ", "First answer ", "opaque-provider-signature"
+    release, finish, preview, last_delta, idle = (asyncio.Event() for _ in range(5))
+    observed = []
+    compact = []
+    terminal = []
+    cursor = None
+
+    async def model(_messages, _info):
+        yield {0: DeltaThinkingPart(content=thinking, signature=signature)}
+        yield answer
+        await release.wait()
+        yield "and last"
+        await finish.wait()
+
+    async with common_command._open_local_runtime(
+        Workspace.initialize(tmp_path), model=_Models(FunctionModel(stream_function=model)),
+    ) as local, common_command.local_turn_notices(local, receive=True) as notices:
+        assert notices is not None
+        app = create_app(runtime=local.runtime, session_notices=notices, shutdown_event=asyncio.Event())
+        async with client(app) as http:
+            created = await http.post("/api/sessions", json={
+                "session_id": "session", "request_id": "create",
+            }, headers=_HEADERS)
+            assert created.status_code == 201, created.text
+            started = await http.post("/api/session/messages?session_id=session", json={
+                "request_id": "turn", "prompt": "hello",
+            }, headers=_HEADERS)
+            assert started.status_code == 202, started.text
+            execution_id = started.json()["execution_id"]
+            active = await http.get("/api/session", params={
+                "session_id": "session", "execution_id": execution_id, "turn_state": "active",
+            })
+            assert active.status_code == 200, active.text
+            assert active.json()["timeline"]["next_cursor"] is None
+            turn, = active.json()["timeline"]["items"]
+            assert turn["execution_id"] == execution_id and not turn["conversation_committed"]
+        path = "/api/session/events" if session_stream else f"/api/executions/{execution_id}/events"
+
+        def record_delta(kind: str, text: str) -> None:
+            observed.append((kind, text))
+            if len(observed) == 2:
+                preview.set()
+            elif len(observed) == 3:
+                last_delta.set()
+
+        async def connect(disconnected: asyncio.Event, ready: asyncio.Event, resume: str | None = None) -> None:
+            initial = True
+
+            async def receive():
+                nonlocal initial
+                if initial:
+                    initial = False
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                await disconnected.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                nonlocal cursor
+                if message["type"] == "http.response.start":
+                    assert message["status"] == 200
+                event_name = "message"
+                for line in message.get("body", b"").decode().splitlines():
+                    if line.startswith("id: "):
+                        cursor = line[4:]
+                    elif line.startswith("event: "):
+                        event_name = line[7:]
+                    elif line.startswith("data: "):
+                        assert signature not in line
+                        payload = json.loads(line[6:])
+                        name = event_name
+                        if session_stream:
+                            if event_name in ("thinking", "text"):
+                                assert payload["execution_id"] == execution_id and cursor
+                                assert payload.keys() <= {"execution_id", "part", "text", "start", "truncated"}
+                                if "part" in payload:
+                                    assert len(payload["part"].split(".")) == 4
+                                compact.append((event_name, payload))
+                                if "text" in payload:
+                                    kind = "THINKING" if event_name == "thinking" else "TEXT"
+                                    record_delta(f"ASSISTANT_{kind}_DELTA", payload["text"])
+                                continue
+                            if event_name != "execution":
+                                assert event_name == "message", payload
+                                if payload["active_execution_id"] == execution_id:
+                                    ready.set()
+                                elif payload["active_execution_id"] is None:
+                                    idle.set()
+                                continue
+                            assert payload["execution_id"] == execution_id
+                            name, payload = payload["event"], payload["data"]
+                            if name == "message":
+                                assert "cursor" not in payload, "Chat resumes from SSE id only"
+                        assert name != "observation_error", payload
+                        if name == "snapshot":
+                            terminal.append(payload["status"])
+                        event = payload.get("item", {}).get("event", {})
+                        if event.get("event_type") in ("ASSISTANT_THINKING_DELTA", "ASSISTANT_TEXT_DELTA"):
+                            assert not session_stream, "positioned Chat deltas use the named compact frames"
+                            record_delta(event["event_type"], event["payload"]["text"])
+
+            scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
+                     "scheme": "http", "path": path, "raw_path": path.encode(),
+                     "query_string": b"view=chat&session_id=session" if session_stream else b"view=chat",
+                     "headers": [(b"last-event-id", resume.encode())] if resume else [],
+                     "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 12345)}
+            await app(scope, receive, send)
+
+        disconnected = asyncio.Event()
+        stream = asyncio.create_task(connect(disconnected, asyncio.Event()))
+        try:
+            await asyncio.wait_for(preview.wait(), 5)
+            assert not release.is_set() and not stream.done()
+            assert observed == [("ASSISTANT_THINKING_DELTA", thinking), ("ASSISTANT_TEXT_DELTA", answer)]
+            if session_stream:
+                assert cursor
+                disconnected.set()
+                await asyncio.wait_for(stream, 5)
+                disconnected, ready = asyncio.Event(), asyncio.Event()
+                stream = asyncio.create_task(connect(disconnected, ready, resume=cursor))
+                await asyncio.wait_for(ready.wait(), 5)
+            release.set()
+            await asyncio.wait_for(last_delta.wait(), 5)
+            finish.set()
+            if session_stream:
+                await asyncio.wait_for(idle.wait(), 5)
+                assert not stream.done(), "session SSE stays open after the turn"
+                disconnected.set()
+            await asyncio.wait_for(stream, 10)
+            assert observed == [
+                ("ASSISTANT_THINKING_DELTA", thinking), ("ASSISTANT_TEXT_DELTA", answer),
+                ("ASSISTANT_TEXT_DELTA", "and last"),
+            ]
+            if session_stream:
+                assert {kind for kind, _ in compact} == {"thinking", "text"}
+            if terminal or not session_stream:
+                assert terminal == ["SUCCEEDED"]
+            async with client(app) as http:
+                again = await http.post("/api/session/messages?session_id=session", json={
+                    "request_id": "next", "prompt": "different",
+                }, headers=_HEADERS)
+                assert again.status_code == 202, again.text
+                second = await local.runtime.executions.get(again.json()["execution_id"])
+                assert (await second.wait(timeout_seconds=10)).result.status.value == "SUCCEEDED"
+                all_turns = await http.get("/api/session?session_id=session")
+                assert len(all_turns.json()["timeline"]["items"]) == 2
+                finished = await http.get("/api/session", params={
+                    "session_id": "session", "execution_id": execution_id,
+                })
+                assert finished.status_code == 200, finished.text
+                assert finished.json()["timeline"]["next_cursor"] is None
+                saved, = finished.json()["timeline"]["items"]
+                assert saved["execution_id"] == execution_id and saved["conversation_committed"]
+                assert signature not in finished.text
+        finally:
+            release.set()
+            finish.set()
+            disconnected.set()
+            if not stream.done():
+                stream.cancel()
+            await asyncio.gather(stream, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -33,7 +33,8 @@ from ..runtime import Runtime
 from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
+    from ..execution import ExecutionObservationEvent
     from starlette.types import ASGIApp, Receive, Scope, Send
 
 _logger = environ.get_logger("ai.web")
@@ -120,21 +121,68 @@ _CHAT_STREAM_FIELDS = {
 }
 
 
-def _chat_frame(item: ExecutionTreeEvent, cursor: str | None) -> dict[str, object] | None:
+_CHAT_DELTA_EVENTS = {"ASSISTANT_TEXT_DELTA": "text", "ASSISTANT_THINKING_DELTA": "thinking"}
+_CHAT_PART_POSITION = ("agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index")
+
+_ExecutionFrame = tuple[str, dict[str, object], str | None]
+
+
+def _chat_frame(item: ExecutionTreeEvent, *, compact: bool) -> _ExecutionFrame | None:
     if item.depth != 0:
         return None
+    cursor = item.cursor
     event = item.event
     process = project_tool_process_event(event.event_type, event.payload)
     if process is not None:
-        return {"type": "process", "item": _wire(process), "cursor": cursor}
+        return "message", {"type": "process", "item": _wire(process), "cursor": cursor}, cursor
     allowed = _CHAT_STREAM_FIELDS.get(event.event_type)
     if allowed is None or not isinstance(event.payload, Mapping):
         return None
-    return {"type": "event", "cursor": cursor, "item": {
+    source = event.payload
+    kind = _CHAT_DELTA_EVENTS.get(event.event_type) if compact else None
+    if kind:
+        text = source.get("text")
+        start = source.get("part_start")
+        truncated = source.get("stream_truncated") is True
+        if not (text or start is True or truncated):
+            return None
+        part = tuple(source.get(key) for key in _CHAT_PART_POSITION)
+        positioned = type(start) is bool and all(type(value) is int for value in part)
+        # The SDK can emit text before a model attempt position is available.
+        if positioned or start is None and all(value is None for value in part):
+            payload: dict[str, object] = {"execution_id": item.execution_id}
+            if positioned:
+                payload["part"] = ".".join(map(str, part))
+            if text:
+                payload["text"] = text
+            if start:
+                payload["start"] = True
+            if truncated:
+                payload["truncated"] = True
+            return kind, payload, cursor
+    return "message", {"type": "event", "cursor": cursor, "item": {
         "execution_id": item.execution_id, "depth": 0,
         "event": {"event_type": event.event_type, "durable_seq": event.durable_seq,
-                  "payload": {key: value for key, value in event.payload.items() if key in allowed}},
-    }}
+                  "payload": {key: value for key, value in source.items() if key in allowed}},
+    }}, cursor
+
+
+def _sse_frame(event: str, data: object, cursor: str | None = None) -> str:
+    prefix = "" if cursor is None else f"id: {cursor}\n"
+    if event != "message":
+        prefix += f"event: {event}\n"
+    return prefix + "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+
+
+def _session_execution_cursor(value: str | None) -> tuple[str | None, str | None]:
+    if value is not None:
+        try:
+            parts = json.loads(value)
+            if isinstance(parts, list) and len(parts) == 2 and all(isinstance(part, str) and part for part in parts):
+                return parts[0], parts[1]
+        except (ValueError, RecursionError):
+            pass
+    return None, None
 
 
 def _response_display(response: ModelClientResponse) -> tuple[str | None, str | None]:
@@ -334,6 +382,33 @@ class _Console:
         include_timeline = request.query_params.get("include_timeline", "true")
         if include_timeline not in {"true", "false"}:
             raise ValueError("include_timeline must be true or false")
+        if "execution_id" in request.query_params:
+            execution_id = _text(request.query_params, "execution_id")
+            turn_state = request.query_params.get("turn_state", "committed")
+            if include_timeline != "true" or turn_state not in {"active", "committed"}:
+                raise ValueError("invalid session turn selector")
+            if environ.debug:
+                request.state.phase = "session.turn"
+            if turn_state == "committed":
+                try:
+                    turn = await history.session_turn(identity, execution_id, principal=self.principal)
+                except AIError as error:
+                    if error.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE:
+                        items = ()
+                    elif error.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY:
+                        # Split storage may not support the exact committed-turn reader.
+                        turn_state = "active"
+                    else:
+                        raise
+                else:
+                    items = (turn,)
+            if turn_state == "active":
+                detail = await history.session_detail(identity, principal=self.principal, limit=1)
+                session = detail.session
+                items = tuple(turn for turn in detail.timeline.items if turn.execution_id == execution_id)
+            else:
+                session = await history.inspect_session(identity, principal=self.principal)
+            return _json({"session": session, "timeline": _chat_timeline(Page(items, None))})
         if include_timeline == "true" and self.runtime is not None and type(history) is History:
             if environ.debug:
                 request.state.phase = "session.timeline"
@@ -381,76 +456,160 @@ class _Console:
     async def session_events(self, request: Request) -> Response:
         runtime = self.require_runtime()
         identity = _text(request.query_params, "session_id")
+        chat = request.query_params.get("view") == "chat"
+        resume_id, resume_cursor = _session_execution_cursor(request.headers.get("last-event-id") if chat else None)
 
         async def stream() -> AsyncGenerator[str, None]:
             feed = self._session_notices
-            queue: asyncio.Queue[tuple[str, ToolProcessItem]] = asyncio.Queue(maxsize=16)
+            tools: asyncio.Queue[tuple[str, ToolProcessItem]] = asyncio.Queue(maxsize=16)
 
             def collect(execution_id: str, item: ToolProcessItem) -> None:
-                if not queue.full():
-                    queue.put_nowait((execution_id, item))
+                if not tools.full():
+                    tools.put_nowait((execution_id, item))
+
+            async def pump(execution_id: str, queue: asyncio.Queue[_ExecutionFrame]) -> None:
+                task = asyncio.current_task()
+                assert task is not None
+                try:
+                    if environ.debug:
+                        request.state.phase = "execution.watch"
+                    execution = await runtime.executions.get(execution_id, principal=self.principal)
+                    watch = execution.watch(
+                        cursor=resume_cursor if execution_id == resume_id else None,
+                        include_content=True, include_descendants=False, include_model_interactions=False,
+                    )
+                    frames = self._execution_frames(request, execution_id, watch, chat=True, local_only=True, compact=True)
+                    async with aclosing(frames):
+                        async for frame in frames:
+                            if task.cancelling():
+                                return
+                            await queue.put(frame)
+                except AIError as error:
+                    if not task.cancelling():
+                        await queue.put(self._execution_error_frame(request, error, chat=True))
+
+            async def authorize_remote(execution_id: str) -> str | None:
+                if feed is not None:
+                    try:
+                        await runtime.events.authorize_read(execution_id, principal=self.principal)
+                    except AIError as error:
+                        _debug_error(request, error)
+                    else:
+                        return execution_id
+                return None
 
             unsubscribe = feed.subscribe(identity, collect) if feed is not None else None
             watch = runtime.sessions.watch(identity, principal=self.principal)
-            state_task = None
-            tool_task = None
+            state_task = asyncio.create_task(anext(watch, None))
+            tool_task = asyncio.create_task(tools.get()) if feed is not None else None
+            frame_task = producer = None
+            execution_frames = None
+            retiring: set[asyncio.Task] = set()
             authorized_execution = None
-            last_active = None
+            last_active = last_local = watching = None
+            ended_while_started = False
+            occupancy: dict[str, object] | None = None
+
+            def finish_retiring(task: asyncio.Task) -> None:
+                retiring.discard(task)
+                if not task.cancelled():
+                    task.exception()
+
+            def stop_execution() -> None:
+                nonlocal producer, frame_task, watching
+                for task in (producer, frame_task):
+                    if task is not None:
+                        retiring.add(task)
+                        task.add_done_callback(finish_retiring)
+                        task.cancel()
+                producer = frame_task = watching = None
+
             try:
-                if feed is not None:
-                    state_task = asyncio.create_task(anext(watch, None))
-                    tool_task = asyncio.create_task(queue.get())
                 while True:
-                    if feed is None:
-                        session = await anext(watch, None)
-                    else:
-                        done, _ = await asyncio.wait((state_task, tool_task), return_when=asyncio.FIRST_COMPLETED)
-                        if state_task not in done:
-                            execution_id, item = tool_task.result()
-                            tool_task = asyncio.create_task(queue.get())
-                            # A transport hint never grants access or identifies a session owner.
-                            if execution_id == authorized_execution:
-                                payload = {"execution_id": execution_id, "item": _wire(item)}
-                                yield "event: session_process\ndata: " + json.dumps(payload) + "\n\n"
+                    done, _ = await asyncio.wait(
+                        tuple(task for task in (state_task, tool_task, frame_task, producer) if task is not None),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    # Completion doesn't invalidate a final frame already buffered by the pump.
+                    if producer in done and not frame_task.done() and not execution_frames.empty():
+                        await frame_task
+                    if frame_task is not None and frame_task.done():
+                        frame = frame_task.result()
+                        # Session occupancy must not wait for optional observation to finish.
+                        if not state_task.done() or frame[0] == "snapshot":
+                            frame_task = asyncio.create_task(execution_frames.get())
+                            event, data, cursor = frame
+                            if event == "message":
+                                # EventSource resumes from the SSE id, not the JSON body.
+                                data.pop("cursor", None)
+                            if event == "snapshot":
+                                ended_while_started = isinstance(data, Mapping) and data.get("status") == "STARTED"
+                            event_id = None if cursor is None else json.dumps((watching, cursor), separators=(",", ":"))
+                            if event in ("text", "thinking"):
+                                yield _sse_frame(event, data, event_id)
+                            else:
+                                yield _sse_frame("execution", {"execution_id": watching, "event": event, "data": data}, event_id)
                             continue
-                        session = state_task.result()
+                    elif producer in done and not state_task.done():
+                        producer.result()
+                        frame_task.cancel()
+                        await asyncio.gather(frame_task, return_exceptions=True)
+                        frame_task = producer = None
+                        if (ended_while_started and watching is not None and watching == last_active
+                                and last_local and not runtime.events.has_local_producer(watching)):
+                            authorized_execution = await authorize_remote(watching)
+                            last_local = False
+                            watching = None
+                            if occupancy is not None and not state_task.done():
+                                yield _sse_frame("message", {**occupancy, "local_execution": False})
+                        continue
+                    if not state_task.done():
+                        execution_id, item = tool_task.result()
+                        tool_task = asyncio.create_task(tools.get())
+                        # A transport hint never grants access or identifies a session owner.
+                        if execution_id == authorized_execution:
+                            yield _sse_frame("session_process", {"execution_id": execution_id, "item": _wire(item)})
+                        continue
+                    session = state_task.result()
+                    state_task = None
                     if session is None:
                         break
                     active = session.active_execution_id
                     local_execution = None
-                    if feed is not None and active is not None:
+                    if active is not None and (chat or feed is not None):
                         local_execution = runtime.events.has_local_producer(active)
-                        if active != last_active:
-                            authorized_execution = None
-                            if not local_execution:
-                                try:
-                                    await runtime.events.authorize_read(active, principal=self.principal)
-                                except AIError as error:
-                                    _debug_error(request, error)
-                                else:
-                                    authorized_execution = active
+                        if (active, local_execution) != (last_active, last_local):
+                            authorized_execution = None if local_execution else await authorize_remote(active)
                     else:
                         authorized_execution = None
-                    last_active = active
-                    payload = {
+                    last_active, last_local = active, local_execution
+                    if watching is not None and (active != watching or not local_execution):
+                        stop_execution()
+                    if chat and local_execution and active != watching:
+                        watching = active
+                        ended_while_started = False
+                        execution_frames = asyncio.Queue(maxsize=1)
+                        producer = asyncio.create_task(pump(active, execution_frames))
+                        frame_task = asyncio.create_task(execution_frames.get())
+                    occupancy = {
                         "status": session.status.value,
-                        "active_execution_id": last_active,
+                        "active_execution_id": active,
                         "revision": session.revision,
                     }
-                    if feed is not None:
-                        state_task = asyncio.create_task(anext(watch, None))
-                        if last_active is not None:
-                            payload["local_execution"] = local_execution
-                    yield "data: " + json.dumps(payload) + "\n\n"
+                    if active is not None and local_execution is not None:
+                        occupancy["local_execution"] = local_execution
+                    state_task = asyncio.create_task(anext(watch, None))
+                    yield _sse_frame("message", occupancy)
             except AIError as error:
                 _debug_error(request, error)
-                yield "event: session_error\ndata: " + json.dumps({"error_code": error.code.value}) + "\n\n"
+                yield _sse_frame("session_error", {"error_code": error.code.value})
             finally:
                 if unsubscribe is not None:
                     unsubscribe()
-                    state_task.cancel()
-                    tool_task.cancel()
-                    await asyncio.gather(state_task, tool_task, return_exceptions=True)
+                tasks = tuple(task for task in (state_task, tool_task, frame_task, producer) if task is not None)
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*retiring, *tasks, return_exceptions=True)
                 await watch.aclose()
 
         return _SSEStream(stream(), self._shutdown_event)
@@ -572,45 +731,59 @@ class _Console:
         )
         cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or None
         chat = request.query_params.get("view") == "chat"
-        watch = execution.watch(cursor=cursor, include_content=True, include_model_interactions=not chat)
+        watch = execution.watch(
+            cursor=cursor, include_content=True, include_descendants=not chat,
+            include_model_interactions=not chat,
+        )
         local_only = chat and self._session_notices is not None
 
         async def stream() -> AsyncGenerator[str, None]:
-            try:
-                with local_execution_stream() if local_only else nullcontext():
-                    async for observation in watch:
-                        item = observation.event
-                        if chat:
-                            if not isinstance(item, ExecutionTreeEvent):
-                                continue
-                            payload = _chat_frame(item, observation.cursor)
-                            if payload is None:
-                                continue
-                        else:
-                            payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
-                                       "item": _wire(item), "cursor": observation.cursor}
-                        prefix = "" if observation.cursor is None else f"id: {observation.cursor}\n"
-                        yield prefix + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
-                # Completion of an observer is not the execution's terminal verdict.
-                if environ.debug:
-                    request.state.phase = "execution.metadata"
-                info = await self.require_history().inspect_execution(execution.execution_id, principal=self.principal)
-                if chat:
-                    info = replace(info, safe_error_details={}, error_diagnostics=None)
-                yield "event: snapshot\ndata: " + json.dumps(_wire(info), ensure_ascii=False) + "\n\n"
-            except AIError as error:
-                _debug_error(request, error)
-                details = error.safe_details
-                if chat:
-                    details = {key: value for key, value in details.items() if key == "cleanup_pending"}
-                payload = {"error_code": error.code.value, "safe_details": details}
-                if isinstance(error, ObservationError):
-                    payload.update(cursor=error.cursor, origin=error.origin)
-                yield "event: observation_error\ndata: " + json.dumps(payload) + "\n\n"
-            finally:
-                await watch.aclose()
+            frames = self._execution_frames(request, execution.execution_id, watch, chat=chat, local_only=local_only)
+            async with aclosing(frames):
+                async for event, data, cursor in frames:
+                    yield _sse_frame(event, data, cursor)
 
         return _SSEStream(stream(), self._shutdown_event)
+
+    async def _execution_frames(
+        self, request: Request, execution_id: str,
+        watch: "AsyncIterator[ExecutionTreeEvent | ExecutionObservationEvent]",
+        *, chat: bool, local_only: bool, compact: bool = False,
+    ) -> AsyncGenerator[_ExecutionFrame, None]:
+        try:
+            with local_execution_stream() if local_only else nullcontext():
+                async for observation in watch:
+                    if chat:
+                        frame = _chat_frame(observation, compact=compact)
+                        if frame is not None:
+                            yield frame
+                    else:
+                        item = observation.event
+                        payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
+                                   "item": _wire(item), "cursor": observation.cursor}
+                        yield "message", payload, observation.cursor
+            # Completion of an observer is not the execution's terminal verdict.
+            if environ.debug:
+                request.state.phase = "execution.metadata"
+            info = await self.require_history().inspect_execution(execution_id, principal=self.principal)
+            if chat:
+                info = replace(info, safe_error_details={}, error_diagnostics=None)
+            yield "snapshot", _wire(info), None
+        except AIError as error:
+            yield self._execution_error_frame(request, error, chat=chat)
+        finally:
+            await watch.aclose()
+
+    @staticmethod
+    def _execution_error_frame(request: Request, error: AIError, *, chat: bool) -> _ExecutionFrame:
+        _debug_error(request, error)
+        details = error.safe_details
+        if chat:
+            details = {key: value for key, value in details.items() if key == "cleanup_pending"}
+        payload = {"error_code": error.code.value, "safe_details": details}
+        if isinstance(error, ObservationError):
+            payload.update(cursor=error.cursor, origin=error.origin)
+        return "observation_error", payload, None
 
     async def metric_query(self, request: Request) -> Response:
         if environ.debug:
