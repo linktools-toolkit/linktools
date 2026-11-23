@@ -3,16 +3,18 @@
 """`lt ai web`: serve a local Runtime console."""
 
 import asyncio
+import signal
 from argparse import Namespace
 from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
-from ._common import add_local_runtime_arguments, run_local
+from ._common import add_local_runtime_arguments, local_turn_notices, run_local
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from ._common import LocalRuntime
     from socket import socket
+    from types import FrameType
 
 
 class Command(BaseCommand):
@@ -36,41 +38,49 @@ class Command(BaseCommand):
             shutdown_event = asyncio.Event()
 
             class Server(uvicorn.Server):
+                interrupted = False
+
+                def handle_exit(self, sig: int, frame: "FrameType | None") -> None:
+                    if sig == signal.SIGINT:
+                        self.interrupted = True
+                    super().handle_exit(sig, frame)
+
                 async def shutdown(self, sockets: "list[socket] | None" = None) -> None:
                     # Uvicorn waits for HTTP streams before dispatching ASGI lifespan shutdown.
                     shutdown_event.set()
                     await super().shutdown(sockets=sockets)
 
-            app = create_app(
-                runtime=local.runtime, metrics=local.metrics,
-                status=local.status, capabilities=local.capabilities, shutdown_event=shutdown_event,
-            )
-            url = f"http://127.0.0.1:{args.port}"
-            self.logger.info("AI Web console: %s", url)
-            server = Server(uvicorn.Config(
-                app, host="127.0.0.1", port=args.port, log_config=None,
-                access_log=False, proxy_headers=False, timeout_graceful_shutdown=5,
-            ))
+            async with local_turn_notices(local, receive=True) as notices:
+                app = create_app(
+                    runtime=local.runtime, metrics=local.metrics,
+                    status=local.status, capabilities=local.capabilities, shutdown_event=shutdown_event,
+                    session_notices=notices,
+                )
+                url = f"http://127.0.0.1:{args.port}"
+                self.logger.info("AI Web console: %s", url)
+                server = Server(uvicorn.Config(
+                    app, host="127.0.0.1", port=args.port, log_config=None,
+                    access_log=False, proxy_headers=False, timeout_graceful_shutdown=5,
+                ))
 
-            async def open_browser() -> None:
-                import webbrowser
-                while not server.started:
-                    await asyncio.sleep(0.05)
-                await asyncio.to_thread(webbrowser.open, url)
+                async def open_browser() -> None:
+                    import webbrowser
+                    while not server.started:
+                        await asyncio.sleep(0.05)
+                    await asyncio.to_thread(webbrowser.open, url)
 
-            browser_task = asyncio.create_task(open_browser()) if args.open else None
-            try:
-                await server.serve()
-            finally:
-                if browser_task is not None:
-                    browser_task.cancel()
-                    await asyncio.gather(browser_task, return_exceptions=True)
-            return 0
+                browser_task = asyncio.create_task(open_browser()) if args.open else None
+                try:
+                    await server.serve()
+                finally:
+                    if browser_task is not None:
+                        browser_task.cancel()
+                        await asyncio.gather(browser_task, return_exceptions=True)
+            # Uvicorn may consume Ctrl-C after graceful shutdown instead of
+            # letting the base CLI translate a replayed KeyboardInterrupt.
+            return 128 + signal.SIGINT if server.interrupted else 0
 
-        from linktools.ai.storage import InMemoryCacheBackend
-
-        # One server owns live turns; durable storage and content caches stay independent.
-        return run_local(args, serve, coordination=InMemoryCacheBackend(max_bytes=0))
+        return run_local(args, serve)
 
 
 command = Command()

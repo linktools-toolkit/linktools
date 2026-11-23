@@ -153,7 +153,7 @@ from ..persistence.contracts import (
     SessionRepository,
     ToolOperationRecord,
 )
-from ..session import ConversationCursor, SessionRecord, SessionTurnRef
+from ..session import ConversationCursor, SessionTurnNotice, SessionRecord, SessionTurnRef, project_tool_process_event
 from ..execution import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
@@ -277,6 +277,8 @@ class _OwnedExecutionTurn:
     principal: Principal
     scope: TurnScope | None = None
     admitting: bool = True
+    notice_admitted: bool = False
+    notice_recovery_terminal: bool = False
     producer_generation: int | None = None
     attempt: _InitialAttemptCapture | None = None
     boundary: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -345,6 +347,7 @@ class LocalExecutionBackend:
     ) -> None:
         if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
             raise ValueError("Execution requires sync or terminal commit")
+        self._turn_observers: set[Callable[[SessionTurnNotice], None]] = set()
         self._commit = commit
         self._trace_commit = trace_commit
         self._execution_buffer = None if commit.buffer is None else _ExecutionPayloadBuffer(commit.buffer)
@@ -793,6 +796,13 @@ class LocalExecutionBackend:
     ) -> None:
         if self._terminal_publication is not None:
             self._terminal_publication(committed if isinstance(committed, ExecutionTerminalPublication) else committed.execution)
+        if session_id is not None and self._turn_observers and isinstance(committed, ExecutionTerminalPublication) and committed.session_released:
+            owner = self._turn_owners.get(committed.execution.execution_id)
+            if owner is not None and (owner.notice_admitted or owner.notice_recovery_terminal):
+                owner.notice_admitted = owner.notice_recovery_terminal = False
+                self._notify_turn(SessionTurnNotice(
+                    "terminal", session_id, committed.execution.execution_id,
+                ))
         recorder = self._metric_recorder
         if recorder is None:
             return
@@ -1795,9 +1805,29 @@ class LocalExecutionBackend:
         await self._validate_start(request, reservation.execution)
         return await self._expected_session_cursor(reservation.execution, session=session) == session.continuation
 
-    @staticmethod
+    def local_admission(self, execution_id: str) -> asyncio.Future[ExecutionHandle] | None:
+        owner = self._turn_owners.get(execution_id)
+        if owner is None or not owner.admitting or owner.stopping:
+            return None
+        return owner.admission
+
+    def observe_turns(self, on_notice: Callable[[SessionTurnNotice], None]) -> Callable[[], None]:
+        # A wrapper gives each subscription independent unsubscribe semantics.
+        def callback(notice: SessionTurnNotice) -> None:
+            on_notice(notice)
+
+        self._turn_observers.add(callback)
+        return lambda: self._turn_observers.discard(callback)
+
+    def _notify_turn(self, notice: SessionTurnNotice) -> None:
+        for callback in tuple(self._turn_observers):
+            try:
+                callback(notice)
+            except (Exception, asyncio.CancelledError) as error:
+                _logger.warning("Turn observer failed: %s", type(error).__name__)
+
     def _capture_reserved_start(
-        owner: _OwnedExecutionTurn, result: ExecutionStartReservationResult | None,
+        self, owner: _OwnedExecutionTurn, result: ExecutionStartReservationResult | None,
     ) -> None:
         if result is not None and result.created and result.execution.recovery is not None:
             owner.attempt = _InitialAttemptCapture(result.execution, result.session)
@@ -1805,6 +1835,18 @@ class LocalExecutionBackend:
                 owner.observed = result.observed
                 owner.reservation = replace(owner.reservation, idempotency=result.idempotency)
                 owner.session_turn = result.turn
+                if (self._turn_observers and result.turn is not None
+                        and result.session is not None
+                        and result.session.active_execution_id == result.execution.execution_id):
+                    if owner.scope is not None:
+                        try:
+                            owner.scope.require_active()
+                        except AIError:
+                            return
+                    owner.notice_admitted = True
+                    self._notify_turn(SessionTurnNotice(
+                        "admitted", result.turn.session_id, result.execution.execution_id,
+                    ))
 
     async def prepare_reserved_start(
         self, request: ExecutionRequest, reservation: ExecutionStartReservation,
@@ -2064,6 +2106,9 @@ class LocalExecutionBackend:
             initial_attempt = _InitialAttemptCapture(current, session)
         if owner is not None:
             self._require_turn_dispatch(owner)
+            if recovery_operation is not None and session is not None and self._turn_observers:
+                # The claimed recovery still owns the existing Session turn; it is not a new admission.
+                owner.notice_recovery_terminal = True
         self._terminal_events[execution.execution_id] = asyncio.Event()
         run = (self._run(request, execution, resume, producer_generation=producer_generation)
                if initial_attempt is None else
@@ -4482,6 +4527,20 @@ class LocalExecutionBackend:
                     return
                 await self._append_event(current, emission.event_type, emission.payload,
                     producer_generation=producer_generation)
+                if self._turn_observers and current.session_id is not None and current.parent_execution_id is None:
+                    owner = self._turn_owners.get(current.execution_id)
+                    if (owner is not None and owner.notice_admitted and not owner.stopping
+                            and owner.producer_generation == producer_generation):
+                        if owner.scope is not None:
+                            try:
+                                owner.scope.require_active()
+                            except AIError:
+                                return
+                        process = project_tool_process_event(emission.event_type.value, emission.payload)
+                        if process is not None:
+                            self._notify_turn(SessionTurnNotice(
+                                "tool", current.session_id, current.execution_id, process,
+                            ))
 
             subagent_refs = binding.binding_contract.subagents
             subagent_available = (

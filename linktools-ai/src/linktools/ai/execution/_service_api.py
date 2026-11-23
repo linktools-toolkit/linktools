@@ -12,6 +12,7 @@ from ._api import (
 )
 
 from ..session import (
+    SessionTurnNotice,
     SessionHistoryItem,
     SessionTurnItem,
     SessionTurn,
@@ -1345,6 +1346,10 @@ class SessionService(Protocol):
 
     def observe_changes(self, session_id: str, on_invalidate: Callable[[], None]) -> Callable[[], None]: ...
 
+    def observe_turns(self, on_notice: Callable[[SessionTurnNotice], None]) -> Callable[[], None]: ...
+
+    def invalidate(self, session_id: str) -> None: ...
+
     def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]: ...
 
     async def wait_inactive(
@@ -1438,6 +1443,10 @@ class ExternalService(Protocol):
 
 
 class EventService(Protocol):
+    def has_local_producer(self, execution_id: str) -> bool: ...
+
+    async def authorize_read(self, execution_id: str, *, principal: Principal) -> None: ...
+
     async def list(
         self,
         execution_id: str,

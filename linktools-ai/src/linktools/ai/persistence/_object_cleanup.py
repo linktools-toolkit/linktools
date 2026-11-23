@@ -35,7 +35,7 @@ from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
                                  restore_native_text_payload, restore_native_user_input)
 from ._sql import SqlStateStorageGroup
-from ._step_schema import build_step_sql_metadata
+from ._step_schema import native_message_sql_tables
 from ._step_maintenance import inspect_native_message_tables, native_message_partitions
 from ._capability_marker import has_capability_partition_marker
 from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
@@ -257,15 +257,15 @@ async def _purge_unreferenced_objects(
             continue
         from sqlalchemy import select
 
-        metadata = build_step_sql_metadata()
         names = await inspect_native_message_tables(group.context, group.metadata)
         if not names:
             continue
+        tables = native_message_sql_tables()
         async with group.context.sessions() as session:
             await group.context.dialect.begin_consistent_read(session)
             rows = {}
             for name in names:
-                table = metadata.tables[name]
+                table = tables[name]
                 statement = select(table)
                 if name == "ai_step_messages":
                     # Typed Step payload bytes share this physical relation but
@@ -529,12 +529,12 @@ async def _purge_unreferenced_objects(
     # deletion. An unknown commit or cancellation leaves objects intact; the
     # outer guard invalidates cached content proofs before admitting writers.
     for group, (closure, bodies, domain, group_id, sequence_ids) in native_groups.items():
-        from sqlalchemy import delete, select
+        from sqlalchemy import delete
 
-        native_metadata = build_step_sql_metadata()
+        tables = native_message_sql_tables()
         unused = (
-            (native_metadata.tables["ai_step_sequences"], sequence_ids - closure.retained_sequences),
-            (native_metadata.tables["ai_step_messages"], bodies.keys() - closure.retained_messages),
+            (tables["ai_step_sequences"], sequence_ids - closure.retained_sequences),
+            (tables["ai_step_messages"], bodies.keys() - closure.retained_messages),
         )
         if not any(identities for _, identities in unused):
             continue

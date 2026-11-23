@@ -106,7 +106,7 @@ class AgentRunRecorder:
         self._restored_tool_results: set[str] = set()
         self._restored_tool_calls: dict[str, ToolCallPart] = {}
         self._restored_pending = False
-        self._model_request_seq_by_tool_call: dict[str, int] = {}
+        self._tool_call_origins: dict[str, tuple[int, int, int]] = {}
         self._model_responses: dict[int, tuple[int, tuple[int, ...]]] = {}
         self.context_projection = RunContextProjection(agent_run_id, initial_messages, initial_context)
         self.model_interactions = ModelInteractionCapture(
@@ -231,11 +231,10 @@ class AgentRunRecorder:
                         if part.tool_call_id in seen_call_ids:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         seen_call_ids.add(part.tool_call_id)
-                        previous_request = self._model_request_seq_by_tool_call.get(part.tool_call_id)
-                        if previous_request is not None:
+                        if part.tool_call_id in self._tool_call_origins:
                             replayed_indices.append(part_index)
                         else:
-                            self._model_request_seq_by_tool_call[part.tool_call_id] = int(model_request_seq)
+                            self._tool_call_origins[part.tool_call_id] = (int(model_request_seq), int(message_seq), part_index)
                 replayed = event.metadata.get(REPLAYED_TOOL_CALL_INDICES_METADATA_KEY)
                 if replayed != (json.dumps(replayed_indices) if replayed_indices else None):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -421,7 +420,7 @@ class AgentRunRecorder:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._pending_parts.pop(f"part:{part_index}", None)
             return sequence
-        if complete and isinstance(part, ToolCallPart) and part.tool_call_id in self._model_request_seq_by_tool_call:
+        if complete and isinstance(part, ToolCallPart) and part.tool_call_id in self._tool_call_origins:
             previous = self._restored_tool_calls.get(part.tool_call_id)
             if previous is None or not self._same_tool_call(previous, part):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -721,6 +720,7 @@ class AgentRunRecorder:
         if captured is not None:
             return captured
         replayed_indices: list[int] = []
+        new_calls: dict[str, int] = {}
         seen_call_ids: set[str] = set()
         for part_index, part in enumerate(response.parts):
             if not isinstance(part, ToolCallPart):
@@ -729,21 +729,29 @@ class AgentRunRecorder:
             if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             seen_call_ids.add(call_id)
-            if call_id in self._model_request_seq_by_tool_call:
+            if call_id in self._tool_call_origins:
                 previous_call = self._restored_tool_calls.get(call_id)
                 if previous_call is None or not self._same_tool_call(previous_call, part):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 replayed_indices.append(part_index)
             else:
-                self._model_request_seq_by_tool_call[call_id] = fact.model_request_seq
+                new_calls[call_id] = part_index
         self.append_transcript_message(response)
-        captured = (len(self._transcript_messages) - 1, tuple(replayed_indices))
+        message_seq = len(self._transcript_messages)
+        for call_id, part_index in new_calls.items():
+            self._tool_call_origins[call_id] = (fact.model_request_seq, message_seq, part_index)
+        captured = (message_seq - 1, tuple(replayed_indices))
         self._model_responses[fact.model_request_seq] = captured
-        self._last_response_position = (fact.model_request_seq, captured[0] + 1)
+        self._last_response_position = (fact.model_request_seq, message_seq)
         return captured
 
     def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
-        return self._model_request_seq_by_tool_call.get(tool_call_id)
+        origin = self._tool_call_origins.get(tool_call_id)
+        return None if origin is None else origin[0]
+
+    def tool_call_position(self, tool_call_id: str) -> tuple[int, int] | None:
+        origin = self._tool_call_origins.get(tool_call_id)
+        return None if origin is None else (origin[1], origin[2])
 
     async def record_model_event(
         self,

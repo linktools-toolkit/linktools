@@ -32,7 +32,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import StreamBatch
 from ..execution.stream import (
     OBSERVATION_TIMEOUT, SharedStreamPublisher, SharedStreamEvent, decode_stream_record, deliver_shared_observation,
-    shared_stream_position, shared_stream_requested, stream_key,
+    local_execution_stream_requested, shared_stream_position, shared_stream_requested, stream_key,
 )
 from ..observe.stream import is_observation_cleanup, await_stream_cleanup
 from . import ExecutionEvent, ExecutionStreamEvent
@@ -71,13 +71,14 @@ _SHARED_PRODUCER_STATUSES = frozenset(
 
 _BOUNDARY_METADATA_FIELDS = {
     ExecutionEventType.TOOL_CALL_STARTED.value: frozenset(
-        {"agent_run_seq", "call_id", "tool_name", "arguments_digest"}
+        {"agent_run_seq", "call_id", "tool_name", "tool_position", "arguments_digest"}
     ),
     ExecutionEventType.TOOL_CALL_FINISHED.value: frozenset(
         {
             "agent_run_seq",
             "call_id",
             "tool_name",
+            "tool_position",
             "result_digest",
             "status",
             "error_code",
@@ -817,6 +818,7 @@ class DefaultEventService:
         *,
         pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
         pending_stream: Callable[..., Awaitable[tuple[ExecutionRecord, int, str] | None]] | None = None,
+        local_admission: Callable[[str], Awaitable[object] | None] | None = None,
     ) -> None:
         self._executions = executions
         self._events = events
@@ -825,8 +827,22 @@ class DefaultEventService:
         self._live = live_broker or LiveExecutionEventBroker()
         self._pending_execution = pending_execution
         self._pending_stream = pending_stream
+        self._local_admission = local_admission
         self._shared_reads: dict[tuple[bytes, int], _SharedRead] = {}
         self._observation_authority: OrderedDict[bytes, _ObservationAuthority] = OrderedDict()
+
+    def has_local_producer(self, execution_id: str) -> bool:
+        """Report current local admission or live production without granting access."""
+        return self._pending_local_admission(execution_id) is not None or (
+            self._live.is_local_producer(execution_id) and not self._live.is_completed(execution_id)
+        )
+
+    def _pending_local_admission(self, execution_id: str) -> Awaitable[object] | None:
+        return None if self._local_admission is None else self._local_admission(execution_id)
+
+    async def authorize_read(self, execution_id: str, *, principal: Principal) -> None:
+        """Authorize event observation without opening a stream or reading its records."""
+        await self._authorize_read(execution_id, principal)
 
     async def _read_shared_batch(
         self, backend: StreamBackend, key: bytes, after: int, *, wait_seconds: float,
@@ -910,6 +926,12 @@ class DefaultEventService:
         after_event_seq: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         pending_observed = await self._authorize_read(execution_id, principal)
+        if local_execution_stream_requested() and not self._live.is_local_producer(execution_id):
+            admission = self._pending_local_admission(execution_id)
+            if admission is not None:
+                await asyncio.shield(admission)
+            if not self._live.is_local_producer(execution_id):
+                return
         try:
             live = self._live.claim_local_producer(execution_id)
         except AIError:
@@ -946,6 +968,8 @@ class DefaultEventService:
             raise
         except Exception as error:
             raise ExecutionStreamFailure(error) from error
+        if not is_local_producer and local_execution_stream_requested():
+            return
         if not is_local_producer and self._live.shared is not None and shared_stream_requested():
             async with aclosing(self._stream_shared(
                 execution_id, principal=principal, after_event_seq=after_event_seq,
@@ -1481,6 +1505,8 @@ class DefaultEventService:
         poll_backoff = 1.0
         terminal_high_water: int | None = None
         while True:
+            if local_execution_stream_requested() and not self._live.is_local_producer(execution_id):
+                return
             page = await self._read_durable(
                 execution_id,
                 tenant_id=tenant_id,

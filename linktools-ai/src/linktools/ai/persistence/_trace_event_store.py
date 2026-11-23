@@ -94,7 +94,9 @@ def _history_identity(event: StepEvent) -> bytes | None:
 class SqlTraceEventStore:
     def __init__(self, state: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
         self.state, self.namespace, self.tenant_id = state, namespace, tenant_id
-        self._table = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_trace_events"]
+        tables = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables
+        self._table = tables["ai_trace_events"]
+        self._admissions = tables["ai_step_run_admissions"]
 
     @property
     def table(self) -> "Table":
@@ -297,7 +299,7 @@ class SqlTraceEventStore:
         from hashlib import sha256
         from sqlalchemy import literal, true
 
-        counters = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_step_run_admissions"]
+        counters = self._admissions
         owner = record_key(self.namespace, self.tenant_id, "trace", "agent_run", (run_id,))
         locator = sha256(owner).hexdigest()
         page = statement.subquery("trace_page")
@@ -332,7 +334,7 @@ class SqlTraceEventStore:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         table = self.table
         t = table.c
-        counters = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_step_run_admissions"]
+        counters = self._admissions
         address = run_counter_address(event_stream)
         if address is None or address[1] != "event_high_water":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

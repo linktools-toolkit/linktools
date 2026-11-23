@@ -4,6 +4,7 @@
 
 import asyncio
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
@@ -23,18 +24,21 @@ from .persistence import PersistenceStorage
 from .core import (
     AuthorizationPolicy,
     ExecutionDeltaType,
-    ExecutionEventType,
     ExecutionStatus,
     JsonValue,
     Principal,
 )
 from .errors import AIError, ErrorCode
-from .execution import CancelExecutionRequest, ExecutionTreeEvent, ListSessionRequest
+from .execution import ExecutionTreeEvent, ListSessionRequest
 from .runtime import Runtime
+from .session import project_tool_process_event
 from .workspace import Workspace
 
 if TYPE_CHECKING:
     from acp.schema import ResourceContentBlock
+
+    from .execution import Execution
+    from .session import ToolProcessItem
 
 _logger = environ.get_logger("ai.acp")
 
@@ -50,13 +54,17 @@ class ACPTextContent(Protocol):
 class ACPAgent:
     """Translate ACP requests into Runtime calls and durable event reads."""
 
-    def __init__(self, runtime: Runtime, *, principal: Principal) -> None:
+    def __init__(self, runtime: Runtime, *, principal: Principal, workspace: Workspace | None = None) -> None:
         self._runtime = runtime
         self._principal = principal
+        self._workspace = workspace
         self._connection: ACPConnection | None = None
         self._initialized = False
+        self._prompts: dict[str, asyncio.Future[Execution | None]] = {}
 
     def on_connect(self, connection: ACPConnection) -> None:
+        if self._connection is not connection:
+            self._prompts.clear()
         self._connection = connection
 
     async def initialize(self, protocol_version: int, **kwargs: JsonValue) -> JsonValue:
@@ -78,18 +86,59 @@ class ACPAgent:
 
     async def new_session(self, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
-        session = await self._runtime.agents.get().create_session(
-            uuid4().hex,
-            principal=self._principal,
-            cwd=cwd,
-        )
+        acp, schema = _require_acp()
+        session_id = uuid4().hex
+        try:
+            logical_cwd = self._workspace_cwd(cwd)
+            session = await self._runtime.agents.get().create_session(
+                session_id, principal=self._principal, cwd=logical_cwd,
+            )
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id) from error
         return schema.NewSessionResponse(sessionId=session.session_id)
 
     async def load_session(self, cwd: str, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
-        await self._runtime.sessions.get(session_id, principal=self._principal)
+        acp, schema = _require_acp()
+        connection = self._connection
+        cursor = None
+        pages = []
+        try:
+            logical_cwd = None if self._workspace is None else self._workspace_cwd(cwd)
+            while True:
+                detail = await self._runtime.history.session_detail(
+                    session_id, principal=self._principal, cursor=cursor,
+                )
+                if logical_cwd is not None and (detail.session.cwd or ".") != logical_cwd:
+                    raise acp.RequestError.invalid_params({"reason": "workspace_cwd_mismatch"})
+                page = detail.timeline
+                pages.append(page.items)
+                cursor = page.next_cursor
+                if cursor is None:
+                    break
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id) from error
+        if connection is not None:
+            for turns in reversed(pages):
+                for turn in turns:
+                    if not turn.conversation_committed:
+                        continue
+                    for text in _history_text(turn.user_input):
+                        await connection.session_update(session_id, schema.UserMessageChunk(
+                            content=schema.TextContentBlock(type="text", text=text), sessionUpdate="user_message_chunk",
+                        ))
+                    process_by_key = {item.key: item for item in turn.process}
+                    for item in turn.items:
+                        if item.item_kind in ("assistant", "thinking") and isinstance(item.content, str) and item.content:
+                            await connection.session_update(session_id, _assistant_chunk(
+                                schema, item.content, thinking=item.item_kind == "thinking",
+                            ))
+                        elif item.item_kind == "tool_call" and item.tool_call_id is not None:
+                            process = process_by_key.pop(f"tool:{item.tool_call_id}", None)
+                            if process is not None:
+                                await connection.session_update(
+                                    session_id, _acp_tool_update(schema, turn.execution_id, process, replay=True),
+                                )
         return schema.LoadSessionResponse()
 
     async def list_sessions(
@@ -100,33 +149,60 @@ class ACPAgent:
     ) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
+        workspace = self._workspace
+        try:
+            logical_cwd = None if cwd is None else self._workspace_cwd(cwd)
+        except AIError:
+            return schema.ListSessionsResponse(sessions=[])
         page = await self._runtime.sessions.list(
             ListSessionRequest(self._principal, cursor=cursor, limit=200),
         )
-        return schema.ListSessionsResponse(
-            sessions=[
-                schema.SessionInfo(sessionId=item.session_id, cwd=item.cwd or "")
-                for item in page.items
-                if cwd is None or item.cwd == cwd
-            ],
-            nextCursor=page.next_cursor,
-        )
+        sessions = []
+        for item in page.items:
+            directory = item.cwd if workspace is None else item.cwd or "."
+            if logical_cwd is None or directory == logical_cwd:
+                sessions.append(schema.SessionInfo(
+                    sessionId=item.session_id,
+                    cwd=(directory or "") if workspace is None else str(workspace.root / (directory or ".")),
+                ))
+        return schema.ListSessionsResponse(sessions=sessions, nextCursor=page.next_cursor)
 
     async def resume_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
         return await self.load_session(cwd, session_id, **kwargs)
 
     async def fork_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
+        acp, schema = _require_acp()
         from .execution import ForkSessionRequest
 
-        source = await self._runtime.sessions.get(session_id, principal=self._principal)
-        session = await self._runtime.sessions.fork(
-            source.agent_id,
-            session_id,
-            ForkSessionRequest(self._principal, uuid4().hex, uuid4().hex, cwd),
-        )
+        try:
+            logical_cwd = self._workspace_cwd(cwd)
+            source = await self._runtime.sessions.get(session_id, principal=self._principal)
+            session = await self._runtime.sessions.fork(
+                source.agent_id, session_id,
+                ForkSessionRequest(self._principal, uuid4().hex, uuid4().hex, logical_cwd),
+            )
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id) from error
         return schema.ForkSessionResponse(sessionId=session.session_id)
+
+    def _workspace_cwd(self, cwd: str) -> str:
+        workspace = self._workspace
+        if workspace is None:
+            return cwd
+        try:
+            path = Path(cwd)
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError
+            resolved = path.resolve()
+            relative = resolved.relative_to(workspace.root)
+            # Keep an in-workspace logical alias after checking physical containment.
+            if path.is_relative_to(workspace.root):
+                relative = path.relative_to(workspace.root)
+            return workspace.validate_path(relative.as_posix())
+        except (OSError, RuntimeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"field": "cwd", "reason": "invalid_workspace_cwd"}) from error
 
     async def close_session(self, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
@@ -165,29 +241,40 @@ class ACPAgent:
                 parts.append("\n" + "\n".join(fields) + "\n")
             else:
                 raise acp.RequestError.invalid_params({"reason": "unsupported_prompt_content"})
-        text = "".join(parts)
-        loaded = await self._runtime.sessions.get(session_id, principal=self._principal)
-        execution = await self._runtime.agents.get(loaded.agent_id).start(
-            text,
-            principal=self._principal,
-            session_id=session_id,
-        )
+        if session_id in self._prompts:
+            raise _acp_error(acp, AIError(ErrorCode.SESSION_BUSY), session_id=session_id)
+        connection = self._connection
+        admitted: asyncio.Future[Execution | None] = asyncio.get_running_loop().create_future()
+        self._prompts[session_id] = admitted
+        execution_id = None
+        request_id = uuid4().hex
+
         async def on_event(item: ExecutionTreeEvent) -> None:
-            if item.depth != 0:
+            if item.depth != 0 or connection is None or connection is not self._connection:
                 return
             event = item.event
-            if self._connection is not None:
-                update = _acp_update(schema, event.event_type, event.payload)
-                if update is not None:
-                    await self._connection.session_update(session_id, update)
+            payload = event.payload
+            thinking = event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value
+            if thinking or event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
+                if isinstance(payload, dict) and isinstance(text := payload.get("text"), str) and text:
+                    await connection.session_update(session_id, _assistant_chunk(schema, text, thinking=thinking))
+            else:
+                process = project_tool_process_event(event.event_type, payload)
+                if process is not None:
+                    await connection.session_update(session_id, _acp_tool_update(schema, item.execution_id, process))
 
         try:
+            execution = await self._runtime.sessions.start(
+                session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
+            )
+            execution_id = execution.execution_id
+            admitted.set_result(execution)
             outcome = await execution.wait(on_event=on_event, include_event_content=True)
             result = outcome.result
             if outcome.observation_error is not None:
                 _logger.warning(
                     "ACP prompt observation incomplete: execution_id=%s code=%s",
-                    execution.execution_id, outcome.observation_error.code.value,
+                    execution_id, outcome.observation_error.code.value,
                 )
             if result.status is ExecutionStatus.FAILED:
                 try:
@@ -196,27 +283,29 @@ class ACPAgent:
                     code = ErrorCode.EXECUTION_FAILED
                 raise AIError(code)
         except AIError as error:
-            failure = AIError(
-                error.code,
-                retryable=error.retryable,
-                safe_details={"execution_id": execution.execution_id},
-            )
-            raise acp.RequestError.internal_error(asdict(
-                failure.to_safe_error(operation_id=execution.execution_id)
-            )) from error
+            raise _acp_error(acp, error, session_id=session_id, operation_id=request_id,
+                             execution_id=execution_id) from error
+        finally:
+            if self._prompts.get(session_id) is admitted:
+                del self._prompts[session_id]
+            if not admitted.done():
+                admitted.set_result(None)
         stop_reason = "cancelled" if result.status is ExecutionStatus.CANCELLED else "end_turn"
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
-        loaded = await self._runtime.sessions.reconcile(
-            session_id,
-            principal=self._principal,
-        )
-        if loaded.active_execution_id is not None:
-            await self._runtime.executions.cancel(
-                loaded.active_execution_id,
-                CancelExecutionRequest(self._principal, uuid4().hex, True),
-            )
+        self._require_initialized()
+        acp, _ = _require_acp()
+        admitted = self._prompts.get(session_id)
+        if admitted is None:
+            return
+        execution = await asyncio.shield(admitted)
+        if execution is None or self._prompts.get(session_id) is not admitted:
+            return
+        try:
+            await execution.cancel()
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id, execution_id=execution.execution_id) from error
 
     async def ext_method(self, method: str, params: "dict[str, JsonValue]") -> None:
         acp, _ = _require_acp()
@@ -270,6 +359,7 @@ class ACPApplication:
                 ACPAgent(
                     runtime,
                     principal=runtime.default_principal,
+                    workspace=self.workspace,
                 )
             )
 
@@ -289,22 +379,64 @@ def _require_acp() -> "tuple[ModuleType, ModuleType]":
     return _acp, _acp_schema
 
 
-def _acp_update(
-    schema: ModuleType,
-    event_type: str,
-    payload: JsonValue,
-) -> "JsonValue | None":
-    if not isinstance(payload, dict):
-        return None
-    if event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
-        return schema.AgentMessageChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_message_chunk")
-    if event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
-        return schema.AgentThoughtChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_thought_chunk")
-    if event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
-        return schema.ToolCallStart(toolCallId=str(payload.get("call_id", "")), title=str(payload.get("tool_name", "tool")), kind="execute", status="in_progress", sessionUpdate="tool_call")
-    if event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
-        return schema.ToolCallProgress(toolCallId=str(payload.get("call_id", "")), kind="execute", status="completed" if payload.get("status") == "SUCCEEDED" else "failed", sessionUpdate="tool_call_update")
-    return None
+def _acp_error(
+    acp: ModuleType, error: AIError, *, session_id: str,
+    operation_id: str | None = None, execution_id: str | None = None,
+) -> Exception:
+    if error.code in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.AUTHORIZATION_DENIED}:
+        return acp.RequestError(-32002, "Resource not found", {"sessionId": session_id})
+    safe = AIError(
+        error.code, retryable=error.retryable,
+        safe_details={} if execution_id is None else {"execution_id": execution_id},
+    )
+    data = asdict(safe.to_safe_error(operation_id=operation_id or execution_id or uuid4().hex))
+    if error.code is ErrorCode.SESSION_BUSY:
+        return acp.RequestError(-32901, "Session busy", data)
+    if error.code is ErrorCode.REQUEST_FIELD_INVALID:
+        return acp.RequestError.invalid_params(data)
+    return acp.RequestError.internal_error(data)
+
+
+def _history_text(value: JsonValue) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if isinstance(value, dict):
+        if value.get("version") == 1:
+            return _history_text(value.get("prompt"))
+        if value.get("kind") == "text" and isinstance(text := value.get("text"), str) and text:
+            return (text,)
+        if value.get("kind") == "items" and isinstance(items := value.get("items"), list):
+            return tuple(text for item in items for text in _history_text(item))
+    return ()
+
+
+def _assistant_chunk(schema: ModuleType, text: str, *, thinking: bool) -> JsonValue:
+    if thinking:
+        return schema.AgentThoughtChunk(
+            content=schema.TextContentBlock(type="text", text=text), sessionUpdate="agent_thought_chunk",
+        )
+    return schema.AgentMessageChunk(
+        content=schema.TextContentBlock(type="text", text=text), sessionUpdate="agent_message_chunk",
+    )
+
+
+def _acp_tool_update(
+    schema: ModuleType, execution_id: str, process: "ToolProcessItem", *, replay: bool = False,
+) -> JsonValue:
+    call_id = f"{execution_id}:{process.key.removeprefix('tool:')}"
+    status = {
+        "RUNNING": "in_progress",
+        "UNCONFIRMED": "pending",
+        "SUCCEEDED": "completed",
+        "FAILED": "failed",
+        "INTERRUPTED": "failed",
+        "CANCELLED": "failed",
+    }[process.status]
+    if replay or process.status == "RUNNING":
+        return schema.ToolCallStart(
+            toolCallId=call_id, title=process.tool_name, kind="execute", status=status, sessionUpdate="tool_call",
+        )
+    return schema.ToolCallProgress(toolCallId=call_id, status=status, sessionUpdate="tool_call_update")
 
 
 __all__ = ["ACPAgent", "ACPApplication", "ACPConnection", "run_stdio", "serve_stdio"]

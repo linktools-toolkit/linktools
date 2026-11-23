@@ -248,6 +248,20 @@ declaration controls retention and commit; workspace
 capability remains built in. A cache attached only to storage does not enable
 turn or stream coordination.
 
+Hosts can register a synchronous callback with
+`runtime.sessions.observe_turns(handler)` and unsubscribe with the returned
+function. The callback receives a `SessionTurnNotice` for confirmed admission,
+display-only tool progress, or confirmed release observed by this Runtime.
+Schedule any transport I/O outside the callback. These notices are best-effort,
+not a remote subscription or a history feed; a missing notice does not prove a
+turn has not run. Read current state through an authorized session API. The
+SDK does not choose a transport or use notices for turn ownership.
+
+ACP uses absolute working directories at its protocol boundary. Runtime keeps
+workspace-relative session directories; a session with no directory uses the
+workspace root. List filtering matches that effective directory, and loading
+replays the stored session without changing its directory.
+
 `PersistenceStorage(..., coordination=cache)` explicitly supplies shared turn
 coordination and live streams. The execution route cache only serves hot
 execution record reads. Session metadata/display and Conversation content

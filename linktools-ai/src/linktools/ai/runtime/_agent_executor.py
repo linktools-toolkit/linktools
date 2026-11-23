@@ -1421,6 +1421,10 @@ def _event_stream_capability(
                 position["part_start"] = isinstance(event, PartStartEvent)
                 emission = LiveDelta(emission.event_type, emission.content, position)
             if isinstance(emission, DurableBoundary):
+                if isinstance(event, (FunctionToolCallEvent, FunctionToolResultEvent)):
+                    origin = recorder.tool_call_position(event.part.tool_call_id)
+                    if origin is not None:
+                        position["tool_position"] = list(origin)
                 emission = DurableBoundary(
                     emission.event_type, {**emission.payload, **position}
                 )

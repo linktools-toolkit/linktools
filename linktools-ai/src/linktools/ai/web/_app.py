@@ -6,13 +6,13 @@ import asyncio
 import base64
 import json
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from contextlib import aclosing, suppress
-from dataclasses import asdict, fields, is_dataclass
+from contextlib import aclosing, nullcontext, suppress
+from dataclasses import asdict, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from importlib.util import find_spec
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import anyio
 import httpx2
@@ -22,15 +22,18 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route
 
 from linktools.core import environ
-from ..core import Principal, PrincipalKind
+from ..core import Page, Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
 from ..history import History
-from ..execution import CreateSessionRequest, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..execution import CreateSessionRequest, ExecutionTreeEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
+from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from starlette.types import ASGIApp, Receive, Scope, Send
 
 _logger = environ.get_logger("ai.web")
@@ -92,6 +95,46 @@ def _wire(value: object) -> object:
     if isinstance(value, (tuple, list)):
         return [_wire(item) for item in value]
     return value
+
+
+def _chat_timeline(page: Page[SessionTurn]) -> Page[SessionTurn]:
+    # Chat receives rendered SDK text, not raw parts or tool payloads.
+    return replace(page, items=tuple(
+        replace(turn, items=tuple(item for item in turn.items if item.item_kind in {"assistant", "thinking"}),
+                safe_error_details={})
+        for turn in page.items
+    ))
+
+
+_CHAT_STREAM_POSITION = {"agent_run_seq", "model_request_seq", "stream_attempt_seq"}
+_CHAT_TEXT_FIELDS = _CHAT_STREAM_POSITION | {"text", "part_index", "part_start", "stream_truncated"}
+_CHAT_STREAM_FIELDS = {
+    "ASSISTANT_TEXT_DELTA": _CHAT_TEXT_FIELDS,
+    "ASSISTANT_THINKING_DELTA": _CHAT_TEXT_FIELDS,
+    "MODEL_ATTEMPT_STARTED": _CHAT_STREAM_POSITION,
+    "MODEL_ATTEMPT_FINISHED": _CHAT_STREAM_POSITION | {"status"},
+    "MODEL_REQUEST_FINISHED": _CHAT_STREAM_POSITION | {"status"},
+    "STREAM_RESET": {"stream_truncated"},
+    "EXECUTION_FAILED": set(),
+    "EXECUTION_CANCELLED": set(),
+}
+
+
+def _chat_frame(item: ExecutionTreeEvent, cursor: str | None) -> dict[str, object] | None:
+    if item.depth != 0:
+        return None
+    event = item.event
+    process = project_tool_process_event(event.event_type, event.payload)
+    if process is not None:
+        return {"type": "process", "item": _wire(process), "cursor": cursor}
+    allowed = _CHAT_STREAM_FIELDS.get(event.event_type)
+    if allowed is None or not isinstance(event.payload, Mapping):
+        return None
+    return {"type": "event", "cursor": cursor, "item": {
+        "execution_id": item.execution_id, "depth": 0,
+        "event": {"event_type": event.event_type, "durable_seq": event.durable_seq,
+                  "payload": {key: value for key, value in event.payload.items() if key in allowed}},
+    }}
 
 
 def _response_display(response: ModelClientResponse) -> tuple[str | None, str | None]:
@@ -221,11 +264,17 @@ class _SSEStream(StreamingResponse):
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
+class _SessionNoticeFeed(Protocol):
+    def subscribe(
+        self, session_id: str, on_process: "Callable[[str, ToolProcessItem], None]",
+    ) -> "Callable[[], None]": ...
+
+
 class _Console:
     def __init__(
         self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
         status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]],
-        shutdown_event: asyncio.Event | None,
+        shutdown_event: asyncio.Event | None, session_notices: _SessionNoticeFeed | None,
     ) -> None:
         self.runtime = runtime
         self.history = runtime.history if runtime is not None else history
@@ -233,6 +282,7 @@ class _Console:
         self.status = dict(status)
         self.capabilities = tuple(capabilities)
         self._shutdown_event = shutdown_event
+        self._session_notices = session_notices
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
         )
@@ -287,7 +337,8 @@ class _Console:
         if include_timeline == "true" and self.runtime is not None and type(history) is History:
             if environ.debug:
                 request.state.phase = "session.timeline"
-            return _json(await history.session_detail(identity, principal=self.principal, **_paging(request)))
+            detail = await history.session_detail(identity, principal=self.principal, **_paging(request))
+            return _json(replace(detail, timeline=_chat_timeline(detail.timeline)))
         if environ.debug:
             request.state.phase = "session.metadata"
         session = await history.inspect_session(identity, principal=self.principal)
@@ -295,7 +346,7 @@ class _Console:
         if include_timeline == "true":
             if environ.debug:
                 request.state.phase = "session.timeline"
-            timeline = await history.session_timeline(identity, principal=self.principal, **_paging(request))
+            timeline = _chat_timeline(await history.session_timeline(identity, principal=self.principal, **_paging(request)))
         return _json({"session": session, "timeline": timeline})
 
     async def session_action(self, request: Request) -> Response:
@@ -332,19 +383,74 @@ class _Console:
         identity = _text(request.query_params, "session_id")
 
         async def stream() -> AsyncGenerator[str, None]:
+            feed = self._session_notices
+            queue: asyncio.Queue[tuple[str, ToolProcessItem]] = asyncio.Queue(maxsize=16)
+
+            def collect(execution_id: str, item: ToolProcessItem) -> None:
+                if not queue.full():
+                    queue.put_nowait((execution_id, item))
+
+            unsubscribe = feed.subscribe(identity, collect) if feed is not None else None
             watch = runtime.sessions.watch(identity, principal=self.principal)
+            state_task = None
+            tool_task = None
+            authorized_execution = None
+            last_active = None
             try:
-                async for session in watch:
+                if feed is not None:
+                    state_task = asyncio.create_task(anext(watch, None))
+                    tool_task = asyncio.create_task(queue.get())
+                while True:
+                    if feed is None:
+                        session = await anext(watch, None)
+                    else:
+                        done, _ = await asyncio.wait((state_task, tool_task), return_when=asyncio.FIRST_COMPLETED)
+                        if state_task not in done:
+                            execution_id, item = tool_task.result()
+                            tool_task = asyncio.create_task(queue.get())
+                            # A transport hint never grants access or identifies a session owner.
+                            if execution_id == authorized_execution:
+                                payload = {"execution_id": execution_id, "item": _wire(item)}
+                                yield "event: session_process\ndata: " + json.dumps(payload) + "\n\n"
+                            continue
+                        session = state_task.result()
+                    if session is None:
+                        break
+                    active = session.active_execution_id
+                    local_execution = None
+                    if feed is not None and active is not None:
+                        local_execution = runtime.events.has_local_producer(active)
+                        if active != last_active:
+                            authorized_execution = None
+                            if not local_execution:
+                                try:
+                                    await runtime.events.authorize_read(active, principal=self.principal)
+                                except AIError as error:
+                                    _debug_error(request, error)
+                                else:
+                                    authorized_execution = active
+                    else:
+                        authorized_execution = None
+                    last_active = active
                     payload = {
                         "status": session.status.value,
-                        "active_execution_id": session.active_execution_id,
+                        "active_execution_id": last_active,
                         "revision": session.revision,
                     }
+                    if feed is not None:
+                        state_task = asyncio.create_task(anext(watch, None))
+                        if last_active is not None:
+                            payload["local_execution"] = local_execution
                     yield "data: " + json.dumps(payload) + "\n\n"
             except AIError as error:
                 _debug_error(request, error)
                 yield "event: session_error\ndata: " + json.dumps({"error_code": error.code.value}) + "\n\n"
             finally:
+                if unsubscribe is not None:
+                    unsubscribe()
+                    state_task.cancel()
+                    tool_task.cancel()
+                    await asyncio.gather(state_task, tool_task, return_exceptions=True)
                 await watch.aclose()
 
         return _SSEStream(stream(), self._shutdown_event)
@@ -460,28 +566,44 @@ class _Console:
     async def events(self, request: Request) -> Response:
         if environ.debug:
             request.state.phase = "execution.watch"
-        execution = await self.require_runtime().executions.get(
+        runtime = self.require_runtime()
+        execution = await runtime.executions.get(
             request.path_params["execution_id"], principal=self.principal,
         )
         cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or None
-        watch = execution.watch(cursor=cursor, include_content=True, include_model_interactions=True)
+        chat = request.query_params.get("view") == "chat"
+        watch = execution.watch(cursor=cursor, include_content=True, include_model_interactions=not chat)
+        local_only = chat and self._session_notices is not None
 
         async def stream() -> AsyncGenerator[str, None]:
             try:
-                async for observation in watch:
-                    item = observation.event
-                    payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
-                               "item": _wire(item), "cursor": observation.cursor}
-                    prefix = "" if observation.cursor is None else f"id: {observation.cursor}\n"
-                    yield prefix + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+                with local_execution_stream() if local_only else nullcontext():
+                    async for observation in watch:
+                        item = observation.event
+                        if chat:
+                            if not isinstance(item, ExecutionTreeEvent):
+                                continue
+                            payload = _chat_frame(item, observation.cursor)
+                            if payload is None:
+                                continue
+                        else:
+                            payload = {"type": "model" if isinstance(item, TaskModelProjection) else "event",
+                                       "item": _wire(item), "cursor": observation.cursor}
+                        prefix = "" if observation.cursor is None else f"id: {observation.cursor}\n"
+                        yield prefix + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
                 # Completion of an observer is not the execution's terminal verdict.
                 if environ.debug:
                     request.state.phase = "execution.metadata"
                 info = await self.require_history().inspect_execution(execution.execution_id, principal=self.principal)
+                if chat:
+                    info = replace(info, safe_error_details={}, error_diagnostics=None)
                 yield "event: snapshot\ndata: " + json.dumps(_wire(info), ensure_ascii=False) + "\n\n"
             except AIError as error:
                 _debug_error(request, error)
-                payload = {"error_code": error.code.value, "safe_details": error.safe_details}
+                details = error.safe_details
+                if chat:
+                    details = {key: value for key, value in details.items() if key == "cleanup_pending"}
+                payload = {"error_code": error.code.value, "safe_details": details}
                 if isinstance(error, ObservationError):
                     payload.update(cursor=error.cursor, origin=error.origin)
                 yield "event: observation_error\ndata: " + json.dumps(payload) + "\n\n"
@@ -558,6 +680,7 @@ def create_app(
     metrics: Metrics | None = None, status: Mapping[str, object] | None = None,
     capabilities: Sequence[Mapping[str, object]] = (),
     shutdown_event: asyncio.Event | None = None,
+    session_notices: _SessionNoticeFeed | None = None,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
 
@@ -567,7 +690,7 @@ def create_app(
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
-    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event)
+    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices)
     app = Starlette(routes=[
         Route("/", _asset), Route("/assets/{name}", _asset),
         Route("/api/config", console.config),

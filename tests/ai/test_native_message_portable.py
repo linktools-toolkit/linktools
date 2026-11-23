@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, FilePart, ModelResponse, TextPart
+from sqlalchemy import event as sql_event
+from sqlalchemy.engine.interfaces import CacheStats
 
 from linktools.ai.steps import native_store_key, encode_native_store_key
 from linktools.ai.errors import AIError, ErrorCode
@@ -55,8 +57,28 @@ async def test_partial_trace_snapshot_restores_native_bodies_and_rekeys_group(
                 async for chunk in original_open(key):
                     yield chunk
             monkeypatch.setattr(source_objects, "open", read_outside_sql)
-            ref = await RuntimeSnapshotOperations(resources, require_ready=lambda: None).export_snapshot(
-                object_store=objects, limits=_LIMITS)
+            operations = RuntimeSnapshotOperations(resources, require_ready=lambda: None)
+            engine = archive.state_store.context.engine.sync_engine
+            reads = []
+
+            def capture(_connection, _cursor, statement, _parameters, context, _many):
+                if statement.startswith((
+                    "SELECT ai_step_sequences.store_key, ai_step_sequences.sha256, ai_step_sequences.message_sha256",
+                    "SELECT ai_step_messages.store_key, ai_step_messages.sha256, ai_step_messages.message",
+                )):
+                    reads.append((statement, context.cache_hit))
+
+            sql_event.listen(engine, "before_cursor_execute", capture)
+            try:
+                ref = await operations.export_snapshot(object_store=objects, limits=_LIMITS)
+                first_reads = [statement for statement, _ in reads]
+                assert len(first_reads) == 2
+                reads.clear()
+                repeat = await operations.export_snapshot(object_store=objects, limits=_LIMITS)
+                assert reads == [(statement, CacheStats.CACHE_HIT) for statement in first_reads]
+            finally:
+                sql_event.remove(engine, "before_cursor_execute", capture)
+            assert ref == repeat
         finally:
             await native.close()
     manifest = json.loads(await read_object(objects, ref.key, expected_digest=ref.digest, expected_size=ref.size))

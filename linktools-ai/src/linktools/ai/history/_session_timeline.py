@@ -39,7 +39,7 @@ from ..persistence.contracts import (
     TranscriptHeadRecord,
 )
 from ..execution import ExecutionRecord, ExecutionTimelineRecord, StoredUserInput
-from ..session import SessionRecord, SessionTurnCommit, SessionTurnRef
+from ..session import SessionRecord, SessionTurnCommit, SessionTurnRef, project_turn_tool_process
 from ..persistence.runs import ConversationPersistence
 from ..persistence.repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
 from ..persistence.repositories import ExecutionRepositoryImpl
@@ -794,6 +794,7 @@ def _format_session_turn(
     return SessionTurn(
         ref.execution_id, execution.status, execution.created_at, updated_at, user_input, committed,
         _timeline_items(messages), execution.error_code, execution.safe_error_details, output=output,
+        process=project_turn_tool_process(messages),
     )
 
 

@@ -35,6 +35,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ..model import CanonicalUserInput, StoredUserInput, UserPromptInput, normalize_input_files, validate_user_input
 from ..workspace import validate_workspace_path
+from ._process import ToolProcessItem
 
 
 SessionContext = Literal["all", "current_turn"]
@@ -212,6 +213,7 @@ class SessionTurn:
     error_code: "str | None" = None
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
     output: JsonValue = None
+    process: tuple[ToolProcessItem, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))

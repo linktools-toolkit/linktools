@@ -3,12 +3,11 @@
 """Transaction-scoped validation of immutable Native publication sources."""
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from functools import lru_cache
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from ..errors import AIError, ErrorCode
 from ..steps import native_store_locator
-from ._step_schema import build_step_sql_metadata
+from ._step_schema import native_message_sql_tables
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Result
@@ -98,12 +97,6 @@ async def run_native_mutation(
                 await recover()
 
 
-@lru_cache(maxsize=1)
-def _tables():
-    metadata = build_step_sql_metadata()
-    return metadata.tables["ai_step_sequences"], metadata.tables["ai_step_messages"]
-
-
 async def capture_retention_root_evidence(
     session: "AsyncSession", execute: Callable[["Select"], Awaitable["Result"]],
     *, store: bytes, roots: tuple[str, ...], audit_time: "ColumnElement",
@@ -111,7 +104,7 @@ async def capture_retention_root_evidence(
     """Read clock and existing roots; activate only after the observed owner CAS."""
     from sqlalchemy import and_, literal, select
 
-    sequences, _ = _tables()
+    sequences = native_message_sql_tables()["ai_step_sequences"]
     seed = select(literal(1).label("seed")).subquery()
     rows = tuple((await execute(select(audit_time.label("observed_at"), sequences.c.sha256).select_from(
         seed.outerjoin(sequences, and_(
@@ -140,7 +133,8 @@ async def resolve_targets(
     session: "AsyncSession", kind: str, store: bytes, identities: Sequence[str], *, required: bool = True,
 ) -> dict[str, int]:
     from sqlalchemy import select
-    sequences, messages = _tables()
+    tables = native_message_sql_tables()
+    sequences, messages = tables["ai_step_sequences"], tables["ai_step_messages"]
     table = messages if kind == "message" else sequences
     result = {}
     identities = tuple(sorted(set(identities)))
@@ -163,7 +157,8 @@ async def index_nodes(
         return {}
     from sqlalchemy import literal, select, union_all
 
-    sequence_table, message_table = _tables()
+    tables = native_message_sql_tables()
+    sequence_table, message_table = tables["ai_step_sequences"], tables["ai_step_messages"]
     sequence_ids = tuple(sorted({
         identity for row in rows for identity in (row["sha256"], row["left_sha256"], row["right_sha256"], row["next_sha256"])
         if identity is not None

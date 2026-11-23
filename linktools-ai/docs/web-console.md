@@ -80,6 +80,28 @@ and working directory are under an optional disclosure. Successful turns do not
 repeat technical status badges or expanded diagnostics. Failures, incomplete
 responses, occupied sessions and unconfirmed cancellation remain visible.
 
+Conversation uses one process panel per turn, with one row per root tool
+call. A tool's finished state updates its existing row; the saved turn replaces
+the preview in place. An unconfirmed tool outcome is not reported as success.
+Conversation displays the SDK's thinking text as-is, while streaming and in
+history. Successful model-request statuses and internal request numbers stay
+in the diagnostic views. Provider signatures and raw tool inputs or results
+remain outside Chat.
+
+**Reuse tool progress in another host.**
+
+Use the already-authorized `SessionTurn.process` for the history view. For a
+root execution's live tool events, call
+`linktools.ai.session.project_tool_process_event(event_type, payload)`.
+It returns the same `ToolProcessItem` shape (or no item). Keep items keyed by
+`(execution_id, item.key)`; an update replaces the same row, not a new row.
+Sort positioned rows by `item.position` (turn message number, then response
+part index), not by event arrival or tool call ID. Keep a known position when
+a later update has no position. When the turn commits, use its saved list as
+authority.
+The helper does not read storage, authorize access, or interpret a transport
+cursor as a tool identity. Frontends retain ownership of labels and styling.
+
 The primary views are **Conversation**, **Model messages** and **Activity**.
 Model messages opens the selected turn's actual captured input directly: indexed
 role and content rows follow the native `messages` array order. A single request
@@ -203,6 +225,18 @@ namespace, tenant, and storage without resuming its live execution. Writable
 and read-only consoles read the same committed history. Independent sessions
 can run concurrently; a second execution in the same session is rejected with
 `SESSION_BUSY`.
+
+On POSIX, CLI processes of the same user in the same local workspace, PID and
+network namespace can notify Web of admission, tool progress and release. A passive Web view gets key updates
+through its session stream, not a second execution stream or database poll.
+The authorized session read supplies the prompt and committed result; tool
+notices contain display metadata only. An ACP editor still receives native
+updates for its own prompt and can load committed history.
+
+Notices are best-effort. If local IPC is unavailable, or the producer stops
+after committing but before delivering the final notice, use **Refresh** to
+reconnect and read the saved session. Refresh does not resume the turn.
+Missed live tool updates are not replayed; the committed view is authoritative.
 
 SQL startup does not infer that an unfinished execution is abandoned. A stopped
 process can leave `PENDING_START`, `STARTED`, or `CANCELLING` visible. Refresh and

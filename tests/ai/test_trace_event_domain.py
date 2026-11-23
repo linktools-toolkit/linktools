@@ -379,6 +379,35 @@ async def test_sql_trace_page_reads_its_capture_bound_with_the_filtered_page(
 
 
 @pytest.mark.asyncio
+async def test_sql_trace_replay_reuses_compiled_queries(tmp_path: Path) -> None:
+    from sqlalchemy import event as sql_event
+    from sqlalchemy.engine.interfaces import CacheStats
+
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        first = _event(run_id, "TOOL_CALL_STARTED", tool="call")
+        second = _event(run_id, "TOOL_CALL_SUCCEEDED", tool="call", second=1)
+        await _append(archive, first, second)
+        engine = archive.state_store.storage_group.context.engine.sync_engine
+        cache_stats = []
+
+        def capture(_conn, _cursor, statement, _parameters, context, _many):
+            if "ai_trace_events" in statement and "AS counter_value" in statement:
+                cache_stats.append(context.cache_hit)
+
+        sql_event.listen(engine, "before_cursor_execute", capture)
+        try:
+            for high_water in (1, 2) * 4:
+                expected = [first, second][:high_water]
+                assert await _trace(archive, run_id, high_water) == list(enumerate(expected, 1))
+                assert await archive.read_history_associations(
+                    agent_run_id=run_id, message_seqs=(), tool_call_ids=("call",), event_high_water=high_water,
+                ) == expected
+        finally:
+            sql_event.remove(engine, "before_cursor_execute", capture)
+        assert cache_stats == [CacheStats.CACHE_MISS] * 2 + [CacheStats.CACHE_HIT] * 14
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("missing_run", (False, True))
 async def test_sql_trace_empty_filter_still_checks_the_captured_high_water(
     tmp_path: Path, missing_run: bool,

@@ -852,6 +852,7 @@ async def _build_local_components(
             workspace_access=input_materializer.access,
             capture_terminal_publication=state.retention.capture_terminal_publication,
         )
+        session.bind_turn_observer(backend.observe_turns)
         lifecycle.session = session
         runtime_bridge.pending_turns.session_changed = state.conversation.sessions.notify_session_change
 
@@ -889,6 +890,7 @@ async def _build_local_components(
             live_broker,
             pending_execution=backend.pending_execution,
             pending_stream=runtime_bridge.pending_turns.read_stream,
+            local_admission=backend.local_admission,
         )
         artifact = DefaultArtifactService(
             state.artifact,

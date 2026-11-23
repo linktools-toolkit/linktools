@@ -5,10 +5,10 @@
 import asyncio
 import os
 from argparse import Namespace
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
@@ -31,8 +31,8 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding
     from linktools.ai.runtime import Runtime
+    from linktools.ai.session import SessionTurnNotice, ToolProcessItem, ToolProcessStatus
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.storage import TurnCoordinationBackend
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
 MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
@@ -88,12 +88,10 @@ def _local_runtime_assets(workspace: Workspace) -> AssetStore:
     )
 
 
-def _local_runtime_storage(
-    workspace: Workspace, *, coordination: "TurnCoordinationBackend | None" = None,
-) -> "PersistenceStorage":
+def _local_runtime_storage(workspace: Workspace) -> "PersistenceStorage":
     from linktools.ai.persistence import PersistenceStorage
 
-    return PersistenceStorage.from_root(_local_runtime_root(workspace), coordination=coordination)
+    return PersistenceStorage.from_root(_local_runtime_root(workspace))
 
 
 async def _local_metrics(workspace: Workspace) -> Metrics:
@@ -208,6 +206,72 @@ class LocalRuntime:
     metrics: Metrics
     capabilities: tuple[dict[str, str | int], ...]
     status: "Mapping[str, object]"
+    workspace: Workspace
+
+
+class _LocalSessionFeed:
+    def __init__(self, runtime: "Runtime") -> None:
+        self.runtime = runtime
+        self._callbacks: dict[str, set["Callable[[str, ToolProcessItem], None]"]] = {}
+
+    def subscribe(
+        self, session_id: str, on_process: "Callable[[str, ToolProcessItem], None]",
+    ) -> "Callable[[], None]":
+        callbacks = self._callbacks.setdefault(session_id, set())
+        callbacks.add(on_process)
+
+        def unsubscribe() -> None:
+            callbacks.discard(on_process)
+            if not callbacks:
+                self._callbacks.pop(session_id, None)
+
+        return unsubscribe
+
+    def receive(self, value: dict[str, object]) -> None:
+        kind, session_id, execution_id = value.get("kind"), value.get("session_id"), value.get("execution_id")
+        if not isinstance(session_id, str) or not session_id or not isinstance(execution_id, str) or not execution_id:
+            return
+        if kind in ("admitted", "terminal"):
+            self.runtime.sessions.invalidate(session_id)
+        elif kind == "tool" and self._callbacks.get(session_id):
+            row = value.get("process")
+            if not isinstance(row, dict):
+                return
+            key, name, status = row.get("key"), row.get("tool_name"), row.get("status")
+            if (row.get("kind") != "tool" or not isinstance(key, str) or not key.startswith("tool:")
+                    or len(key) <= len("tool:") or not isinstance(name, str) or not name
+                    or status not in ("RUNNING", "SUCCEEDED", "FAILED", "INTERRUPTED", "CANCELLED")):
+                return
+            position = row.get("position")
+            if position is not None:
+                if not isinstance(position, list) or len(position) != 2:
+                    return
+                message_seq, part_index = position
+                if type(message_seq) is not int or message_seq < 1 or type(part_index) is not int or part_index < 0:
+                    return
+                position = (message_seq, part_index)
+            from linktools.ai.session import ToolProcessItem
+
+            item = ToolProcessItem(key, name, cast("ToolProcessStatus", status), position)
+            for callback in tuple(self._callbacks[session_id]):
+                callback(execution_id, item)
+
+
+@asynccontextmanager
+async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "AsyncIterator[_LocalSessionFeed | None]":
+    from ._session_notices import session_notice_publisher, session_notice_receiver
+
+    feed = _LocalSessionFeed(local.runtime) if receive else None
+    runtime_root = _local_runtime_root(local.workspace)
+    async with AsyncExitStack() as stack:
+        receiver = None if feed is None else await stack.enter_async_context(session_notice_receiver(runtime_root, feed.receive))
+        offer = await stack.enter_async_context(session_notice_publisher(runtime_root, exclude=receiver))
+
+        def publish(notice: "SessionTurnNotice") -> None:
+            offer(asdict(notice), discover=notice.kind != "tool")
+
+        stack.callback(local.runtime.sessions.observe_turns(publish))
+        yield feed
 
 
 @asynccontextmanager
@@ -216,7 +280,6 @@ async def _open_local_runtime(
     *,
     model: "ModelBinding",
     status: "Mapping[str, object] | None" = None,
-    coordination: "TurnCoordinationBackend | None" = None,
 ) -> "AsyncIterator[LocalRuntime]":
     from linktools.ai.capability import (
         AssetCapability, ExecutionCapability, FileSystem, MemoryCapability,
@@ -235,7 +298,7 @@ async def _open_local_runtime(
     features.capability(TraceCapability())
     metrics = await _local_metrics(workspace)
     async with Runtime.open(
-        "default", storage=_local_runtime_storage(workspace, coordination=coordination), features=features, metrics=metrics,
+        "default", storage=_local_runtime_storage(workspace), features=features, metrics=metrics,
     ) as runtime:
         source = runtime.features
         assert source is not None
@@ -248,12 +311,11 @@ async def _open_local_runtime(
         yield LocalRuntime(runtime, metrics, declarations, {
             "workspace": str(workspace.root), "asset_root": str(workspace.storage_root),
             **({} if status is None else status),
-        })
+        }, workspace)
 
 
 def run_local(
-    args: Namespace, execute: "Callable[[LocalRuntime], Awaitable[int]]", *,
-    coordination: "TurnCoordinationBackend | None" = None,
+    args: Namespace, execute: "Callable[[LocalRuntime], Awaitable[int]]",
 ) -> int:
     """Run a command while owning its Runtime and local resource lifetime."""
     async def run() -> int:
@@ -261,7 +323,7 @@ def run_local(
         options = _ModelOptions.load(workspace, args)
         model = options.create_model()
         async with _open_local_runtime(
-            workspace, model=model, status=options.status(model), coordination=coordination,
+            workspace, model=model, status=options.status(model),
         ) as local:
             return await execute(local)
 
@@ -271,4 +333,4 @@ def run_local(
         raise CommandError(str(error)) from error
 
 
-__all__ = ["LocalRuntime", "add_local_runtime_arguments", "run_local"]
+__all__ = ["LocalRuntime", "add_local_runtime_arguments", "local_turn_notices", "run_local"]
