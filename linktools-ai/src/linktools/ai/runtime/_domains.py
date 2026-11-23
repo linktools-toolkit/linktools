@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
-from ..session import LocalSessionTurnNotice, SessionAdmission, PublishedSessionTurn
+from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn
 from ..agent import AgentBindingContract
 from ..core import BudgetUsage, Principal
 from ..observe import WaitResult, RuntimeMetricsControl
@@ -314,16 +314,19 @@ class RuntimeSessions(Generic[AppT]):
         self._ensure_open()
         return self._service.observe_changes(session_id, on_invalidate)
 
-    def observe_local_turns(
-        self, on_notice: Callable[[LocalSessionTurnNotice], None],
+    def observe_turns(
+        self, handler: Callable[[SessionTurnNotice], None],
     ) -> Callable[[], None]:
-        """Subscribe a trusted host to best-effort, payload-free local turn notices.
+        """Subscribe a trusted host to turn milestones produced by this Runtime.
 
-        The callback must not block or do I/O. It grants no authorization and
-        carries no replay or snapshot; read state through the authorized API.
+        Best-effort notices carry confirmed admission and release or display-only
+        tool progress. They omit prompts, raw tool payloads, and model output.
+        The synchronous callback must only schedule work, not do I/O; the host
+        owns transport. No replay, remote subscription, or authorization is
+        provided. Read current state through the authorized API as needed.
         """
         self._ensure_open()
-        return self._service.observe_local_turns(on_notice)
+        return self._service.observe_turns(handler)
 
     def invalidate(self, session_id: str) -> None:
         """Wake existing local watches to reread current authorized session state."""

@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding
     from linktools.ai.runtime import Runtime
-    from linktools.ai.session import LocalSessionTurnNotice, ToolProcessItem, ToolProcessStatus
+    from linktools.ai.session import SessionTurnNotice, ToolProcessItem, ToolProcessStatus
     from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
@@ -267,10 +267,10 @@ async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "
         receiver = None if feed is None else await stack.enter_async_context(session_notice_receiver(runtime_root, feed.receive))
         offer = await stack.enter_async_context(session_notice_publisher(runtime_root, exclude=receiver))
 
-        def publish(notice: "LocalSessionTurnNotice") -> None:
+        def publish(notice: "SessionTurnNotice") -> None:
             offer(asdict(notice), discover=notice.kind != "tool")
 
-        stack.callback(local.runtime.sessions.observe_local_turns(publish))
+        stack.callback(local.runtime.sessions.observe_turns(publish))
         yield feed
 
 

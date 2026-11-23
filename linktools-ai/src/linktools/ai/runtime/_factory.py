@@ -852,7 +852,7 @@ async def _build_local_components(
             workspace_access=input_materializer.access,
             capture_terminal_publication=state.retention.capture_terminal_publication,
         )
-        session.bind_local_turn_observer(backend.observe_local_turns)
+        session.bind_turn_observer(backend.observe_turns)
         lifecycle.session = session
         runtime_bridge.pending_turns.session_changed = state.conversation.sessions.notify_session_change
 

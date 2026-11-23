@@ -12,7 +12,7 @@ from ._api import (
 )
 
 from ..session import (
-    LocalSessionTurnNotice,
+    SessionTurnNotice,
     SessionHistoryItem,
     SessionTurnItem,
     SessionTurn,
@@ -1346,7 +1346,7 @@ class SessionService(Protocol):
 
     def observe_changes(self, session_id: str, on_invalidate: Callable[[], None]) -> Callable[[], None]: ...
 
-    def observe_local_turns(self, on_notice: Callable[[LocalSessionTurnNotice], None]) -> Callable[[], None]: ...
+    def observe_turns(self, on_notice: Callable[[SessionTurnNotice], None]) -> Callable[[], None]: ...
 
     def invalidate(self, session_id: str) -> None: ...
 

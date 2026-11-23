@@ -1,20 +1,25 @@
 import asyncio
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import CreateSessionRequest
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.migrate import provision_runtime_database
+from linktools.ai.persistence import PersistenceStorage, StateTurnResources
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.session import SessionTurnNotice
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 
 @pytest.mark.asyncio
-async def test_file_sqlite_local_turn_notices_follow_owned_boundaries(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", ("file", "memory", "borrowed", "coordinated"))
+async def test_observe_turns_follows_owned_boundaries(tmp_path: Path, backend: str) -> None:
     async def lookup(context: AgentContext[None], value: str) -> str:
         return "not-for-notices"
 
@@ -26,11 +31,23 @@ async def test_file_sqlite_local_turn_notices_follow_owned_boundaries(tmp_path: 
     features = RuntimeFeatures("local-notices")
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.capability(ExecutionCapability(retain_history=True))
-    features.capability(StepPersistenceCapability())
+    if backend != "memory":
+        features.capability(StepPersistenceCapability())
     features.capability(TraceCapability())
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="default", allow_tools=("lookup",))
-    async with Runtime.open("default", storage=PersistenceStorage.from_root(tmp_path), features=features) as runtime:
+    async with AsyncExitStack() as resources:
+        if backend == "file":
+            storage = PersistenceStorage.from_root(tmp_path)
+        elif backend == "memory":
+            storage = PersistenceStorage.in_memory()
+        else:
+            engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'borrowed.db'}")
+            resources.push_async_callback(engine.dispose)
+            await provision_runtime_database(engine)
+            coordination = StateTurnResources() if backend == "coordinated" else None
+            storage = PersistenceStorage.sql(engine, coordination=coordination)
+        runtime = await resources.enter_async_context(Runtime.open("default", storage=storage, features=features))
         principal = runtime.default_principal
         await runtime.sessions.create("default", CreateSessionRequest(principal, "session", "create"))
 
@@ -42,9 +59,9 @@ async def test_file_sqlite_local_turn_notices_follow_owned_boundaries(tmp_path: 
         runtime.sessions.invalidate("session")
         assert changes.is_set()
         remove_invalidation()
-        unsubscribe_failed = runtime.sessions.observe_local_turns(fail)
-        notices = []
-        unsubscribe = runtime.sessions.observe_local_turns(notices.append)
+        unsubscribe_failed = runtime.sessions.observe_turns(fail)
+        notices: list[SessionTurnNotice] = []
+        unsubscribe = runtime.sessions.observe_turns(handler=notices.append)
         turn = await runtime.sessions.start("session", "ask", principal=principal, idempotency_key="turn")
         assert (await turn.wait(timeout_seconds=10)).result.output == {"text": "answer"}
         replay = await runtime.sessions.start("session", "ask", principal=principal, idempotency_key="turn")
@@ -82,7 +99,7 @@ async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admi
         turn = await initial.runtime.sessions.start("session", "ask", principal=actor, idempotency_key="turn")
         await asyncio.wait_for(entered.wait(), 10)
         rejected_notices = []
-        unsubscribe = initial.runtime.sessions.observe_local_turns(rejected_notices.append)
+        unsubscribe = initial.runtime.sessions.observe_turns(rejected_notices.append)
         try:
             with pytest.raises(AIError) as error:
                 await initial.runtime.executions.recover(
@@ -99,7 +116,7 @@ async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admi
         actor = runtime.default_principal
         assert (await runtime.executions.inspect(turn.execution_id, principal=actor)).status.value == "STARTED"
         notices = []
-        unsubscribe = runtime.sessions.observe_local_turns(notices.append)
+        unsubscribe = runtime.sessions.observe_turns(notices.append)
         try:
             recovered = await runtime.executions.recover(turn.execution_id, principal=actor, idempotency_key="recover")
             assert recovered.execution_id == turn.execution_id

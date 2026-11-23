@@ -30,8 +30,8 @@ class ToolProcessItem:
 
 
 @dataclass(frozen=True, slots=True)
-class LocalSessionTurnNotice:
-    """Best-effort local producer notice; never an authorization or state source."""
+class SessionTurnNotice:
+    """Best-effort turn producer notice; never an authorization or state source."""
 
     kind: Literal["admitted", "tool", "terminal"]
     session_id: str
@@ -101,4 +101,4 @@ def project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[ToolP
     return tuple(calls.values())
 
 
-__all__ = ["LocalSessionTurnNotice", "ToolProcessItem", "ToolProcessStatus", "project_tool_process_event", "project_turn_tool_process"]
+__all__ = ["SessionTurnNotice", "ToolProcessItem", "ToolProcessStatus", "project_tool_process_event", "project_turn_tool_process"]

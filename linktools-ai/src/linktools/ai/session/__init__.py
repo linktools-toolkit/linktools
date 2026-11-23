@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session lifecycle and conversation membership contracts."""
 
-from ._process import LocalSessionTurnNotice, ToolProcessItem, ToolProcessStatus, project_tool_process_event, project_turn_tool_process
+from ._process import SessionTurnNotice, ToolProcessItem, ToolProcessStatus, project_tool_process_event, project_turn_tool_process
 
 from ._contracts import (
     SessionContext,
@@ -42,7 +42,7 @@ from ._service import (
 )
 
 __all__ = [
-    "LocalSessionTurnNotice",
+    "SessionTurnNotice",
     "ToolProcessItem",
     "ToolProcessStatus",
     "project_tool_process_event",
