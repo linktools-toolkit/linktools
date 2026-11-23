@@ -84,8 +84,9 @@ Conversation uses one process panel per turn, with one row per root tool
 call. A tool's finished state updates its existing row; the saved turn replaces
 the preview in place. An unconfirmed tool outcome is not reported as success.
 Conversation displays the SDK's thinking text as-is, while streaming and in
-history. Provider signatures and raw tool inputs or results remain outside
-Chat. Inspecting the underlying records is an explicit diagnostic action.
+history. Successful model-request statuses and internal request numbers stay
+in the diagnostic views. Provider signatures and raw tool inputs or results
+remain outside Chat.
 
 **Reuse tool progress in another host.**
 

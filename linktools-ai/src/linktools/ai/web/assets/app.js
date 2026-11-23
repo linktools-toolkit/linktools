@@ -621,8 +621,7 @@ function renderTurnProcess(section, rows) {
   for(const key of section.rows.keys())if(!keys.has(key))section.rows.delete(key);
   section.hidden=children.length===1;
   if(children.length!==section.children.length || children.some((node,index)=>node!==section.children[index])) {
-    const focus=requestFocusWithin(section);
-    section.replaceChildren(...children);restoreRequestFocus(section,focus);
+    section.replaceChildren(...children);
   }
 }
 function turnProcess() {
@@ -641,11 +640,7 @@ function attachLiveTurn(live) {
   const container=$('conversation');
   const article=state.observedExecution?[...container.children].find(node=>node.dataset.openExecution===state.observedExecution):null;
   const target=article?.liveSlot || container;
-  if(live.parentElement!==target) {
-    const previous=live.parentElement?.parentElement;
-    if(previous?.liveSlot===live.parentElement)previous.savedAnswers.hidden=false;
-    target.append(live);
-  }
+  if(live.parentElement!==target)target.append(live);
   return article;
 }
 function thinkingMessage(label,text='') {
@@ -674,10 +669,10 @@ function renderConversation({prepend=false}={}) {
       section.dataset.openExecution=turn.execution_id;section.savedProcess=turn.process || [];section.processNode=process;
       section.liveSlot=element('div','turn-live-slot');section.append(section.liveSlot);
     }
-    section.savedAnswers=element('div','turn-saved-answers');section.append(section.savedAnswers);
+    const savedAnswers=element('div','turn-saved-answers');section.append(savedAnswers);
     for (const item of turn.items) {
-      if (item.item_kind==='assistant') section.savedAnswers.append(typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
-      else if (item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) section.savedAnswers.append(thinkingMessage('Thinking',item.content));
+      if (item.item_kind==='assistant') savedAnswers.append(typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
+      else if (item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) savedAnswers.append(thinkingMessage('Thinking',item.content));
     }
     if (!turn.conversation_committed) section.append(element('p','muted','Incomplete turn; history is not yet committed.'));
     if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
@@ -741,7 +736,8 @@ function renderLiveAttempts(live,wanted,process) {
         node.label=element('summary');node.body=element('pre');node.thinking=element('pre');node.append(node.label,node.thinking,node.body);
         live.attemptNodes.set(key,node);
       }
-      node.label.textContent=`${attempt.status} · run ${request.agent_run_seq} · request ${request.model_request_seq} · attempt ${attempt.seq} · partial content is not an answer`;
+      node.label.textContent=process?'Interrupted response · partial content is not an answer'
+        :`${attempt.status} · run ${request.agent_run_seq} · request ${request.model_request_seq} · attempt ${attempt.seq} · partial content is not an answer`;
       const content=streamAttemptText(attempt),thinking=process?'':streamAttemptText(attempt,'thinking');
       if(node.body.textContent!==content)node.body.textContent=content;
       if(node.thinking.textContent!==thinking)node.thinking.textContent=thinking;
@@ -758,14 +754,16 @@ function renderLiveAttempts(live,wanted,process) {
     }
     const preview=streamResponsePreview(request),canonical=request.canonicalResponse;
     const responseText=kind=>canonical.parts.filter(part=>part.part_kind===kind && typeof part.content==='string').map(part=>part.content).join('');
-    const content=canonical?responseText('text'):request.status==='SUCCEEDED'?'':preview.text;
-    const thinking=canonical?responseText('thinking'):!process && request.status==='SUCCEEDED'?'':preview.thinking;
+    const showPreview=process || request.status!=='SUCCEEDED';
+    const content=canonical?responseText('text'):showPreview?preview.text:'';
+    const thinking=canonical?responseText('thinking'):showPreview?preview.thinking:'';
     const status=canonical?'COMPLETED MODEL RESPONSE · committed SDK text':request.status==='SUCCEEDED'?`MODEL REQUEST SUCCEEDED · ${request.canonicalError || 'awaiting committed response'}`:['FAILED','CANCELLED'].includes(request.status)?`INCOMPLETE RESPONSE · ${request.status}`:'LIVE RESPONSE · incomplete SDK display';
-    const label=`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${!canonical && preview.truncated?' · preview GAP · noncontiguous fragment':''}`;
+    const gap=!canonical && preview.truncated;
+    const label=process?(gap?'Part of the response was missed.': ['FAILED','CANCELLED'].includes(request.status)?'Incomplete response.':'')
+      :`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${gap?' · preview GAP · noncontiguous fragment':''}`;
     if(node.label.textContent!==label)node.label.textContent=label;
-    node.label.hidden=Boolean(process && !(request.status==='SUCCEEDED' && !canonical) && !preview.truncated && !['FAILED','CANCELLED'].includes(request.status));
+    node.label.hidden=!label;
     node.thinking.hidden=!thinking.trim();if(node.thinking.body.textContent!==thinking)node.thinking.body.textContent=thinking;
-    node.previewHasText=Boolean(content || thinking.trim());
     if(!node.reload){node.reload=button('Load committed response',()=>readLiveResponse(request,true));node.append(node.reload);}
     node.reload.hidden=state.view==='sessions' || request.status!=='SUCCEEDED' || Boolean(canonical);node.reload.disabled=Boolean(request.canonicalPending);
     updateMarkdownMessage(node.body,content);node.body.hidden=!content;wanted.push(node);
@@ -837,8 +835,7 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   if(process) {
     const section=article?.processNode || (live.processNode ||= turnProcess());
     renderTurnProcess(section,conversationProcessRows(state.observedExecution,article?.savedProcess,state.liveProcess));
-    if(article)article.savedAnswers.hidden=Boolean(state.liveText || state.liveThinking.trim() || wanted.some(node=>node.previewHasText));
-    else if(!section.hidden)wanted.unshift(section);
+    if(!article && !section.hidden)wanted.unshift(section);
   }
   const events=[...state.events.values()].slice(-12);
   if(!live.activityEvents || events.length!==live.activityEvents.length || events.some((item,index)=>item!==live.activityEvents[index])) {

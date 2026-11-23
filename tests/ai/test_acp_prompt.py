@@ -3,6 +3,7 @@
 """ACP uses authorized session admission, prompt-scoped cancellation and committed history."""
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -91,7 +92,7 @@ async def test_acp_load_replays_only_committed_public_history_in_turn_order(tmp_
             conversation_committed=committed, process=process, execution_id=f"execution-{text}",
             user_input={"version": 1, "prompt": {"kind": "text", "text": text}},
             items=(
-                SimpleNamespace(item_kind="thinking", content="private thinking"),
+                SimpleNamespace(item_kind="thinking", content=f"  SDK thought {text}  "),
                 SimpleNamespace(item_kind="tool_call", tool_call_id="c-1", content="private input"),
                 SimpleNamespace(item_kind="tool_result", content="private result"),
                 SimpleNamespace(item_kind="assistant", content=f"reply {text}"),
@@ -118,21 +119,23 @@ async def test_acp_load_replays_only_committed_public_history_in_turn_order(tmp_
 
     updates = [request.args[1] for request in connection.session_update.await_args_list]
     assert [value.session_update for value in updates] == [
-        "user_message_chunk", "tool_call", "agent_message_chunk", "user_message_chunk", "agent_message_chunk",
+        "user_message_chunk", "agent_thought_chunk", "tool_call", "agent_message_chunk",
+        "user_message_chunk", "agent_thought_chunk", "agent_message_chunk",
     ]
     assert [value.content.text for value in updates if hasattr(value.content, "text")] == [
-        "old", "reply old", "new", "reply new",
+        "old", "  SDK thought old  ", "reply old", "new", "  SDK thought new  ", "reply new",
     ]
-    assert (updates[1].tool_call_id, updates[1].title, updates[1].status) == ("execution-old:c-1", "search", "completed")
+    assert (updates[2].tool_call_id, updates[2].title, updates[2].status) == ("execution-old:c-1", "search", "completed")
+    assert all("private" not in value.model_dump_json() for value in updates)
 
 
 @pytest.mark.asyncio
-async def test_acp_prompt_streams_public_tool_status_and_answer_without_thinking_or_payloads() -> None:
+async def test_acp_prompt_streams_sdk_thinking_and_tool_status_without_private_payloads() -> None:
     acp = pytest.importorskip("acp")
 
     async def wait(*, on_event, **kwargs):
         for event_type, payload in (
-            (ExecutionDeltaType.ASSISTANT_THINKING_DELTA, {"text": "private"}),
+            (ExecutionDeltaType.ASSISTANT_THINKING_DELTA, {"text": "  SDK thought  ", "signature": "private"}),
             (ExecutionEventType.TOOL_CALL_STARTED, {"call_id": "c-1", "tool_name": "search", "args": "private"}),
             (ExecutionEventType.TOOL_CALL_FINISHED, {
                 "call_id": "c-1", "tool_name": "search", "status": "SUCCEEDED", "result": "private",
@@ -150,7 +153,59 @@ async def test_acp_prompt_streams_public_tool_status_and_answer_without_thinking
     await agent.initialize(acp.PROTOCOL_VERSION)
     await agent.prompt("session", [SimpleNamespace(text="hi")])
     updates = [request.args[1] for request in connection.session_update.await_args_list]
-    assert [value.session_update for value in updates] == ["tool_call", "tool_call_update", "agent_message_chunk"]
-    assert (updates[0].tool_call_id, updates[0].status, updates[1].status) == ("execution:c-1", "in_progress", "completed")
-    assert updates[2].content.text == "public"
+    assert [value.session_update for value in updates] == [
+        "agent_thought_chunk", "tool_call", "tool_call_update", "agent_message_chunk",
+    ]
+    assert updates[0].content.text == "  SDK thought  "
+    assert (updates[1].tool_call_id, updates[1].status, updates[2].status) == ("execution:c-1", "in_progress", "completed")
+    assert updates[3].content.text == "public"
     assert all("private" not in value.model_dump_json() for value in updates)
+
+
+@pytest.mark.asyncio
+async def test_embedded_acp_without_workspace_keeps_logical_directories(tmp_path: Path) -> None:
+    acp = pytest.importorskip("acp")
+    from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+
+    from linktools.ai.workspace import Workspace
+    from linktools.commands.ai._common import _open_local_runtime
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+    workspace = Workspace.initialize(tmp_path)
+    (tmp_path / "nested").mkdir()
+    model = _Models(_UsageFunctionModel(lambda _messages, _info: ModelResponse(parts=[
+        ThinkingPart("  SDK thought  ", signature="not-for-client"), TextPart("answer"),
+    ])))
+    async with _open_local_runtime(workspace, model=model) as local:
+        runtime = local.runtime
+        agent = ACPAgent(runtime, principal=runtime.default_principal)
+        connection = SimpleNamespace(session_update=AsyncMock())
+        agent.on_connect(connection)
+        capabilities = (await agent.initialize(acp.PROTOCOL_VERSION)).agent_capabilities
+        assert capabilities.load_session and capabilities.session_capabilities.list is not None
+
+        session_id = (await agent.new_session("nested")).session_id
+        sessions = (await agent.list_sessions("nested")).sessions
+        assert [(item.session_id, item.cwd) for item in sessions] == [(session_id, "nested")]
+        assert not (await agent.list_sessions("other")).sessions
+
+        assert (await agent.prompt(session_id, [SimpleNamespace(text="question")])).stop_reason == "end_turn"
+        live = [notice.args[1] for notice in connection.session_update.await_args_list]
+        assert [(notice.session_update, notice.content.text) for notice in live] == [
+            ("agent_thought_chunk", "  SDK thought  "), ("agent_message_chunk", "answer"),
+        ]
+        assert all("not-for-client" not in notice.model_dump_json() for notice in live)
+
+        connection.session_update.reset_mock()
+        await agent.load_session("nested", session_id)
+        saved = [notice.args[1] for notice in connection.session_update.await_args_list]
+        assert [(notice.session_update, notice.content.text) for notice in saved] == [
+            ("user_message_chunk", "question"),
+            ("agent_thought_chunk", "  SDK thought  "),
+            ("agent_message_chunk", "answer"),
+        ]
+        assert all("not-for-client" not in notice.model_dump_json() for notice in saved)
+
+        fork_id = (await agent.fork_session(session_id, "nested")).session_id
+        assert {item.session_id for item in (await agent.list_sessions("nested")).sessions} == {session_id, fork_id}

@@ -34,8 +34,8 @@ async def _produce(project: Path, mode: str) -> None:
         publisher = _session_notices.session_notice_publisher
 
         @asynccontextmanager
-        async def without_terminal(root: Path):
-            async with publisher(root) as offer:
+        async def without_terminal(root: Path, **kwargs):
+            async with publisher(root, **kwargs) as offer:
                 def intercept(notice, discover=True):
                     if notice["kind"] != "terminal":
                         offer(notice, discover=discover)

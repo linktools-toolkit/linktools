@@ -194,3 +194,58 @@ async def test_registration_ignores_nonprivate_files_and_symbolic_links(tmp_path
             publish(notice)
         await asyncio.wait_for(arrived.wait(), 2)
         assert received == [notice]
+
+
+@pytest.mark.asyncio
+async def test_publisher_skips_its_own_descriptor_but_sends_to_same_process_peer(tmp_path, monkeypatch):
+    from linktools.commands.ai import _session_notices
+
+    attempted = []
+    sent = _session_notices._send
+    own = []
+    peer = asyncio.Queue()
+
+    async def record(target, frame):
+        attempted.append(target[0])
+        return await sent(target, frame)
+
+    monkeypatch.setattr(_session_notices, "_send", record)
+    async with (
+        session_notice_receiver(tmp_path, own.append) as own_descriptor,
+        session_notice_receiver(tmp_path, peer.put_nowait) as peer_descriptor,
+        session_notice_publisher(tmp_path, exclude=own_descriptor) as publish,
+    ):
+        assert own_descriptor and peer_descriptor and own_descriptor != peer_descriptor
+        peer_port = json.loads((tmp_path / "session-receivers" / peer_descriptor).read_bytes())[1]
+        for kind in ("admitted", "tool"):
+            message = {"kind": kind}
+            publish(message, discover=kind != "tool")
+            assert await asyncio.wait_for(peer.get(), 2) == message
+    assert attempted == [peer_port, peer_port]
+    assert not own
+
+
+def test_local_session_feed_decodes_existing_tool_shape_without_forwarding_invalid_rows():
+    from types import SimpleNamespace
+
+    from linktools.ai.session import ToolProcessItem
+    from linktools.commands.ai._common import _LocalSessionFeed
+
+    invalidations = []
+    feed = _LocalSessionFeed(SimpleNamespace(sessions=SimpleNamespace(invalidate=invalidations.append)))
+    received = []
+    unsubscribe = feed.subscribe("session", lambda execution, item: received.append((execution, item)))
+    notice = {
+        "kind": "tool", "session_id": "session", "execution_id": "execution",
+        "process": {
+            "kind": "tool", "key": "tool:abc", "tool_name": "search", "status": "SUCCEEDED", "position": [2, 0],
+        },
+    }
+    for change in ({"key": "tool:"}, {"status": "UNCONFIRMED"}, {"position": [True, 0]}, {"kind": "other"}):
+        feed.receive({**notice, "process": {**notice["process"], **change}})
+    feed.receive(notice)
+    unsubscribe()
+    feed.receive(notice)
+    feed.receive({**notice, "kind": "terminal"})
+    assert received == [("execution", ToolProcessItem("tool:abc", "search", "SUCCEEDED", (2, 0)))]
+    assert invalidations == ["session"]

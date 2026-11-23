@@ -827,8 +827,8 @@ if(process.argv[3]==='tools') {
   const sdkThinking='  SDK thinking\n<literal>  ';
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
   assert.equal(calls.findLast(call=>call.key==='/api/executions/'+id+'/events').query.view,'chat');
-  event('ASSISTANT_THINKING_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,text:sdkThinking});
-  event('ASSISTANT_TEXT_DELTA',{text:'Answer'});
+  event('ASSISTANT_THINKING_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,part_index:0,part_start:true,text:sdkThinking});
+  event('ASSISTANT_TEXT_DELTA',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,part_index:1,part_start:true,text:'Answer'});
   emit('process',laterTool,'later-tool-cursor');emit('process',tool,'tool-cursor');
   await until('live process and answer share the turn',()=>processArea().textContent.includes('lookupIn progress') && article().textContent.includes('Answer') && article().textContent.includes(sdkThinking));
   assert.ok(article().contains(node('live')));
@@ -853,7 +853,13 @@ if(process.argv[3]==='tools') {
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
   event('MODEL_REQUEST_FINISHED',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,status:'SUCCEEDED'});
-  await until('logical model finish arrives before conversation commit',()=>node('live').textContent.includes('awaiting committed response'));
+  await until('logical model finish arrives before conversation commit',()=>node('live').textContent.includes('model request finished'));
+  const modelPreview=node('live').children.find(item=>item.className==='stream-attempt');
+  assert.equal(modelPreview.label.hidden,true,'normal model status belongs to the Activity disclosure, not Chat');
+  assert.equal(modelPreview.label.textContent,'');
+  assert.equal(modelPreview.thinking.body.textContent,sdkThinking,'thinking remains visible until History replaces the preview');
+  assert.equal(modelPreview.body.hidden,false,'a completed model request is still a visible Chat preview until History arrives');
+  assert.equal(modelPreview.body.children[0].textContent.trim(),'Answer');
   timelineOverrides.set('a',{items:[saved],next_cursor:null});
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
   streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));

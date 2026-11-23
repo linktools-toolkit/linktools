@@ -91,7 +91,7 @@ def _process_gone(pid: int) -> bool:
     return False
 
 
-def _discover(root: Path) -> list[tuple[int, bytes]]:
+def _discover(root: Path, exclude: str | None) -> list[tuple[int, bytes]]:
     directory = _directory(root)
     if directory is None:
         return []
@@ -101,7 +101,7 @@ def _discover(root: Path) -> list[tuple[int, bytes]]:
             removed = False
             with os.scandir(directory) as entries:
                 for entry in itertools.islice(entries, _MAX_SCAN):
-                    if not re.fullmatch(r"[0-9a-f]{32}\.json", entry.name):
+                    if entry.name == exclude or not re.fullmatch(r"[0-9a-f]{32}\.json", entry.name):
                         continue
                     try:
                         fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -138,11 +138,11 @@ def _proof(secret: bytes, role: bytes, client: bytes, server: bytes) -> bytes:
 @contextlib.asynccontextmanager
 async def session_notice_receiver(
     runtime_root: Path, on_notice: "Callable[[dict[str, object]], None]",
-) -> "AsyncIterator[bool]":
-    """Receive local notices with a synchronous callback that only schedules work."""
+) -> "AsyncIterator[str | None]":
+    """Receive local notices and yield the registered descriptor name, if any."""
     directory = _directory(runtime_root, create=True)
     if directory is None:
-        yield False
+        yield None
         return
     secret = secrets.token_bytes(_SECRET)
     active: set[asyncio.Task[None]] = set()
@@ -189,7 +189,7 @@ async def session_notice_receiver(
                 listener.close()
                 await listener.wait_closed()
                 listener = None
-        yield descriptor is not None
+        yield descriptor[0].name if descriptor is not None else None
     finally:
         if descriptor is not None:
             _unlink_descriptor(*descriptor)
@@ -230,7 +230,7 @@ async def _send(peer: tuple[int, bytes], frame: bytes) -> bool:
 
 @contextlib.asynccontextmanager
 async def session_notice_publisher(
-    runtime_root: Path,
+    runtime_root: Path, *, exclude: str | None = None,
 ) -> "AsyncIterator[SessionNoticeOffer]":
     """Yield a nonblocking offer callback; only lifecycle notices discover peers."""
     pending: deque[tuple[bytes, bool]] = deque()
@@ -264,7 +264,7 @@ async def session_notice_publisher(
     async def send(frame: bytes, discover: bool) -> None:
         nonlocal peers
         if discover:
-            peers = await asyncio.to_thread(_discover, runtime_root)
+            peers = await asyncio.to_thread(_discover, runtime_root, exclude)
         delivered = await asyncio.gather(*(_send(peer, frame) for peer in peers))
         peers = [peer for peer, sent in zip(peers, delivered) if sent]
 

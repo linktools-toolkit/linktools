@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
 
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai._common import _open_local_runtime
@@ -18,7 +18,7 @@ from linktools.commands.ai._common import _open_local_runtime
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 if TYPE_CHECKING:
-    from acp.schema import AgentMessageChunk, UserMessageChunk
+    from acp.schema import AgentMessageChunk, AgentThoughtChunk, UserMessageChunk
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="local Linux ACP stdio integration")
@@ -37,7 +37,9 @@ async def test_acp_stdio_lists_and_loads_sessions_with_effective_web_workspace(t
     outside_link.symlink_to(tmp_path, target_is_directory=True)
     workspace = Workspace.initialize(root)
     async with _open_local_runtime(workspace, model=_Models(_UsageFunctionModel(
-        lambda _messages, _info: ModelResponse(parts=[TextPart("Saved answer")]),
+        lambda _messages, _info: ModelResponse(parts=[
+            ThinkingPart("  Saved thought  ", signature="not-for-client"), TextPart("Saved answer"),
+        ]),
     ))) as local:
         app = create_app(runtime=local.runtime)
         headers = {"Origin": "http://127.0.0.1:8765", "Sec-Fetch-Site": "same-origin", "X-Linktools-Console": "1"}
@@ -63,7 +65,7 @@ async def test_acp_stdio_lists_and_loads_sessions_with_effective_web_workspace(t
         def __init__(self) -> None:
             self.updates: list[tuple[str, str, str]] = []
 
-        async def session_update(self, session_id: str, update: "AgentMessageChunk | UserMessageChunk") -> None:
+        async def session_update(self, session_id: str, update: "AgentMessageChunk | AgentThoughtChunk | UserMessageChunk") -> None:
             self.updates.append((session_id, update.session_update, update.content.text))
 
     source = Path(__file__).resolve().parents[2]
@@ -107,5 +109,6 @@ async def test_acp_stdio_lists_and_loads_sessions_with_effective_web_workspace(t
                     await client.load_session(cwd=item.cwd, session_id=item.session_id, mcp_servers=[])
             assert recorder.updates == [
                 ("web-default", "user_message_chunk", "Saved question"),
+                ("web-default", "agent_thought_chunk", "  Saved thought  "),
                 ("web-default", "agent_message_chunk", "Saved answer"),
             ]

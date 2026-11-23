@@ -8,8 +8,7 @@ from argparse import Namespace
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from secrets import token_hex
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
@@ -20,7 +19,7 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.core import DEFAULT_DISCOVERY_POLICY, ExecutionEventType
+from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_sqlite
 from linktools.ai.observe import Metrics
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding
     from linktools.ai.runtime import Runtime
-    from linktools.ai.session import LocalSessionTurnNotice, ToolProcessItem
+    from linktools.ai.session import LocalSessionTurnNotice, ToolProcessItem, ToolProcessStatus
     from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
@@ -213,7 +212,6 @@ class LocalRuntime:
 class _LocalSessionFeed:
     def __init__(self, runtime: "Runtime") -> None:
         self.runtime = runtime
-        self.source = token_hex(16)
         self._callbacks: dict[str, set["Callable[[str, ToolProcessItem], None]"]] = {}
 
     def subscribe(
@@ -230,8 +228,6 @@ class _LocalSessionFeed:
         return unsubscribe
 
     def receive(self, value: dict[str, object]) -> None:
-        if value.get("source") == self.source:
-            return
         kind, session_id, execution_id = value.get("kind"), value.get("session_id"), value.get("execution_id")
         if not isinstance(session_id, str) or not session_id or not isinstance(execution_id, str) or not execution_id:
             return
@@ -241,37 +237,41 @@ class _LocalSessionFeed:
             row = value.get("process")
             if not isinstance(row, dict):
                 return
-            key = row.get("key")
-            if not isinstance(key, str) or not key.startswith("tool:"):
+            key, name, status = row.get("key"), row.get("tool_name"), row.get("status")
+            if (row.get("kind") != "tool" or not isinstance(key, str) or not key.startswith("tool:")
+                    or len(key) <= len("tool:") or not isinstance(name, str) or not name
+                    or status not in ("RUNNING", "SUCCEEDED", "FAILED", "INTERRUPTED", "CANCELLED")):
                 return
-            from linktools.ai.session import project_tool_process_event
+            position = row.get("position")
+            if position is not None:
+                if not isinstance(position, list) or len(position) != 2:
+                    return
+                message_seq, part_index = position
+                if type(message_seq) is not int or message_seq < 1 or type(part_index) is not int or part_index < 0:
+                    return
+                position = (message_seq, part_index)
+            from linktools.ai.session import ToolProcessItem
 
-            event_type = ExecutionEventType.TOOL_CALL_STARTED if row.get("status") == "RUNNING" else ExecutionEventType.TOOL_CALL_FINISHED
-            item = project_tool_process_event(event_type.value, {
-                "call_id": key[5:], "tool_name": row.get("tool_name"),
-                "status": row.get("status"), "tool_position": row.get("position"),
-            })
-            if item is not None:
-                for callback in tuple(self._callbacks.get(session_id, ())):
-                    callback(execution_id, item)
+            item = ToolProcessItem(key, name, cast("ToolProcessStatus", status), position)
+            for callback in tuple(self._callbacks[session_id]):
+                callback(execution_id, item)
 
 
 @asynccontextmanager
 async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "AsyncIterator[_LocalSessionFeed | None]":
     from ._session_notices import session_notice_publisher, session_notice_receiver
 
-    feed = _LocalSessionFeed(local.runtime)
+    feed = _LocalSessionFeed(local.runtime) if receive else None
     runtime_root = _local_runtime_root(local.workspace)
     async with AsyncExitStack() as stack:
-        offer = await stack.enter_async_context(session_notice_publisher(runtime_root))
+        receiver = None if feed is None else await stack.enter_async_context(session_notice_receiver(runtime_root, feed.receive))
+        offer = await stack.enter_async_context(session_notice_publisher(runtime_root, exclude=receiver))
 
         def publish(notice: "LocalSessionTurnNotice") -> None:
-            offer({**asdict(notice), "source": feed.source}, discover=notice.kind != "tool")
+            offer(asdict(notice), discover=notice.kind != "tool")
 
         stack.callback(local.runtime.sessions.observe_local_turns(publish))
-        if receive:
-            await stack.enter_async_context(session_notice_receiver(runtime_root, feed.receive))
-        yield feed if receive else None
+        yield feed
 
 
 @asynccontextmanager

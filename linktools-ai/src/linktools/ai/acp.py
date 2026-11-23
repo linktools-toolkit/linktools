@@ -75,9 +75,9 @@ class ACPAgent:
         return schema.InitializeResponse(
             protocolVersion=protocol_version,
             agentCapabilities=schema.AgentCapabilities(
-                loadSession=self._workspace is not None,
+                loadSession=True,
                 sessionCapabilities=schema.SessionCapabilities(
-                    list=None if self._workspace is None else schema.SessionListCapabilities(),
+                    list=schema.SessionListCapabilities(),
                 ),
             ),
             authMethods=[],
@@ -104,12 +104,12 @@ class ACPAgent:
         cursor = None
         pages = []
         try:
-            logical_cwd = self._workspace_cwd(cwd)
+            logical_cwd = None if self._workspace is None else self._workspace_cwd(cwd)
             while True:
                 detail = await self._runtime.history.session_detail(
                     session_id, principal=self._principal, cursor=cursor,
                 )
-                if (detail.session.cwd or ".") != logical_cwd:
+                if logical_cwd is not None and (detail.session.cwd or ".") != logical_cwd:
                     raise acp.RequestError.invalid_params({"reason": "workspace_cwd_mismatch"})
                 page = detail.timeline
                 pages.append(page.items)
@@ -129,8 +129,10 @@ class ACPAgent:
                         ))
                     process_by_key = {item.key: item for item in turn.process}
                     for item in turn.items:
-                        if item.item_kind == "assistant" and isinstance(item.content, str) and item.content:
-                            await connection.session_update(session_id, _assistant_chunk(schema, item.content))
+                        if item.item_kind in ("assistant", "thinking") and isinstance(item.content, str) and item.content:
+                            await connection.session_update(session_id, _assistant_chunk(
+                                schema, item.content, thinking=item.item_kind == "thinking",
+                            ))
                         elif item.item_kind == "tool_call" and item.tool_call_id is not None:
                             process = process_by_key.pop(f"tool:{item.tool_call_id}", None)
                             if process is not None:
@@ -146,10 +148,8 @@ class ACPAgent:
         **kwargs: JsonValue,
     ) -> JsonValue:
         self._require_initialized()
-        acp, schema = _require_acp()
+        _, schema = _require_acp()
         workspace = self._workspace
-        if workspace is None:
-            raise acp.RequestError.invalid_params({"reason": "workspace_required"})
         try:
             logical_cwd = None if cwd is None else self._workspace_cwd(cwd)
         except AIError:
@@ -157,14 +157,15 @@ class ACPAgent:
         page = await self._runtime.sessions.list(
             ListSessionRequest(self._principal, cursor=cursor, limit=200),
         )
-        return schema.ListSessionsResponse(
-            sessions=[
-                schema.SessionInfo(sessionId=item.session_id, cwd=str(workspace.root / (item.cwd or ".")))
-                for item in page.items
-                if logical_cwd is None or (item.cwd or ".") == logical_cwd
-            ],
-            nextCursor=page.next_cursor,
-        )
+        sessions = []
+        for item in page.items:
+            directory = item.cwd if workspace is None else item.cwd or "."
+            if logical_cwd is None or directory == logical_cwd:
+                sessions.append(schema.SessionInfo(
+                    sessionId=item.session_id,
+                    cwd=(directory or "") if workspace is None else str(workspace.root / (directory or ".")),
+                ))
+        return schema.ListSessionsResponse(sessions=sessions, nextCursor=page.next_cursor)
 
     async def resume_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
         return await self.load_session(cwd, session_id, **kwargs)
@@ -188,8 +189,7 @@ class ACPAgent:
     def _workspace_cwd(self, cwd: str) -> str:
         workspace = self._workspace
         if workspace is None:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
-                          safe_details={"field": "cwd", "reason": "workspace_required"})
+            return cwd
         try:
             path = Path(cwd)
             if not path.is_absolute() or ".." in path.parts:
@@ -254,9 +254,10 @@ class ACPAgent:
                 return
             event = item.event
             payload = event.payload
-            if event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
+            thinking = event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value
+            if thinking or event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
                 if isinstance(payload, dict) and isinstance(text := payload.get("text"), str) and text:
-                    await connection.session_update(session_id, _assistant_chunk(schema, text))
+                    await connection.session_update(session_id, _assistant_chunk(schema, text, thinking=thinking))
             else:
                 process = project_tool_process_event(event.event_type, payload)
                 if process is not None:
@@ -409,7 +410,11 @@ def _history_text(value: JsonValue) -> tuple[str, ...]:
     return ()
 
 
-def _assistant_chunk(schema: ModuleType, text: str) -> JsonValue:
+def _assistant_chunk(schema: ModuleType, text: str, *, thinking: bool) -> JsonValue:
+    if thinking:
+        return schema.AgentThoughtChunk(
+            content=schema.TextContentBlock(type="text", text=text), sessionUpdate="agent_thought_chunk",
+        )
     return schema.AgentMessageChunk(
         content=schema.TextContentBlock(type="text", text=text), sessionUpdate="agent_message_chunk",
     )
