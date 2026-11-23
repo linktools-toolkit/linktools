@@ -118,6 +118,76 @@ async def test_session_release_does_not_wait_for_stalled_chat_observer() -> None
 
 
 @pytest.mark.asyncio
+async def test_session_disconnect_joins_observer_that_finishes_during_cancellation() -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal, SessionStatus
+    from linktools.ai.history import ExecutionInfo
+
+    watching, disconnected = asyncio.Event(), asyncio.Event()
+    observer = None
+
+    async def session_watch(_session_id, *, principal):
+        yield SimpleNamespace(status=SessionStatus.OPEN, active_execution_id="run", revision=1)
+        await asyncio.Future()
+
+    async def execution_watch(**_kwargs):
+        nonlocal observer
+        observer = asyncio.current_task()
+        watching.set()
+        # An underlying store may finish its operation when cancellation arrives.
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            return
+        yield
+
+    async def inspect_execution(execution_id, *, principal):
+        now = datetime.now(timezone.utc)
+        return ExecutionInfo(
+            execution_id, "agent", "default", None, ExecutionStatus.SUCCEEDED,
+            ExecutionLineageKind.RUN, None, execution_id, None, "chosen", now, now, None,
+        )
+
+    async def execution_get(_execution_id, *, principal):
+        return SimpleNamespace(watch=execution_watch)
+
+    runtime = SimpleNamespace(
+        history=SimpleNamespace(inspect_execution=inspect_execution),
+        default_principal=Principal("runtime", "default"),
+        sessions=SimpleNamespace(watch=session_watch), executions=SimpleNamespace(get=execution_get),
+        events=SimpleNamespace(has_local_producer=lambda _: True),
+    )
+    app = create_app(runtime=runtime, shutdown_event=asyncio.Event())
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
+             "scheme": "http", "path": "/api/session/events", "raw_path": b"/api/session/events",
+             "query_string": b"session_id=chosen&view=chat", "headers": [],
+             "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 12345)}
+
+    async def receive():
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(_message):
+        pass
+
+    stream = asyncio.create_task(app(scope, receive, send))
+    try:
+        await asyncio.wait_for(watching.wait(), 5)
+        disconnected.set()
+        done, _ = await asyncio.wait((stream,), timeout=5)
+        assert stream in done, "a disconnect must not wait for an unread observer frame"
+        stream.result()
+        assert observer.done()
+    finally:
+        disconnected.set()
+        if observer is not None and not observer.done():
+            observer.cancel()
+        await asyncio.gather(stream, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pytest.MonkeyPatch) -> None:
     from pydantic_ai.messages import ModelMessage, ModelResponse
     from pydantic_ai.models.function import AgentInfo

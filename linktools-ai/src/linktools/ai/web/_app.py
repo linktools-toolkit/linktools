@@ -467,7 +467,9 @@ class _Console:
                 if not tools.full():
                     tools.put_nowait((execution_id, item))
 
-            async def pump(execution_id: str, queue: asyncio.Queue[_ExecutionFrame | Exception | None]) -> None:
+            async def pump(execution_id: str, queue: asyncio.Queue[_ExecutionFrame]) -> None:
+                task = asyncio.current_task()
+                assert task is not None
                 try:
                     if environ.debug:
                         request.state.phase = "execution.watch"
@@ -479,12 +481,12 @@ class _Console:
                     frames = self._execution_frames(request, execution_id, watch, chat=True, local_only=True, compact=True)
                     async with aclosing(frames):
                         async for frame in frames:
+                            if task.cancelling():
+                                return
                             await queue.put(frame)
                 except AIError as error:
-                    await queue.put(self._execution_error_frame(request, error, chat=True))
-                except Exception as error:
-                    await queue.put(error)
-                await queue.put(None)
+                    if not task.cancelling():
+                        await queue.put(self._execution_error_frame(request, error, chat=True))
 
             async def authorize_remote(execution_id: str) -> str | None:
                 if feed is not None:
@@ -508,52 +510,60 @@ class _Console:
             ended_while_started = False
             occupancy: dict[str, object] | None = None
 
+            def finish_retiring(task: asyncio.Task) -> None:
+                retiring.discard(task)
+                if not task.cancelled():
+                    task.exception()
+
             def stop_execution() -> None:
                 nonlocal producer, frame_task, watching
                 for task in (producer, frame_task):
                     if task is not None:
                         retiring.add(task)
-                        task.add_done_callback(retiring.discard)
+                        task.add_done_callback(finish_retiring)
                         task.cancel()
                 producer = frame_task = watching = None
 
             try:
                 while True:
                     done, _ = await asyncio.wait(
-                        tuple(task for task in (state_task, tool_task, frame_task) if task is not None),
+                        tuple(task for task in (state_task, tool_task, frame_task, producer) if task is not None),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    if frame_task in done:
+                    # Completion doesn't invalidate a final frame already buffered by the pump.
+                    if producer in done and not frame_task.done() and not execution_frames.empty():
+                        await frame_task
+                    if frame_task is not None and frame_task.done():
                         frame = frame_task.result()
                         # Session occupancy must not wait for optional observation to finish.
-                        if state_task not in done or isinstance(frame, tuple) and frame[0] == "snapshot":
-                            if isinstance(frame, Exception):
-                                raise frame
-                            if frame is None:
-                                await producer
-                                frame_task = producer = None
-                                if (ended_while_started and watching is not None and watching == last_active
-                                        and last_local and not runtime.events.has_local_producer(watching)):
-                                    authorized_execution = await authorize_remote(watching)
-                                    last_local = False
-                                    watching = None
-                                    if occupancy is not None and not state_task.done():
-                                        yield _sse_frame("message", {**occupancy, "local_execution": False})
+                        if not state_task.done() or frame[0] == "snapshot":
+                            frame_task = asyncio.create_task(execution_frames.get())
+                            event, data, cursor = frame
+                            if event == "message":
+                                # EventSource resumes from the SSE id, not the JSON body.
+                                data.pop("cursor", None)
+                            if event == "snapshot":
+                                ended_while_started = isinstance(data, Mapping) and data.get("status") == "STARTED"
+                            event_id = None if cursor is None else json.dumps((watching, cursor), separators=(",", ":"))
+                            if event in ("text", "thinking"):
+                                yield _sse_frame(event, data, event_id)
                             else:
-                                frame_task = asyncio.create_task(execution_frames.get())
-                                event, data, cursor = frame
-                                if event == "message":
-                                    # EventSource resumes from the SSE id, not the JSON body.
-                                    data.pop("cursor", None)
-                                if event == "snapshot":
-                                    ended_while_started = isinstance(data, Mapping) and data.get("status") == "STARTED"
-                                event_id = None if cursor is None else json.dumps((watching, cursor), separators=(",", ":"))
-                                if event in ("text", "thinking"):
-                                    yield _sse_frame(event, data, event_id)
-                                else:
-                                    yield _sse_frame("execution", {"execution_id": watching, "event": event, "data": data}, event_id)
+                                yield _sse_frame("execution", {"execution_id": watching, "event": event, "data": data}, event_id)
                             continue
-                    if state_task not in done:
+                    elif producer in done and not state_task.done():
+                        producer.result()
+                        frame_task.cancel()
+                        await asyncio.gather(frame_task, return_exceptions=True)
+                        frame_task = producer = None
+                        if (ended_while_started and watching is not None and watching == last_active
+                                and last_local and not runtime.events.has_local_producer(watching)):
+                            authorized_execution = await authorize_remote(watching)
+                            last_local = False
+                            watching = None
+                            if occupancy is not None and not state_task.done():
+                                yield _sse_frame("message", {**occupancy, "local_execution": False})
+                        continue
+                    if not state_task.done():
                         execution_id, item = tool_task.result()
                         tool_task = asyncio.create_task(tools.get())
                         # A transport hint never grants access or identifies a session owner.
@@ -596,10 +606,10 @@ class _Console:
             finally:
                 if unsubscribe is not None:
                     unsubscribe()
-                tasks = (*retiring, *(task for task in (state_task, tool_task, frame_task, producer) if task is not None))
+                tasks = tuple(task for task in (state_task, tool_task, frame_task, producer) if task is not None)
                 for task in tasks:
                     task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*retiring, *tasks, return_exceptions=True)
                 await watch.aclose()
 
         return _SSEStream(stream(), self._shutdown_event)
