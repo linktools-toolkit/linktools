@@ -33,11 +33,16 @@ bundle calls.
    request contract; otherwise return a conflict. A different concurrent
    request follows the existing busy semantics. Do not pre-read merely to
    implement uniqueness; read just the necessary receipt on conflict.
-3. Acknowledge only after commit. An accepted but undispatched request must be
-   discoverable from its durable admission if the process stops between commit
-   and dispatch. Reuse the existing handoff/recovery entry point; do not assume
-   an in-memory wake is durable, enable default recovery scanning, or add a
-   synchronous outbox write solely for UI notifications.
+3. Acknowledge only after commit. HTTP 202 guarantees durable acceptance
+   and a stable execution ID, not that a worker has started. If the process
+   dies before dispatch, the same-key request can return that ID, but neither
+   receipt replay nor Refresh starts work. Extend the existing authorized
+   execution recovery operation for an abandoned, regenerate-safe admission:
+   the current checkpoint-based recovery path rejects unprepared starts.
+   Recover with the original admitted principal, input and binding, after
+   the original writer is gone or durably superseded. Concurrent recovery
+   attempts compete through the same conditional ownership write. Automatic
+   recovery stays off by default; no new synchronous outbox for UI notices.
 
 ### Run and recover
 
@@ -164,7 +169,9 @@ production MySQL numbers or expected gains.
   authoritative result, no repeated unsafe effect, and correct recovery. Cover
   a replay-safe mutation whose original arguments differ from a fresh model
   output, a counted request across restart, and replacement preview without
-  mixing generations.
+  mixing generations. In the crash-before-dispatch fixture, a same-key retry
+  returns the original execution ID, a passive reload makes no model calls,
+  and two authorized recoveries elect one writer and publish one terminal turn.
 - **Full-path measurement:** compare at identical SDK/DB/profile for plain
   and single-tool turns, Trace off/on, 0/1/2 observers, cold vs warm, and
   reconnect. Label intentional history reads separately from “no observer”;
