@@ -604,8 +604,7 @@ async def project_session_turn(
 
     async def capture(group: StateGroupTransaction) -> SessionTimelineCapture:
         root = await sessions.get(session_id, tenant_id=principal.tenant_id)
-        if (root is None or header.kind is not ResourceKind.SESSION
-                or header.tenant_id != principal.tenant_id or root.session_id != header.id
+        if (root is None or root.session_id != header.id
                 or root.owner_principal_id != header.owner_principal_id):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         histories = _timeline_history_capture_repository(conversation, transcript_store)

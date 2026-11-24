@@ -1404,6 +1404,19 @@ class SessionRepository(SessionRepositoryContract, RuntimeRepository, Protocol):
         admitted_turn: SessionTurnRef | None = None,
     ) -> SessionTurnCommit | None: ...
 
+    async def publish_and_release_turn_in_transaction(
+        self,
+        transaction: StateTransaction,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        start_message_index: int,
+        end_message_index: int,
+        history_unavailable: bool,
+        allow_unadmitted: bool = False,
+    ) -> tuple[SessionRecord, SessionTurnCommit | None]: ...
+
     async def get_in_transaction(
         self,
         transaction: StateTransaction,

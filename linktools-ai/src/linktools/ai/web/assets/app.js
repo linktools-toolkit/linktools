@@ -375,8 +375,7 @@ function watchSession(id, {restart=false}={}) {
     if(!value || !['OPEN','CLOSING','CLOSED','CLEANUP_REQUIRED'].includes(value.status)
       || !Number.isSafeInteger(value.revision) || value.revision<0
       || !Object.hasOwn(value,'active_execution_id')
-      || value.active_execution_id!==null && (typeof value.active_execution_id!=='string' || !value.active_execution_id)
-      || value.session_id!==undefined && value.session_id!==id) {
+      || value.active_execution_id!==null && (typeof value.active_execution_id!=='string' || !value.active_execution_id)) {
       watch.ready=false;setDisabled();return;
     }
     if(watch.revision!==null && value.revision<watch.revision)return;

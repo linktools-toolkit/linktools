@@ -290,10 +290,33 @@ async def test_releasing_published_failed_turn_advances_the_session_once(tmp_pat
         admitted = await sessions.admit_execution(
             "session", tenant_id="tenant", execution_id=execution.execution_id, expected=None,
         )
-        await _commit_empty_turn(state, execution)
-        released = await sessions.release_execution(
-            "session", tenant_id="tenant", execution_id=execution.execution_id, require_turn_commit=True,
-        )
+        with pytest.raises(AIError) as missing_commit:
+            await sessions.release_execution(
+                "session", tenant_id="tenant", execution_id=execution.execution_id, require_turn_commit=True,
+            )
+        assert missing_commit.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+        assert (await sessions.get("session", tenant_id="tenant")).active_execution_id == execution.execution_id
+
+        async def publish(transaction):
+            return await sessions.publish_and_release_turn_in_transaction(
+                transaction, "session", tenant_id="tenant", execution_id=execution.execution_id,
+                start_message_index=0, end_message_index=0, history_unavailable=False,
+            )
+
+        engine = sessions.state_store.storage_group.context.engine.sync_engine
+        fact_reads = []
+
+        def statement(_connection, _cursor, sql, _parameters, _context, _many):
+            if sql.lstrip().upper().startswith("SELECT") and "FROM ai_state_facts" in sql:
+                fact_reads.append(sql)
+
+        event.listen(engine, "before_cursor_execute", statement)
+        try:
+            released, receipt = await sessions.state_store.mutate(publish)
+        finally:
+            event.remove(engine, "before_cursor_execute", statement)
+        assert receipt is not None and receipt.execution_id == execution.execution_id
+        assert len(fact_reads) == 1
         assert released.active_execution_id is None
         assert released.revision == admitted.revision + 1
         assert (await _history(state).session_turn(
