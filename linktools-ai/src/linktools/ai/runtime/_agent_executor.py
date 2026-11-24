@@ -1425,6 +1425,7 @@ def _event_stream_capability(
                     origin = recorder.tool_call_position(event.part.tool_call_id)
                     if origin is not None:
                         position["tool_position"] = list(origin)
+                        position["tool_model_request_seq"] = recorder.model_request_seq_for_tool_call(event.part.tool_call_id)
                 emission = DurableBoundary(
                     emission.event_type, {**emission.payload, **position}
                 )

@@ -100,12 +100,19 @@ def _wire(value: object) -> object:
 
 
 def _chat_timeline(page: Page[SessionTurn]) -> Page[SessionTurn]:
-    # Chat receives rendered SDK text, not raw parts or tool payloads.
-    return replace(page, items=tuple(
-        replace(turn, items=tuple(item for item in turn.items if item.item_kind in {"assistant", "thinking"}),
-                safe_error_details={})
-        for turn in page.items
-    ))
+    # Tool markers preserve placement; names/status come from process, not tool payloads.
+    turns = []
+    for turn in page.items:
+        seen_calls = set()
+        items = []
+        for item in turn.items:
+            if item.item_kind in {"assistant", "thinking"}:
+                items.append(item)
+            elif item.item_kind == "tool_call" and item.tool_call_id and item.tool_call_id not in seen_calls:
+                seen_calls.add(item.tool_call_id)
+                items.append(replace(item, content=None, tool_name=None))
+        turns.append(replace(turn, items=tuple(items), safe_error_details={}))
+    return replace(page, items=tuple(turns))
 
 
 _CHAT_STREAM_POSITION = {"agent_run_seq", "model_request_seq", "stream_attempt_seq"}
@@ -134,8 +141,14 @@ def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
     cursor = item.cursor
     event = item.event
     process = project_tool_process_event(event.event_type, event.payload)
-    if process is not None:
-        return "message", {"type": "process", "item": _wire(process), "cursor": cursor}, cursor
+    if process is not None and isinstance(event.payload, Mapping):
+        frame = {"type": "process", "item": _wire(process), "cursor": cursor}
+        agent = event.payload.get("agent_run_seq")
+        request = event.payload.get("tool_model_request_seq")
+        if (process.position is not None and type(agent) is int and agent > 0
+                and type(request) is int and request > 0):
+            frame["order"] = (agent, request, process.position[1])
+        return "message", frame, cursor
     allowed = _CHAT_STREAM_FIELDS.get(event.event_type)
     if allowed is None or not isinstance(event.payload, Mapping):
         return None

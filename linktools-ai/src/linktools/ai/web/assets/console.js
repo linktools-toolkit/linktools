@@ -38,7 +38,7 @@ export function streamAttemptText(attempt,kind='text') {
   return attempt[kind]+[...attempt.parts.values()].sort((a,b)=>a.index-b.index).filter(part=>part.kind===kind).map(part=>part.content).join('');
 }
 export function streamResponsePreview(request) {
-  const parts=new Map(),result={text:'',thinking:'',truncated:request.truncated || false};
+  const parts=new Map(),result={text:'',thinking:'',loose:{text:'',thinking:''},parts:[],truncated:request.truncated || false};
   for(const attempt of [...request.attempts.values()].sort((a,b)=>a.seq-b.seq)) {
     if(attempt.status!=='SUCCEEDED' && !(attempt.seq===request.current && attempt.status==='RUNNING'))continue;
     result.text+=attempt.text;result.thinking+=attempt.thinking;result.truncated ||= attempt.truncated;
@@ -47,7 +47,9 @@ export function streamResponsePreview(request) {
       parts.set(part.index,part.start || !previous?{...part}:{...part,content:previous.content+part.content});
     }
   }
-  for(const part of [...parts.values()].sort((a,b)=>a.index-b.index))result[part.kind]+=part.content;
+  result.loose={text:result.text,thinking:result.thinking};
+  result.parts=[...parts.values()].sort((a,b)=>a.index-b.index);
+  for(const part of result.parts)result[part.kind]+=part.content;
   return result;
 }
 export function updateStreamAttempts(requests,item) {

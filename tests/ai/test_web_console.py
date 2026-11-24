@@ -1171,9 +1171,10 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
             return SessionDetail(await self.inspect_session(identity, **kwargs), Page((SessionTurn(
                 "execution", ExecutionStatus.SUCCEEDED, now, now, "user", True,
                 (SessionTurnItem(1, "thinking", thinking),
-                 SessionTurnItem(2, "tool_call", raw_marker),
+                 SessionTurnItem(2, "tool_call", raw_marker, "lookup", "id"),
                  SessionTurnItem(3, "tool_result", raw_marker),
-                 SessionTurnItem(4, "assistant", "answer")),
+                 SessionTurnItem(4, "assistant", "answer"),
+                 SessionTurnItem(5, "tool_call", raw_marker, "lookup", "id")),
                 process=(process,),
             ),)))
 
@@ -1194,7 +1195,8 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
                 ("ASSISTANT_THINKING_DELTA", {"text": thinking, "signature": raw_marker}, 0),
                 ("ASSISTANT_THINKING_DELTA", {"text": raw_marker}, 1),
                 ("TOOL_CALL_FINISHED", {"call_id": "id", "tool_name": "lookup", "status": "SUCCEEDED",
-                                        "result": raw_marker, "tool_position": [2, 1]}, 0),
+                                        "result": raw_marker, "tool_position": [2, 1], "agent_run_seq": 1,
+                                        "tool_model_request_seq": 2, "model_request_seq": 7}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": "answer", "internal": raw_marker}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": raw_marker}, 1),
                 ("MODEL_ATTEMPT_FINISHED", {"status": "SUCCEEDED", "provider_request": raw_marker}, 0),
@@ -1230,8 +1232,10 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         assert raw_marker not in history.text
         turn = history.json()["timeline"]["items"][0]
         assert [(item["item_kind"], item["content"]) for item in turn["items"]] == [
-            ("thinking", thinking), ("assistant", "answer"),
+            ("thinking", thinking), ("tool_call", None), ("assistant", "answer"),
         ]
+        assert turn["items"][1]["tool_call_id"] == "id"
+        assert turn["items"][1]["tool_name"] is None
         assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup", "status": "SUCCEEDED", "position": [2, 1]}]
         removed = await http.get("/api/executions/execution/events?view=chat")
         assert removed.status_code == 400
@@ -1270,6 +1274,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
     assert [name for name, _ in frames] == ["message", "thinking", "execution", "text", "execution", "execution"]
     assert frames[1][1] == {"execution_id": "execution", "text": thinking}
     assert frames[2][1]["data"]["item"] == turn["process"][0]
+    assert frames[2][1]["data"]["order"] == [1, 2, 1]
     assert frames[3][1] == {"execution_id": "execution", "text": "answer"}
     assert frames[-1][1]["data"]["status"] == "SUCCEEDED"
 
@@ -1491,10 +1496,12 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
 async def test_chat_tool_positions_match_history_when_parallel_results_finish_out_of_order() -> None:
     from linktools.ai.capability import AgentContext
     from linktools.ai.session import project_tool_process_event
+    from linktools.ai.web._app import _chat_frame
     from pydantic_ai.messages import (
         ModelMessage,
         ModelResponse,
         TextPart,
+        ThinkingPart,
         ToolCallPart,
         ToolReturnPart,
     )
@@ -1514,6 +1521,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
             return ModelResponse(parts=[TextPart("done")])
         return ModelResponse(parts=[
             ToolCallPart("lookup", {"label": "first"}, tool_call_id="z"),
+            ThinkingPart("Between calls"),
             ToolCallPart("lookup", {"label": "second"}, tool_call_id="a"),
         ])
 
@@ -1534,6 +1542,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         execution = await runtime.executions.get(accepted.json()["execution_id"])
         started = []
         finished = []
+        orders = {}
         try:
             async with asyncio.timeout(10):
                 async for observation in execution.watch():
@@ -1541,6 +1550,10 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
                     item = project_tool_process_event(event.event_type, event.payload)
                     if item is None:
                         continue
+                    frame = _chat_frame(observation)
+                    assert frame is not None
+                    order = frame[1]["order"]
+                    assert orders.setdefault(item.key, order) == order
                     if item.status == "RUNNING":
                         started.append(item)
                     elif item.status == "SUCCEEDED":
@@ -1556,6 +1569,12 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         assert [item.key for item in started] == ["tool:z", "tool:a"], turn
         assert [item.key for item in finished] == ["tool:a", "tool:z"], turn
         assert turn["conversation_committed"]
+        assert [(item["item_kind"], item["tool_call_id"], item["content"]) for item in turn["items"]] == [
+            ("tool_call", "z", None), ("thinking", None, "Between calls"),
+            ("tool_call", "a", None), ("assistant", None, "done"),
+        ]
+        assert orders["tool:z"][:2] == orders["tool:a"][:2]
+        assert (orders["tool:z"][2], orders["tool:a"][2]) == (0, 2)
         assert [item["key"] for item in turn["process"]] == ["tool:z", "tool:a"]
         saved = {item["key"]: tuple(item["position"]) for item in turn["process"]}
         assert {item.key: item.position for item in started} == saved

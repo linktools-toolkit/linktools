@@ -866,7 +866,7 @@ if(process.argv[3]==='tools') {
   sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});
   timelineOverrides.set('a',{items:[turn],next_cursor:null});streamBlocks.set(id,{});
   await select('#session=a');await until('tool stream opened',()=>streamBlocks.get(id).controller);
-  const emit=(type,item,cursor=null)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type,item,cursor})+'\n\n'));
+  const emit=(type,item,cursor=null,order)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type,item,cursor,order})+'\n\n'));
   const event=(event_type,payload)=>emit('event',{execution_id:id,depth:0,event:{event_type,payload}});
   const delta=(name,part,fields,cursor)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode(
     'id: '+JSON.stringify([id,cursor])+'\nevent: '+name+'\ndata: '+JSON.stringify({execution_id:id,part,...fields})+'\n\n'));
@@ -878,38 +878,50 @@ if(process.argv[3]==='tools') {
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
   assert.equal(sessionSources.at(-1).url.searchParams.get('view'),'chat');
   assert.equal(calls.filter(call=>call.key==='/api/executions/'+id+'/events').length,0,'Chat uses its session EventSource only');
-  delta('thinking','1.1.1.0',{start:true,text:sdkThinking},'thinking-start');
-  delta('text','1.1.1.1',{start:true,text:'Superseded preview'},'old-text');
-  delta('text','1.1.1.1',{start:true},'empty-start');
-  delta('text','1.1.1.1',{text:'Answer'},'answer');
-  emit('process',laterTool,'later-tool-cursor');emit('process',tool,'tool-cursor');
-  await until('live process and answer share the turn',()=>processArea().textContent.includes('lookupIn progress') && article().textContent.includes('Answer') && article().textContent.includes(sdkThinking));
+  delta('text','1.1.1.0',{start:true,text:'Superseded preview'},'old-text');
+  delta('text','1.1.1.0',{start:true},'empty-start');
+  delta('text','1.1.1.0',{text:'First answer'},'answer');
+  delta('thinking','1.2.1.0',{start:true,text:'Superseded hidden thought'},'old-attempt-thinking');
+  event('MODEL_ATTEMPT_FINISHED',{agent_run_seq:1,model_request_seq:2,stream_attempt_seq:1,status:'FAILED'});
+  delta('thinking','1.2.2.0',{start:true,text:sdkThinking},'thinking-start');
+  delta('thinking','1.2.1.0',{text:'Late stale thought'},'discarded-attempt');
+  delta('text','1.2.2.1',{start:true,text:'Intermediate'},'intermediate');
+  delta('text','1.4.1.0',{start:true,text:'Final reply'},'final');
+  emit('process',laterTool,'later-tool-cursor',[1,3,0]);emit('process',tool,'tool-cursor',[1,1,1]);
+  const liveParts=()=>({children:node('live').children.filter(item=>item.className==='stream-attempt')
+    .flatMap(item=>item.parts.children),textContent:node('live').textContent});
+  await until('live process and answer share the turn',()=>liveParts()?.textContent.includes('lookupIn progress') && article().textContent.includes('First answer') && article().textContent.includes(sdkThinking));
   assert.ok(article().contains(node('live')));
-  assert.doesNotMatch(article().textContent,/Superseded preview/,'an empty part start replaces content');
-  const liveThought=node('live').children.find(item=>item.className==='stream-attempt').thinking;
+  assert.doesNotMatch(article().textContent,/Superseded preview|Superseded hidden thought|Late stale thought/);
+  const liveThought=liveParts().children[2];
   assert.equal(liveThought.open,true,'live positioned thinking is visible without clicking');
-  assert.equal(liveThought.hidden,false);
-  const first=processArea().children[1];
-  assert.deepEqual(processArea().children.slice(1).map(row=>row.name.textContent),['lookup','secondary']);
+  const first=liveParts().children[1];
+  const mixedOrder=parent=>parent.children.map(row=>row.name?.textContent || row.body?.textContent || row.markdownBody?.textContent.trim() || row.textContent.trim());
+  assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup',sdkThinking,'Intermediate','secondary','Final reply']);
+  assert.equal(processArea().hidden,true,'positioned tools are not repeated in Process');
   assert.equal(first.status.getAttribute('aria-live'),'polite');
   const unranked={...tool,position:null};
   emit('process',{...unranked,status:'SUCCEEDED'});emit('process',unranked);
   await until('completed tool cannot be reopened by replay',()=>first.status.textContent==='Completed');
-  assert.equal(processArea().children[1],first);
+  assert.equal(liveParts().children[1],first);
 
   const old=streamBlocks.get(id).controller;old.close();
   await until('process stream reconnected',()=>streamBlocks.get(id).controller!==old);
   assert.equal(streamBlocks.get(id).resumeCursor,'tool-cursor');
   const completedThinking=sdkThinking+' + continuation';
-  delta('thinking','1.1.1.0',{text:' + continuation'},'resume-thinking');
+  delta('thinking','1.2.2.0',{text:' + continuation'},'resume-thinking');
   await until('stable native part continues after reconnect',()=>liveThought.body.textContent===completedThinking);
   emit('process',unranked);await settle();
-  assert.deepEqual(processArea().children.slice(1).map(row=>row.textContent),['lookupCompleted','secondaryIn progress']);
+  assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup',completedThinking,'Intermediate','secondary','Final reply']);
 
   const saved={...turn,status:'SUCCEEDED',conversation_committed:true,items:[
+    {item_kind:'assistant',content:'First answer'},
+    {item_kind:'tool_call',tool_call_id:'call',content:null},
     {item_kind:'thinking',content:completedThinking},
+    {item_kind:'assistant',content:'Intermediate'},
+    {item_kind:'tool_call',tool_call_id:'later',content:null},
     {item_kind:'tool_result',content:'Private saved result'},
-    {item_kind:'assistant',content:'Answer'},
+    {item_kind:'assistant',content:'Final reply'},
   ],process:[{...tool,status:'SUCCEEDED'},{...laterTool,status:'UNCONFIRMED'}]};
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
@@ -918,25 +930,26 @@ if(process.argv[3]==='tools') {
   const modelPreview=node('live').children.find(item=>item.className==='stream-attempt');
   assert.equal(modelPreview.label.hidden,true,'normal model status belongs to the Activity disclosure, not Chat');
   assert.equal(modelPreview.label.textContent,'');
-  assert.equal(modelPreview.thinking.body.textContent,completedThinking,'thinking remains visible until History replaces the preview');
-  assert.equal(modelPreview.body.hidden,false,'a completed model request is still a visible Chat preview until History arrives');
-  assert.equal(modelPreview.body.children[0].textContent.trim(),'Answer');
+  const expectedOrder=['First answer','lookup',completedThinking,'Intermediate','secondary','Final reply'];
+  assert.deepEqual(mixedOrder(liveParts()),expectedOrder,'completed model preview retains its inline order until History');
+  assert.equal(liveParts().children[1],first);
   timelineOverrides.set('a',{items:[saved],next_cursor:null});
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
   streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));
   streamBlocks.get(id).controller.close();
-  await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && processArea().textContent.includes('lookupCompleted'));
-  const current=processArea();
-  assert.deepEqual(current.children.map(item=>item.textContent),['Process','lookupCompleted','secondaryOutcome unconfirmed']);
+  const savedParts=()=>article()?.children.find(item=>item.className==='turn-saved-answers');
+  await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookupCompleted'));
+  assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
+  assert.match(savedParts().textContent,/secondaryOutcome unconfirmed/);
   const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===completedThinking);
   assert.equal(savedThought.length,1);
   assert.equal(savedThought[0].open,false,'committed History keeps thinking collapsed');
-  assert.equal(article().textContent.match(/Answer/g).length,1);
+  assert.equal(article().textContent.match(/First answer/g).length,1);
   assert.equal(modelReads(),readsBeforeCommit,'Chat terminal readback never loads retained model contents');
   assert.doesNotMatch(article().textContent,/Private saved result/);
   await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/SDK thinking|lookupCompleted/);
   await select('#session=a');
-  assert.deepEqual(processArea().children.slice(1).map(row=>row.textContent),['lookupCompleted','secondaryOutcome unconfirmed']);
+  assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
   assert.ok(descendants(article()).some(item=>item.tagName==='PRE' && item.textContent===completedThinking));
 
   const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
