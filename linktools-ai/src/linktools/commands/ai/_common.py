@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
+from linktools.errors import ConfigCastError
 
 from linktools.ai.asset import (
     AssetStore,
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
 MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
+MODEL_VISION = ConfigField(name="MODEL_VISION", cast=bool)
 _MODEL_NUMERIC_OPTIONS = (
     ("context_window", int, "context window in tokens"),
     ("max_tokens", int, "maximum output tokens"),
@@ -109,15 +111,15 @@ def _local_input_config(workspace: Workspace) -> tuple[str, ...]:
         values = workspace.config.get("input_types", [])
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
             raise ValueError("input_types must be a list of input type strings")
-        vision = os.getenv("LINKTOOLS_MODEL_VISION")
+        vision = environ.config.get(MODEL_VISION, default=None)
         if vision is None:
             return tuple(values)
-        if environ.config.cast(vision, bool):
+        if vision:
             return (*values, "image")
         return tuple(item for item in values if item != "image" and not (
             item.startswith("mime:") and item[5:].strip().lower().startswith("image/")
         ))
-    except (TypeError, ValueError) as error:
+    except (ConfigCastError, TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
             "Invalid workspace input_types or LINKTOOLS_MODEL_VISION configuration",

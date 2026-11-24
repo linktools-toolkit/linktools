@@ -54,7 +54,10 @@ To allow image attachments for one invocation, use `LINKTOOLS_MODEL_VISION=1 ai-
 The same environment variable works for `ai-run` and `ai-acp`. `LINKTOOLS_MODEL_VISION=1`
 (or `true`) adds the `image` category to workspace `input_types`; `LINKTOOLS_MODEL_VISION=0`
 (or `false`) removes image inputs but leaves all other types unchanged.
-When unset, the workspace list applies as written.
+You can also set `LINKTOOLS_MODEL_VISION` in the `env` section of the
+`.linktools.json` profile in the directory where you launch the command.
+It follows the same source precedence as `LINKTOOLS_MODEL_API`. When no source
+sets it, the workspace list applies as written.
 
 The console opens one execution Runtime and requires a configured model.
 Persisted history remains available in the same console. Merely opening the

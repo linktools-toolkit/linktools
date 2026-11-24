@@ -96,3 +96,34 @@ def test_local_vision_rejects_invalid_boolean(
     with pytest.raises(AIError) as raised:
         _ModelOptions.load(Workspace(tmp_path, {})).create_model_binding()
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+
+
+@pytest.mark.parametrize("process_env", [None, "0"])
+def test_local_vision_reads_cli_project_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_env: str | None,
+) -> None:
+    from linktools.commands.ai import _common
+    from linktools.core import Environ
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MODEL_API", raising=False)
+    monkeypatch.delenv("MODEL_VISION", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    if process_env is None:
+        monkeypatch.delenv("LINKTOOLS_MODEL_VISION", raising=False)
+    else:
+        monkeypatch.setenv("LINKTOOLS_MODEL_API", "openai")
+        monkeypatch.setenv("LINKTOOLS_MODEL_VISION", process_env)
+    (tmp_path / ".linktools.json").write_text('''{
+        "env": {
+            "LINKTOOLS_MODEL_API": "anthropic",
+            "ANTHROPIC_MODEL": "testing/profile-inputs",
+            "LINKTOOLS_MODEL_VISION": "1"
+        }
+    }''', encoding="utf-8")
+    monkeypatch.setattr(_common, "environ", Environ())
+
+    binding = _ModelOptions.load(Workspace.load(tmp_path)).create_model_binding()
+    assert binding.model_identity == "anthropic:testing/profile-inputs"
+    assert "image/png" in binding.contract["input_mime_types"]
