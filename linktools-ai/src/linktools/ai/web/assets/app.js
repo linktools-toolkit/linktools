@@ -433,6 +433,7 @@ function reconcileLiveHistory(timeline) {
     if(sessionWatch.refresh.releasedTurn===turn.execution_id)sessionWatch.refresh.releasedTurn=null;
   }
   if(!timeline.items.some(turn=>turn.execution_id===state.observedExecution && turn.conversation_committed))return;
+  if(state.view==='sessions' && state.conversationMode==='chat' && (liveRenderFrame!==null || liveRenderTimer!==null))renderLive();
   state.liveText='';state.liveThinking='';state.liveThinkingRunning=false;state.liveAttempts.clear();state.liveTools.clear();state.liveProcess.clear();state.events.clear();
 }
 function reconcileOlderTurn(payload,id) {
@@ -759,7 +760,7 @@ function thinkingMessage(label,text='') {
   const node=element('details','tool-message');node.body=element('pre','',text);
   node.append(element('summary','',label),node.body);return node;
 }
-function renderTurn(turn,liveTools=null) {
+function renderTurn(turn,liveTools=null,liveThinking=null) {
   const section=element('article','turn');section.dataset.execution=turn.execution_id;
   section.append(userMessage(turn.user_input));
   const ordered=state.conversationMode==='chat',process=turnProcess();
@@ -772,7 +773,11 @@ function renderTurn(turn,liveTools=null) {
   const savedAnswers=element('div','turn-saved-answers');section.append(savedAnswers);
   for (const item of turn.items) {
     if (item.item_kind==='assistant') savedAnswers.append(typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
-    else if (item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) savedAnswers.append(thinkingMessage('Thinking',item.content));
+    else if (item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) {
+      const thought=thinkingMessage('Thinking',item.content),preview=liveThinking?.get(item.content);
+      if(preview){thought.open=preview.open;showProcessElapsed(thought,preview.elapsedMs,true);}
+      savedAnswers.append(thought);
+    }
     else if (ordered && item.item_kind==='tool_call') {
       const key='tool:'+item.tool_call_id,row=remaining.get(key);
       if(row){savedAnswers.append(toolProcessRow(cards,row,true));remaining.delete(key);}
@@ -813,16 +818,31 @@ function renderCommittedTurn(timeline,id,previousError=state.timelineError) {
     renderTurnPickers();renderLive();return;
   }
   const top=container.scrollTop,follows=top+container.clientHeight>=container.scrollHeight-40;
-  const liveTools=new Map();
+  const liveTools=new Map(),liveThinking=new Map();
   const rememberTools=rows=>{
     for(const [key,node] of rows || [])if(key.startsWith('tool:') && (node.open || node.elapsedMs!==undefined))liveTools.set(key,node);
   };
   rememberTools(previous?.placedTools);rememberTools(previous?.processNode?.rows);
   if(state.observedExecution===id) {
     rememberTools(live.processNode?.rows);
-    for(const request of live.attemptNodes?.values() || [])rememberTools(request.partNodes);
+    const rememberThought=node=>{
+      if(!node || node.hidden || !live.contains(node))return;
+      const content=node.body.textContent;
+      liveThinking.set(content,liveThinking.has(content)?null:node);
+    };
+    rememberThought(live.thinkingNode);
+    for(const request of live.attemptNodes?.values() || []) {
+      rememberTools(request.partNodes);
+      if(request.partNodes)for(const [key,node] of request.partNodes)if(key.startsWith('thinking:'))rememberThought(node);
+      if(request.partNodes)rememberThought(request.thinking);
+    }
+    const seen=new Set();
+    if(liveThinking.size)for(const item of turn.items)if(item.item_kind==='thinking'){
+      if(seen.has(item.content))liveThinking.delete(item.content);
+      seen.add(item.content);
+    }
   }
-  const section=renderTurn(turn,liveTools);
+  const section=renderTurn(turn,liveTools,liveThinking);
   if(previous) {
     if(previous.contains(live))container.append(live);
     container.insertBefore(section,previous);

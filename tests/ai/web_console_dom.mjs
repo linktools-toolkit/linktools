@@ -965,13 +965,26 @@ if(process.argv[3]==='tools') {
   assert.equal(liveParts().children[1],first);
   const previousArticle=olderArticle(),previousThinking=descendants(previousArticle).find(item=>item.tagName==='DETAILS');
   previousThinking.open=true;previousThinking.children[0].focus();
-  const previousLive=node('live');
+  const previousLive=node('live'),finalThought='Final thinking span';
+  delta('thinking','1.4.1.1',{start:true,text:'Final thinking'},'final-thinking-start');
+  await until('last thinking span starts',()=>spinningThoughts().some(item=>item.body.textContent==='Final thinking'));
+  // Hold the scheduled paint: canonical History is allowed to arrive before it.
+  const schedule=requestAnimationFrame,cancel=cancelAnimationFrame;
+  let paintQueued=false;globalThis.requestAnimationFrame=()=>{paintQueued=true;return -1;};
+  globalThis.cancelAnimationFrame=id=>{if(id!==-1)cancel(id);};
+  delta('thinking','1.4.1.1',{text:' span'},'final-thinking-tail');
+  event('MODEL_ATTEMPT_FINISHED',{agent_run_seq:1,model_request_seq:4,stream_attempt_seq:1,status:'SUCCEEDED'});
+  await until('last thinking timing is queued',()=>paintQueued);
+  assert.doesNotMatch(previousLive.textContent,/Final thinking span/);
+  saved.items.push({item_kind:'thinking',content:finalThought});
+  expectedOrder.push(finalThought);
   timelineOverrides.set('a',{items:[older,saved],next_cursor:null});
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
-  streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));
-  streamBlocks.get(id).controller.close();
   const savedParts=()=>article()?.children.find(item=>item.className==='turn-saved-answers');
   await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookup125 ms'));
+  globalThis.requestAnimationFrame=schedule;globalThis.cancelAnimationFrame=cancel;
+  assert.match(savedParts().children.at(-1).children[0].textContent,/Stream [0-9]/,
+    'canonical hydration preserves a completed duration even before the queued paint');
   assert.equal(olderArticle(),previousArticle,'terminal History leaves older article nodes untouched');
   assert.equal(previousThinking.open,true);
   assert.equal(document.activeElement,previousThinking.children[0]);
@@ -984,9 +997,9 @@ if(process.argv[3]==='tools') {
   assert.ok(!descendants(savedParts()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
   const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===completedThinking);
   assert.equal(savedThought.length,1);
-  assert.equal(savedThought[0].open,false,'committed History keeps thinking collapsed');
+  assert.equal(savedThought[0].open,true,'exact committed thinking keeps its existing disclosure state');
   assert.ok(!savedThought[0].className.includes('process-running'),'committed thinking is not running');
-  assert.doesNotMatch(savedThought[0].textContent,/Stream /,'History does not invent timing for thinking');
+  assert.equal(savedThought[0].children[0].textContent,liveThought.children[0].textContent,'exact committed thinking retains the observed stream interval');
   assert.equal(article().textContent.match(/First answer/g).length,1);
   assert.equal(modelReads(),readsBeforeCommit,'Chat terminal readback never loads retained model contents');
   assert.doesNotMatch(article().textContent,/Private saved result/);
