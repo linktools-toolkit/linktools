@@ -52,14 +52,15 @@ export function streamResponsePreview(request) {
   for(const part of result.parts)result[part.kind]+=part.content;
   return result;
 }
-export function updateStreamAttempts(requests,item,clock) {
+export function updateStreamAttempts(requests,item) {
   const {event_type:type,payload={}}=item.event;
   if(type==='STREAM_RESET') {
     for(const request of requests.values())if(request.execution_id===item.execution_id && !request.finished){
       request.truncated=true;
       // A lost part-start may replace any earlier successful segment of this request.
       for(const attempt of request.attempts.values())if(['RUNNING','SUCCEEDED'].includes(attempt.status)){
-        attempt.text='';attempt.thinking='';attempt.thinkingPart=undefined;attempt.thinkingSpan=null;attempt.thinkingElapsed?.clear();for(const part of attempt.parts.values())part.content='';attempt.truncated=true;
+        attempt.text='';attempt.thinking='';attempt.thinkingPart=undefined;attempt.truncated=true;
+        for(const part of attempt.parts.values()){part.content='';delete part.elapsedMs;}
       }
     }
     return false;
@@ -70,6 +71,16 @@ export function updateStreamAttempts(requests,item,clock) {
       for(const attempt of request.attempts.values())if(attempt.status==='RUNNING')attempt.status=type.slice('EXECUTION_'.length);
     }
     return false;
+  }
+  if(type==='ASSISTANT_PART_COMPLETED'){
+    const identity=streamAttemptIdentity(item),request=identity && requests.get(identity.key);
+    if(!request || identity.stream_attempt_seq!==request.current)return false;
+    const attempt=request.attempts.get(request.current),part=attempt?.parts.get(payload.part_index);
+    if(!part || part.kind!=='thinking' || !['RUNNING','SUCCEEDED'].includes(attempt.status)
+      || !Number.isSafeInteger(payload.thinking_elapsed_ms) || payload.thinking_elapsed_ms<0)return false;
+    part.elapsedMs=payload.thinking_elapsed_ms;
+    if(attempt.thinkingPart===part.index)attempt.thinkingPart=undefined;
+    return true;
   }
   if(!['MODEL_ATTEMPT_STARTED','MODEL_ATTEMPT_FINISHED','MODEL_REQUEST_FINISHED','ASSISTANT_TEXT_DELTA','ASSISTANT_THINKING_DELTA'].includes(type))return false;
   const identity=streamAttemptIdentity(item);if(!identity)return false;
@@ -82,36 +93,16 @@ export function updateStreamAttempts(requests,item,clock) {
     attempt={seq,status:'RUNNING',text:'',thinking:'',parts:new Map(),truncated:false};request.attempts.set(seq,attempt);
   }
   if(seq>request.current)request.current=seq;
-  const finishThinking=()=>{
-    const span=attempt.thinkingSpan;
-    if(span && clock?.epoch===span.epoch && span.last>span.start){
-      (attempt.thinkingElapsed ||= new Map()).set(span.index,span.last-span.start);
-    }
-    attempt.thinkingSpan=null;
-  };
   if(type==='MODEL_ATTEMPT_FINISHED' && attempt.status==='RUNNING') {
-    if(payload.status==='SUCCEEDED')finishThinking();else attempt.thinkingSpan=null;
     if(['SUCCEEDED','FAILED','CANCELLED'].includes(payload.status))attempt.status=payload.status;
     attempt.error_code=payload.error_code;
   } else if(type==='MODEL_REQUEST_FINISHED') {
     if(seq!==request.current)return true;
     if(attempt.status==='RUNNING' && ['SUCCEEDED','FAILED','CANCELLED'].includes(payload.status))attempt.status=payload.status;
-    if(payload.status==='SUCCEEDED')finishThinking();else attempt.thinkingSpan=null;
     request.finished=true;request.status=payload.status;
   } else if(type.endsWith('_DELTA') && seq===request.current && attempt.status==='RUNNING' && typeof payload.text==='string') {
     const kind=type==='ASSISTANT_TEXT_DELTA'?'text':'thinking';
     const positioned=Number.isInteger(payload.part_index) && payload.part_index>=0 && typeof payload.part_start==='boolean';
-    if(clock){
-      const index=kind==='thinking' && positioned ? payload.part_index : null,span=attempt.thinkingSpan;
-      if(payload.stream_truncated===true)attempt.thinkingSpan=null;
-      else if(span && span.index!==index)finishThinking();
-      if(index!==null){
-        if(payload.part_start){
-          attempt.thinkingElapsed?.delete(index);
-          if(payload.stream_truncated!==true)attempt.thinkingSpan={index,epoch:clock.epoch,start:clock.now,last:clock.now};
-        }else if(attempt.thinkingSpan?.index===index && attempt.thinkingSpan.epoch===clock.epoch)attempt.thinkingSpan.last=clock.now;
-      }
-    }
     attempt.thinkingPart=kind==='thinking' && payload.text ? (positioned?payload.part_index:null) : undefined;
     if(positioned) {
       const previous=attempt.parts.get(payload.part_index);

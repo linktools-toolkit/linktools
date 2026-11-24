@@ -1400,6 +1400,12 @@ def _event_stream_capability(
             emission = _map_event(event)
             if isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent)):
                 position["part_index"] = event.index
+            if isinstance(event, (PartStartEvent, PartEndEvent)) and isinstance(event.part, ThinkingPart):
+                elapsed_ms = recorder.observe_thinking_part(
+                    event.part, event.index, complete=isinstance(event, PartEndEvent),
+                )
+                if elapsed_ms is not None:
+                    position["thinking_elapsed_ms"] = elapsed_ms
             if preview is not None:
                 attempt = (position.get("model_request_seq"), position.get("stream_attempt_seq"))
                 if preview_attempt is not None and preview_attempt != attempt:
@@ -1424,6 +1430,8 @@ def _event_stream_capability(
                 await recorder.record_tool_start(event.part, _ctx.run_step)
             elif isinstance(event, FunctionToolResultEvent):
                 await recorder.record_tool_result_boundary(event.part, _ctx.run_step)
+            if recorder.direct_stream and (isinstance(emission, LiveDelta) or "thinking_elapsed_ms" in position):
+                position["stream_attempt_seq"] = 1
             if isinstance(emission, LiveDelta) and "stream_attempt_seq" in position:
                 position["part_start"] = isinstance(event, PartStartEvent)
                 emission = LiveDelta(emission.event_type, emission.content, position)

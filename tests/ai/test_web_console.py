@@ -1341,10 +1341,12 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
     observed = []
     compact = []
     terminal = []
+    thinking_durations: dict[tuple[int, ...], int] = {}
     cursor = None
 
     async def model(_messages, _info):
         yield {0: DeltaThinkingPart(content=thinking, signature=signature)}
+        await asyncio.sleep(0.015)
         yield answer
         await release.wait()
         yield "and last"
@@ -1430,6 +1432,16 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                         assert name != "observation_error", payload
                         if name == "snapshot":
                             terminal.append(payload["status"])
+                        part_event = payload.get("item", {}).get("event", {})
+                        if part_event.get("event_type") == "ASSISTANT_PART_COMPLETED":
+                            timing = part_event["payload"]
+                            assert set(timing) == {"agent_run_seq", "model_request_seq", "stream_attempt_seq",
+                                                   "part_index", "thinking_elapsed_ms"}
+                            assert type(timing["thinking_elapsed_ms"]) is int and timing["thinking_elapsed_ms"] >= 0
+                            position = tuple(timing[key] for key in (
+                                "agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index",
+                            ))
+                            assert thinking_durations.setdefault(position, timing["thinking_elapsed_ms"]) == timing["thinking_elapsed_ms"]
                         assert payload.get("item", {}).get("event", {}).get("event_type") not in (
                             "ASSISTANT_THINKING_DELTA", "ASSISTANT_TEXT_DELTA",
                         ), "positioned Chat deltas use the named compact frames"
@@ -1484,6 +1496,9 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                 saved, = finished.json()["timeline"]["items"]
                 assert saved["execution_id"] == execution_id and saved["conversation_committed"]
                 assert signature not in finished.text
+                saved_thinking, = (item for item in saved["items"] if item["item_kind"] == "thinking")
+                assert list(thinking_durations.values()) == [saved_thinking["elapsed_ms"]]
+                assert saved_thinking["content"] == thinking
         finally:
             release.set()
             finish.set()
@@ -1491,6 +1506,17 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
             if not stream.done():
                 stream.cancel()
             await asyncio.gather(stream, return_exceptions=True)
+
+    async with common_command._open_local_runtime(
+        Workspace.load(tmp_path), model=_Models(FunctionModel(stream_function=model)),
+    ) as reopened, client(create_app(runtime=reopened.runtime)) as http:
+        restored = await http.get("/api/session", params={
+            "session_id": "session", "execution_id": execution_id,
+        })
+        assert restored.status_code == 200, restored.text
+        restored_turn, = restored.json()["timeline"]["items"]
+        restored_thinking, = (item for item in restored_turn["items"] if item["item_kind"] == "thinking")
+        assert restored_thinking["elapsed_ms"] == saved_thinking["elapsed_ms"]
 
 
 @pytest.mark.asyncio

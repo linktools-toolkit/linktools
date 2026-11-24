@@ -9,6 +9,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
+from time import monotonic_ns
 from typing import Protocol, cast
 
 from pydantic_ai_harness.step_persistence import RunRecord as NativeRunRecord, StepEvent as NativeStepEvent
@@ -18,6 +19,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
     ModelResponsePart,
@@ -44,7 +46,7 @@ from ..observe.journal import (
     ModelRequestFact,
     await_request_handoff,
 )
-from ..model.messages import freeze_model_messages, model_response_usage
+from ..model.messages import THINKING_ELAPSED_MS_METADATA_KEY, freeze_model_messages, model_response_usage
 from ._run_context import RunContextProjection
 from ._trace_capture import ModelInteractionCapture, TraceStagingPort
 from ..persistence.contracts import LoadedModelContext
@@ -116,6 +118,9 @@ class AgentRunRecorder:
         self._transcript_messages = self._message_archive.snapshot(())
         self._pending_parts: dict[str, ModelMessage] = {}
         self._stream_position: dict[str, JsonValue] = {}
+        self._streaming = False
+        self._thinking_started: dict[int, int] = {}
+        self._thinking_elapsed: dict[int, tuple[ThinkingPart, int]] = {}
         self._last_response_position: tuple[int, int] | None = None
 
     @property
@@ -128,16 +133,37 @@ class AgentRunRecorder:
 
     def observe_stream_attempt(self, fact: ModelRequestFact, attempt: ModelStreamAttempt) -> None:
         if attempt.status == "RUNNING":
+            self._thinking_started.clear()
             self._stream_position = {
                 "model_request_seq": fact.model_request_seq,
                 "stream_attempt_seq": attempt.stream_attempt_seq,
             }
         elif attempt.status in {"FAILED", "CANCELLED"}:
+            self._thinking_started.clear()
+            self._thinking_elapsed.clear()
             # These previews belong to the failed attempt, not the next canonical message.
             self._pending_parts = {
                 key: value for key, value in self._pending_parts.items()
                 if not isinstance(value, ModelResponse)
             }
+
+    @property
+    def direct_stream(self) -> bool:
+        """A true stream without a separately tracked provider attempt."""
+        return self._streaming and "stream_attempt_seq" not in self._stream_position
+
+    def observe_thinking_part(self, part: ThinkingPart, index: int, *, complete: bool) -> int | None:
+        if not self._streaming or "message_seq" in self._stream_position:
+            return None
+        if not complete:
+            self._thinking_started[index] = monotonic_ns()
+            return None
+        started = self._thinking_started.pop(index, None)
+        if started is None:
+            return None
+        elapsed_ms = (monotonic_ns() - started) // 1_000_000
+        self._thinking_elapsed[index] = (part, elapsed_ms)
+        return elapsed_ms
 
     def response_message_seq(self, model_request_seq: int) -> int | None:
         position = self._last_response_position
@@ -646,6 +672,9 @@ class AgentRunRecorder:
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
         self._stream_position = {"model_request_seq": fact.model_request_seq}
+        self._streaming = streaming
+        self._thinking_started.clear()
+        self._thinking_elapsed.clear()
         self.model_interactions.begin_model_interaction(
             fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
@@ -661,6 +690,7 @@ class AgentRunRecorder:
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
+        self._streaming = streaming
         self.model_interactions.prepare_model_interaction(
             fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
@@ -736,6 +766,19 @@ class AgentRunRecorder:
                 replayed_indices.append(part_index)
             else:
                 new_calls[call_id] = part_index
+        elapsed = {
+            str(index): measurement[1]
+            for index, part in enumerate(response.parts)
+            if (measurement := self._thinking_elapsed.get(index)) is not None and measurement[0] == part
+        }
+        if elapsed or (response.metadata and THINKING_ELAPSED_MS_METADATA_KEY in response.metadata):
+            metadata = dict(response.metadata or {})
+            if elapsed:
+                metadata[THINKING_ELAPSED_MS_METADATA_KEY] = elapsed
+            else:
+                metadata.pop(THINKING_ELAPSED_MS_METADATA_KEY, None)
+            # The SDK retains this response for both the final checkpoint and our transcript.
+            response.metadata = metadata or None
         self.append_transcript_message(response)
         message_seq = len(self._transcript_messages)
         for call_id, part_index in new_calls.items():

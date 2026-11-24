@@ -94,6 +94,7 @@ _BOUNDARY_METADATA_FIELDS = {
             "stream_attempt_seq",
             "part_index",
             "part_type",
+            "thinking_elapsed_ms",
             "digest",
             "characters",
         }

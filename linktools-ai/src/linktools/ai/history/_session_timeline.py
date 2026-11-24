@@ -37,6 +37,7 @@ from ..storage import StoredPayload
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ..inputs import stored_user_input_view
+from ..model.messages import THINKING_ELAPSED_MS_METADATA_KEY
 from ..session import SessionTurn, SessionTurnItem
 from ..persistence.contracts import (
     ConversationRepositories,
@@ -86,20 +87,18 @@ class SessionTimelineTranscriptStore(Protocol):
 def _timeline_items(messages: tuple[ModelMessage, ...]) -> tuple[SessionTurnItem, ...]:
     values: list[SessionTurnItem] = []
     for message in messages:
-        projected = project_session_history_message(message)
         if isinstance(message, ModelRequest):
-            projected = tuple(
-                item for item in projected if item.item_kind == "tool_result"
-            )
+            kinds, durations = {"tool_result"}, None
         elif isinstance(message, ModelResponse):
-            projected = tuple(
-                item
-                for item in projected
-                if item.item_kind in {"assistant", "thinking", "tool_call"}
-            )
+            kinds = {"assistant", "thinking", "tool_call"}
+            durations = (message.metadata or {}).get(THINKING_ELAPSED_MS_METADATA_KEY)
         else:
             continue
-        for item in projected:
+        # ModelResponse history projection emits one item per part, in part order.
+        for part_index, item in enumerate(project_session_history_message(message)):
+            if item.item_kind not in kinds:
+                continue
+            elapsed = durations.get(str(part_index)) if item.item_kind == "thinking" and isinstance(durations, Mapping) else None
             values.append(
                 SessionTurnItem(
                     len(values) + 1,
@@ -107,6 +106,7 @@ def _timeline_items(messages: tuple[ModelMessage, ...]) -> tuple[SessionTurnItem
                     item.content,
                     item.tool_name,
                     item.tool_call_id,
+                    elapsed if type(elapsed) is int and elapsed >= 0 else None,
                 )
             )
     return tuple(values)

@@ -120,6 +120,7 @@ _CHAT_TEXT_FIELDS = _CHAT_STREAM_POSITION | {"text", "part_index", "part_start",
 _CHAT_STREAM_FIELDS = {
     "ASSISTANT_TEXT_DELTA": _CHAT_TEXT_FIELDS,
     "ASSISTANT_THINKING_DELTA": _CHAT_TEXT_FIELDS,
+    "ASSISTANT_PART_COMPLETED": _CHAT_STREAM_POSITION | {"part_index", "thinking_elapsed_ms"},
     "MODEL_ATTEMPT_STARTED": _CHAT_STREAM_POSITION,
     "MODEL_ATTEMPT_FINISHED": _CHAT_STREAM_POSITION | {"status"},
     "MODEL_REQUEST_FINISHED": _CHAT_STREAM_POSITION | {"status"},
@@ -156,6 +157,10 @@ def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
     if allowed is None or not isinstance(event.payload, Mapping):
         return None
     source = event.payload
+    if event.event_type == "ASSISTANT_PART_COMPLETED":
+        elapsed = source.get("thinking_elapsed_ms")
+        if source.get("part_type") != "thinking" or type(elapsed) is not int or elapsed < 0:
+            return None
     kind = _CHAT_DELTA_EVENTS.get(event.event_type)
     if kind:
         text = source.get("text")

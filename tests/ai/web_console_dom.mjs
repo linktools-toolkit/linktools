@@ -896,6 +896,7 @@ if(process.argv[3]==='tools') {
   await until('retry current thinking spins',()=>spinningThoughts().some(item=>item.body.textContent===initialThinking));
   delta('thinking','1.2.2.0',{text:'complete phase'},'thinking-more');
   delta('thinking','1.2.1.0',{text:'Late stale thought'},'discarded-attempt');
+  event('ASSISTANT_PART_COMPLETED',{agent_run_seq:1,model_request_seq:2,stream_attempt_seq:1,part_index:0,thinking_elapsed_ms:999});
   delta('text','1.2.2.1',{start:true,text:'Intermediate'},'intermediate');
   delta('text','1.4.1.0',{start:true,text:'Final reply'},'final');
   emit('process',laterTool,'later-tool-cursor',[1,3,0]);emit('process',tool,'tool-cursor',[1,1,1]);
@@ -907,7 +908,7 @@ if(process.argv[3]==='tools') {
   const liveThought=liveParts().children[2];
   assert.equal(Boolean(liveThought.open),false,'live positioned thinking starts collapsed');
   assert.equal(spinningThoughts().length,0,'following answer and newer request stop older thinking');
-  assert.match(liveThought.children[0].textContent,/Stream .*ms/);
+  assert.equal(liveThought.children[0].textContent,'Thinking','text transitions and stale attempt events cannot invent timings');
   liveThought.open=true;
   const first=liveParts().children[1];
   assert.equal(first.tagName,'DETAILS');
@@ -939,6 +940,8 @@ if(process.argv[3]==='tools') {
   const completedThinking=sdkThinking+' + continuation';
   delta('thinking','1.2.2.0',{text:' + continuation'},'resume-thinking');
   await until('stable native part continues after reconnect',()=>liveThought.body.textContent===completedThinking);
+  event('ASSISTANT_PART_COMPLETED',{agent_run_seq:1,model_request_seq:2,stream_attempt_seq:2,part_index:0,thinking_elapsed_ms:375});
+  await until('server timing populates exact observed segment',()=>liveThought.children[0].textContent==='Thinking375 ms');
   emit('process',unranked);await settle();
   assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup',completedThinking,'Intermediate','secondary','Final reply']);
   assert.equal(liveThought.open,true,'new thinking deltas preserve the user-opened disclosure');
@@ -946,7 +949,7 @@ if(process.argv[3]==='tools') {
   const saved={...turn,status:'SUCCEEDED',conversation_committed:true,items:[
     {item_kind:'assistant',content:'First answer'},
     {item_kind:'tool_call',tool_call_id:'call',content:null},
-    {item_kind:'thinking',content:completedThinking},
+    {item_kind:'thinking',content:completedThinking,elapsed_ms:375},
     {item_kind:'assistant',content:'Intermediate'},
     {item_kind:'tool_call',tool_call_id:'later',content:null},
     {item_kind:'tool_result',content:'Private saved result'},
@@ -973,17 +976,18 @@ if(process.argv[3]==='tools') {
   let paintQueued=false;globalThis.requestAnimationFrame=()=>{paintQueued=true;return -1;};
   globalThis.cancelAnimationFrame=id=>{if(id!==-1)cancel(id);};
   delta('thinking','1.4.1.1',{text:' span'},'final-thinking-tail');
+  event('ASSISTANT_PART_COMPLETED',{agent_run_seq:1,model_request_seq:4,stream_attempt_seq:1,part_index:1,thinking_elapsed_ms:0});
   event('MODEL_ATTEMPT_FINISHED',{agent_run_seq:1,model_request_seq:4,stream_attempt_seq:1,status:'SUCCEEDED'});
   await until('last thinking timing is queued',()=>paintQueued);
   assert.doesNotMatch(previousLive.textContent,/Final thinking span/);
-  saved.items.push({item_kind:'thinking',content:finalThought});
+  saved.items.push({item_kind:'thinking',content:finalThought,elapsed_ms:0});
   expectedOrder.push(finalThought);
   timelineOverrides.set('a',{items:[older,saved],next_cursor:null});
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
   const savedParts=()=>article()?.children.find(item=>item.className==='turn-saved-answers');
   await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookup125 ms'));
   globalThis.requestAnimationFrame=schedule;globalThis.cancelAnimationFrame=cancel;
-  assert.match(savedParts().children.at(-1).children[0].textContent,/Stream [0-9]/,
+  assert.equal(savedParts().children.at(-1).children[0].textContent,'Thinking0 ms',
     'canonical hydration preserves a completed duration even before the queued paint');
   assert.equal(olderArticle(),previousArticle,'terminal History leaves older article nodes untouched');
   assert.equal(previousThinking.open,true);
@@ -999,7 +1003,7 @@ if(process.argv[3]==='tools') {
   assert.equal(savedThought.length,1);
   assert.equal(savedThought[0].open,true,'exact committed thinking keeps its existing disclosure state');
   assert.ok(!savedThought[0].className.includes('process-running'),'committed thinking is not running');
-  assert.equal(savedThought[0].children[0].textContent,liveThought.children[0].textContent,'exact committed thinking retains the observed stream interval');
+  assert.equal(savedThought[0].children[0].textContent,'Thinking375 ms','canonical History uses its exact recorded duration');
   assert.equal(article().textContent.match(/First answer/g).length,1);
   assert.equal(modelReads(),readsBeforeCommit,'Chat terminal readback never loads retained model contents');
   assert.doesNotMatch(article().textContent,/Private saved result/);
@@ -1007,7 +1011,10 @@ if(process.argv[3]==='tools') {
   await select('#session=a');
   assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
   assert.ok(descendants(article()).some(item=>item.tagName==='PRE' && item.textContent===completedThinking));
-  assert.doesNotMatch(savedParts().textContent,/125 ms|Stream /,'reopened History does not invent or persist timings');
+  assert.match(savedParts().textContent,/Thinking375 ms/,'cold-reopened History retains thinking time without prior browser observations');
+  assert.match(savedParts().textContent,/Thinking0 ms/,'a real zero duration also survives reopen');
+  assert.doesNotMatch(olderArticle().textContent,/ ms/,'older archived thoughts without a duration remain untimed');
+  assert.doesNotMatch(savedParts().textContent,/125 ms/,'History does not invent tool durations');
 
   const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
   const remoteTurn={...turn,execution_id:remote,user_input:'External question'};
