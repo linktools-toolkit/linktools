@@ -100,3 +100,11 @@ def test_native_tool_registrations_declare_only_the_public_identifier() -> None:
     assert {name: tool_argument_preview_field(tool.metadata) for name, tool in agents.tools.items()} == {
         "list_subagents": None, "delegate_task": "subagent_id",
     }
+
+
+def test_plain_tool_metadata_is_not_native_preview_authority() -> None:
+    from linktools.ai.capability import durable_tool_metadata, tool_argument_preview_field
+
+    lookalike = {"linktools.ai.argument_preview_field": "path"}
+    assert tool_argument_preview_field(lookalike) is None
+    assert durable_tool_metadata(lookalike) is lookalike

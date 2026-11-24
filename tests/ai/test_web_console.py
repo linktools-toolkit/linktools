@@ -1704,7 +1704,7 @@ async def test_passive_session_tool_notice_requires_event_authorization(allowed:
 async def test_workspace_tool_title_requires_native_registration(tmp_path: Path, native: bool) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.capability import ExecutionCapability, TraceCapability
     from linktools.ai.workspace import Workspace
 
     from ._runtime_test_helpers import _Models, _UsageFunctionModel, workspace_features
@@ -1728,10 +1728,9 @@ async def test_workspace_tool_title_requires_native_registration(tmp_path: Path,
         async def read_file(path: str | list[str]) -> str:
             return "custom source"
 
-        custom = features.tool(read_file, effect_policy="none")
-        # A stringified look-alike declaration is not an installed native formatter.
-        custom.metadata["linktools.ai.argument_preview_field"] = "path"
+        features.tool(read_file, effect_policy="none")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.capability(TraceCapability(), scope="runtime")
     features.agent("default", allow_tools=("read_file",))
     model_features(_Models(_UsageFunctionModel(respond)), features)
     async with Persistence.open("tool-preview", storage=PersistenceStorage.in_memory()) as state, Runtime.open(
@@ -1754,3 +1753,9 @@ async def test_workspace_tool_title_requires_native_registration(tmp_path: Path,
             "tool:simple": "README.md" if native else None, "tool:complex": None,
         }
         assert "private source contents" not in history.text and "notes.txt" not in history.text
+
+        trace = await execution.model_interactions(include_content=True)
+        first_tool, = trace.items[0].request["parameters"]["function_tools"]
+        metadata = first_tool["metadata"]
+        assert metadata["linktools.ai.effect_policy"] == "none"
+        assert "linktools.ai.argument_preview_field" not in metadata

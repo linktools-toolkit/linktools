@@ -12,11 +12,13 @@ from pathlib import Path
 from ._runtime_test_helpers import FileToolsStub
 
 import pytest
+from pydantic_ai.tools import Tool
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
     CapabilityContribution,
     ToolCallFailed,
+    tool_argument_preview_field,
     tool_class_from_metadata,
     filesystem_capabilities,
     filesystem_tool_declarations,
@@ -135,18 +137,10 @@ class _SpoofedSandboxCapability(AbstractCapability[object]):
     id = "linktools.workspace-sandbox"
 
 
-def _tool_contract(tool: object) -> dict[str, object]:
-    definition = tool.tool_def  # type: ignore[attr-defined]
-    return {
-        "version": 1,
-        "revision": next(item.revision for item in filesystem_tool_declarations()
-                         if item.name == definition.name),
-        "description": definition.description,
-        "parameters": definition.parameters_json_schema,
-        "return_schema": definition.return_schema,
-        "strict": definition.strict,
-        "metadata": definition.metadata,
-    }
+def _tool_contract(tool: Tool) -> dict[str, object]:
+    name = tool.name
+    revision = next(item.revision for item in filesystem_tool_declarations() if item.name == name)
+    return CapabilityContribution.from_opaque("tool", name, tool, revision=revision).contract
 
 
 def test_workspace_constructor_normalizes_root(
@@ -397,6 +391,7 @@ async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_
     )[0]
     run_toolset = capability.get_toolset()
 
+    assert tool_argument_preview_field(run_toolset.tools["read_file"].metadata) == "path"  # type: ignore[attr-defined]
     assert {
         name: _tool_contract(tool)
         for name, tool in run_toolset.tools.items()  # type: ignore[attr-defined]

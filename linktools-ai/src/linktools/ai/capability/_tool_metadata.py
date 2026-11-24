@@ -3,7 +3,7 @@
 """Shared Tool metadata keys and strict metadata parsing."""
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, cast, get_args
+from typing import Any, Literal, cast, get_args
 
 from ..errors import AIError, ErrorCode
 
@@ -31,6 +31,13 @@ def _registered_preview(field: str) -> dict[str, object]:
 def tool_argument_preview_field(metadata: Mapping[str, object] | None) -> str | None:
     field = None if metadata is None else metadata.get(_TOOL_PREVIEW_FIELD)
     return field if isinstance(field, _RegisteredPreviewField) else None
+
+
+def durable_tool_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Exclude native display registration from durable tool descriptions."""
+    if not isinstance(metadata, Mapping) or tool_argument_preview_field(metadata) is None:
+        return metadata
+    return {name: value for name, value in metadata.items() if name != _TOOL_PREVIEW_FIELD}
 
 
 ToolEffectPolicy = Literal["none", "replay_safe", "non_replay_safe"]
@@ -209,6 +216,7 @@ __all__ = [
     "TOOL_MCP_SELECTOR_METADATA_KEY",
     "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
     "TOOL_CONTEXT_DEDUPE_METADATA_KEY",
+    "durable_tool_metadata",
     "tool_argument_preview_field",
     "TOOL_EFFECT_POLICY_METADATA_KEY",
     "TOOL_PATH_FIELDS_METADATA_KEY",
