@@ -9,6 +9,7 @@ class Element {
   constructor(tag='div') {
     this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.hidden=false;this.disabled=false;
     this.isConnected=false;this.value='';this.checked=false;this.open=false;this.className='';this.scrollTop=0;this.clientHeight=300;this._text='';
+    if(this.tagName==='DETAILS')Object.defineProperty(this,'name',{get:()=>this.getAttribute('name') || '',set:value=>this.setAttribute('name',typeof value==='object'?'[object HTMLElement]':value)});
     this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on??!names.has(name))names.add(name);else names.delete(name);this.className=[...names].join(' ');},remove:name=>this.classList.toggle(name,false),add:name=>this.classList.toggle(name,true)};
   }
   get id(){return this._id;}
@@ -880,14 +881,19 @@ if(process.argv[3]==='tools') {
   const laterTool={kind:'tool',key:'tool:later',tool_name:'secondary',status:'RUNNING',position:[2,1]};
   const sdkThinking='  SDK thinking\n<literal>  ';
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
+  assert.doesNotMatch(article().textContent,/Incomplete turn; history is not yet committed/);
   assert.equal(sessionSources.at(-1).url.searchParams.get('view'),'chat');
   assert.equal(calls.filter(call=>call.key==='/api/executions/'+id+'/events').length,0,'Chat uses its session EventSource only');
   delta('text','1.1.1.0',{start:true,text:'Superseded preview'},'old-text');
   delta('text','1.1.1.0',{start:true},'empty-start');
   delta('text','1.1.1.0',{text:'First answer'},'answer');
+  const spinningThoughts=()=>descendants(node('live')).filter(item=>item.className==='tool-message process-running' && item.body);
   delta('thinking','1.2.1.0',{start:true,text:'Superseded hidden thought'},'old-attempt-thinking');
+  await until('active thinking spins',()=>spinningThoughts().some(item=>item.body.textContent==='Superseded hidden thought'));
   event('MODEL_ATTEMPT_FINISHED',{agent_run_seq:1,model_request_seq:2,stream_attempt_seq:1,status:'FAILED'});
+  await until('failed attempt removes its thinking spinner',()=>!spinningThoughts().length);
   delta('thinking','1.2.2.0',{start:true,text:sdkThinking},'thinking-start');
+  await until('retry current thinking spins',()=>spinningThoughts().some(item=>item.body.textContent===sdkThinking));
   delta('thinking','1.2.1.0',{text:'Late stale thought'},'discarded-attempt');
   delta('text','1.2.2.1',{start:true,text:'Intermediate'},'intermediate');
   delta('text','1.4.1.0',{start:true,text:'Final reply'},'final');
@@ -899,28 +905,30 @@ if(process.argv[3]==='tools') {
   assert.doesNotMatch(article().textContent,/Superseded preview|Superseded hidden thought|Late stale thought/);
   const liveThought=liveParts().children[2];
   assert.equal(Boolean(liveThought.open),false,'live positioned thinking starts collapsed');
+  assert.equal(spinningThoughts().length,0,'following answer and newer request stop older thinking');
   liveThought.open=true;
   const first=liveParts().children[1];
   assert.equal(first.tagName,'DETAILS');
+  assert.equal(first.name,'','tool cards do not write the native disclosure group name');
   assert.ok(first.className.split(' ').includes(liveThought.className));
   assert.equal(first.children[0].tagName,'SUMMARY');
   assert.equal(first.children[0].textContent,'lookup');
   assert.equal(Boolean(first.open),false);
-  assert.ok(first.className.split(' ').includes('tool-running'));
-  assert.equal(first.name.getAttribute('aria-label'),'lookup · In progress');
+  assert.ok(first.className.split(' ').includes('process-running'));
+  assert.equal(first.children[0].getAttribute('aria-label'),'lookup · In progress');
   assert.ok(!descendants(article()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
   first.open=true;
-  const mixedOrder=parent=>parent.children.map(row=>row.name?.textContent || row.body?.textContent || row.markdownBody?.textContent.trim() || row.textContent.trim());
+  const mixedOrder=parent=>parent.children.map(row=>row.className.split(' ').includes('tool-message') && row.children[0]?.className==='tool-name' && row.children[0].textContent || row.body?.textContent || row.markdownBody?.textContent.trim() || row.textContent.trim());
   assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup',sdkThinking,'Intermediate','secondary','Final reply']);
   assert.equal(processArea().hidden,true,'positioned tools are not repeated in Process');
-  assert.equal(first.status.getAttribute('aria-live'),'polite');
+  assert.equal(first.children[1].getAttribute('aria-live'),'polite');
   const unranked={...tool,position:null};
   emit('process',{...unranked,status:'SUCCEEDED'});emit('process',unranked);
-  await until('completed tool cannot be reopened by replay',()=>first.status.textContent==='Completed');
+  await until('completed tool cannot be reopened by replay',()=>first.children[1].textContent==='Completed');
   assert.equal(liveParts().children[1],first);
   assert.equal(first.open,true,'tool completion preserves disclosure state');
-  assert.ok(!first.className.split(' ').includes('tool-running'));
-  assert.equal(first.name.getAttribute('aria-label'),'lookup · Completed');
+  assert.ok(!first.className.split(' ').includes('process-running'));
+  assert.equal(first.children[0].getAttribute('aria-label'),'lookup · Completed');
 
   const old=streamBlocks.get(id).controller;old.close();
   await until('process stream reconnected',()=>streamBlocks.get(id).controller!==old);
@@ -944,7 +952,8 @@ if(process.argv[3]==='tools') {
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
   event('MODEL_REQUEST_FINISHED',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,status:'SUCCEEDED'});
-  await until('logical model finish arrives before conversation commit',()=>node('live').textContent.includes('model request finished'));
+  await settle();
+  assert.equal(node('live-activity'),undefined,'ordinary model lifecycle is not disclosed in Chat');
   const modelPreview=node('live').children.find(item=>item.className==='stream-attempt');
   assert.equal(modelPreview.label.hidden,true,'normal model status belongs to the Activity disclosure, not Chat');
   assert.equal(modelPreview.label.textContent,'');
@@ -973,6 +982,7 @@ if(process.argv[3]==='tools') {
   const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===completedThinking);
   assert.equal(savedThought.length,1);
   assert.equal(savedThought[0].open,false,'committed History keeps thinking collapsed');
+  assert.ok(!savedThought[0].className.includes('process-running'),'committed thinking is not running');
   assert.equal(article().textContent.match(/First answer/g).length,1);
   assert.equal(modelReads(),readsBeforeCommit,'Chat terminal readback never loads retained model contents');
   assert.doesNotMatch(article().textContent,/Private saved result/);
@@ -1219,11 +1229,13 @@ if(process.argv[3]==='streaming') {
   node('prompt').focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emitThinking('thinking');
   await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
   assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,1);assert.equal(document.activeElement,node('prompt'));
-  const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking'));
+  const thinking=descendants(node('live')).find(item=>item.className.split(' ').includes('tool-message') && item.textContent.startsWith('Thinking'));
   assert.equal(Boolean(thinking.open),false,'live fallback thinking starts collapsed');
+  assert.ok(thinking.className.includes('process-running'));
   thinking.open=false;
   emitThinking(' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
   await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
+  assert.ok(!thinking.className.includes('process-running'),'following fallback text stops thinking');
   assert.equal(thinking.open,false,'additional deltas must not reopen thinking the user collapsed');assert.match(thinking.textContent,/thinking continued/);
   const {renderMarkdown}=await import(messageURL);assert.equal(body.innerHTML,renderMarkdown(expected));
   // A paused/background animation frame keeps only current accumulated text.
@@ -2084,8 +2096,9 @@ const stream=streamBlocks.get('a-new');
 stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'a-new',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'New execution text'}}},cursor:'resume-cursor'})+'\n\n'));
 await until('live assistant text',()=>node('live').textContent.includes('New execution text'));assert.match(node('live').textContent,/New execution text/);
 const liveEvent=(event_type,seq,depth=0,payload={})=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:depth?'child':'a-new',agent_id:'default',depth,event:{event_type,durable_seq:seq,payload}},cursor:null})+'\n\n'));
-liveEvent('TOOL_CALL_STARTED',1);await until('tool start event',()=>node('live-activity').textContent.includes('tool call started'));assert.equal(node('live-activity').open,false);
-node('live-activity').open=true;node('live-activity').ontoggle();node('live-activity').children[0].focus();liveEvent('MODEL_REQUEST_STARTED',2);await until('model start event',()=>node('live-activity').textContent.includes('model request started'));assert.equal(node('live-activity').open,true);assert.equal(document.activeElement,node('live-activity').children[0]);
+liveEvent('TOOL_CALL_STARTED',1);liveEvent('MODEL_REQUEST_STARTED',2);
+await settle();assert.equal(node('live-activity'),undefined);
+assert.doesNotMatch(newTurn.textContent,/Incomplete turn; history is not yet committed/);
 liveEvent('EXECUTION_FAILED',3,1);
 liveEvent('MODEL_REQUEST_FINISHED',4,0,{agent_run_seq:1,model_request_seq:1,status:'FAILED'});
 liveEvent('TOOL_CALL_FINISHED',5,0,{agent_run_seq:1,call_id:'failed-call',tool_name:'query',status:'FAILED',error_code:'TOOL_RETRY_REQUIRED'});
@@ -2094,13 +2107,13 @@ liveEvent('TOOL_CALL_FINISHED',7,0,{agent_run_seq:1,call_id:'successful-call',to
 for(const [index,event] of ['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','CANCEL_REQUESTED','EXECUTION_CANCELLED'].entries())liveEvent(event,8+index);
 await until('final event in stream batch',()=>node('live').textContent.includes('execution cancelled'));
 for(const name of ['execution failed','model request finished · FAILED','tool call finished · FAILED · TOOL_RETRY_REQUIRED','model request finished · CANCELLED','execution start unknown','execution recovery required','cancel requested','execution cancelled'])assert.ok(node('live').children.some(child=>child.className.includes('live-event') && child.textContent.includes(name)),name);
-assert.ok(node('live-activity').children.some(child=>child.className.includes('live-event') && child.textContent.includes('tool call finished · SUCCEEDED')));
+assert.equal(node('live-activity'),undefined);
 assert.ok(!node('live').children.some(child=>child.className.includes('live-event') && child.textContent.includes('SUCCEEDED')));
-const focusedChild=node('live').children.find(child=>child.className.includes('live-event') && child.textContent.includes('execution failed')).children.find(child=>child.tagName==='BUTTON');focusedChild.focus();liveEvent('TOOL_CALL_STARTED',12,0,{agent_run_seq:1,call_id:'next-call'});await until('next tool event',()=>node('live-activity').textContent.includes('next-call'));assert.equal(document.activeElement.dataset.liveFocus,focusedChild.dataset.liveFocus);
+const focusedChild=node('live').children.find(child=>child.className.includes('live-event') && child.textContent.includes('execution failed')).children.find(child=>child.tagName==='BUTTON');focusedChild.focus();liveEvent('TOOL_CALL_STARTED',12,0,{agent_run_seq:1,call_id:'next-call'});await settle();assert.equal(node('live-activity'),undefined);assert.equal(document.activeElement.dataset.liveFocus,focusedChild.dataset.liveFocus);
 releaseRefresh({session:sessions.get('a'),timeline:timeline('a')});await settle();
-assert.match(node('live').textContent,/New execution text/);assert.equal(node('live-activity').open,true);
+assert.match(node('live').textContent,/New execution text/);assert.equal(node('live-activity'),undefined);
 const focusBeforeRefresh=document.activeElement.dataset.liveFocus;
-await refresh();assert.equal(node('live-activity').open,true);
+await refresh();assert.equal(node('live-activity'),undefined);
 assert.equal(document.activeElement.dataset.liveFocus,focusBeforeRefresh);
 // A disconnected running observation reconnects from the last Runtime cursor.
 const disconnected=stream.controller;

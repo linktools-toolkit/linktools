@@ -59,7 +59,7 @@ export function updateStreamAttempts(requests,item) {
       request.truncated=true;
       // A lost part-start may replace any earlier successful segment of this request.
       for(const attempt of request.attempts.values())if(['RUNNING','SUCCEEDED'].includes(attempt.status)){
-        attempt.text='';attempt.thinking='';for(const part of attempt.parts.values())part.content='';attempt.truncated=true;
+        attempt.text='';attempt.thinking='';attempt.thinkingPart=undefined;for(const part of attempt.parts.values())part.content='';attempt.truncated=true;
       }
     }
     return false;
@@ -91,7 +91,9 @@ export function updateStreamAttempts(requests,item) {
     request.finished=true;request.status=payload.status;
   } else if(type.endsWith('_DELTA') && seq===request.current && attempt.status==='RUNNING' && typeof payload.text==='string') {
     const kind=type==='ASSISTANT_TEXT_DELTA'?'text':'thinking';
-    if(Number.isInteger(payload.part_index) && payload.part_index>=0 && typeof payload.part_start==='boolean') {
+    const positioned=Number.isInteger(payload.part_index) && payload.part_index>=0 && typeof payload.part_start==='boolean';
+    attempt.thinkingPart=kind==='thinking' && payload.text ? (positioned?payload.part_index:null) : undefined;
+    if(positioned) {
       const previous=attempt.parts.get(payload.part_index);
       attempt.parts.set(payload.part_index,{index:payload.part_index,kind,
         start:payload.part_start || previous?.start || false,

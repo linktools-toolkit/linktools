@@ -5,7 +5,7 @@ const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, listSessionReads:new Map(), session:null, sessionError:false, executionError:false, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
   execution:null, executionReadGeneration:0, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'models', traceSelection:null, conversationMode:'chat', nativeTimeline:null, readerSelection:null, readerRaw:false, readerHttp:false, readerCache:null, readerExpanded:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
-  liveText:'', liveThinking:'', liveTools:new Map(), liveProcess:new Map(), liveAttempts:new Map(), liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
+  liveText:'', liveThinking:'', liveThinkingRunning:false, liveTools:new Map(), liveProcess:new Map(), liveAttempts:new Map(), liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
 const text = value => typeof value === 'string' ? value : json(value);
 const short = value => value ? String(value).slice(0, 12) : '—';
@@ -302,7 +302,7 @@ function watchSession(id, {restart=false}={}) {
   const prior=sessionWatch?.id===id?sessionWatch:null;
   if(prior?.execution?.id===state.observedExecution) {
     // A new EventSource starts without the previous connection's Last-Event-ID.
-    state.cursor=null;state.liveText='';state.liveThinking='';state.liveAttempts.clear();
+    state.cursor=null;state.liveText='';state.liveThinking='';state.liveThinkingRunning=false;state.liveAttempts.clear();
     state.liveTools.clear();state.liveProcess.clear();state.events.clear();renderLive();
   }
   stopSessionWatch();
@@ -433,7 +433,7 @@ function reconcileLiveHistory(timeline) {
     if(sessionWatch.refresh.releasedTurn===turn.execution_id)sessionWatch.refresh.releasedTurn=null;
   }
   if(!timeline.items.some(turn=>turn.execution_id===state.observedExecution && turn.conversation_committed))return;
-  state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.liveTools.clear();state.liveProcess.clear();state.events.clear();
+  state.liveText='';state.liveThinking='';state.liveThinkingRunning=false;state.liveAttempts.clear();state.liveTools.clear();state.liveProcess.clear();state.events.clear();
 }
 function reconcileOlderTurn(payload,id) {
   if(payload?.session.session_id!==state.selectedSession)return;
@@ -539,7 +539,7 @@ async function readSession(id, {metadataOnly=false,executionId=null,active=false
 }
 function clearObservation() {
   stopStream();++state.observationGeneration;state.observedExecution=null;state.observedInfo=null;
-  state.cursor=null;state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.liveTools.clear();state.liveProcess.clear();state.liveActivityOpen=false;state.models.clear();state.events.clear();
+  state.cursor=null;state.liveText='';state.liveThinking='';state.liveThinkingRunning=false;state.liveAttempts.clear();state.liveTools.clear();state.liveProcess.clear();state.liveActivityOpen=false;state.models.clear();state.events.clear();
 }
 function unavailableSelection(error) {
   if(error.name==='AbortError')return false;
@@ -689,16 +689,16 @@ function toolProcessRow(rows,row,fold=false) {
   let node=rows.get(row.key);
   if(!node) {
     node=fold?element('details','tool-message'):element('div','live-tool');
-    node.name=element(fold?'summary':'span','tool-name');node.status=element(fold?'pre':'span','tool-status');
-    node.status.setAttribute('role','status');node.status.setAttribute('aria-live','polite');node.append(node.name,node.status);
+    node.toolNameNode=element(fold?'summary':'span','tool-name');node.toolStatusNode=element(fold?'pre':'span','tool-status');
+    node.toolStatusNode.setAttribute('role','status');node.toolStatusNode.setAttribute('aria-live','polite');node.append(node.toolNameNode,node.toolStatusNode);
     rows.set(row.key,node);
   }
-  if(node.name.textContent!==row.tool_name)node.name.textContent=row.tool_name;
-  if(node.status.textContent!==processToolStatus[row.status])node.status.textContent=processToolStatus[row.status];
+  if(node.toolNameNode.textContent!==row.tool_name)node.toolNameNode.textContent=row.tool_name;
+  if(node.toolStatusNode.textContent!==processToolStatus[row.status])node.toolStatusNode.textContent=processToolStatus[row.status];
   if(fold) {
-    node.classList.toggle('tool-running',row.status==='RUNNING');
+    node.classList.toggle('process-running',row.status==='RUNNING');
     const label=`${row.tool_name} · ${processToolStatus[row.status]}`;
-    if(node.name.getAttribute('aria-label')!==label)node.name.setAttribute('aria-label',label);
+    if(node.toolNameNode.getAttribute('aria-label')!==label)node.toolNameNode.setAttribute('aria-label',label);
   }
   node.classList.toggle('error',row.status==='FAILED');
   return node;
@@ -777,7 +777,7 @@ function renderTurn(turn,openTools=null) {
   }
   if(ordered)section.append(process);
   if(!turn.conversation_committed)section.processNode=process;
-  if (!turn.conversation_committed) section.append(element('p','muted','Incomplete turn; history is not yet committed.'));
+  if (!ordered && !turn.conversation_committed) section.append(element('p','muted','Incomplete turn; history is not yet committed.'));
   if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
   const heading=element('div','turn-heading');heading.append(element('span','',date(turn.created_at)));
   if(turn.status!=='SUCCEEDED')heading.append(element('span','badge',turn.status));
@@ -878,7 +878,7 @@ async function readLiveResponse(request,force=false) {
   } catch(error) {if(current())request.canonicalError='Committed response read unavailable';}
   finally {if(current()){request.canonicalPending=false;scheduleLiveRender();}}
 }
-function renderLiveAttempts(live,wanted,process,tools) {
+function renderLiveAttempts(live,wanted,process,tools,running) {
   live.attemptNodes ||= new Map();const retained=new Set();
   const requests=new Map(state.liveAttempts),toolsByRequest=new Map();
   if(process)for(const row of tools.values())if(row.order) {
@@ -892,6 +892,7 @@ function renderLiveAttempts(live,wanted,process,tools) {
   }
   const orderedRequests=[...requests.values()];
   if(process)orderedRequests.sort((a,b)=>a.agent_run_seq-b.agent_run_seq || a.model_request_seq-b.model_request_seq);
+  const newestRequest=orderedRequests.at(-1);
   for(const request of orderedRequests) {
     if(request.execution_id!==state.observedExecution)continue;
     const attempts=[...request.attempts.values()].sort((a,b)=>a.seq-b.seq);
@@ -934,6 +935,11 @@ function renderLiveAttempts(live,wanted,process,tools) {
       :`${status} · run ${request.agent_run_seq} · request ${request.model_request_seq}${gap?' · preview GAP · noncontiguous fragment':''}`;
     if(node.label.textContent!==label)node.label.textContent=label;
     node.label.hidden=!label;
+    const activeAttempt=request.attempts.get(request.current);
+    let thinkingPart=running && request===newestRequest && !request.finished && activeAttempt?.status==='RUNNING'
+      ? activeAttempt.thinkingPart : undefined;
+    if(orderedTools.some(row=>thinkingPart===null || row.order[2]>thinkingPart))thinkingPart=undefined;
+    node.thinking.classList.toggle('process-running',process && thinkingPart===null);
     if(process) {
       const ordered=canonical
         ? canonical.parts.filter(part=>['text','thinking'].includes(part.part_kind) && typeof part.content==='string')
@@ -955,6 +961,7 @@ function renderLiveAttempts(live,wanted,process,tools) {
           node.partNodes.set(key,body);
         }
         if(part.kind==='thinking'){
+          body.classList.toggle('process-running',thinkingPart===part.index);
           if(body.body.textContent!==part.content)body.body.textContent=part.content;
         }else updateMarkdownMessage(body,part.content);
         children.push(body);
@@ -1016,11 +1023,14 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   if (!live) return;
   const container=$('conversation'), follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40,wanted=[];
   const process=state.view==='sessions' && state.conversationMode==='chat';
+  const status=state.observedInfo?.status;
+  const running=process && !terminal(status) && !['RECOVERY_REQUIRED','START_UNKNOWN'].includes(status);
   const article=process?attachLiveTurn(live):null;
   if (state.liveThinking.trim()) {
     if(!live.thinkingNode) {
       live.thinkingNode=thinkingMessage(process?'Thinking':'Live thinking · incomplete SDK response');
     }
+    live.thinkingNode.classList.toggle('process-running',running && state.liveThinkingRunning);
     if(live.thinkingSource!==state.liveThinking){live.thinkingNode.body.textContent=state.liveThinking;live.thinkingSource=state.liveThinking;}
     wanted.push(live.thinkingNode);
   }
@@ -1040,29 +1050,32 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
       toolProcessRow(article.placedTools,row,true);
       return false;
     }).map(row=>[row.key,row])) : null;
-  renderLiveAttempts(live,wanted,process,tools);
+  renderLiveAttempts(live,wanted,process,tools,running);
   if(process) {
     const section=article?.processNode || (live.processNode ||= turnProcess());
     renderTurnProcess(section,[...tools.values()],true);
     if(!article && !section.hidden)wanted.push(section);
   }
-  const events=[...state.events.values()].slice(-12);
-  if(!live.activityEvents || events.length!==live.activityEvents.length || events.some((item,index)=>item!==live.activityEvents[index])) {
-  live.activityEvents=events;live.activityFocusNodes=new Map();live.activityNodes=[];
-  const activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
-  activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
   const attention=item=>['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type)
     || ['MODEL_ATTEMPT_FINISHED','MODEL_REQUEST_FINISHED','TOOL_CALL_FINISHED'].includes(item.event.event_type) && ['FAILED','CANCELLED'].includes(item.event.payload?.status);
+  const recent=[...state.events.values()].slice(-12),events=process?recent.filter(attention):recent;
+  if(!live.activityEvents || events.length!==live.activityEvents.length || events.some((item,index)=>item!==live.activityEvents[index])) {
+  live.activityEvents=events;live.activityFocusNodes=new Map();live.activityNodes=[];
   const ordinary=events.filter(item=>!attention(item)).length;
-  const summary=element('summary','',`Activity · ${ordinary} recent events`);summary.dataset.liveFocus='summary';activity.append(summary);
-  if(ordinary)live.activityFocusNodes.set('summary',summary);
+  const activity=ordinary?element('details','tool-message'):null;
+  if(activity) {
+    activity.id='live-activity';activity.open=state.liveActivityOpen;
+    activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
+    const summary=element('summary','',`Activity · ${ordinary} recent events`);summary.dataset.liveFocus='summary';activity.append(summary);
+    live.activityFocusNodes.set('summary',summary);
+  }
   events.forEach(item => {
     const payload=item.event.payload || {};
     const row=element('div',`live-event${item.depth?' child':''}`,`${item.depth?'↳ ':''}${item.agent_id || 'task'} · ${item.event.event_type.replaceAll('_',' ').toLowerCase()}${payload.status?' · '+payload.status:''}${payload.error_code?' · '+payload.error_code:''}${payload.tool_name?' · '+payload.tool_name:''}${payload.call_id?' #'+short(payload.call_id):''}`);
     if(item.depth){const inspect=button('Inspect subagent',async()=>{showInspector(true,true);await selectExecution(item.execution_id);});inspect.dataset.liveFocus=eventKey(item);row.append(inspect);live.activityFocusNodes.set(inspect.dataset.liveFocus,inspect);}
     if(attention(item))live.activityNodes.push(row);else activity.append(row);
   });
-  if(ordinary)live.activityNodes.push(activity);
+  if(activity)live.activityNodes.push(activity);
   }
   wanted.push(...live.activityNodes);
   if(wanted.length!==live.children.length || wanted.some((node,index)=>node!==live.children[index])) {
@@ -1644,7 +1657,7 @@ async function syncObservation({refresh=false}={}) {
   if(state.view==='executions' && !id)return;
   if(id!==state.observedExecution) {
     stopStream();++state.observationGeneration;state.observedExecution=id || null;state.observedInfo=null;
-    state.cursor=null;state.liveText='';state.liveThinking='';state.liveAttempts.clear();state.liveTools.clear();state.liveProcess.clear();state.liveActivityOpen=false;state.models.clear();state.events.clear();renderLive();
+    state.cursor=null;state.liveText='';state.liveThinking='';state.liveThinkingRunning=false;state.liveAttempts.clear();state.liveTools.clear();state.liveProcess.clear();state.liveActivityOpen=false;state.models.clear();state.events.clear();renderLive();
   }
   if(!id)return;
   const generation=state.observationGeneration,view=state.view;
@@ -1764,7 +1777,10 @@ function receiveExecutionFrames(id) {
       if(!committed && item?.key) {
         const previous=state.liveProcess.get(item.key),
           row=mergeProcessRow(previous,envelope.order ? {...item,order:envelope.order} : item);
-        if(row!==previous){state.liveProcess.set(item.key,row);scheduleLiveRender();}
+        if(row!==previous){
+          if(row.status==='RUNNING')state.liveThinkingRunning=false;
+          state.liveProcess.set(item.key,row);scheduleLiveRender();
+        }
       }
     } else if(envelope.type==='model') {
       const previous=state.models.get(modelKey(item.item));upsertModel(state.models,item.item);
@@ -1779,11 +1795,14 @@ function receiveExecutionFrames(id) {
       const event=item.event,payload=event.payload || {};
       updateLiveTools(item);
       const attemptHandled=item.depth===0 && updateStreamAttempts(state.liveAttempts,item);
+      if(item.depth===0 && (attemptHandled || ['ASSISTANT_TEXT_DELTA','MODEL_REQUEST_STARTED','EXECUTION_SUCCEEDED','EXECUTION_FAILED','EXECUTION_CANCELLED','TOOL_CALL_STARTED'].includes(event.event_type)))state.liveThinkingRunning=false;
       if(item.depth===0 && event.event_type==='STREAM_RESET'){
-        state.liveText='';state.liveThinking='';
+        state.liveText='';state.liveThinking='';state.liveThinkingRunning=false;
       }
       else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
-      else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA')state.liveThinking+=payload.text || '';
+      else if(!attemptHandled && item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA'){
+        state.liveThinking+=payload.text || '';state.liveThinkingRunning=Boolean(payload.text);
+      }
       if(!event.event_type.endsWith('_DELTA')) {
         state.events.set(eventKey(item),item);
         if(state.events.size>100)state.events.delete(state.events.keys().next().value);
