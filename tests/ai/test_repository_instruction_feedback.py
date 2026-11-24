@@ -8,11 +8,12 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
 from linktools.ai.capability import AgentContext, CapabilityContribution, ExecutionCapability, TraceCapability
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import ApprovalDecision, ExecutionStatus, service_principal
 from linktools.ai.errors import ErrorCode
+from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime
-from linktools.ai.workspace import Workspace
+from linktools.ai.workspace import ToolPermissionPolicy, ToolPermissionRule, Workspace, WorkspacePolicy
 
 from ._runtime_test_helpers import (
     _Models,
@@ -181,3 +182,91 @@ async def test_instruction_feedback_does_not_swallow_a_sibling_approval_pause(tm
             assert checkpoint is not None and checkpoint.recovery.repository_instruction_overlay is not None
             assert checkpoint.recovery.pending_tools is not None
             assert [call.tool_call_id for call in checkpoint.recovery.pending_tools.approvals] == ["approval"]
+
+
+@pytest.mark.asyncio
+async def test_reading_instruction_files_discovers_scopes_without_a_retry(tmp_path: Path) -> None:
+    _scope(tmp_path, "first")
+    _scope(tmp_path, "second")
+    _scope(tmp_path, "mixed")
+    (tmp_path / "AGENTS.md").write_text("ROOT-RULE", encoding="utf-8")
+    requests = 0
+
+    async def model(messages, info):
+        nonlocal requests
+        requests += 1
+        instructions = info.instructions or ""
+        if requests == 1:
+            assert "ROOT-RULE" in instructions and "RULE-first" not in instructions
+            return ModelResponse(parts=[
+                ToolCallPart("read_file", {"path": "AGENTS.md"}, "root-instructions"),
+                ToolCallPart("read_file", {"path": "first/AGENTS.md"}, "first-instructions"),
+                ToolCallPart("read_file", {"path": ["second/AGENTS.md"]}, "second-instructions"),
+            ])
+        returns = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
+        if requests == 2:
+            assert len(returns) == 3
+            assert all(part.outcome == "success" for part in returns)
+            for name in ("first", "second"):
+                assert f"RULE-{name}" in instructions
+                assert any(f"RULE-{name}" in str(part.content) for part in returns)
+            return ModelResponse(parts=[
+                ToolCallPart("read_file", {"path": ["mixed/AGENTS.md", "mixed/file.txt"]}, "mixed-files"),
+            ])
+        if requests == 3:
+            assert "RULE-mixed" in instructions
+            assert len(returns) == 1 and returns[0].outcome == "failed"
+            assert "CONTENTS-mixed" not in str(returns[0].content)
+            return ModelResponse(parts=[
+                ToolCallPart("read_file", {"path": "mixed/file.txt"}, "known-file"),
+            ])
+        assert requests == 4
+        assert len(returns) == 1 and "CONTENTS-mixed" in str(returns[0].content)
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = workspace_features("instruction-read", workspace=Workspace.load(tmp_path))
+    features.agent("reader", allow_tools=("read_file",), tool_retries=0, output_retries=0)
+    async with Persistence.open("instruction-read", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+            result = (await runtime.agents.get("reader").run("read", timeout_seconds=10)).result
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert requests == 4
+
+
+@pytest.mark.asyncio
+async def test_reading_instruction_files_still_requires_workspace_approval(tmp_path: Path) -> None:
+    _scope(tmp_path, "pkg")
+    requests = 0
+
+    async def model(messages, info):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            assert "RULE-pkg" not in (info.instructions or "")
+            return ModelResponse(parts=[ToolCallPart("read_file", {"path": "pkg/AGENTS.md"}, "read")])
+        assert requests == 2
+        assert "RULE-pkg" in (info.instructions or "")
+        assert any(
+            isinstance(part, ToolReturnPart) and part.outcome == "success" and "RULE-pkg" in str(part.content)
+            for part in messages[-1].parts
+        )
+        return ModelResponse(parts=[TextPart("done")])
+
+    policy = WorkspacePolicy(tool_permissions=ToolPermissionPolicy((ToolPermissionRule("ask", tool_name="read_file"),)))
+    features = workspace_features("instruction-approval", workspace=Workspace.load(tmp_path, policy=policy))
+    features.agent("reader", allow_tools=("read_file",), tool_retries=0, output_retries=0)
+    async with Persistence.open("instruction-approval", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+            execution = await runtime.agents.get("reader").start("read instructions")
+            await _wait_for_committed(
+                lambda: persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id),
+                lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
+            )
+            principal = service_principal(runtime.tenant_id, runtime.default_principal.principal_id)
+            approvals = await runtime.approvals.list(execution.execution_id, principal=principal)
+            assert len(approvals) == 1 and requests == 1
+            await runtime.approvals.decide(execution.execution_id, ApprovalDecisionRequest(
+                principal, approvals[0].approval_id, "approve-read", ApprovalDecision.APPROVE,
+            ))
+            result = (await execution.wait(timeout_seconds=10)).result
+            assert result.status is ExecutionStatus.SUCCEEDED and requests == 2
