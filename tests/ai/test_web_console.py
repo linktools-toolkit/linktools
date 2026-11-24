@@ -1196,7 +1196,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
                 ("ASSISTANT_THINKING_DELTA", {"text": raw_marker}, 1),
                 ("TOOL_CALL_FINISHED", {"call_id": "id", "tool_name": "lookup", "status": "SUCCEEDED",
                                         "result": raw_marker, "tool_position": [2, 1], "agent_run_seq": 1,
-                                        "tool_model_request_seq": 2, "model_request_seq": 7}, 0),
+                                        "tool_model_request_seq": 2, "model_request_seq": 7, "tool_elapsed_ms": 19}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": "answer", "internal": raw_marker}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": raw_marker}, 1),
                 ("MODEL_ATTEMPT_FINISHED", {"status": "SUCCEEDED", "provider_request": raw_marker}, 0),
@@ -1275,6 +1275,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
     assert frames[1][1] == {"execution_id": "execution", "text": thinking}
     assert frames[2][1]["data"]["item"] == turn["process"][0]
     assert frames[2][1]["data"]["order"] == [1, 2, 1]
+    assert frames[2][1]["data"]["elapsed_ms"] == 19
     assert frames[3][1] == {"execution_id": "execution", "text": "answer"}
     assert frames[-1][1]["data"]["status"] == "SUCCEEDED"
 
@@ -1555,8 +1556,10 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
                     order = frame[1]["order"]
                     assert orders.setdefault(item.key, order) == order
                     if item.status == "RUNNING":
+                        assert "elapsed_ms" not in frame[1]
                         started.append(item)
                     elif item.status == "SUCCEEDED":
+                        assert type(frame[1]["elapsed_ms"]) is int and frame[1]["elapsed_ms"] >= 0
                         finished.append(item)
                         if item.key == "tool:a":
                             release_first.set()

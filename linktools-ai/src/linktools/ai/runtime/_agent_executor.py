@@ -1388,9 +1388,16 @@ def _event_stream_capability(
     ) -> None:
         preview = None if output_preview is None else output_preview.new_stream()
         preview_attempt: tuple[JsonValue, JsonValue] | None = None
+        tool_started: dict[str, int] = {}
         async for event in events:
-            emission = _map_event(event)
             position: dict[str, JsonValue] = {"agent_run_seq": agent_run_seq, **recorder.stream_position}
+            if isinstance(event, FunctionToolCallEvent):
+                tool_started[event.part.tool_call_id] = monotonic_ns()
+            elif isinstance(event, FunctionToolResultEvent):
+                started = tool_started.pop(event.part.tool_call_id, None)
+                if started is not None:
+                    position["tool_elapsed_ms"] = (monotonic_ns() - started) // 1_000_000
+            emission = _map_event(event)
             if isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent)):
                 position["part_index"] = event.index
             if preview is not None:

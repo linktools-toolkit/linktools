@@ -148,6 +148,9 @@ def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
         if (process.position is not None and type(agent) is int and agent > 0
                 and type(request) is int and request > 0):
             frame["order"] = (agent, request, process.position[1])
+        elapsed = event.payload.get("tool_elapsed_ms")
+        if process.status != "RUNNING" and type(elapsed) is int and elapsed >= 0:
+            frame["elapsed_ms"] = elapsed
         return "message", frame, cursor
     allowed = _CHAT_STREAM_FIELDS.get(event.event_type)
     if allowed is None or not isinstance(event.payload, Mapping):

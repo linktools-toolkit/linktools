@@ -96,6 +96,7 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;height:100dvh}
 .tool-message{border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#fafbfa}
 .tool-message summary{font-size:12px;padding:10px;cursor:pointer;color:var(--muted)}
 .process-running > summary::after{content:'';display:inline-block;width:7px;height:7px;margin-inline-start:8px;vertical-align:1px;border:1px solid currentColor;border-right-color:transparent;border-radius:50%;animation:process-spin .8s linear infinite}
+.process-elapsed{margin-inline-start:8px;color:var(--muted);font-size:11px}
 @keyframes process-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.process-running > summary::after{animation:none}}
 .tool-message pre{font-size:12px;white-space:pre-wrap;word-break:break-word;margin:12px;line-height:1.7}

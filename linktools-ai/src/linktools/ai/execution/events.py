@@ -80,6 +80,7 @@ _BOUNDARY_METADATA_FIELDS = {
             "tool_name",
             "tool_position",
             "tool_model_request_seq",
+            "tool_elapsed_ms",
             "result_digest",
             "status",
             "error_code",

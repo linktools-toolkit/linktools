@@ -685,6 +685,18 @@ function mergeProcessRow(previous,row) {
   const order=previous.order ?? row.order;
   return next.position===position && next.order===order ? next : {...next,position,order};
 }
+function showProcessElapsed(node,ms,stream=false) {
+  node.elapsedMs=ms;
+  if(ms==null){if(node.elapsedNode){node.elapsedNode.remove();node.elapsedNode=null;}return '';}
+  const elapsed=`${stream?'Stream ':''}${ms<1000?Math.round(ms)+' ms':(ms/1000).toFixed(1)+' s'}`;
+  if(!node.elapsedNode){
+    node.elapsedNode=element('span','process-elapsed');
+    if(stream)node.elapsedNode.title='Streaming interval observed by this browser, not model computation time';
+    node.children[0].append(node.elapsedNode);
+  }
+  if(node.elapsedNode.textContent!==elapsed)node.elapsedNode.textContent=elapsed;
+  return elapsed;
+}
 function toolProcessRow(rows,row,fold=false) {
   let node=rows.get(row.key);
   if(!node) {
@@ -693,11 +705,12 @@ function toolProcessRow(rows,row,fold=false) {
     node.toolStatusNode.setAttribute('role','status');node.toolStatusNode.setAttribute('aria-live','polite');node.append(node.toolNameNode,node.toolStatusNode);
     rows.set(row.key,node);
   }
-  if(node.toolNameNode.textContent!==row.tool_name)node.toolNameNode.textContent=row.tool_name;
+  if(node.toolNameText!==row.tool_name){node.toolNameNode.textContent=row.tool_name;node.toolNameText=row.tool_name;}
   if(node.toolStatusNode.textContent!==processToolStatus[row.status])node.toolStatusNode.textContent=processToolStatus[row.status];
   if(fold) {
     node.classList.toggle('process-running',row.status==='RUNNING');
-    const label=`${row.tool_name} · ${processToolStatus[row.status]}`;
+    const elapsed=showProcessElapsed(node,row.elapsedMs);
+    const label=`${row.tool_name} · ${processToolStatus[row.status]}${elapsed?' · '+elapsed:''}`;
     if(node.toolNameNode.getAttribute('aria-label')!==label)node.toolNameNode.setAttribute('aria-label',label);
   }
   node.classList.toggle('error',row.status==='FAILED');
@@ -746,12 +759,15 @@ function thinkingMessage(label,text='') {
   const node=element('details','tool-message');node.body=element('pre','',text);
   node.append(element('summary','',label),node.body);return node;
 }
-function renderTurn(turn,openTools=null) {
+function renderTurn(turn,liveTools=null) {
   const section=element('article','turn');section.dataset.execution=turn.execution_id;
   section.append(userMessage(turn.user_input));
   const ordered=state.conversationMode==='chat',process=turnProcess();
   if(!ordered)section.append(process);
-  const originalRows=turn.conversation_committed?turn.process:conversationProcessRows(turn.execution_id,turn.process);
+  const originalRows=turn.conversation_committed?turn.process?.map(row=>{
+    const elapsedMs=liveTools?.get(row.key)?.elapsedMs;
+    return elapsedMs===undefined?row:{...row,elapsedMs};
+  }):conversationProcessRows(turn.execution_id,turn.process);
   const remaining=new Map((originalRows || []).map(row=>[row.key,row])), cards=new Map();
   const savedAnswers=element('div','turn-saved-answers');section.append(savedAnswers);
   for (const item of turn.items) {
@@ -771,9 +787,9 @@ function renderTurn(turn,openTools=null) {
     section.liveSlot=element('div','turn-live-slot');section.append(section.liveSlot);
   }
   renderTurnProcess(process,[...remaining.values()],ordered);
-  if(openTools)for(const key of openTools) {
+  if(liveTools)for(const [key,previous] of liveTools) {
     const card=cards.get(key) || process.rows.get(key);
-    if(card)card.open=true;
+    if(card && previous.open)card.open=true;
   }
   if(ordered)section.append(process);
   if(!turn.conversation_committed)section.processNode=process;
@@ -797,16 +813,16 @@ function renderCommittedTurn(timeline,id,previousError=state.timelineError) {
     renderTurnPickers();renderLive();return;
   }
   const top=container.scrollTop,follows=top+container.clientHeight>=container.scrollHeight-40;
-  const openTools=new Set();
+  const liveTools=new Map();
   const rememberTools=rows=>{
-    for(const [key,node] of rows || [])if(key.startsWith('tool:') && node.open)openTools.add(key);
+    for(const [key,node] of rows || [])if(key.startsWith('tool:') && (node.open || node.elapsedMs!==undefined))liveTools.set(key,node);
   };
   rememberTools(previous?.placedTools);rememberTools(previous?.processNode?.rows);
   if(state.observedExecution===id) {
     rememberTools(live.processNode?.rows);
     for(const request of live.attemptNodes?.values() || [])rememberTools(request.partNodes);
   }
-  const section=renderTurn(turn,openTools);
+  const section=renderTurn(turn,liveTools);
   if(previous) {
     if(previous.contains(live))container.append(live);
     container.insertBefore(section,previous);
@@ -963,6 +979,7 @@ function renderLiveAttempts(live,wanted,process,tools,running) {
         if(part.kind==='thinking'){
           body.classList.toggle('process-running',thinkingPart===part.index);
           if(body.body.textContent!==part.content)body.body.textContent=part.content;
+          showProcessElapsed(body,activeAttempt?.thinkingElapsed?.get(part.index),true);
         }else updateMarkdownMessage(body,part.content);
         children.push(body);
       }
@@ -1773,10 +1790,13 @@ function receiveExecutionFrames(id) {
       checkedTurns=state.turns;
       committed=state.view==='sessions' && checkedTurns.some(turn=>turn.execution_id===id && turn.conversation_committed);
     }
+    const clock=state.view==='sessions' && state.conversationMode==='chat'?{now:performance.now(),epoch:sessionWatch?.refresh.reconnect}:undefined;
     if(envelope.type==='process') {
       if(!committed && item?.key) {
-        const previous=state.liveProcess.get(item.key),
-          row=mergeProcessRow(previous,envelope.order ? {...item,order:envelope.order} : item);
+        const previous=state.liveProcess.get(item.key);
+        let row=mergeProcessRow(previous,envelope.order ? {...item,order:envelope.order} : item);
+        const elapsed=Number.isSafeInteger(envelope.elapsed_ms) && envelope.elapsed_ms>=0 ? envelope.elapsed_ms : previous?.elapsedMs;
+        if(row.status!=='RUNNING' && elapsed!==undefined && row.elapsedMs!==elapsed)row={...row,elapsedMs:elapsed};
         if(row!==previous){
           if(row.status==='RUNNING')state.liveThinkingRunning=false;
           state.liveProcess.set(item.key,row);scheduleLiveRender();
@@ -1794,7 +1814,7 @@ function receiveExecutionFrames(id) {
     else if(!committed) {
       const event=item.event,payload=event.payload || {};
       updateLiveTools(item);
-      const attemptHandled=item.depth===0 && updateStreamAttempts(state.liveAttempts,item);
+      const attemptHandled=item.depth===0 && updateStreamAttempts(state.liveAttempts,item,clock);
       if(item.depth===0 && (attemptHandled || ['ASSISTANT_TEXT_DELTA','MODEL_REQUEST_STARTED','EXECUTION_SUCCEEDED','EXECUTION_FAILED','EXECUTION_CANCELLED','TOOL_CALL_STARTED'].includes(event.event_type)))state.liveThinkingRunning=false;
       if(item.depth===0 && event.event_type==='STREAM_RESET'){
         state.liveText='';state.liveThinking='';state.liveThinkingRunning=false;
