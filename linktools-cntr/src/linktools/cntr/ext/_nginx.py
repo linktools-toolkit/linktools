@@ -57,10 +57,8 @@ class Nginx(Integration):
         def get_domain(config: "ConfigResolver") -> str:
             if not container.containers["nginx"].enable:
                 return ""
-            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool):
-                return config.get("NGINX_ROOT_DOMAIN")
             root = config.get("NGINX_ROOT_DOMAIN")
-            if root in ("_", "localhost"):
+            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool) or root in ("", "_", "localhost"):
                 return root
             if name is None:
                 return f"{container.name}.{root}"

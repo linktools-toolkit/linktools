@@ -384,8 +384,12 @@ returns a lazy configuration provider. For example:
 APP_DOMAIN = ConfigField(provider=Nginx.domain(self))
 ```
 
-It keeps the shared nginx root-domain, wildcard and disabled-provider behavior.
-The former `BaseContainer.get_nginx_domain` method is removed.
+Use this provider for a site's routing name, not to decide whether a public
+URL exists. An empty root keeps inherited sites disabled, even when wildcard
+mode is set; the legacy `_` remains an unnamed nginx routing name, not a
+publicly reachable hostname. Existing wildcard validation still requires a
+configured root. The raw default stays `_` so existing container repositories
+such as Homelab keep their routing and configuration-alias behavior.
 
 Import the URL factories from `linktools.cntr.ext`:
 
@@ -427,7 +431,10 @@ raises ConfigError without reading paths or queries.
 the snapshot. Every Config.resolve performs the lookup; the reference does not
 cache a resolved site. For immediate site properties, use
 `config.resolve(ResolvedSite.find(producer)).get_url(default="")`.
-Missing, foreign or ambiguous references raise ConfigError at resolution time.
+Use this to get a public main-site URL rather than testing raw root values
+such as `("_", "")`. For a producer with multiple sites, pass the original
+site declaration as the second argument. Missing, foreign or ambiguous
+references raise ConfigError at resolution time.
 Declared disabled sites or absent nginx produce an empty URL. There is no
 separate synchronous alias.
 These factories never register hooks or write configuration.
