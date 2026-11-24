@@ -709,7 +709,7 @@ function toolProcessRow(rows,row,fold=false) {
   if(node.toolStatusNode.textContent!==processToolStatus[row.status])node.toolStatusNode.textContent=processToolStatus[row.status];
   if(fold) {
     node.classList.toggle('process-running',row.status==='RUNNING');
-    const elapsed=showProcessElapsed(node,row.elapsedMs);
+    const elapsed=showProcessElapsed(node,row.elapsed_ms);
     const label=`${row.tool_name} · ${processToolStatus[row.status]}${elapsed?' · '+elapsed:''}`;
     if(node.toolNameNode.getAttribute('aria-label')!==label)node.toolNameNode.setAttribute('aria-label',label);
   }
@@ -765,8 +765,8 @@ function renderTurn(turn,liveTools=null,liveThinking=null) {
   const ordered=state.conversationMode==='chat',process=turnProcess();
   if(!ordered)section.append(process);
   const originalRows=turn.conversation_committed?turn.process?.map(row=>{
-    const elapsedMs=liveTools?.get(row.key)?.elapsedMs;
-    return elapsedMs===undefined?row:{...row,elapsedMs};
+    const elapsed=liveTools?.get(row.key)?.elapsedMs;
+    return row.elapsed_ms!=null || elapsed===undefined?row:{...row,elapsed_ms:elapsed};
   }):conversationProcessRows(turn.execution_id,turn.process);
   const remaining=new Map((originalRows || []).map(row=>[row.key,row])), cards=new Map();
   const savedAnswers=element('div','turn-saved-answers');section.append(savedAnswers);
@@ -1814,8 +1814,8 @@ function receiveExecutionFrames(id) {
       if(!committed && item?.key) {
         const previous=state.liveProcess.get(item.key);
         let row=mergeProcessRow(previous,envelope.order ? {...item,order:envelope.order} : item);
-        const elapsed=Number.isSafeInteger(envelope.elapsed_ms) && envelope.elapsed_ms>=0 ? envelope.elapsed_ms : previous?.elapsedMs;
-        if(row.status!=='RUNNING' && elapsed!==undefined && row.elapsedMs!==elapsed)row={...row,elapsedMs:elapsed};
+        const elapsed=Number.isSafeInteger(envelope.elapsed_ms) && envelope.elapsed_ms>=0 ? envelope.elapsed_ms : previous?.elapsed_ms;
+        if(row.status!=='RUNNING' && elapsed!==undefined && row.elapsed_ms!==elapsed)row={...row,elapsed_ms:elapsed};
         if(row!==previous){
           if(row.status==='RUNNING')state.liveThinkingRunning=false;
           state.liveProcess.set(item.key,row);scheduleLiveRender();

@@ -87,6 +87,8 @@ def _wire(value: object) -> object:
         return result
     if is_dataclass(value) and not isinstance(value, type):
         result = {field.name: _wire(getattr(value, field.name)) for field in fields(value)}
+        if isinstance(value, ToolProcessItem) and value.elapsed_ms is None:
+            result.pop("elapsed_ms")
         return result
     if isinstance(value, Enum):
         return value.value

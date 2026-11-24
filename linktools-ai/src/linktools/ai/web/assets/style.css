@@ -95,9 +95,9 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;height:100dvh}
 .message-label{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin-bottom:9px}
 .tool-message{border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#fafbfa}
 .tool-message summary{font-size:12px;padding:10px;cursor:pointer;color:var(--muted)}
-.process-running > summary::after{content:'';display:inline-block;width:7px;height:7px;margin-inline-start:8px;vertical-align:1px;border:1px solid currentColor;border-right-color:transparent;border-radius:50%;animation:process-spin .8s linear infinite}
+.process-running > summary::after{content:'';display:inline-block;width:7px;height:7px;margin-inline-start:8px;vertical-align:1px;border-radius:50%;background:var(--accent);animation:process-pulse 1.2s ease-in-out infinite}
 .process-elapsed{margin-inline-start:8px;color:var(--muted);font-size:11px}
-@keyframes process-spin{to{transform:rotate(360deg)}}
+@keyframes process-pulse{50%{opacity:.45;transform:scale(.82)}}
 @media(prefers-reduced-motion:reduce){.process-running > summary::after{animation:none}}
 .tool-message pre{font-size:12px;white-space:pre-wrap;word-break:break-word;margin:12px;line-height:1.7}
 .live-event{font-size:12px;line-height:1.6;padding:8px 11px;margin:5px 0;border-left:2px solid #bccdc3;color:#51685a;background:#f3f7f2;overflow-wrap:anywhere}

@@ -1520,7 +1520,7 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
 
 
 @pytest.mark.asyncio
-async def test_chat_tool_positions_match_history_when_parallel_results_finish_out_of_order() -> None:
+async def test_chat_tool_positions_match_history_when_parallel_results_finish_out_of_order(tmp_path: Path) -> None:
     from linktools.ai.capability import AgentContext
     from linktools.ai.session import project_tool_process_event
     from linktools.ai.web._app import _chat_frame
@@ -1530,6 +1530,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         TextPart,
         ThinkingPart,
         ToolCallPart,
+        ToolReturn,
         ToolReturnPart,
     )
     from pydantic_ai.models.function import AgentInfo
@@ -1538,13 +1539,17 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
 
     release_first = asyncio.Event()
 
-    async def lookup(context: AgentContext[None], label: str) -> str:
+    async def lookup(context: AgentContext[None], label: str) -> ToolReturn:
         if label == "first":
             await release_first.wait()
-        return label
+        return ToolReturn(return_value=label, metadata=f"application metadata: {label}")
 
     def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
-        if any(isinstance(part, ToolReturnPart) for part in messages[-1].parts):
+        results = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
+        if results:
+            assert {part.tool_call_id: part.metadata for part in results} == {
+                "z": "application metadata: first", "a": "application metadata: second",
+            }
             return ModelResponse(parts=[TextPart("done")])
         return ModelResponse(parts=[
             ToolCallPart("lookup", {"label": "first"}, tool_call_id="z"),
@@ -1556,9 +1561,10 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="default", allow_tools=("lookup",))
-    model = _Models(_UsageFunctionModel(respond))
-    async with Persistence.open("web-tool-order", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
-        persistence=persistence, features=model_features(model, features),
+    model_features(_Models(_UsageFunctionModel(respond)), features)
+    storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    async with Persistence.open("web-tool-order", storage=storage) as persistence, Runtime.open(
+        persistence=persistence, features=features,
     ) as runtime, client(create_app(runtime=runtime)) as http:
         created = await http.post("/api/sessions", headers=_HEADERS,
                                   json={"session_id": "tools", "request_id": "create"})
@@ -1570,6 +1576,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         started = []
         finished = []
         orders = {}
+        live_elapsed: dict[str, int] = {}
         try:
             async with asyncio.timeout(10):
                 async for observation in execution.watch():
@@ -1586,6 +1593,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
                         started.append(item)
                     elif item.status == "SUCCEEDED":
                         assert type(frame[1]["elapsed_ms"]) is int and frame[1]["elapsed_ms"] >= 0
+                        live_elapsed[item.key] = frame[1]["elapsed_ms"]
                         finished.append(item)
                         if item.key == "tool:a":
                             release_first.set()
@@ -1608,6 +1616,17 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         saved = {item["key"]: tuple(item["position"]) for item in turn["process"]}
         assert {item.key: item.position for item in started} == saved
         assert {item.key: item.position for item in finished} == saved
+
+        assert {item["key"]: item["elapsed_ms"] for item in turn["process"]} == live_elapsed
+        assert "application metadata:" not in replay.text
+
+    async with Persistence.open("web-tool-order", storage=storage) as persistence, Runtime.open(
+        persistence=persistence, features=features,
+    ) as runtime, client(create_app(runtime=runtime)) as http:
+        restored = await http.get("/api/session?session_id=tools")
+        assert restored.status_code == 200, restored.text
+        restored_turn, = restored.json()["timeline"]["items"]
+        assert {item["key"]: item["elapsed_ms"] for item in restored_turn["process"]} == live_elapsed
 
 
 @pytest.mark.asyncio

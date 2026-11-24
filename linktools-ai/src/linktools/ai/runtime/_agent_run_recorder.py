@@ -46,7 +46,10 @@ from ..observe.journal import (
     ModelRequestFact,
     await_request_handoff,
 )
-from ..model.messages import THINKING_ELAPSED_MS_METADATA_KEY, freeze_model_messages, model_response_usage
+from ..model.messages import (
+    THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY,
+    freeze_model_messages, model_response_usage,
+)
 from ._run_context import RunContextProjection
 from ._trace_capture import ModelInteractionCapture, TraceStagingPort
 from ..persistence.contracts import LoadedModelContext
@@ -105,6 +108,7 @@ class AgentRunRecorder:
         self._tool_operation_ids: dict[str, str] = {}
         self._tool_execution_metadata: dict[str, tuple[dict[str, str], str | None]] = {}
         self._tool_results: dict[str, ToolReturnPart] = {}
+        self._tool_elapsed_ms: dict[str, int] = {}
         self._restored_tool_results: set[str] = set()
         self._restored_tool_calls: dict[str, ToolCallPart] = {}
         self._restored_pending = False
@@ -205,7 +209,13 @@ class AgentRunRecorder:
                 self._restored_pending = True
                 if len(observed.pending.parts) != len(observed.pending_keys):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                tool_timings = ((observed.pending.metadata or {}).get(TOOL_ELAPSED_MS_METADATA_KEY)
+                                if isinstance(observed.pending, ModelRequest) else None)
                 for key, part in zip(observed.pending_keys, observed.pending.parts):
+                    if isinstance(part, ToolReturnPart) and isinstance(tool_timings, Mapping):
+                        elapsed_ms = tool_timings.get(part.tool_call_id)
+                        if type(elapsed_ms) is int and elapsed_ms >= 0:
+                            self._tool_elapsed_ms[part.tool_call_id] = elapsed_ms
                     self._pending_parts[key] = freeze_model_messages((
                         ModelResponse(parts=[part])
                         if isinstance(observed.pending, ModelResponse)
@@ -389,7 +399,22 @@ class AgentRunRecorder:
             for key, pending in self._pending_parts.items()
         )
 
+    def _attach_tool_timings(self, request: ModelRequest) -> None:
+        if not self._tool_elapsed_ms:
+            return
+        durations = {
+            part.tool_call_id: self._tool_elapsed_ms[part.tool_call_id]
+            for part in request.parts
+            if (isinstance(part, ToolReturnPart) and part.tool_call_id in self._tool_elapsed_ms
+                and not self._is_interrupted_tool_placeholder(part))
+        }
+        if durations:
+            # Preserve the SDK request used for the native checkpoint as well.
+            request.metadata = {**(request.metadata or {}), TOOL_ELAPSED_MS_METADATA_KEY: durations}
+
     def append_transcript_message(self, message: ModelMessage) -> ModelMessage:
+        if isinstance(message, ModelRequest):
+            self._attach_tool_timings(message)
         frozen = freeze_model_messages((message,))[0]
         if isinstance(frozen, ModelRequest):
             parts = []
@@ -522,13 +547,18 @@ class AgentRunRecorder:
         await self.commit_history_boundary()
 
     async def record_tool_result_boundary(
-        self, part: ToolReturnPart, step_index: int
-    ) -> None:
+        self, part: ToolReturnPart, step_index: int, *, elapsed_ms: int | None = None,
+    ) -> int | None:
+        if self._is_interrupted_tool_placeholder(part):
+            elapsed_ms = None
+        elif elapsed_ms is not None:
+            elapsed_ms = self._tool_elapsed_ms.setdefault(part.tool_call_id, elapsed_ms)
         interrupted = await await_request_handoff(
             self._record_tool_result_boundary(part, step_index)
         )
         if interrupted:
             raise asyncio.CancelledError
+        return elapsed_ms
 
     def _same_tool_call(self, previous: ToolCallPart, current: ToolCallPart) -> bool:
         return previous.tool_name == current.tool_name and previous.args_as_dict() == current.args_as_dict()
@@ -604,6 +634,8 @@ class AgentRunRecorder:
                 if isinstance(first, ModelResponse)
                 else ModelRequest(parts=parts)
             )
+            if isinstance(pending, ModelRequest):
+                self._attach_tool_timings(pending)
         self._staging_store.stage_transcript(
             self._agent_run_id,
             StagedTranscript(self._transcript_messages, pending, keys),

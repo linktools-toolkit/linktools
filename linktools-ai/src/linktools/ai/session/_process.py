@@ -17,6 +17,7 @@ class ToolProcessItem:
     tool_name: str
     status: ToolProcessStatus
     position: tuple[int, int] | None = None
+    elapsed_ms: int | None = None
     kind: Literal["tool"] = field(default="tool", init=False)
 
 

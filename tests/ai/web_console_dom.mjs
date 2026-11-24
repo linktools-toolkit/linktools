@@ -954,7 +954,7 @@ if(process.argv[3]==='tools') {
     {item_kind:'tool_call',tool_call_id:'later',content:null},
     {item_kind:'tool_result',content:'Private saved result'},
     {item_kind:'assistant',content:'Final reply'},
-  ],process:[{...tool,status:'SUCCEEDED'},{...laterTool,status:'UNCONFIRMED'}]};
+  ],process:[{...tool,status:'SUCCEEDED',elapsed_ms:140},{...laterTool,status:'UNCONFIRMED'}]};
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
   event('MODEL_REQUEST_FINISHED',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,status:'SUCCEEDED'});
@@ -985,7 +985,7 @@ if(process.argv[3]==='tools') {
   timelineOverrides.set('a',{items:[older,saved],next_cursor:null});
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
   const savedParts=()=>article()?.children.find(item=>item.className==='turn-saved-answers');
-  await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookup125 ms'));
+  await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookup140 ms'));
   globalThis.requestAnimationFrame=schedule;globalThis.cancelAnimationFrame=cancel;
   assert.equal(savedParts().children.at(-1).children[0].textContent,'Thinking0 ms',
     'canonical hydration preserves a completed duration even before the queued paint');
@@ -996,7 +996,7 @@ if(process.argv[3]==='tools') {
   assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
   assert.match(savedParts().textContent,/secondaryOutcome unconfirmed/);
   assert.equal(savedParts().children[1].tagName,'DETAILS');
-  assert.equal(savedParts().children[1].children[0].textContent,'lookup125 ms');
+  assert.equal(savedParts().children[1].children[0].textContent,'lookup140 ms','durable server time replaces the live tool preview');
   assert.equal(savedParts().children[1].open,true,'the same committed tool retains its open disclosure');
   assert.ok(!descendants(savedParts()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
   const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===completedThinking);
@@ -1014,7 +1014,8 @@ if(process.argv[3]==='tools') {
   assert.match(savedParts().textContent,/Thinking375 ms/,'cold-reopened History retains thinking time without prior browser observations');
   assert.match(savedParts().textContent,/Thinking0 ms/,'a real zero duration also survives reopen');
   assert.doesNotMatch(olderArticle().textContent,/ ms/,'older archived thoughts without a duration remain untimed');
-  assert.doesNotMatch(savedParts().textContent,/125 ms/,'History does not invent tool durations');
+  assert.match(savedParts().textContent,/lookup140 ms/,'cold-reopened History retains the saved tool elapsed time');
+  assert.equal(savedParts().children[4].children[0].textContent,'secondary','legacy tool without an elapsed field remains untimed');
 
   const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
   const remoteTurn={...turn,execution_id:remote,user_input:'External question'};

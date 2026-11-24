@@ -1395,8 +1395,7 @@ def _event_stream_capability(
                 tool_started[event.part.tool_call_id] = monotonic_ns()
             elif isinstance(event, FunctionToolResultEvent):
                 started = tool_started.pop(event.part.tool_call_id, None)
-                if started is not None:
-                    position["tool_elapsed_ms"] = (monotonic_ns() - started) // 1_000_000
+                tool_elapsed_ms = None if started is None else (monotonic_ns() - started) // 1_000_000
             emission = _map_event(event)
             if isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent)):
                 position["part_index"] = event.index
@@ -1429,7 +1428,11 @@ def _event_stream_capability(
             elif isinstance(event, FunctionToolCallEvent):
                 await recorder.record_tool_start(event.part, _ctx.run_step)
             elif isinstance(event, FunctionToolResultEvent):
-                await recorder.record_tool_result_boundary(event.part, _ctx.run_step)
+                elapsed_ms = await recorder.record_tool_result_boundary(
+                    event.part, _ctx.run_step, elapsed_ms=tool_elapsed_ms,
+                )
+                if elapsed_ms is not None:
+                    position["tool_elapsed_ms"] = elapsed_ms
             if recorder.direct_stream and (isinstance(emission, LiveDelta) or "thinking_elapsed_ms" in position):
                 position["stream_attempt_seq"] = 1
             if isinstance(emission, LiveDelta) and "stream_attempt_seq" in position:

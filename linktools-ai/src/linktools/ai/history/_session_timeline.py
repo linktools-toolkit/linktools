@@ -37,7 +37,7 @@ from ..storage import StoredPayload
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ..inputs import stored_user_input_view
-from ..model.messages import THINKING_ELAPSED_MS_METADATA_KEY
+from ..model.messages import THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY
 from ..session import SessionTurn, SessionTurnItem
 from ..persistence.contracts import (
     ConversationRepositories,
@@ -827,6 +827,7 @@ def _project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[Tool
                         ),
                     )
         elif isinstance(message, ModelRequest):
+            durations = (message.metadata or {}).get(TOOL_ELAPSED_MS_METADATA_KEY)
             for part in message.parts:
                 if not isinstance(part, ToolReturnPart):
                     continue
@@ -845,7 +846,10 @@ def _project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[Tool
                     status = "INTERRUPTED"
                 else:
                     continue
-                calls[part.tool_call_id] = replace(call, status=status)
+                elapsed = durations.get(part.tool_call_id) if isinstance(durations, Mapping) else None
+                calls[part.tool_call_id] = replace(
+                    call, status=status, elapsed_ms=elapsed if type(elapsed) is int and elapsed >= 0 else None,
+                )
     return tuple(calls.values())
 
 
