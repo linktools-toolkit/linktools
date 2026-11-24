@@ -809,7 +809,7 @@ function renderTurn(turn,openTools=null,liveThinking=null) {
   if (!ordered && !turn.conversation_committed) section.append(element('p','muted','Incomplete turn; history is not yet committed.'));
   if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
   const heading=element('div','turn-heading');heading.append(element('span','',date(turn.created_at)));
-  if(turn.status!=='SUCCEEDED')heading.append(element('span','badge',turn.status));
+  if(turn.status!=='SUCCEEDED' && !(ordered && turn.status==='STARTED'))heading.append(element('span','badge',turn.status));
   section.append(heading);return section;
 }
 function renderCommittedTurn(timeline,id,previousError=state.timelineError) {

@@ -881,6 +881,8 @@ if(process.argv[3]==='tools') {
   const laterTool={kind:'tool',key:'tool:later',tool_name:'secondary',status:'RUNNING',position:[2,1]};
   const initialThinking='  SDK thinking\n<literal>  ',sdkThinking=initialThinking+'complete phase';
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
+  assert.ok(!descendants(article()).some(item=>item.className==='badge' && item.textContent==='STARTED'),
+    'Chat omits the turn STARTED footer badge');
   assert.doesNotMatch(article().textContent,/Incomplete turn; history is not yet committed/);
   assert.equal(sessionSources.at(-1).url.searchParams.get('view'),'chat');
   assert.equal(calls.filter(call=>call.key==='/api/executions/'+id+'/events').length,0,'Chat uses its session EventSource only');
