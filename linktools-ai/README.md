@@ -264,17 +264,17 @@ security, persisted history and explicit recovery of stopped executors.
 
 ```python
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
-from linktools.ai.capability import FileSystem
+from linktools.ai.capability import FileSystemCapability
 from linktools.ai.capability import MemoryCapability, ShellCapability
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.persistence import PersistenceStorage
 
 workspace = Workspace.initialize("/workspace/project")
-binding = create_model(api="openai", model="gpt-4o-mini")
+binding = create_model_binding(api="openai", model="gpt-4o-mini")
 storage = PersistenceStorage.in_memory()
 features = RuntimeFeatures("workspace")
 features.model("default", binding)
-features.capability(FileSystem(workspace))
+features.capability(FileSystemCapability(workspace))
 features.capability(ShellCapability())
 features.capability(MemoryCapability())
 
@@ -319,7 +319,7 @@ binding is reused within that run; the next run reads updated configuration.
 To give multiple routes the same static binding, register that object under each name:
 
 ```python
-binding = create_model(
+binding = create_model_binding(
     api="openai", model="gpt-4o-mini",
     api_key=get_api_key(),
 )
@@ -333,19 +333,19 @@ Install `linktools-ai[openai]` for Chat Completions and Responses, or
 `linktools-ai[anthropic]` for Messages; combine extras when using both.
 The base package does not install either provider SDK.
 
-`create_model(api="anthropic", model="claude-sonnet-4-5")` returns a
+`create_model_binding(api="anthropic", model="claude-sonnet-4-5")` returns a
 model binding without a route name. Protocols are `openai` (Chat Completions),
 `openai-responses`, and `anthropic`. Register bindings in the same feature
 container as tools and capabilities:
 
 ```python
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.runtime import RuntimeFeatures
 
 features = RuntimeFeatures()
-features.model("assistant", create_model(api="anthropic", model="claude-sonnet-4-5"))
+features.model("assistant", create_model_binding(api="anthropic", model="claude-sonnet-4-5"))
 # Or load one fresh binding for each agent run. The function is synchronous.
-features.model("deferred", lambda: create_model(api="openai", model="gpt-4o"))
+features.model("deferred", lambda: create_model_binding(api="openai", model="gpt-4o"))
 ```
 
 Runtime captures the route mapping at opening without evaluating every loader.
@@ -355,7 +355,7 @@ it. Concurrent runs do not share mutable loader results. Client resources are
 created and released per run. See [model protocols](docs/model-protocols.md) for
 custom bindings, request-body extensions, restore boundaries and trace semantics.
 
-`create_model(..., model_settings={"extra_body": {"enable_thinking": True}})`
+`create_model_binding(..., model_settings={"extra_body": {"enable_thinking": True}})`
 forwards native body fields when the endpoint supports them. Common and
 provider-specific SDK settings go directly in `model_settings`; unknown keys are
 not automatically body fields. A host can pass its JSON/YAML mapping without a
@@ -367,10 +367,10 @@ in connection configuration, not contract-captured semantic values. Operational
 `timeout`, `request_timeout`, `max_retries` and `extra_headers` are excluded from
 the semantic contract.
 
-Transport retries belong only to `create_model(max_retries=...)`; native SDK
+Transport retries belong only to `create_model_binding(max_retries=...)`; native SDK
 retries stay disabled. Omit `model_settings["max_retries"]`; its only accepted
 explicit value is integer `0`, which does **not** disable LinkTools retries.
-Use `create_model(..., max_retries=0)` for no transport retries. The default `2`
+Use `create_model_binding(..., max_retries=0)` for no transport retries. The default `2`
 permits up to three attempts on a retryable failure, including when an old settings
 mapping contains `"max_retries": 0`; migrate that intent to the factory argument.
 See [transport retry semantics](docs/model-protocols.md#transport-retries).
@@ -389,12 +389,12 @@ Use `RuntimeFeatures` for direct application registrations:
 
 ```python
 from linktools.ai import AgentContext, RuntimeFeatures, Runtime
-from linktools.ai.capability import FileSystem
+from linktools.ai.capability import FileSystemCapability
 from linktools.ai.capability import ShellCapability
 
 application = RuntimeFeatures[None]("application")
 application.model("default", binding)
-application.capability(FileSystem(workspace))
+application.capability(FileSystemCapability(workspace))
 application.capability(ShellCapability())
 
 @application.tool
@@ -469,13 +469,13 @@ Native files and commands share one explicitly owned environment:
 ```python
 from pydantic_ai import Agent
 from linktools.ai.capability import ShellCapability
-from linktools.ai.capability import FileSystem, PydanticToolControlCapability
+from linktools.ai.capability import FileSystemCapability, PydanticToolControlCapability
 from linktools.ai.workspace import LocalWorkspaceBackend, Workspace
 
 project = Workspace.load("./project")
 backend = LocalWorkspaceBackend(project.root)  # Trusted host execution; no OS isolation.
 try:
-    files = FileSystem(project).bind(("read_file",), backend=backend)
+    files = FileSystemCapability(project).bind(("read_file",), backend=backend)
     shell = ShellCapability().bind(("run_command",), backend=backend, policy=project.policy.tool_permissions)
     agent = Agent(model, capabilities=[PydanticToolControlCapability(), files, shell])
     result = await agent.run("Inspect the project.", workspace=backend)
@@ -670,7 +670,7 @@ unchanged.
 
 ## 3. Workspace and declaration assets
 
-Registering `FileSystem(workspace)` at Runtime scope contributes the stable
+Registering `FileSystemCapability(workspace)` at Runtime scope contributes the stable
 ten file tools, including bounded reads and attachments. Register native
 `ShellCapability()` separately for command tools. Neither
 capability discovers Agent, Skill, or
@@ -830,7 +830,7 @@ The workspace provider exposes existing local resource files by path after verif
 bound Asset versions and executable bits. Resources without native file paths
 remain available through `load_skill` but cannot be executed by file path.
 Skill resource bytes are not copied to a temporary directory or Runtime ObjectStore.
-Because the paths point to original files, external edits after verification can be observed by an already running process. A Skill or resource added during a run does not expand its prepared resources: `load_skill` exposes it as virtual when no matching path is available. Files already under the authorized Workspace remain usable through ordinary FileSystem/Shell tools. The next run prepares its resources from the current allowed Skills.
+Because the paths point to original files, external edits after verification can be observed by an already running process. A Skill or resource added during a run does not expand its prepared resources: `load_skill` exposes it as virtual when no matching path is available. Files already under the authorized Workspace remain usable through ordinary FileSystemCapability/Shell tools. The next run prepares its resources from the current allowed Skills.
 
 For a stdio MCP package, the package directory supplies the default resource
 root when `resource` is omitted; an explicit resource root takes precedence.
@@ -1030,7 +1030,7 @@ publishing, and arbitrary third-party configuration import are out of scope.
 
 ### Execution workspace
 
-Custom FileSystem and ShellCapability share one native `WorkspaceBackend`. Configure
+Custom FileSystemCapability and ShellCapability share one native `WorkspaceBackend`. Configure
 `RuntimeFeatures(workspace_factory=LocalWorkspaceBackend)` or a callable accepting
 `root` and keyword-only `resources`. The default is `LocalWorkspaceBackend`;
 Factory construction must perform no I/O. Runtime owns each returned environment, so its backend must implement `SupportsClose`; cleanup support is checked before activation.
@@ -1057,7 +1057,7 @@ reject stdio unless trusted host stdio is explicitly permitted.
 
 ShellCapability exposes command jobs; the workspace provider owns their process state and teardown
 must establish process-tree quiescence. Runtime does not offer those jobs as
-cross-execution services. FileSystem uses the provider's bounded read and
+cross-execution services. FileSystemCapability uses the provider's bounded read and
 content-state operations rather than a command fallback or whole-file reads.
 
 HTTP/SSE MCP remains in the Runtime process network, independently of local
@@ -1073,7 +1073,7 @@ denies reads, and resource rules are keyed by `WorkspaceResource.id`:
 
 ```python
 from linktools.ai import RuntimeFeatures, Workspace
-from linktools.ai.capability import FileSystem
+from linktools.ai.capability import FileSystemCapability
 from linktools.ai.capability import ShellCapability
 from functools import partial
 from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceReadPolicy
@@ -1087,7 +1087,7 @@ group = RuntimeFeatures(
     "workspace",
     workspace_factory=partial(LocalWorkspaceBackend, read_policy=readonly),
 )
-group.capability(FileSystem(workspace))
+group.capability(FileSystemCapability(workspace))
 group.capability(ShellCapability())
 ```
 
@@ -1305,9 +1305,9 @@ MIME Literal values. Use a `mime:` prefix for an explicit MIME type or `type/*`
 family. Attachments that do not match the resulting MIME allowlist are rejected:
 
 ```python
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
-binding = create_model(api="openai",
+binding = create_model_binding(api="openai",
     model="your-model",
     input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
 )
@@ -1544,7 +1544,7 @@ immutable `linktools.ai.spec.CapabilityRef(kind, id, revision)` values from that
 execution's frozen Agent binding: selected tools, Skills, MCP servers, runtime
 capabilities and directly allowed child Agents (`kind="agent"`). The main Agent
 identity remains `agent_id`. An Agent with no selected capabilities returns `()`;
-non-Agent executions return `None`. `recent_executions()` exposes the same
+non-Agent executions return `None`. `scan_recent_executions()` exposes the same
 projection after authorizing each execution. This is the execution's bound
 capability set, not the current catalog and not evidence of an actual tool call,
 child execution, or Skill body read. MCP entries identify bound servers, not

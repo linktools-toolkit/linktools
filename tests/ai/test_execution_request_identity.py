@@ -15,7 +15,7 @@ from linktools.ai.core import (ExecutionLineageKind, ExecutionStatus, Idempotenc
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionRecord, ExecutionRequest, ExecutionStartClaim, IdempotencyRecord, StoredUserInput
 from linktools.ai.inputs import ExecutionInputMaterializer, encode_user_content
-from linktools.ai.model import ModelBinding, create_model
+from linktools.ai.model import ModelBinding, create_model_binding
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.runtime._execution import ExecutionStartIdentity, _request_digest
@@ -166,8 +166,8 @@ async def test_local_and_remote_pending_retries_use_the_retained_owner_version(
 ) -> None:
     if with_file:
         def file_model(*, api: str, model: str) -> ModelBinding:
-            return create_model(api=api, model=model, input_types=("mime:text/plain",))
-        monkeypatch.setattr(pending_fixture, "create_model", file_model)
+            return create_model_binding(api=api, model=model, input_types=("mime:text/plain",))
+        monkeypatch.setattr(pending_fixture, "create_model_binding", file_model)
 
     class OnceReadableInput:
         def __init__(self) -> None:

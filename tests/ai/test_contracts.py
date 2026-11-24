@@ -25,7 +25,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.agent._model_resolver import _ModelResolver
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.execution import ExecutionRequest
 from linktools.ai.persistence import PersistencePlan
 from linktools.ai.persistence.codec import decode_domain, encode_domain
@@ -186,7 +186,7 @@ def test_task_graph_exposes_deterministic_topological_order() -> None:
 
 
 def test_model_resolver_is_instance_owned() -> None:
-    binding = create_model(api="openai", model="model")
+    binding = create_model_binding(api="openai", model="model")
     sources = {"route": binding}
     snapshot = _ModelResolver(sources)
     sources.clear()

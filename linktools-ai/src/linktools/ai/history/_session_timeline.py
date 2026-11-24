@@ -37,7 +37,7 @@ from ..storage import StoredPayload
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ..inputs import stored_user_input_view
-from ..execution import SessionTurn, SessionTurnItem
+from ..session import SessionTurn, SessionTurnItem
 from ..persistence.contracts import (
     ConversationRepositories,
     ConversationHistoryRecord,

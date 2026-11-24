@@ -59,7 +59,7 @@ from ._tool_metadata import (
 )
 from ._shell import ShellCapability
 from ._filesystem import (
-    FileSystem,
+    FileSystemCapability,
     FileSystemToolDeclaration,
     filesystem_capabilities,
     filesystem_tool_declarations,
@@ -82,7 +82,7 @@ __all__ = [
     "ToolResultsCapability",
     "RunCallbacks", "RunCallbackScope", "bind_run_callbacks",
     "AssetCapability",
-    "FileSystem",
+    "FileSystemCapability",
     "ShellCapability",
     "ToolClass",
     "ToolEffectPolicy",

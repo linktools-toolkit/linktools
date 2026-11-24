@@ -18,7 +18,7 @@ from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import Principal, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import ListSessionRequest
+from linktools.ai.session import ListSessionRequest
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute

@@ -17,7 +17,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.execution import ExecutionRequest
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.execution.events import LiveExecutionEventBroker
@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 def _binding() -> AgentBinding:
     spec = AgentSpec("agent", model="model")
-    models = {"model": create_model(api="openai", model="gpt-test")}
+    models = {"model": create_model_binding(api="openai", model="gpt-test")}
     compiler = AgentCompiler(
         models=models, candidates=(), agents={spec.id: spec},
     )

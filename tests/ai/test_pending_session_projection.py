@@ -19,7 +19,8 @@ from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, StateTurnResources
-from linktools.ai.execution import CancelExecutionRequest, ListSessionRequest
+from linktools.ai.execution import CancelExecutionRequest
+from linktools.ai.session import ListSessionRequest
 from linktools.ai.persistence.state import active_state_scope, record_key
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy

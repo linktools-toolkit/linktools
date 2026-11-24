@@ -6,7 +6,7 @@ import pytest
 
 from linktools.ai.agent import AgentCompiler, AssistantTextOutput, bind_output
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelBinding, create_model
+from linktools.ai.model import ModelBinding, create_model_binding
 from linktools.ai.spec import AgentSpec
 
 
@@ -32,7 +32,7 @@ def test_valid_explicit_output_overrides_unusable_default_and_loads_model() -> N
 
     def load() -> ModelBinding:
         loaded.append(True)
-        return create_model(api="openai", model="gpt-test")
+        return create_model_binding(api="openai", model="gpt-test")
 
     spec = AgentSpec("default", output_schema={"type": "string"})
     compiler = AgentCompiler(models={"default": load}, candidates=(), agents={spec.id: spec})

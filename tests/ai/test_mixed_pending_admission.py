@@ -12,7 +12,7 @@ import pytest
 from linktools.ai.agent import AgentBinding, AgentCompiler
 from linktools.ai.capability import CapabilityContribution, ExecutionCapability
 from linktools.ai.core import canonical_sha256, CommitPolicy, Principal
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.spec import AgentSpec
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
@@ -34,7 +34,7 @@ def _binding(commit: CommitPolicy = CommitPolicy.terminal()) -> AgentBinding:
     spec = AgentSpec("agent", model="model")
     execution = ExecutionCapability(commit=commit, retain_history=True)
     compiler = AgentCompiler(
-        models={"model": create_model(api="openai", model="gpt-test")},
+        models={"model": create_model_binding(api="openai", model="gpt-test")},
         candidates=(CapabilityContribution("capability", execution.id, execution, scope="runtime"),),
         agents={spec.id: spec},
     )

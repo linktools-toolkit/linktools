@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ToolReturnPart
 from pydantic_ai.models.function import FunctionModel, DeltaToolCall
-from linktools.ai.capability import FileSystem, ExecutionCapability, TraceCapability
+from linktools.ai.capability import FileSystemCapability, ExecutionCapability, TraceCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -115,7 +115,7 @@ async def test_model_corrects_path_using_original_tool_retry_budget(
             return FunctionModel(stream_function=stream)
 
     features = RuntimeFeatures("invalid-path")
-    features.capability(FileSystem(Workspace.load(tmp_path)), scope="runtime")
+    features.capability(FileSystemCapability(Workspace.load(tmp_path)), scope="runtime")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
     features.model("default", Binding())

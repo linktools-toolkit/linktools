@@ -16,7 +16,7 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.history import History
 from linktools.ai.core import Page
-from linktools.ai.execution import SessionTurn
+from linktools.ai.session import SessionTurn
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 

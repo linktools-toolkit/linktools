@@ -172,13 +172,13 @@ class _ModelOptions:
                           safe_details={"reason": "model_configuration_invalid"}) from error
         return cls(api, model, options["base_url"], options["api_key"], input_types, limits)
 
-    def create_model(self) -> "ModelBinding":
-        from linktools.ai.model import create_model
+    def create_model_binding(self) -> "ModelBinding":
+        from linktools.ai.model import create_model_binding
 
         if not self.model:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
         try:
-            return create_model(
+            return create_model_binding(
                 api=self.api, model=self.model, input_types=self.input_types,
                 base_url=self.base_url, api_key=self.api_key,
                 model_settings={name: value for name, value in self.limits.items() if name in {"max_tokens", "timeout"}},
@@ -282,7 +282,7 @@ async def _open_local_runtime(
     status: "Mapping[str, object] | None" = None,
 ) -> "AsyncIterator[LocalRuntime]":
     from linktools.ai.capability import (
-        AssetCapability, ExecutionCapability, FileSystem, MemoryCapability,
+        AssetCapability, ExecutionCapability, FileSystemCapability, MemoryCapability,
         ShellCapability, StepPersistenceCapability, TraceCapability,
     )
     from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -290,7 +290,7 @@ async def _open_local_runtime(
     features = RuntimeFeatures("workspace")
     features.model("default", model)
     features.capability(AssetCapability(_local_runtime_assets(workspace)))
-    features.capability(FileSystem(workspace))
+    features.capability(FileSystemCapability(workspace))
     features.capability(ShellCapability())
     features.capability(MemoryCapability())
     features.capability(ExecutionCapability(retain_history=True))
@@ -321,7 +321,7 @@ def run_local(
     async def run() -> int:
         workspace = _load_workspace(args.project)
         options = _ModelOptions.load(workspace, args)
-        model = options.create_model()
+        model = options.create_model_binding()
         async with _open_local_runtime(
             workspace, model=model, status=options.status(model),
         ) as local:

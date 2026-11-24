@@ -4,7 +4,7 @@
 from linktools.ai.persistence import Persistence
 """Runtime-scoped bounded metric dimension regressions."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from ._runtime_test_helpers import workspace_features
 
@@ -66,7 +66,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
 ) -> None:
     workspace = Workspace.load(tmp_path)
     metrics = Metrics.in_memory(namespace="runtime-context")
-    models = create_model(api='openai', model="gpt-test")
+    models = create_model_binding(api='openai', model="gpt-test")
     context = ExecutionContext(
         None,
         metric_dimensions={"environment": "prod", "region": "us-west"},
@@ -261,7 +261,7 @@ async def test_metrics_resources_do_not_enter_captured_agent_binding_identity() 
 
     features = RuntimeFeatures("metric-resource-identity")
     features.agent("default")
-    models = create_model(api="openai", model="unused-offline-model")
+    models = create_model_binding(api="openai", model="unused-offline-model")
     features.model("default", models)
     capture = await features.resolve()
     bindings = []

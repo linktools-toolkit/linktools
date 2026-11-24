@@ -101,7 +101,7 @@ Conversation, Checkpoint and Trace persistence owners keep their existing
 module-specific reads, buffers and commit boundaries.
 
 Tool-owning capabilities supply their tool declarations and native binding together.
-`MemoryCapability`, `ShellCapability` and `FileSystem` contribute ordinary Agent tool
+`MemoryCapability`, `ShellCapability` and `FileSystemCapability` contribute ordinary Agent tool
 candidates: the default `allow_tools=("*",)` includes available tools, and explicit
 `allow_tools` or the candidate filter can narrow them. Runtime owns the borrowed storage
 or workspace, not a second tool-name registry. An admitted execution retains its captured

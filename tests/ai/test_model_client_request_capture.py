@@ -4,7 +4,7 @@
 from linktools.ai.persistence import Persistence
 """Original client requests remain separate from SDK message projections."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 import asyncio
 import json
@@ -69,7 +69,7 @@ def _binding(
         return client
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", create_client)
-    registry = create_model(api='openai',
+    registry = create_model_binding(api='openai',
         model="gpt-4o", base_url="https://capture.invalid/v1",
         api_key="connection-secret-never-captured", max_retries=retries,
         retry_delay=0, context_window=context_window,

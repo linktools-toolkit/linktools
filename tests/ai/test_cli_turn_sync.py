@@ -16,7 +16,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-from linktools.ai.execution import CreateSessionRequest
+from linktools.ai.session import CreateSessionRequest
 pytest.importorskip("starlette")
 
 from linktools.ai.web import create_app

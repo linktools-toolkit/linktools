@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from linktools.ai.capability import FileSystem
+from linktools.ai.capability import FileSystemCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
@@ -53,7 +53,7 @@ def _features(
 
     features: RuntimeFeatures[None] = RuntimeFeatures(workspace_factory=factory)
     if workspace:
-        features.capability(FileSystem(Workspace.load(tmp_path)))
+        features.capability(FileSystemCapability(Workspace.load(tmp_path)))
     return features
 
 
@@ -160,7 +160,7 @@ async def test_runtime_input_backend_requires_close_support(tmp_path: Path) -> N
         return object()
 
     features: RuntimeFeatures[None] = RuntimeFeatures(workspace_factory=factory)
-    features.capability(FileSystem(Workspace.load(tmp_path)))
+    features.capability(FileSystemCapability(Workspace.load(tmp_path)))
     runtime = Runtime.open("input-owner", storage=PersistenceStorage.in_memory(), features=features)
     with pytest.raises(AIError) as raised:
         await runtime.__aenter__()

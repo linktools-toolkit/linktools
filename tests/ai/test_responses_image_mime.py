@@ -10,7 +10,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
 from linktools.ai.errors import AIError
-from linktools.ai.model import create_model, validate_model_inputs
+from linktools.ai.model import create_model_binding, validate_model_inputs
 from .test_model_protocols import model_binding, response
 
 
@@ -44,7 +44,7 @@ async def test_responses_binary_mime_preserves_native_request(monkeypatch: pytes
     ('video/mp4', True, 'input_encoding_not_supported'),
 ])
 def test_responses_mime_permission_and_document_constraints_remain(mime: str, declared: bool, reason: str) -> None:
-    binding = create_model(api='openai-responses', model='gpt-5',
+    binding = create_model_binding(api='openai-responses', model='gpt-5',
                            input_types=('mime:' + mime,) if declared else ())
     with pytest.raises(AIError) as raised:
         validate_model_inputs(binding, BinaryContent(b'bytes', media_type=mime))

@@ -112,7 +112,7 @@ async def test_safe_bound_refs_cover_run_hooks_and_children_without_extra_reads(
         info.capability_refs[0].id = "changed"
 
     calls.clear()
-    recent = await history.recent_executions(principal=principal)
+    recent = await history.scan_recent_executions(principal=principal)
     assert recent[0].capability_refs == info.capability_refs
     assert Counter(calls) == Counter(candidates=1, authorize=1)
     old_payload = binding.to_payload()
@@ -181,7 +181,7 @@ async def test_capability_refs_remain_behind_execution_read_authorization(entry,
         assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert "record" not in calls and "usage" not in calls
     else:
-        assert await history.recent_executions(principal=principal) == ()
+        assert await history.scan_recent_executions(principal=principal) == ()
         assert "record" not in calls and "usage" not in calls
 
 
@@ -259,4 +259,4 @@ async def test_graph_agent_refs_preserve_admitted_hooks_after_catalog_change_and
     async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_234, History.open(persistence=history_persistence_234) as history:
         reopened = await history.inspect_execution(execution_id, principal=principal)
         assert reopened.capability_refs == info.capability_refs
-        assert (await history.recent_executions(principal=principal))[0].capability_refs == info.capability_refs
+        assert (await history.scan_recent_executions(principal=principal))[0].capability_refs == info.capability_refs

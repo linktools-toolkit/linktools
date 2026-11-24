@@ -443,7 +443,7 @@ class _FileSystemToolset(FunctionToolset[AgentContext[object]]):
 
 
 
-class FileSystem(AbstractCapability[AgentContext[object]]):
+class FileSystemCapability(AbstractCapability[AgentContext[object]]):
     """Expose selected tools through a caller-owned sandbox backend.
 
     Native bindings enforce the Workspace tool policy. Runtime supplies its own
@@ -478,7 +478,7 @@ class FileSystem(AbstractCapability[AgentContext[object]]):
             [AbstractToolset[AgentContext[object]]],
             AbstractToolset[AgentContext[object]],
         ] | None = None,
-    ) -> "FileSystem":
+    ) -> "FileSystemCapability":
         """Build tools without modifying this declaration or owning the backend.
 
         A supplied wrap_toolset owns the execution boundary, including policy
@@ -553,7 +553,7 @@ def filesystem_capabilities(
     model_binding: ModelBinding | None = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Adapt selected tools to a caller-owned, already-opened backend."""
-    bound = FileSystem(workspace).bind(
+    bound = FileSystemCapability(workspace).bind(
         selected_tool_names, backend=backend, limits=limits, model_binding=model_binding,
     )
     return () if bound.get_toolset() is None else (bound,)
@@ -655,7 +655,7 @@ def _filesystem_tool_rejected(
 
 
 __all__ = [
-    "FileSystem",
+    "FileSystemCapability",
     "FileSystemToolDeclaration",
     "filesystem_tool_declarations",
     "filesystem_capabilities",

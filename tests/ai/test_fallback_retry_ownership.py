@@ -20,7 +20,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import TraceCapability
 from linktools.ai.core import ExecutionStatus, TaskStatus
-from linktools.ai.model import FallbackBinding, ModelBinding, create_model
+from linktools.ai.model import FallbackBinding, ModelBinding, create_model_binding
 from linktools.ai.model._binding import _RetryingModel
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -62,7 +62,7 @@ async def test_fresh_fallback_request_uses_each_candidate_budget_once(
 ) -> None:
     sent: list[str] = []
     _offline_failures(monkeypatch, protocol, sent)
-    leaves = [create_model(
+    leaves = [create_model_binding(
         api=protocol, model=f"candidate-{index}", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=retries, retry_delay=0,
     ) for index in range(3)]
@@ -90,7 +90,7 @@ async def test_fresh_fallback_request_uses_each_candidate_budget_once(
 def test_nested_fallback_is_rejected_before_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     sent: list[str] = []
     _offline_failures(monkeypatch, "openai", sent)
-    leaves = [create_model(
+    leaves = [create_model_binding(
         api="openai", model=f"candidate-{index}", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0,
     ) for index in range(3)]

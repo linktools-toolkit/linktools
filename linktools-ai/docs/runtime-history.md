@@ -75,7 +75,7 @@ it according to its handoff policy.
 | Model request/response | execution ID, agent run sequence, request sequence | `runtime.executions.model_interactions(...)` |
 | Function tool call/result | execution ID, agent run sequence, call ID | `runtime.executions.history(...)` |
 | Completed assistant text/thinking part | execution ID, agent run sequence, message sequence, part index | `runtime.executions.history(...)` |
-| User/assistant transcript | execution ID; current agent run | `runtime.executions.transcript(...)` |
+| User/assistant transcript | execution ID; current agent run | `execution.transcript(...)` or `history.transcript(execution_id, ...)` |
 | Execution step facts | execution ID and agent run | `runtime.executions.trace(...)` |
 | Request attachment inclusion | execution ID, agent run sequence, request sequence, attachment ID | `runtime.history.attachment_facts(...)` |
 | Task result | graph ID, task ID, result reference | the task run's `result`, `result_ref`, or `results` operation |

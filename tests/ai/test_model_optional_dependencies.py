@@ -14,7 +14,7 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.errors import ErrorCode
-from linktools.ai.model import create_model, model_binding_error
+from linktools.ai.model import create_model_binding, model_binding_error
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 import linktools.ai.web
@@ -28,9 +28,9 @@ def test_installed_provider_set_and_missing_extra_hints():
         for factory in factories:
             if importlib.util.find_spec(provider) is None:
                 with pytest.raises(ImportError, match=rf"linktools-ai\[{provider}\]"):
-                    create_model(api=factory, model="fixture")
+                    create_model_binding(api=factory, model="fixture")
             else:
-                assert create_model(api=factory, model="fixture")
+                assert create_model_binding(api=factory, model="fixture")
     assert model_binding_error(ModelHTTPError(429, model_name="fixture")).code == ErrorCode.MODEL_RATE_LIMITED
     assert model_binding_error(ValueError("ordinary failure")) is None
 
@@ -69,7 +69,7 @@ async def test_installed_adapter_projects_native_transport_errors(
         raise httpx2.ConnectError("fixture connection failure", request=request)
     monkeypatch.setattr(module, "DefaultAsyncHttpxClient", lambda **kwargs: httpx2.AsyncClient(
         transport=httpx2.MockTransport(fail), trust_env=False, **kwargs))
-    models = create_model(
+    models = create_model_binding(
         api=factory,
         model='fixture',
         api_key='fixture-secret',

@@ -87,7 +87,7 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
-    FileSystem,
+    FileSystemCapability,
     ShellCapability,
 )
 from ..core import (
@@ -1179,7 +1179,7 @@ async def _materialize_agent(
                 [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
                 backend=scope.workspace_backend, wrap_toolset=wrap_workspace_toolset,
             )
-        if isinstance(capability, FileSystem):
+        if isinstance(capability, FileSystemCapability):
             return capability.bind(
                 [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
                 backend=scope.workspace_backend, limits=scope.limits,

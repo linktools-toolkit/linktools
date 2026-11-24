@@ -4,7 +4,7 @@
 from linktools.ai.persistence import Persistence
 """Application capability filters narrow each current candidate observation."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from dataclasses import dataclass, replace
 
@@ -53,7 +53,7 @@ async def contributions():
 
 def _compiler(contributions, capability_filter=None):
     return AgentCompiler(
-        models={"default": create_model(api='openai', model="test")},
+        models={"default": create_model_binding(api='openai', model="test")},
         candidates=contributions,
         agents={item.id: item.value for item in contributions if item.kind == "agent"},
         capability_filter=capability_filter,
@@ -157,7 +157,7 @@ async def test_restore_keeps_run_hooks_and_filters_current_callable_directory(co
 async def test_runtime_wires_filter_into_roots_and_derived_agents(tmp_path):
     group = RuntimeFeatures("application", filter=lambda agent, item: item.kind != "skill")
     group.agent("root")
-    group.model("default", create_model(api='openai', model='test'))
+    group.model("default", create_model_binding(api='openai', model='test'))
     group._contributions.append(CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions"))))
     async with Persistence.open('capability-filter-test', storage=PersistenceStorage.from_root(tmp_path)) as persistence_153, Runtime.open(persistence=persistence_153, features=group) as runtime:
         root = runtime.agents.get("root")
@@ -304,11 +304,11 @@ async def test_filter_configuration_rejects_invalid_values_and_old_runtime_param
         with pytest.raises(TypeError, match="filter must be callable"):
             replace(capture, filter=invalid)
     with pytest.raises(TypeError, match="capability_filter"):
-        Runtime.open(persistence=None, features=model_features(create_model(api='openai', model="test")),
+        Runtime.open(persistence=None, features=model_features(create_model_binding(api='openai', model="test")),
                      capability_filter=lambda *_: True)
 
 
 def test_runtime_rejects_removed_runtime_features_keyword():
     with pytest.raises(TypeError, match="runtime_features"):
-        Runtime.open(persistence=None, features=model_features(create_model(api='openai', model="test")),
+        Runtime.open(persistence=None, features=model_features(create_model_binding(api='openai', model="test")),
                      runtime_features=RuntimeFeatures("old"))

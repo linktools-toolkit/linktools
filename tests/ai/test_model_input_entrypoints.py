@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Default Runtime and command composition share workspace input declarations."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from pathlib import Path
 
@@ -20,11 +20,11 @@ def test_default_runtime_reads_workspace_inputs_and_environment_model(
     config = tmp_path / ".linktools" / "config.yaml"
     config.parent.mkdir()
     config.write_text("input_types:\n  - audio\n  - document\n  - mime:audio/*\n  - mime:application/pdf\n")
-    binding = _ModelOptions.load(Workspace.load(tmp_path)).create_model()
+    binding = _ModelOptions.load(Workspace.load(tmp_path)).create_model_binding()
     assert binding.model_identity == "openai:testing/inputs"
 
 
-    authored = create_model(api='openai',
+    authored = create_model_binding(api='openai',
         model="testing/inputs",
         input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
     )
@@ -39,7 +39,7 @@ def test_default_runtime_ignores_unrelated_environment(
 ) -> None:
     monkeypatch.setenv("OPENAI_MODEL", "testing/inputs")
     monkeypatch.setenv("OPENAI_VISION", "sometimes")
-    binding = _ModelOptions.load(Workspace.load(tmp_path)).create_model()
+    binding = _ModelOptions.load(Workspace.load(tmp_path)).create_model_binding()
     assert binding.contract["input_mime_types"] == []
 
 
@@ -52,6 +52,6 @@ def test_workspace_configuration_rejects_invalid_input_types(
     config.parent.mkdir()
     config.write_text("input_types: image/png\n")
     with pytest.raises(AIError) as raised:
-        _ModelOptions.load(Workspace.load(tmp_path)).create_model()
+        _ModelOptions.load(Workspace.load(tmp_path)).create_model_binding()
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.safe_details == {"reason": "model_input_configuration_invalid"}

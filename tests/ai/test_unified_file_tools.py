@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Unified model-facing file operations and publication boundaries."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from ._runtime_test_helpers import workspace_features
 
@@ -28,7 +28,7 @@ _PNG = base64.b64decode(
 
 
 def _binding():
-    return create_model(api='openai',
+    return create_model_binding(api='openai',
         model="explicit-test",
         input_types=(
             "mime:image/png",
@@ -135,7 +135,7 @@ async def test_unified_read_later_failure_returns_no_partial_batch(tmp_path: Pat
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        denied = create_model(api='openai', model="no-inputs", input_types=())
+        denied = create_model_binding(api='openai', model="no-inputs", input_types=())
         with pytest.raises(ToolCallRetry) as rejected:
             await _tools(tmp_path, session, binding=denied)["read_file"].function(["notes.txt", "image.png"])
         facts = json.loads(str(rejected.value).split(" File: ", 1)[1])
@@ -212,7 +212,7 @@ async def test_workspace_tools_use_initial_behavior_revision(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_whole_file_read_obeys_explicit_model_route_before_publication(tmp_path: Path) -> None:
     (tmp_path / "report.pdf").write_bytes(b"%PDF-1.7\n")
-    binding = create_model(api='openai', model="no-files", input_types=())
+    binding = create_model_binding(api='openai', model="no-files", input_types=())
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
@@ -325,7 +325,7 @@ async def test_generic_text_detection_keeps_structured_text_attachment_hint(tmp_
     import mimetypes
     mimetypes.add_type(mime, Path(name).suffix)
     (tmp_path / name).write_text("key,value\none,two\n", encoding="utf-8")
-    binding = create_model(api='openai', model="known-text", input_types=(f"mime:{mime}",))
+    binding = create_model_binding(api='openai', model="known-text", input_types=(f"mime:{mime}",))
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
@@ -354,7 +354,7 @@ async def test_unsupported_attachment_reports_facts_without_content_or_native_de
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        denied = create_model(api='openai', model="no-inputs")
+        denied = create_model_binding(api='openai', model="no-inputs")
         with pytest.raises(ToolCallRetry) as rejected:
             await _tools(tmp_path, session, binding=denied)["read_file"].function(name, as_file=as_file)
         facts = json.loads(str(rejected.value).split(" File: ", 1)[1])
@@ -371,7 +371,7 @@ async def test_default_attachment_deny_keeps_bounded_text_preview_available(tmp_
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        denied = create_model(api='openai', model="no-inputs")
+        denied = create_model_binding(api='openai', model="no-inputs")
         result = await _tools(tmp_path, session, binding=denied)["read_file"].function("large.txt", offset=1, limit=2)
         assert result.return_value["texts"][0]["content"] == "line\nline\n"
         assert result.return_value["files"] == []

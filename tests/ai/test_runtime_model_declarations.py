@@ -13,7 +13,7 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import AgentContext
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.agent._model_resolver import _ModelResolver
 from linktools.ai.runtime import RuntimeFeatures
 
@@ -21,14 +21,14 @@ from linktools.ai.runtime import RuntimeFeatures
 @pytest.mark.asyncio
 async def test_model_capture_is_lazy_isolated_and_success_is_shared() -> None:
     calls = []
-    binding = create_model(api="openai", model="fixture")
+    binding = create_model_binding(api="openai", model="fixture")
     def load():
         calls.append("load")
         return binding
     features = RuntimeFeatures()
     features.model("assistant", load)
     captured = await features.resolve()
-    features.model("assistant", create_model(api="anthropic", model="replacement"))
+    features.model("assistant", create_model_binding(api="anthropic", model="replacement"))
     assert calls == []
     resolved = _ModelResolver(captured.models).resolve("assistant")
     assert calls == []
@@ -56,14 +56,14 @@ def test_lazy_model_failure_can_be_retried_and_async_result_is_rejected() -> Non
         attempts.append(1)
         if len(attempts) == 1:
             raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "fixture configuration missing")
-        return create_model(api="openai", model="fixture")
+        return create_model_binding(api="openai", model="fixture")
     binding = _ModelResolver({"model": load}).resolve("model")
     with pytest.raises(AIError):
         _ = binding.contract
     assert binding.model_identity == "openai:fixture"
     assert len(attempts) == 2
     async def async_load():
-        return create_model(api="openai", model="fixture")
+        return create_model_binding(api="openai", model="fixture")
     with pytest.raises(TypeError):
         _ModelResolver({"async": async_load})
     hidden = _ModelResolver({"async": lambda: async_load()}).resolve("async")
@@ -72,7 +72,7 @@ def test_lazy_model_failure_can_be_retried_and_async_result_is_rejected() -> Non
 
 
 def test_lazy_model_restore_uses_registered_route_and_rejects_missing_route() -> None:
-    binding = create_model(api="openai", model="fixture")
+    binding = create_model_binding(api="openai", model="fixture")
     resolver = _ModelResolver({"assistant": lambda: binding})
     assert resolver.resolve("assistant").model_identity == binding.model_identity
     assert resolver.resolve("assistant").model_identity == binding.model_identity
@@ -93,7 +93,7 @@ async def test_runtime_open_compiles_routes_without_eager_model_loading() -> Non
     calls = []
     def load():
         calls.append(1)
-        return create_model(api="openai", model="fixture")
+        return create_model_binding(api="openai", model="fixture")
     features = RuntimeFeatures()
     features.model("default", load)
     features.model("unused", lambda: pytest.fail("unused model loaded"))
@@ -142,7 +142,7 @@ async def test_callable_custom_binding_is_not_mistaken_for_a_loader() -> None:
 def test_async_callable_loader_result_is_closed_and_rejected() -> None:
     class Loader:
         async def __call__(self):
-            return create_model(api="openai", model="fixture")
+            return create_model_binding(api="openai", model="fixture")
     binding = _ModelResolver({"async": Loader()}).resolve("async")
     with pytest.raises(TypeError):
         _ = binding.contract
@@ -161,7 +161,7 @@ async def test_each_model_resolution_owns_one_immutable_configuration(monkeypatc
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
     def load():
         loads.append(1)
-        return create_model(api="openai", model="fixture", api_key=configuration["api_key"])
+        return create_model_binding(api="openai", model="fixture", api_key=configuration["api_key"])
     features = RuntimeFeatures()
     features.model("assistant", load)
     capture = await features.resolve()
@@ -191,7 +191,7 @@ def test_cancelled_loader_does_not_poison_first_success() -> None:
         calls.append(1)
         if len(calls) == 1:
             raise asyncio.CancelledError
-        return create_model(api="openai", model="fixture")
+        return create_model_binding(api="openai", model="fixture")
     binding = _ModelResolver({"assistant": load}).resolve("assistant")
     with pytest.raises(asyncio.CancelledError):
         _ = binding.contract
@@ -357,13 +357,13 @@ def test_registered_model_identity_is_independent_of_configuration(protocol) -> 
     from linktools.ai.agent import AgentCompiler
     from linktools.ai.spec import AgentSpec
 
-    state = {"binding": create_model(api="openai", model="original",
+    state = {"binding": create_model_binding(api="openai", model="original",
                                      model_settings={"extra_body": {"custom": False}})}
     spec = AgentSpec("agent", model="registered")
     compiler = AgentCompiler(models={"registered": lambda: state["binding"]}, candidates=(), agents={"agent": spec})
     compiled = compiler.compile(spec)
     original = compiler.bind(compiled)
-    state["binding"] = create_model(
+    state["binding"] = create_model_binding(
         api=protocol,
         model='replacement',
         model_settings={'max_tokens': 4096, 'extra_body': {'custom': True}},

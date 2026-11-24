@@ -496,7 +496,7 @@ async def test_runtime_history_projects_owned_sessions_without_runtime_open() ->
         PrincipalKind.LOCAL_TRUSTED.value,
     )
 
-    recent = await history.recent_sessions(principal=principal, limit=20)
+    recent = await history.scan_recent_sessions(principal=principal, limit=20)
     selected = await history.inspect_session("newer", principal=principal)
 
     assert [item.session_id for item in recent] == ["newer", "older"]

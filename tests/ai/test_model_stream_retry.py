@@ -22,7 +22,7 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.capability import TraceCapability
-from linktools.ai.model import ModelClientRequestRecorder, create_model
+from linktools.ai.model import ModelClientRequestRecorder, create_model_binding
 from linktools.ai.model import _binding, _openai
 from linktools.ai.model._binding import _RetryingModel
 from linktools.ai.model._stream import _RetryingStreamedResponse
@@ -88,7 +88,7 @@ def _model(
         return httpx2.AsyncClient(transport=httpx2.MockTransport(handle), **kwargs)
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
-    binding = create_model(api="openai", model="fixture", api_key="synthetic",
+    binding = create_model_binding(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=retries,
                            retry_delay=5, retry_max_delay=120, retry_backoff_factor=4)
     return binding, sources, depths

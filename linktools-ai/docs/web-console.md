@@ -288,7 +288,7 @@ credentials present in the exception. Restrict access and retention accordingly.
 | --- | --- | --- |
 | `ai-run` | New conversation, composer, Plan mode/Thinking slider, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, History `result` |
 | Former `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and History session APIs |
-| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | History `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
+| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | History `list_executions`, `scan_recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | History `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
 | Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, captured input_mime_types allowlist, credential presence, current Agent/Tool/Skill/MCP identities | CLI composition and RuntimeFeatures source resolution |

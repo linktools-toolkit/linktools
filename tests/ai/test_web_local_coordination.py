@@ -13,7 +13,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import CreateSessionRequest
+from linktools.ai.session import CreateSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai._common import _local_runtime_storage, _open_local_runtime

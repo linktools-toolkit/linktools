@@ -287,7 +287,7 @@ async def test_pending_sessionless_agent_commits_once(tmp_path: Path, monkeypatc
 @pytest.mark.asyncio
 async def test_pending_session_force_close_promotes_before_closing(tmp_path: Path) -> None:
     from linktools.ai.core import SessionStatus
-    from linktools.ai.execution import CloseSessionRequest
+    from linktools.ai.session import CloseSessionRequest
     entered = asyncio.Event()
     async def model(messages, info):
         entered.set()

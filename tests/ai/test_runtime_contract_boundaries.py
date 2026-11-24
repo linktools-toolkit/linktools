@@ -326,12 +326,12 @@ def test_tool_ref_contains_named_revision_without_contract_payload() -> None:
 def test_tool_argument_and_return_digests_are_stable_across_hash_seeds() -> None:
     script = """
 import json
-from pydantic import create_model
+from pydantic import create_model_binding
 from linktools.ai.core import canonical_sha256
 from linktools.ai.runtime._tool import _portable_arguments
 from linktools.ai.model._tool_return_codec import tool_return_content_digest
 
-Result = create_model("Result", values=(set[str], ...))
+Result = create_model_binding("Result", values=(set[str], ...))
 values = {"alpha", "beta", "gamma"}
 print(json.dumps({
     "arguments": canonical_sha256(_portable_arguments({"values": values})),

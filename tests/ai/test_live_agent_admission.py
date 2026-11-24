@@ -16,7 +16,7 @@ from linktools.ai.capability import CapabilityContribution, SkillDefinition, too
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionHandle
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.runtime._agent import Agent
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.runtime.agent_execution import AgentExecutionPort
@@ -45,7 +45,7 @@ def _compiler(
     *, models: Mapping[str, object] | None = None,
 ) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(api="openai", model="test")} if models is None else models,
+        models={"default": create_model_binding(api="openai", model="test")} if models is None else models,
         candidates=candidates, agents={spec.id: spec for spec in specs},
     )
 
@@ -139,7 +139,7 @@ async def test_single_observation_resolves_root_and_children_without_unrelated_m
             AgentSpec("root", revision=calls, allow_subagents=("child",)),
             AgentSpec("child", revision=calls, allow_subagents=()),
             AgentSpec("unused", model="unused", allow_subagents=()),
-        ), models={"default": create_model(api="openai", model="test"), "unused": unused_model})
+        ), models={"default": create_model_binding(api="openai", model="test"), "unused": unused_model})
 
     resolver = _AgentBindingResolver(AgentCatalog({}), old, current_compiler=provider)
     for expected in (1, 2):
@@ -291,7 +291,7 @@ def test_restore_filters_current_directory_but_preserves_admitted_run_hooks() ->
         return candidate.id != "hidden"
 
     second = AgentCompiler(
-        models={"default": create_model(api="openai", model="test")},
+        models={"default": create_model_binding(api="openai", model="test")},
         agents={"root": AgentSpec("root", revision=3, allow_tools=(), allow_capabilities=())},
         candidates=(_tool("visible"), _tool("hidden"), first_hook,
                     CapabilityContribution.from_opaque("capability", "later", _Extra("later"))),
@@ -367,7 +367,7 @@ async def test_admission_memory_scope_comes_from_current_runtime_contributions(w
 def test_current_step_compilation_reuses_admitted_model_without_loading_route() -> None:
     def unexpected_model():
         raise AssertionError("Per-step resolution must not reload the model route")
-    model = create_model(api="openai", model="admitted")
+    model = create_model_binding(api="openai", model="admitted")
     compiler = _compiler((AgentSpec("root", allow_subagents=()),), (_tool("current"),),
                          models={"default": unexpected_model})
     compiled = compiler.compile_current(AgentSpec("root", allow_subagents=()), model=model)

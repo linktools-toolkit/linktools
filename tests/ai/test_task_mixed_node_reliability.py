@@ -4,7 +4,7 @@
 from linktools.ai.persistence import Persistence
 """Focused regression coverage for reliable mixed TaskGraph nodes."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import workspace_features
@@ -321,7 +321,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
 
 
 class _TaskTestModelBinding:
-    _input_binding = create_model(api='openai',
+    _input_binding = create_model_binding(api='openai',
         model="gpt-task-test", input_types=("mime:text/plain",),
     )
     route_id = "default"

@@ -13,7 +13,7 @@ import yaml
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import ExecutionStatus, JsonValue
-from linktools.ai.model import ModelBinding, ModelClientRequestRecorder, create_model
+from linktools.ai.model import ModelBinding, ModelClientRequestRecorder, create_model_binding
 from linktools.ai.model import _anthropic, _openai
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
@@ -46,7 +46,7 @@ def _binding(monkeypatch: pytest.MonkeyPatch, protocol: str, model: str,
     limit = {"openai": "max_completion_tokens", "openai-responses": "max_output_tokens", "anthropic": "max_tokens"}[protocol]
     if limit not in settings.get("extra_body", {}):
         settings.setdefault("max_tokens", 12000)
-    return create_model(api=protocol, model=model, api_key="mock-only",
+    return create_model_binding(api=protocol, model=model, api_key="mock-only",
                         base_url="https://model.invalid/v1", max_retries=0, model_settings=settings)
 
 
@@ -99,7 +99,7 @@ async def test_native_manual_budget_overrides_unified_false(monkeypatch):
 @pytest.mark.parametrize("value", [[1], "body", {"value": object()}, {"value": float("nan")}])
 def test_model_settings_requires_json_object(value):
     with pytest.raises((TypeError, ValueError)):
-        create_model(api="openai", model="alias", model_settings=value)
+        create_model_binding(api="openai", model="alias", model_settings=value)
 
 
 @pytest.mark.asyncio
@@ -220,7 +220,7 @@ async def test_sdk_zero_does_not_disable_binding_retry_owner(monkeypatch, stream
     settings = {"max_tokens": 1000}
     if location == "binding":
         settings["max_retries"] = 0
-    binding = create_model(api=protocol, model="fixture", api_key="mock-only",
+    binding = create_model_binding(api=protocol, model="fixture", api_key="mock-only",
                            base_url="https://model.invalid", max_retries=2, retry_delay=0,
                            model_settings=settings)
     request_settings = {"max_retries": 0} if location == "request" else None
@@ -245,7 +245,7 @@ async def test_sdk_zero_does_not_disable_binding_retry_owner(monkeypatch, stream
 @pytest.mark.parametrize("value", [None, 1, 2, False])
 def test_sdk_retry_override_rejected_at_binding(protocol, value):
     with pytest.raises(AIError) as raised:
-        create_model(api=protocol, model="fixture", model_settings={"max_retries": value})
+        create_model_binding(api=protocol, model="fixture", model_settings={"max_retries": value})
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.retryable is False
 

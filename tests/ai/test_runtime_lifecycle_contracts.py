@@ -4,7 +4,7 @@
 from linktools.ai.core import ExecutionContext
 """Runtime body and cleanup error precedence coverage."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 import asyncio
 from pathlib import Path
@@ -112,7 +112,7 @@ async def test_runtime_body_error_wins_over_cleanup_error(
         async with Persistence.open("lifecycle", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
             persistence=persistence,
             context=ExecutionContext(None),
-            features=model_features(create_model(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
+            features=model_features(create_model_binding(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
 
@@ -133,7 +133,7 @@ async def test_runtime_body_error_wins_when_close_succeeds(
         async with Persistence.open("lifecycle", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
             persistence=persistence,
             context=ExecutionContext(None),
-            features=model_features(create_model(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
+            features=model_features(create_model_binding(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
 
@@ -150,7 +150,7 @@ async def test_runtime_close_error_still_propagates_after_success(
         async with Persistence.open("lifecycle", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
             persistence=persistence,
             context=ExecutionContext(None),
-            features=model_features(create_model(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
+            features=model_features(create_model_binding(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             pass
     assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
@@ -173,7 +173,7 @@ async def test_runtime_construction_error_wins_when_cleanup_fails(
         async with Persistence.open("lifecycle", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
             persistence=persistence,
             context=ExecutionContext(None),
-            features=model_features(create_model(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
+            features=model_features(create_model_binding(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             pass
 
@@ -190,7 +190,7 @@ async def test_runtime_cancellation_wins_when_cleanup_fails(
         async with Persistence.open("lifecycle", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
             persistence=persistence,
             context=ExecutionContext(None),
-            features=model_features(create_model(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
+            features=model_features(create_model_binding(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise asyncio.CancelledError
 
@@ -210,7 +210,7 @@ async def test_secondary_cleanup_log_excludes_business_payload(
         async with Persistence.open("lifecycle", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
             persistence=persistence,
             context=ExecutionContext(None),
-            features=model_features(create_model(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
+            features=model_features(create_model_binding(api='openai', model="test-model"), RuntimeFeatures("lifecycle", limits=PromptLimits())),
         ):
             raise ValueError("body secret")
 
@@ -329,7 +329,7 @@ async def test_failed_composition_releases_resources_before_persistence_close(
         async with Persistence.open("lifecycle", storage=state) as persistence:
             await factory.compose_runtime_components(
                 persistence=persistence,
-                features=model_features(create_model(api='openai', model="test-model")),
+                features=model_features(create_model_binding(api='openai', model="test-model")),
             )
     assert state_owners[0].ready is False
     assert close_calls == 1
@@ -357,7 +357,7 @@ async def test_compose_build_cleanup_preserves_construction_error(
         async with Persistence.open("lifecycle", storage=state) as persistence:
             await factory.compose_runtime_components(
                 persistence=persistence,
-                features=model_features(create_model(api='openai', model="test-model")),
+                features=model_features(create_model_binding(api='openai', model="test-model")),
             )
 
 
@@ -388,7 +388,7 @@ async def test_failed_build_leaves_persistence_cleanup_with_owner(
         with pytest.raises(RuntimeError, match="build failed"):
             await factory.compose_runtime_components(
                 persistence=persistence,
-                features=model_features(create_model(api='openai', model="test-model")),
+                features=model_features(create_model_binding(api='openai', model="test-model")),
             )
         assert persistence.ready is True
         assert close_calls == 0
@@ -468,7 +468,7 @@ async def test_build_abort_continues_after_input_cleanup_failure(
         async with Persistence.open("lifecycle", storage=state) as persistence:
             await factory.compose_runtime_components(
                 persistence=persistence,
-                features=model_features(create_model(api='openai', model="test-model")),
+                features=model_features(create_model_binding(api='openai', model="test-model")),
             )
 
     assert state_close_calls == 1
@@ -501,7 +501,7 @@ async def test_runtime_composition_defers_task_recovery_to_explicit_call(
     async with Persistence.open("lifecycle", storage=state) as persistence:
         monkeypatch.setattr(persistence.task.admissions, "list_recoverable_page", fail_restore)
         async with Runtime.open(persistence=persistence, features=model_features(
-            create_model(api="openai", model="test-model"),
+            create_model_binding(api="openai", model="test-model"),
         )), TaskEngine.open(persistence=persistence) as engine:
             assert state_close_calls == 0
             assert persistence.ready is True

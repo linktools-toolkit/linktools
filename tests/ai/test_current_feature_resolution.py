@@ -298,10 +298,10 @@ async def test_direct_registrations_added_after_resolution_remain_available() ->
 
 @pytest.mark.asyncio
 async def test_loader_host_capabilities_use_the_same_current_tool_projection(tmp_path) -> None:
-    from linktools.ai.capability import FileSystem, MemoryCapability, ShellCapability
+    from linktools.ai.capability import FileSystemCapability, MemoryCapability, ShellCapability
     from linktools.ai.workspace import Workspace
 
-    current = [MemoryCapability(scope="first"), ShellCapability(), FileSystem(Workspace.load(tmp_path))]
+    current = [MemoryCapability(scope="first"), ShellCapability(), FileSystemCapability(Workspace.load(tmp_path))]
 
     class Loader:
         async def load(self, context):
@@ -330,10 +330,10 @@ async def test_loader_host_capabilities_use_the_same_current_tool_projection(tmp
 
 @pytest.mark.asyncio
 async def test_host_resource_inspection_does_not_materialize_tool_schemas(tmp_path, monkeypatch) -> None:
-    from linktools.ai.capability import FileSystem, MemoryCapability, ShellCapability
+    from linktools.ai.capability import FileSystemCapability, MemoryCapability, ShellCapability
     from linktools.ai.workspace import Workspace
 
-    calls = {kind: 0 for kind in (MemoryCapability, ShellCapability, FileSystem)}
+    calls = {kind: 0 for kind in (MemoryCapability, ShellCapability, FileSystemCapability)}
 
     def count(kind):
         original = kind.tool_definitions
@@ -350,7 +350,7 @@ async def test_host_resource_inspection_does_not_materialize_tool_schemas(tmp_pa
     features.capability(MemoryCapability())
     features.capability(ShellCapability())
     workspace = Workspace.load(tmp_path)
-    features.capability(FileSystem(workspace))
+    features.capability(FileSystemCapability(workspace))
     assert features.assets is None
     assert features.workspace is workspace
     assert set(calls.values()) == {0}

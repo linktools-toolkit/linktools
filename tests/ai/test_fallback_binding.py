@@ -16,7 +16,7 @@ from pydantic_ai.settings import ModelSettings
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError
 from linktools.ai.model import (
-    FallbackBinding, ModelBinding, create_model,
+    FallbackBinding, ModelBinding, create_model_binding,
     validate_model_input,
 )
 
@@ -84,7 +84,7 @@ class _Binding:
 def test_fallback_requires_a_candidate_and_preserves_ordered_semantics() -> None:
     with pytest.raises(ValueError, match="at least one candidate"):
         FallbackBinding()
-    primary = create_model(
+    primary = create_model_binding(
         api='openai',
         model='primary',
         api_key='secret-primary',
@@ -92,7 +92,7 @@ def test_fallback_requires_a_candidate_and_preserves_ordered_semantics() -> None
         input_types=['image'],
         model_settings={'max_tokens': 25},
     )
-    secondary = create_model(
+    secondary = create_model_binding(
         api="anthropic", model="secondary", api_key="secret-secondary",
         input_types=["mime:application/pdf"],
     )
@@ -149,8 +149,8 @@ def test_handler_implementation_and_connections_do_not_define_model_semantics() 
         def __repr__(self) -> str:
             raise AssertionError("handler implementation must not be exposed")
 
-    primary = create_model(api="openai", model="primary", api_key="first-secret")
-    other_connection = create_model(
+    primary = create_model_binding(api="openai", model="primary", api_key="first-secret")
+    other_connection = create_model_binding(
         api='openai',
         model='primary',
         api_key='second-secret',

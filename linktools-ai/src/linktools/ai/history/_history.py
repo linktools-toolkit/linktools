@@ -81,12 +81,11 @@ from ..execution import (
     ModelInteractionItem,
     ModelInteractionReadBoundary,
     ModelInteractionSubscription,
-    SessionTurn,
-    SessionView,
     TranscriptItem,
     UsageReadCutoff,
     UsageSummary,
 )
+from ..session import SessionTurn, SessionView
 from ..persistence import Persistence, PersistenceDomain
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
@@ -573,7 +572,7 @@ class History:
             limit=limit,
         )
 
-    async def recent_executions(
+    async def scan_recent_executions(
         self,
         *,
         principal: Principal,
@@ -1122,7 +1121,7 @@ class History:
         )
         return Page(cast(tuple[ModelMessage, ...], messages), next_cursor)
 
-    async def recent_sessions(
+    async def scan_recent_sessions(
         self,
         *,
         principal: Principal,

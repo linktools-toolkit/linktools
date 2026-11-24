@@ -360,7 +360,7 @@ async def test_session_creation_returns_public_view_and_replays_without_duplicat
 async def test_session_creation_does_not_require_session_read_authority() -> None:
     from linktools.ai.core import AuthorizationAction, Principal, ResourceRef, TenantAuthorizationPolicy
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.execution import CreateSessionRequest
+    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.runtime import Session
 
     class CreateOnlyAuthorization(TenantAuthorizationPolicy):
@@ -898,7 +898,7 @@ def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch
 
     monkeypatch.setattr(Runtime, "open", tracked_open)
     monkeypatch.setattr(common_command, "_local_runtime_assets", create_assets)
-    monkeypatch.setattr(common_command._ModelOptions, "create_model", lambda _self: RuntimeUsageModels())
+    monkeypatch.setattr(common_command._ModelOptions, "create_model_binding", lambda _self: RuntimeUsageModels())
     monkeypatch.setattr(uvicorn, "Server", Server)
     args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--model", "fake"])
     with pytest.raises(CommandError):
@@ -961,7 +961,7 @@ def test_web_cli_provides_default_memory_tools_to_messages(monkeypatch: pytest.M
                         assert result.output["text"].strip() == "remembered from web"
 
     monkeypatch.setattr(Runtime, "open", tracked_open)
-    monkeypatch.setattr(common_command._ModelOptions, "create_model", lambda _self: _Models(_UsageFunctionModel(respond)))
+    monkeypatch.setattr(common_command._ModelOptions, "create_model_binding", lambda _self: _Models(_UsageFunctionModel(respond)))
     monkeypatch.setattr(uvicorn, "Server", Server)
     args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--model", "fake"])
     assert web_command.command.run(args) == 0

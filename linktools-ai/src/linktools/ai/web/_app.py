@@ -27,7 +27,8 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
 from ..history import History
-from ..execution import CreateSessionRequest, ExecutionTreeEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..execution import ExecutionTreeEvent, ListExecutionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..session import CreateSessionRequest, ListSessionRequest
 from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
 from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
@@ -368,10 +369,10 @@ class _Console:
             return _json(view, 201)
         if self.runtime is not None:
             return _json(await self.runtime.sessions.list(ListSessionRequest(self.principal, **_paging(request))))
-        # History currently offers recent sessions, not a read-only paged session index.
+        # The read-only console lists the newest sessions by time, without pagination.
         if request.query_params.get("cursor"):
             raise ValueError("read-only recent sessions have no cursor")
-        items = () if self.history is None else await self.history.recent_sessions(
+        items = () if self.history is None else await self.history.scan_recent_sessions(
             principal=self.principal, limit=int(_paging(request)["limit"]),
         )
         return _json({"items": items, "next_cursor": None, "recent_only": True})
@@ -613,7 +614,7 @@ class _Console:
         if request.query_params.get("recent") == "true":
             if any(request.query_params.get(key) for key in ("cursor", "session_id", "agent_id", "parent_execution_id")):
                 raise ValueError("recent scan does not support cursors or filters")
-            items = () if self.history is None else await self.history.recent_executions(
+            items = () if self.history is None else await self.history.scan_recent_executions(
                 principal=self.principal, limit=int(_paging(request)["limit"]),
             )
             return _json({"items": items, "next_cursor": None, "recent_scan": True})

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Execution input and final tool-boundary regressions."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from linktools.ai.persistence import Persistence
 from dataclasses import replace
@@ -19,12 +19,11 @@ from linktools.ai.execution import ExecutionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.execution import (
-    CreateSessionRequest,
     ExecutionHandle,
     ForkExecutionRequest,
     RetryExecutionRequest,
-    ResumeSessionRequest,
 )
+from linktools.ai.session import CreateSessionRequest, ResumeSessionRequest
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.inputs import (
     ExecutionInputMaterializer,
@@ -163,7 +162,7 @@ async def test_execution_freezes_materialized_input_once() -> None:
             _request(files=("evidence.txt",))
         )
 
-        model = create_model(api='openai',
+        model = create_model_binding(api='openai',
             model="test", input_types=("mime:text/plain",),
         )
         binding = SimpleNamespace(compiled_agent=SimpleNamespace(model=model))

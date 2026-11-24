@@ -35,7 +35,9 @@ except ImportError:
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from . import model_input_content, ReferencedContent, ReferencedInputOrigin, project_model_attempts, project_model_response_attempts
+from ._input import model_input_content as _model_input_content
+from ._referenced_content import ReferencedContent, ReferencedInputOrigin
+from ._response import project_model_attempts, project_model_response_attempts as _project_model_response_attempts
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
@@ -144,7 +146,7 @@ def project_transient_binary_content(
                 continue
             content = []
             part_changed = False
-            for item in model_input_content(part):
+            for item in _model_input_content(part):
                 if isinstance(item, ReferencedContent):
                     descriptor = encode_user_content_item(item)
                     canonical = decode_user_content_item(descriptor)
@@ -207,7 +209,7 @@ def binary_content_usage(messages: Sequence[ModelMessage]) -> tuple[int, int]:
         if not isinstance(message, ModelRequest):
             continue
         for part in message.parts:
-            for item in model_input_content(part):
+            for item in _model_input_content(part):
                 if isinstance(item, ReferencedContent):
                     count += 1
                     total_bytes += item.ref.size
@@ -404,7 +406,7 @@ def native_checkpoint_messages(messages: Sequence[ModelMessage], *, restore: boo
         parts = []
         changed = False
         for part in message.parts:
-            items = model_input_content(part)
+            items = _model_input_content(part)
             projected = tuple(content(item) for item in items)
             if any(left is not right for left, right in zip(items, projected, strict=True)):
                 value = (list(projected) if isinstance(part, UserPromptPart) or isinstance(part.content, list)
@@ -572,7 +574,7 @@ def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
     for mi, message in enumerate(messages):
         _validate_message_facts(message)
         if isinstance(message, ModelResponse):
-            message = project_model_response_attempts(message)
+            message = _project_model_response_attempts(message)
         parts = []
         for pi, part in enumerate(message.parts):
             if ModelSettingsDeltaPart is not None and isinstance(part, ModelSettingsDeltaPart):
@@ -852,7 +854,7 @@ def _encode_datetime(value: datetime | None) -> JsonValue:
 
 
 
-__all__ = ['bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'native_checkpoint_messages', 'model_response_usage', 'project_model_response_attempts', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
+__all__ = ['bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 

@@ -10,7 +10,7 @@ import pytest
 
 from linktools.ai.acp import ACPAgent
 from linktools.ai.core import Page, Principal, SessionStatus
-from linktools.ai.execution import ListSessionRequest, SessionView
+from linktools.ai.session import ListSessionRequest, SessionView
 from linktools.ai.workspace import Workspace
 
 

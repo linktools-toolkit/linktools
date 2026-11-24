@@ -21,7 +21,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.core import JsonValue
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.model import _anthropic, _openai
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
@@ -126,7 +126,7 @@ def _model(
             profile["openai_unsupported_model_settings"] = ["parallel_tool_calls"]
     provider = _anthropic.AnthropicProvider if protocol == "anthropic" else _openai.OpenAIProvider
     monkeypatch.setattr(provider, "model_profile", staticmethod(lambda name: profile))
-    model = create_model(
+    model = create_model_binding(
         api=protocol,
         model='fixture-model',
         api_key='synthetic',

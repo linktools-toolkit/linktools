@@ -19,7 +19,7 @@ from linktools.ai.core import (
     StopReason, UsageMetrics,
 )
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.execution import ForkSessionRequest
+from linktools.ai.session import ForkSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import (
     ExecutionRecord, ResultRecord,

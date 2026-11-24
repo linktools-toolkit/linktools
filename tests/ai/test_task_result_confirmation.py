@@ -292,7 +292,7 @@ async def test_runner_result_confirmation_preserves_cancellation(monkeypatch: py
 async def test_agent_result_wait_recovers_without_repeating_model(monkeypatch: pytest.MonkeyPatch) -> None:
     from pydantic_ai.models.function import FunctionModel
     from linktools.ai.inputs import AgentTaskInput
-    from linktools.ai.model import create_model
+    from linktools.ai.model import create_model_binding
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     calls = 0
     async def respond(messages, info) -> AsyncIterator[str]:
@@ -300,7 +300,7 @@ async def test_agent_result_wait_recovers_without_repeating_model(monkeypatch: p
         calls += 1
         yield "x" * 80000
     model = FunctionModel(stream_function=respond)
-    declaration = create_model(api="openai", model="offline-confirmation", input_types=("mime:text/plain",))
+    declaration = create_model_binding(api="openai", model="offline-confirmation", input_types=("mime:text/plain",))
     class Binding:
         route_id = "default"
         provider = declaration.provider

@@ -185,7 +185,7 @@ async def test_runtime_history_returns_exact_recent_executions_and_errors() -> N
     )
     principal = Principal("cli", "default", "service")
 
-    recent = await history.recent_executions(principal=principal, limit=3)
+    recent = await history.scan_recent_executions(principal=principal, limit=3)
     inspected = await history.inspect_execution("exec-new", principal=principal)
 
     assert [value.execution_id for value in recent] == [

@@ -62,11 +62,11 @@ from ..execution import (
     ModelStreamAttemptItem,
     ModelInteractionReadBoundary,
     ModelInteractionSubscription,
-    SessionHistoryItem,
     UsageReadCutoff,
     UsageSummary,
     TranscriptItem,
 )
+from ..session import SessionHistoryItem
 from ..execution import ExecutionRecord
 from ..persistence.contracts import (
     ExecutionRepository,

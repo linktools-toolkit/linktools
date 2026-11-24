@@ -27,7 +27,7 @@ from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAs
 from linktools.ai.capability import (
     AgentContext, AssetCapability, CapabilityContribution, CapabilityLoadContext,
     ExecutionCapability, ReferencedInputsCapability,
-    ToolCallRetry, TraceCapability, ToolResultsCapability, FileSystem,
+    ToolCallRetry, TraceCapability, ToolResultsCapability, FileSystemCapability,
     TOOL_MCP_SELECTOR_METADATA_KEY)
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
@@ -354,7 +354,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         root = tmp_path / "workspace"
         root.mkdir()
         (root / filename).write_bytes(body)
-        features.capability(FileSystem(Workspace.load(root)))
+        features.capability(FileSystemCapability(Workspace.load(root)))
         selected = "read_file"
     else:
         features.tool(render, effect_policy=kind)

@@ -4,7 +4,7 @@
 from linktools.ai.persistence import Persistence
 """Regression tests for workspace PersistenceStorage composition."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from ._runtime_test_helpers import workspace_features
 
@@ -219,7 +219,7 @@ def _workspace_runtime_storage(workspace: Workspace) -> PersistenceStorage:
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
-    models = create_model(api='openai', model="gpt-test")
+    models = create_model_binding(api='openai', model="gpt-test")
     from linktools.ai.capability import ExecutionCapability
 
     features = workspace_features("workspace", workspace=workspace)

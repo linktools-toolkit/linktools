@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.workspaces import CommandResult, WorkspaceRef
 
-from linktools.ai.capability import FileSystem, PydanticToolControlCapability, ShellCapability
+from linktools.ai.capability import FileSystemCapability, PydanticToolControlCapability, ShellCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.workspace import ToolPermissionPolicy, ToolPermissionRule, Workspace
@@ -54,7 +54,7 @@ def _command_model(messages, info):
 
 
 def test_filesystem_keeps_file_surface_without_shell(tmp_path: Path) -> None:
-    tools = FileSystem(Workspace.load(tmp_path)).tool_definitions()
+    tools = FileSystemCapability(Workspace.load(tmp_path)).tool_definitions()
     assert {tool.name for tool in tools} == {
         "list_files", "read_file", "search_files", "write_file",
     }
@@ -123,7 +123,7 @@ async def test_runtime_native_shell_uses_admitted_tools_and_explicit_environment
 
     features = RuntimeFeatures("native-shell-runtime", workspace_factory=LocalWorkspaceBackend)
     if with_files:
-        features.capability(FileSystem(Workspace.load(tmp_path)))
+        features.capability(FileSystemCapability(Workspace.load(tmp_path)))
     features.capability(ShellCapability())
     features.agent("default", allow_tools=("terminal:*",))
     features.model("default", _FeatureModels(_FeatureFunctionModel(_command_model)))
@@ -248,7 +248,7 @@ async def test_runtime_rejects_owned_provider_without_close_before_activation(tm
             return "/workspace"
 
     features = RuntimeFeatures("missing-workspace-cleanup", workspace_factory=lambda root, **kwargs: NoCleanup())
-    features.capability(FileSystem(Workspace.load(tmp_path)))
+    features.capability(FileSystemCapability(Workspace.load(tmp_path)))
     async with Persistence.open("no-cleanup", storage=PersistenceStorage.in_memory()) as persistence:
         with pytest.raises(AIError) as rejected:
             async with Runtime.open(persistence=persistence, features=features):
@@ -279,7 +279,7 @@ async def test_selected_file_tool_accepts_narrow_backend_without_widening_author
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(
         tool_permissions=ToolPermissionPolicy(default="deny" if denied else "allow"),
     ))
-    capability = FileSystem(workspace).bind(("list_files",), backend=ListingBackend())
+    capability = FileSystemCapability(workspace).bind(("list_files",), backend=ListingBackend())
     result = await Agent(FunctionModel(model), capabilities=[
         PydanticToolControlCapability(), capability,
     ]).run("list the directory")
@@ -322,7 +322,7 @@ async def test_runtime_file_selectors_expose_only_unified_model_schemas(
         return ModelResponse(parts=[TextPart("done")])
 
     features = RuntimeFeatures("unified-file-tools")
-    features.capability(FileSystem(Workspace.load(tmp_path)))
+    features.capability(FileSystemCapability(Workspace.load(tmp_path)))
     features.agent("default", allow_tools=(selector,))
     features.model("default", _FeatureModels(_FeatureFunctionModel(model)))
     async with Persistence.open("unified-files", storage=PersistenceStorage.in_memory()) as persistence:

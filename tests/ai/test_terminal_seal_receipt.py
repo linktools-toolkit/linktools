@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import CreateSessionRequest
+from linktools.ai.session import CreateSessionRequest
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.persistence._step_archive import StateStepArchive

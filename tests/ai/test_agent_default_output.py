@@ -20,7 +20,7 @@ from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import AssetCapability
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
@@ -41,7 +41,7 @@ class _Label(BaseModel):
 
 def _compiler(spec: AgentSpec) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(api="openai", model="gpt-test")},
+        models={"default": create_model_binding(api="openai", model="gpt-test")},
         candidates=(), agents={spec.id: spec},
     )
 

@@ -22,7 +22,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientResponse
 from linktools.ai.observe import MetricMeasurement, Metrics, Observation
 from linktools.ai.history import ExecutionInfo
-from linktools.ai.execution import ExecutionHistoryItem, ExecutionTraceItem, ListExecutionRequest, ModelInteractionItem, SessionView, TranscriptItem, UsageSummary
+from linktools.ai.execution import ExecutionHistoryItem, ExecutionTraceItem, ListExecutionRequest, ModelInteractionItem, TranscriptItem, UsageSummary
+from linktools.ai.session import SessionView
 from linktools.ai.web import create_app
 
 
@@ -177,7 +178,7 @@ class _ExecutionListHistory:
         assert request.principal.tenant_id == self.tenant_id and request.limit == 20
         return Page(tuple(reversed(self.records)))
 
-    async def recent_executions(
+    async def scan_recent_executions(
         self, *, principal: Principal, limit: int,
     ) -> tuple[ExecutionInfo, ...]:
         assert self.allow_recent_scan, "Ordinary browsing must not scan all execution metadata"
@@ -357,7 +358,7 @@ async def test_trace_viewer_preserves_compact_model_timing_and_usage() -> None:
 class _SessionHistory:
     tenant_id = "default"
 
-    async def recent_sessions(
+    async def scan_recent_sessions(
         self, *, principal: Principal, limit: int,
     ) -> tuple[SessionView, ...]:
         assert principal.tenant_id == self.tenant_id and limit == 20
