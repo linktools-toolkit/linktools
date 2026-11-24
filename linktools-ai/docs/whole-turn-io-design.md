@@ -43,6 +43,9 @@ bundle calls.
    the original writer is gone or durably superseded. Concurrent recovery
    attempts compete through the same conditional ownership write. Automatic
    recovery stays off by default; no new synchronous outbox for UI notices.
+   Reuse terminal write composition without taking the deferred-admission route:
+   an optional buffer's append is not the first source commit required for 202.
+   Selecting the existing `CommitPolicy.terminal()` alone is insufficient.
 
 ### Run and recover
 
@@ -189,3 +192,10 @@ production MySQL numbers or expected gains.
   Keep startup/schema probes separate. Repeat on the supported SQL
   backend(s) used to make performance claims; do not extrapolate SQLite
   numbers to remote MySQL or conflate cursor executions with round trips.
+- **Resource bounds:** include a matched long-output run with a slow observer.
+  A bounded preview queue does not bound retained output, encoding or total
+  memory across subscribers. Measure producer peak and post-turn memory,
+  subscriber queue size and final frame bytes, and verify completion under
+  backpressure. When the complete final projection exceeds the stream's
+  delivery limit, use the authorized exact-turn read without truncating the
+  stored result. This exception does not add a GET to the normal path.
