@@ -42,10 +42,10 @@ bundle calls.
 ### Run and recover
 
 - Stay in memory for ordinary model output, intermediate text/reasoning and
-  explicitly replay-safe tools. A restart may regenerate work from accepted
+  read-only tools (`effect_policy="none"`). A restart may regenerate work from accepted
   input when that execution's recovery contract permits regeneration. This is
   not a promise to reproduce provider output or avoid another model charge.
-  A tool with unknown replay semantics is not assumed replay-safe.
+  A tool with unknown effect semantics is not assumed read-only.
 - Save a checkpoint when required to preserve continuation, approval/suspension,
   ownership handoff or external effects. Publish the effect's durable intent
   and stable invocation key before calling it. Record the outcome at the
@@ -53,6 +53,13 @@ bundle calls.
   and the durability boundary is unchanged. A lost response is not proof of
   failure. Reuse the same key if the external service supports it; otherwise
   reconcile uncertain outcomes and do not automatically repeat the action.
+  A `replay_safe` mutation still requires this boundary: repeating a call with
+  the same arguments is different from regenerating a model turn that can
+  change or omit the invocation. If such a tool is selected during a turn,
+  persist the required continuation and admitted invocation before dispatch and
+  continue from that durable boundary, not from the original input alone.
+  Enabled durable model/tool count reservations for RunBudget also precede
+  dispatch and survive restart; do not defer them until terminal publication.
 - Reuse current coordination rather than adding a second lock. A lease gives
   local validity and cancellation signals, not proof of write authority. On a
   durable boundary, enforce the applicable writer generation and expected
@@ -94,7 +101,9 @@ bundle calls.
   Overflow marks a gap or closes the stream; process death after commit may
   lose notification, so reconnect or explicit refresh must still find the
   committed turn. A silent lost notification is not guaranteed to wake an
-  already attached client. Reconnect or refresh does not write the turn. Multiple tabs may require
+  already attached client. Reconnect or refresh does not write the turn.
+  On a new preview generation, reuse `STREAM_RESET` to discard the old transient
+  preview before rendering replacement deltas for that execution. Multiple tabs may require
   subscriber-specific authorization/reads; they must not multiply producer
   reads/writes or trigger repeated full-session fetches. Do not introduce a
   mandatory message broker, per-token durable stream, or per-tab DB polling.
@@ -140,7 +149,8 @@ each repeat. These are diagnostic baseline counts, not a SQL lower bound,
 production MySQL numbers or expected gains.
 
 - **Normal path budget:** one batch of required context reads; two business
-  write commits (admit and publish) for the regenerate-safe no-effect case;
+  write commits (admit and publish) for the regenerate-safe no-effect case
+  without durable per-request budget reservations;
   no DB work caused by output fragment count; no mandatory terminal readback
   after known commit. Adding a viewer with identical input and transport
   must add no turn DML or producer transactions. Count lease health and
@@ -151,7 +161,10 @@ production MySQL numbers or expected gains.
   durable acceptance but before dispatch, between model response and
   checkpoint, on output validation failure, on effect response ambiguity,
   during an unknown final commit, and after commit but before notification. Assert one
-  authoritative result, no repeated unsafe effect, and correct recovery.
+  authoritative result, no repeated unsafe effect, and correct recovery. Cover
+  a replay-safe mutation whose original arguments differ from a fresh model
+  output, a counted request across restart, and replacement preview without
+  mixing generations.
 - **Full-path measurement:** compare at identical SDK/DB/profile for plain
   and single-tool turns, Trace off/on, 0/1/2 observers, cold vs warm, and
   reconnect. Label intentional history reads separately from “no observer”;
