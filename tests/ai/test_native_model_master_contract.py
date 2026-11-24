@@ -200,7 +200,7 @@ async def test_runtime_reference_stream_failure_keeps_attempt_coordinates_and_sa
                         revision=_SOURCE.revision, scope="agent")
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('reference-stream', storage=PersistenceStorage.in_memory()) as persistence_200, Runtime.attach(persistence=persistence_200, features=features) as runtime:
+    async with Persistence.open('reference-stream', storage=PersistenceStorage.in_memory()) as persistence_200, Runtime.open(persistence=persistence_200, features=features) as runtime:
         execution = await runtime.agents.get().start([reference])
         result = (await execution.wait(timeout_seconds=10)).result
         interactions = (await execution.model_interactions(include_content=True, include_client_requests=True)).items

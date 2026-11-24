@@ -70,7 +70,7 @@ def checkpoint_recovery_sources(tmp_path_factory: pytest.TempPathFactory) -> tup
                     if original_strict and mode == "create" else {}))
                 group.agent("default", allow_tools=("write",))
                 storage = PersistenceStorage.sqlite(root / "source.db")
-                async with Persistence.open("checkpoint-replacement", storage=storage) as state, Runtime.attach(
+                async with Persistence.open("checkpoint-replacement", storage=storage) as state, Runtime.open(
                     persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), group),
                     auto_recover=False, metrics=None,
                 ) as runtime:
@@ -348,7 +348,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
     async with Persistence.open("idempotent-parallel", storage=PersistenceStorage.sqlite(
         database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
-    )) as state, Runtime.attach(
+    )) as state, Runtime.open(
         persistence=state, features=features, auto_recover=False, metrics=None,
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -405,7 +405,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
     async with Persistence.open("idempotent-parallel", storage=PersistenceStorage.sqlite(
         database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
-    )) as state, Runtime.attach(
+    )) as state, Runtime.open(
         persistence=state, features=features, auto_recover=False, metrics=None,
     ) as runtime:
         reopened = assert_results(await state.checkpoint.tools.list_by_execution(original_id, tenant_id=runtime.tenant_id))

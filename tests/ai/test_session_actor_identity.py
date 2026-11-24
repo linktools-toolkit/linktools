@@ -51,7 +51,7 @@ async def test_shared_session_preserves_actor_in_live_and_portable_history(
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
     owner, peer = Principal("owner", "default"), Principal("peer", "default")
     policy = SharedSessionPolicy()
-    async with Persistence.open("shared-session", storage=storage) as state, Runtime.attach(
+    async with Persistence.open("shared-session", storage=storage) as state, Runtime.open(
         persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
         authorization=policy,
     ) as runtime:

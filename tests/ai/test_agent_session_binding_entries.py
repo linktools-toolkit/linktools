@@ -44,7 +44,7 @@ async def test_captured_binding_is_used_by_agent_and_session_entries(entry: str,
     features.capability(ExecutionCapability(retain_history=True))
     features = model_features(_Models(_UsageFunctionModel(respond)), features)
     async with Persistence.open("binding-entries", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             current = runtime.agents.get()
             captured_base = current.derive(system_prompt="CAPTURED_DEFINITION").execution_port.binding_contract
             output = bind_output(_CapturedAnswer)

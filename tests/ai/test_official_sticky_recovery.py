@@ -44,7 +44,7 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
         return model_features(_Models(_UsageFunctionModel(model)), result)
 
     async with Persistence.open("sticky-native", storage=PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features(stopped), auto_recover=False) as runtime:
+        async with Runtime.open(persistence=persistence, features=features(stopped), auto_recover=False) as runtime:
             agent = runtime.agents.get()
             runner = await agent.create_session("session") if conversation else agent
             execution = await runner.start("question", idempotency_key="start")
@@ -64,7 +64,7 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
             assert [part.content for message in observed.messages for part in message.parts
                     if isinstance(part, UserPromptPart)] == ["sticky context"]
     async with Persistence.open("sticky-native", storage=PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features(resumed), auto_recover=False) as runtime:
+        async with Runtime.open(persistence=persistence, features=features(resumed), auto_recover=False) as runtime:
             reader = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
             assert await reader.latest_snapshot(run_id=source, include_interrupted=True) == snapshot
             await runtime.executions.recover(execution.execution_id, principal=runtime.default_principal,

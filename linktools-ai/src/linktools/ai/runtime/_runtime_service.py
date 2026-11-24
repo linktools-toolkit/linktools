@@ -242,19 +242,6 @@ class Runtime(Generic[AppT]):
             authorization=authorization, auto_recover=auto_recover,
         )
 
-    @classmethod
-    def attach(
-        cls, *, persistence: Persistence, context: ExecutionContext[AppT] | None = None,
-        features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
-        metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
-        auto_recover: bool = False,
-    ) -> "Runtime[AppT]":
-        """Compatibility alias for open(persistence=...); the provider owns storage."""
-        return cls.open(
-            persistence=persistence, context=context, features=features, metrics=metrics,
-            authorization=authorization, auto_recover=auto_recover,
-        )
-
     @property
     def features(self) -> "RuntimeFeaturesSource[AppT] | None":
         """Return live source inspection without owning a frozen candidate catalog."""

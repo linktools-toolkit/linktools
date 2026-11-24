@@ -88,7 +88,7 @@ def _crash_worker(database: str, effects: str, phase: str) -> None:
 
     async def run() -> None:
         async with Persistence.open('volatile-probe', storage=_storage(Path(database))) as persistence:
-            async with Runtime.attach(persistence=persistence,
+            async with Runtime.open(persistence=persistence,
                                       features=_features(Path(effects), [], phase)) as runtime:
                 execution = await runtime.agents.get().session('session').start('work', idempotency_key='work')
                 Path(database + '.execution').write_text(execution.execution_id)
@@ -103,7 +103,7 @@ def _crash_worker(database: str, effects: str, phase: str) -> None:
 async def test_volatile_turn_process_crash_keeps_prior_turn_and_business_idempotency(tmp_path: Path, phase: str) -> None:
     database, effects = tmp_path / 'state.db', tmp_path / 'effects.db'
     async with Persistence.open('volatile-probe', storage=_storage(database)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(effects, [])) as runtime:
+        async with Runtime.open(persistence=persistence, features=_features(effects, [])) as runtime:
             session = await runtime.agents.get().create_session('session')
             prior = await session.start('baseline', idempotency_key='baseline')
             assert (await prior.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
@@ -124,7 +124,7 @@ async def test_volatile_turn_process_crash_keeps_prior_turn_and_business_idempot
     lost_id = Path(str(database) + '.execution').read_text()
     calls = []
     async with Persistence.open('volatile-probe', storage=_storage(database)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(effects, calls)) as runtime:
+        async with Runtime.open(persistence=persistence, features=_features(effects, calls)) as runtime:
             before = await persistence.execution.executions.get(lost_id, tenant_id=persistence.tenant_id)
             assert (before is not None) is (phase == 'after_terminal')
             assert await persistence.execution.executions.get(prior_id, tenant_id=persistence.tenant_id) is not None
@@ -164,7 +164,7 @@ async def test_volatile_turn_replacement_does_not_publish_the_stale_worker(
     entered, release = asyncio.Event(), asyncio.Event()
     calls = []
     async with Persistence.open('volatile-probe', storage=storage) as first:
-        async with Runtime.attach(persistence=first,
+        async with Runtime.open(persistence=first,
                                   features=_features(effects, calls, entered=entered, release=release)) as old:
             session = await old.agents.get().create_session('session')
             lost = await session.start('work', idempotency_key='work')
@@ -197,7 +197,7 @@ async def test_volatile_turn_replacement_does_not_publish_the_stale_worker(
                 assert released is (interference == 'lost_lease')
                 replacement_calls = []
                 async with Persistence.open('volatile-probe', storage=storage) as second:
-                    async with Runtime.attach(persistence=second,
+                    async with Runtime.open(persistence=second,
                                               features=_features(effects, replacement_calls)) as new:
                         replacement = await new.agents.get().session('session').start('work', idempotency_key='work')
                         assert replacement.execution_id != lost.execution_id
@@ -262,7 +262,7 @@ async def test_probe_lease_loss_after_last_check_before_sql_commit(
     old_buffer = _PayloadBuffer() if buffered_trace else None
     new_buffer = _PayloadBuffer() if buffered_trace else None
     async with Persistence.open('volatile-probe', storage=storage) as first:
-        async with Runtime.attach(persistence=first, features=_features(effects, old_calls, buffer=old_buffer, trace=buffered_trace)) as old:
+        async with Runtime.open(persistence=first, features=_features(effects, old_calls, buffer=old_buffer, trace=buffered_trace)) as old:
             session = await old.agents.get().create_session('session')
             stale = await session.start('work', idempotency_key='work')
             try:
@@ -271,7 +271,7 @@ async def test_probe_lease_loss_after_last_check_before_sql_commit(
                 pending = backend._pending_turns.get(stale.execution_id, tenant_id=old.tenant_id)
                 assert await cache.release_turn(pending.coordination.lease)
                 async with Persistence.open('volatile-probe', storage=storage) as second:
-                    async with Runtime.attach(persistence=second,
+                    async with Runtime.open(persistence=second,
                                               features=_features(effects, new_calls, entered=new_entered, release=new_release, buffer=new_buffer, trace=buffered_trace)) as new:
                         fresh = await new.agents.get().session('session').start('work', idempotency_key='work')
                         await asyncio.wait_for(new_entered.wait(), 5)

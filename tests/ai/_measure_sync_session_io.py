@@ -73,7 +73,7 @@ async def measure(args: argparse.Namespace) -> dict:
                     storage = PersistenceStorage.sqlite(Path(directory) / "state.db", cache=cache,
                                                        coordination=coordination)
                 state = await stack.enter_async_context(Persistence.open(namespace, storage=storage))
-                runtimes.append(await stack.enter_async_context(Runtime.attach(persistence=state, features=features())))
+                runtimes.append(await stack.enter_async_context(Runtime.open(persistence=state, features=features())))
             owner, reader = runtimes
             await owner.agents.get().create_session("session")
             backend = owner._execution_service.runtime_backend()

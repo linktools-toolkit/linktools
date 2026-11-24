@@ -104,7 +104,7 @@ async def test_local_native_factory_runs_checkpointed_agent_and_reopens(tmp_path
             features.capability(ExecutionCapability(retain_history=True))
             features.capability(StepPersistence(store=native, capture_frontier=True))
             features.agent("default", model="default", allow_tools=())
-            async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+            async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
                 session = await runtime.agents.get().create_session("session")
                 execution = await session.start("question", idempotency_key="input")
                 assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -296,7 +296,7 @@ async def test_local_native_handoff_backup_recovers_same_execution(tmp_path: Pat
     async with Persistence.open("native-handoff", storage=PersistenceStorage.from_root(source, exclusive_writer=True)) as persistence:
         native = await persistence.create_step_store()
         try:
-            async with Runtime.attach(persistence=persistence, features=features(native, blocked)) as owner:
+            async with Runtime.open(persistence=persistence, features=features(native, blocked)) as owner:
                 execution = await (await owner.agents.get().create_session("session")).start("Remember blue", idempotency_key="first")
                 await asyncio.wait_for(entered.wait(), 5)
                 await asyncio.wait_for(owner.handoff(), 5)
@@ -309,7 +309,7 @@ async def test_local_native_handoff_backup_recovers_same_execution(tmp_path: Pat
     async with Persistence.open("native-handoff", storage=PersistenceStorage.from_root(target, exclusive_writer=True)) as persistence:
         native = await persistence.create_step_store()
         try:
-            async with Runtime.attach(persistence=persistence, features=features(native, answer), auto_recover=False) as successor:
+            async with Runtime.open(persistence=persistence, features=features(native, answer), auto_recover=False) as successor:
                 principal = successor.default_principal
                 before = await successor.executions.inspect(execution.execution_id, principal=principal)
                 assert before.status is ExecutionStatus.STARTED

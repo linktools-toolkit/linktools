@@ -97,7 +97,7 @@ async def test_runtime_compile_failure_does_not_allocate_input_backend(tmp_path:
 async def test_runtime_failed_entry_keeps_input_cleanup_retryable(tmp_path: Path, close_failures: int) -> None:
     instances: list[_OwnedBackend] = []
     async with Persistence.open("input-owner", storage=PersistenceStorage.in_memory()) as persistence:
-        runtime = Runtime.attach(persistence=persistence,
+        runtime = Runtime.open(persistence=persistence,
             features=_features(tmp_path, instances, close_failures=close_failures), metrics=_FailingMetrics())
         try:
             with pytest.raises(ValueError, match="metrics initialization failed") as raised:
@@ -132,7 +132,7 @@ async def test_runtime_cancelled_entry_closes_acquired_input_backend(
 
     monkeypatch.setattr(RuntimeAgentRunStore, "prepare_archives", prepare_archives)
     async with Persistence.open("input-owner", storage=PersistenceStorage.in_memory()) as persistence:
-        runtime = Runtime.attach(persistence=persistence, features=_features(tmp_path, instances))
+        runtime = Runtime.open(persistence=persistence, features=_features(tmp_path, instances))
         task = asyncio.create_task(runtime.__aenter__())
         try:
             await asyncio.wait_for(entered.wait(), 5)

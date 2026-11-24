@@ -156,7 +156,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     storage = storage_for(backend, tmp_path)
     async with (
         Persistence.open('shared-data', storage=storage, tenant_id=TENANT) as persistence_150,
-        Runtime.attach(persistence=persistence_150, context=CONTEXT, features=captured, authorization=authorization) as runtime,
+        Runtime.open(persistence=persistence_150, context=CONTEXT, features=captured, authorization=authorization) as runtime,
         History.open(persistence=persistence_150, authorization=authorization) as history,
     ):
         target = (Task("shared.target", echo, effect_policy="none") if input_kind == "task" else

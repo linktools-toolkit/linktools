@@ -121,7 +121,7 @@ async def test_large_pending_input_is_materialized_only_at_source_boundary(tmp_p
         tmp_path / "state.db", object_store=objects,
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )
-    async with Persistence.open("payload-placement", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("payload-placement", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -179,7 +179,7 @@ async def test_rejected_admission_does_not_publish_large_input_or_context(
         tmp_path / "state.db", object_store=objects,
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )
-    async with Persistence.open("rejected-payload", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("rejected-payload", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         coordination = runtime._execution_service._runtime_bridge.pending_turns.coordination
@@ -208,7 +208,7 @@ async def test_imported_context_is_archived_at_source_and_can_reopen(tmp_path: P
         return PersistenceStorage.sqlite(tmp_path / "state.db", object_store=objects,
             coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
 
-    async with Persistence.open("imported-payload", storage=storage()) as persistence, Runtime.attach(
+    async with Persistence.open("imported-payload", storage=storage()) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         execution = await runtime.agents.get().start("question", input_context=context)
@@ -217,7 +217,7 @@ async def test_imported_context_is_archived_at_source_and_can_reopen(tmp_path: P
         reference = record.input_context
         assert reference.payload.decode()["kind"] == "execution-context"
         assert objects.writes == []
-    async with Persistence.open("imported-payload", storage=storage()) as persistence, Runtime.attach(
+    async with Persistence.open("imported-payload", storage=storage()) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         restored = await runtime._execution_service.runtime_backend().load_input_context(reference)

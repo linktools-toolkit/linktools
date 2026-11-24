@@ -109,10 +109,10 @@ async def test_local_root_keeps_one_agent_producer_while_allowing_task_only_view
 
     features = model_features(_Models(FunctionModel(stream_function=answer)), _group(False))
     async with Persistence.open('local-runtime', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as state:
-        async with Runtime.attach(persistence=state, features=features) as first, Runtime.attach(persistence=state):
+        async with Runtime.open(persistence=state, features=features) as first, Runtime.open(persistence=state):
             execution = await first.agents.get().start('only one owner', idempotency_key='same')
             await asyncio.wait_for(entered.wait(), 5)
-            second = Runtime.attach(persistence=state, features=features, auto_recover=auto_recover)
+            second = Runtime.open(persistence=state, features=features, auto_recover=auto_recover)
             try:
                 with pytest.raises(AIError) as rejected:
                     await second.__aenter__()
@@ -154,7 +154,7 @@ async def test_local_sqlite_process_exit_preserves_same_execution_recovery(tmp_p
         async def main():
             storage = PersistenceStorage.from_root(sys.argv[1], exclusive_writer=True)
             async with Persistence.open('startup-recovery', storage=storage) as state:
-                async with Runtime.attach(persistence=state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime:
+                async with Runtime.open(persistence=state, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime:
                     async def interrupted_launch(*args, **kwargs):
                         pass
                     runtime._execution_service.runtime_backend().launch = interrupted_launch
@@ -192,7 +192,7 @@ async def test_local_sqlite_process_exit_preserves_same_execution_recovery(tmp_p
         yield 'recovered once'
 
     async with Persistence.open('startup-recovery', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as state:
-        async with Runtime.attach(persistence=state,
+        async with Runtime.open(persistence=state,
             features=model_features(_Models(FunctionModel(stream_function=recovered)), _capabilities()),
             auto_recover=auto_recover) as runtime:
             if not auto_recover:
@@ -230,7 +230,7 @@ async def test_local_sqlite_unknown_terminal_keeps_owner_until_same_commit_is_co
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True,
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open('local-unknown', storage=storage) as state:
-        async with Runtime.attach(persistence=state,
+        async with Runtime.open(persistence=state,
             features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get().create_session('session')
             group = state.execution.executions.state_store.storage_group
@@ -279,7 +279,7 @@ async def test_local_sqlite_unknown_terminal_keeps_owner_until_same_commit_is_co
             assert len(calls) == len(writes) == 1
     async with Persistence.open('local-unknown', storage=storage) as reopened:
         assert reopened.exclusive_execution_writer
-        async with Runtime.attach(persistence=reopened,
+        async with Runtime.open(persistence=reopened,
             features=model_features(_Models(_UsageFunctionModel(model)), features)) as following:
             session = following.agents.get().session('session')
             replay = await session.start('question', idempotency_key='same')

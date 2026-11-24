@@ -108,7 +108,7 @@ async def test_prepared_native_context_reopens_without_rebuilding(
 
     storage = PersistenceStorage.sqlite(tmp_path / "prepared.sqlite")
     graph_id = "prepared-native-graph"
-    async with Persistence.open("prepared-native", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("prepared-native", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features(),
     ) as runtime, task_engine_scope(runtime, persistence) as engine:
         worker = Task.from_agent("prepared-native-worker", runtime.agents.get(), build_input=build_input)
@@ -135,7 +135,7 @@ async def test_prepared_native_context_reopens_without_rebuilding(
             assert builds == ["worker"] and requests == [] and observations == []
             await runtime.close()
 
-    async with Persistence.open("prepared-native", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("prepared-native", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features(),
     ) as runtime, task_engine_scope(runtime, persistence) as engine:
         snapshot = await persistence.task.tasks.graph_state(graph_id, tenant_id=runtime.tenant_id)
@@ -199,7 +199,7 @@ async def test_prepared_native_context_reopens_without_rebuilding(
                 assert "previous-route" in str(items[0].request)
             assert "previous-response" in str(items[0].request)
 
-    async with Persistence.open("prepared-native", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("prepared-native", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features(),
     ) as runtime:
         persisted = (await runtime.history.model_interactions(

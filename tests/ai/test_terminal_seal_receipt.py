@@ -82,7 +82,7 @@ async def test_terminal_cleanup_requires_confirmed_matching_seal(
     def respond(_messages, _info):
         return ModelResponse(parts=[TextPart("complete")])
 
-    async with Persistence.open("terminal-seal-receipt", storage=storage) as state, Runtime.attach(
+    async with Persistence.open("terminal-seal-receipt", storage=storage) as state, Runtime.open(
         persistence=state,
         features=model_features(_Models(_UsageFunctionModel(respond)), features),
     ) as runtime:

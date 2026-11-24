@@ -48,7 +48,7 @@ class _TestBinding:
 @pytest.mark.asyncio
 async def test_base_runtime_can_invoke_custom_sdk_model():
     models = _TestBinding()
-    async with Persistence.open('extras', storage=PersistenceStorage.in_memory()) as persistence_48, Runtime.attach(persistence=persistence_48, features=model_features(models)) as runtime:
+    async with Persistence.open('extras', storage=PersistenceStorage.in_memory()) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models)) as runtime:
         execution = await runtime.agents.get().start("hello")
         result = await execution.wait()
         assert result.result.status.value == "SUCCEEDED"

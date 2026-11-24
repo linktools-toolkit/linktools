@@ -46,7 +46,7 @@ async def test_native_control_view_and_budget_use_cache_without_body_reads(tmp_p
                 statements.clear()
                 assert await repository.get_view("execution", tenant_id="tenant") == expected
                 assert statements == []
-                async with Runtime.attach(persistence=state, features=model_features(_LargeModels(), _capabilities())) as runtime:
+                async with Runtime.open(persistence=state, features=model_features(_LargeModels(), _capabilities())) as runtime:
                     assert await runtime.executions.budget_usage("execution", principal=Principal(current.principal_id, "tenant", current.principal_kind)) is None
                     statements.clear()
                     assert await runtime.executions.budget_usage("execution", principal=Principal(current.principal_id, "tenant", current.principal_kind)) is None

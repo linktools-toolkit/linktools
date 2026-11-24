@@ -43,7 +43,7 @@ async def _admit_without_worker(
     path: Path, models: _Models, monkeypatch: pytest.MonkeyPatch,
 ) -> ExecutionRecord:
     storage = PersistenceStorage.from_root(path, exclusive_writer=True)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_41, Runtime.attach(persistence=persistence_41, features=model_features(models, _capabilities())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_41, Runtime.open(persistence=persistence_41, features=model_features(models, _capabilities())) as runtime:
         async def interrupted_launch(
             request: ExecutionRequest, execution: ExecutionRecord, **kwargs: object,
         ) -> None:
@@ -73,7 +73,7 @@ async def test_startup_recovery_runs_when_explicitly_enabled(
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     assert calls == []
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_75, Runtime.attach(persistence=persistence_75, features=model_features(models, _capabilities()), auto_recover=True) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_75, Runtime.open(persistence=persistence_75, features=model_features(models, _capabilities()), auto_recover=True) as runtime:
         result = (await runtime.executions.wait(
             before.execution_id, principal=runtime.default_principal, timeout_seconds=10,
         )).result
@@ -98,7 +98,7 @@ async def test_startup_without_opt_in_preserves_admission_until_explicit_recover
     models = _Models(FunctionModel(stream_function=model))
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_101, Runtime.attach(persistence=persistence_101, features=model_features(models, _capabilities()), **options) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_101, Runtime.open(persistence=persistence_101, features=model_features(models, _capabilities()), **options) as runtime:
         assert await runtime._state.execution.executions.get(
             before.execution_id, tenant_id=runtime.tenant_id,
         ) == before
@@ -154,7 +154,7 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
     owner_storage = PersistenceStorage.sqlite(path)
     other_storage = PersistenceStorage.sqlite(path)
     assert owner_storage is not other_storage
-    async with Persistence.open(_NAMESPACE, storage=owner_storage) as persistence_159, Runtime.attach(persistence=persistence_159, features=model_features(_Models(FunctionModel(stream_function=owner_model)), _capabilities())) as owner:
+    async with Persistence.open(_NAMESPACE, storage=owner_storage) as persistence_159, Runtime.open(persistence=persistence_159, features=model_features(_Models(FunctionModel(stream_function=owner_model)), _capabilities())) as owner:
         try:
             owner_run = await owner.agents.get().start("keep running", idempotency_key="owner")
             await asyncio.wait_for(owner_entered.wait(), 10)
@@ -165,7 +165,7 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
             checkpoint = await owner._state.execution.executions.get(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
-            async with Persistence.open(_NAMESPACE, storage=other_storage) as persistence_173, Runtime.attach(persistence=persistence_173, features=model_features(_Models(FunctionModel(stream_function=owned_model)), _capabilities()), auto_recover=False) as other:
+            async with Persistence.open(_NAMESPACE, storage=other_storage) as persistence_173, Runtime.open(persistence=persistence_173, features=model_features(_Models(FunctionModel(stream_function=owned_model)), _capabilities()), auto_recover=False) as other:
                 assert other.namespace == owner.namespace
                 assert owned_calls == []
                 assert await other._state.execution.executions.get(
@@ -215,7 +215,7 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
     task = Task("test.startup-recovery", execute, effect_policy="none")
     graph = TaskGraph("recover-graph", (TaskNode("node", task=task),))
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_228, Runtime.attach(features=RuntimeFeatures(), persistence=persistence_228) as runtime, TaskEngine.open(persistence=persistence_228, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_228, Runtime.open(features=RuntimeFeatures(), persistence=persistence_228) as runtime, TaskEngine.open(persistence=persistence_228, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         submission = await runtime_engine.with_definitions(task).prepare_submission(graph, idempotency_key="graph-admission")
         await runtime._state.task.admissions.admit_prepared(submission)
         lease = await runtime._state.task.tasks.claim(
@@ -226,7 +226,7 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
             error_digest=canonical_sha256({"phase": "worker-interrupted"}),
         )
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_239, Runtime.attach(features=RuntimeFeatures(), persistence=persistence_239, auto_recover=False) as runtime, TaskEngine.open(persistence=persistence_239, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_239, Runtime.open(features=RuntimeFeatures(), persistence=persistence_239, auto_recover=False) as runtime, TaskEngine.open(persistence=persistence_239, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         run = await runtime_engine.with_definitions(task).get(graph.graph_id)
         assert (await run.state()).status is TaskStatus.RECOVERY_REQUIRED
         assert calls == []

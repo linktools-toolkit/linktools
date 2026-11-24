@@ -125,7 +125,7 @@ async def test_model_corrects_path_using_original_tool_retry_budget(
     async with Persistence.open(
         "invalid-path", storage=PersistenceStorage.in_memory()
     ) as persistence:
-        async with Runtime.attach(
+        async with Runtime.open(
             persistence=persistence, features=features
         ) as runtime:
             result = (

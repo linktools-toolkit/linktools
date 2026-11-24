@@ -198,7 +198,7 @@ async def test_provider_rejection_identifiers_survive_history_reopen(
     storage = lambda: PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     expected = {"type": "invalid_request_error", "code": rejection, "param": param,
                 "request_id": "req_offline-diagnostic"}
-    async with Persistence.open("provider-diagnostics", storage=storage()) as persistence, Runtime.attach(
+    async with Persistence.open("provider-diagnostics", storage=storage()) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         execution = await runtime.agents.get().start(prompt)

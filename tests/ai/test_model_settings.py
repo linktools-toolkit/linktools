@@ -127,7 +127,7 @@ async def test_runtime_uses_sdk_thinking_mapping_without_local_model_rejection(m
     features.model("default", binding)
     features.agent("default", model="default")
     features.capability(Thinking(effort="high"))
-    async with Persistence.open('native-thinking', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.attach(persistence=persistence_103, features=features) as runtime:
+    async with Persistence.open('native-thinking', storage=PersistenceStorage.in_memory()) as persistence_103, Runtime.open(persistence=persistence_103, features=features) as runtime:
         result = await runtime.agents.get().run("hello", thinking=thinking, timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert sent[-1]["reasoning"]["effort"] == expected
@@ -141,7 +141,7 @@ async def test_runtime_unknown_model_keeps_native_extension_without_profile(monk
     features = RuntimeFeatures()
     features.model("default", binding)
     features.agent("default", model="default")
-    async with Persistence.open('unknown-model', storage=PersistenceStorage.in_memory()) as persistence_117, Runtime.attach(persistence=persistence_117, features=features) as runtime:
+    async with Persistence.open('unknown-model', storage=PersistenceStorage.in_memory()) as persistence_117, Runtime.open(persistence=persistence_117, features=features) as runtime:
         result = await runtime.agents.get().run("hello", thinking=True, timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert sent[-1]["vendor_thinking"] == {"budget": 2048}
@@ -285,7 +285,7 @@ async def test_yaml_thinking_is_inherited_until_spec_or_run_explicitly_overrides
     features.model("default", binding)
     features.agent("default", model="default",
                    **({} if spec_thinking is None else {"thinking": spec_thinking}))
-    async with Persistence.open('inherited-thinking', storage=PersistenceStorage.in_memory()) as persistence_233, Runtime.attach(persistence=persistence_233, features=features) as runtime:
+    async with Persistence.open('inherited-thinking', storage=PersistenceStorage.in_memory()) as persistence_233, Runtime.open(persistence=persistence_233, features=features) as runtime:
         result = await runtime.agents.get().run(
             "hello", timeout_seconds=10,
             **({} if run_thinking is None else {"thinking": run_thinking}),
@@ -301,7 +301,7 @@ async def test_omitted_thinking_preserves_sdk_model_default(monkeypatch):
     features = RuntimeFeatures()
     features.model("default", binding)
     features.agent("default", model="default")
-    async with Persistence.open('default-thinking', storage=PersistenceStorage.in_memory()) as persistence_249, Runtime.attach(persistence=persistence_249, features=features) as runtime:
+    async with Persistence.open('default-thinking', storage=PersistenceStorage.in_memory()) as persistence_249, Runtime.open(persistence=persistence_249, features=features) as runtime:
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
     assert "reasoning" not in sent[-1]

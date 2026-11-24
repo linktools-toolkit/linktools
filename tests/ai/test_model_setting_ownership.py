@@ -138,7 +138,7 @@ async def test_runtime_thinking_is_fallback_not_a_second_native_owner(
     features.capability(Thinking(effort="high"))
     async with (
         Persistence.open("native-owner", storage=PersistenceStorage.in_memory()) as persistence,
-        Runtime.attach(persistence=persistence, features=features) as runtime,
+        Runtime.open(persistence=persistence, features=features) as runtime,
     ):
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.SUCCEEDED
@@ -302,7 +302,7 @@ async def test_runtime_reports_owner_conflict_as_nonretryable_configuration_erro
     features.agent("default", model="default")
     async with (
         Persistence.open("owner-conflict", storage=PersistenceStorage.in_memory()) as persistence,
-        Runtime.attach(persistence=persistence, features=features) as runtime,
+        Runtime.open(persistence=persistence, features=features) as runtime,
     ):
         result = await runtime.agents.get().run("hello", timeout_seconds=10)
     assert result.result.status is ExecutionStatus.FAILED

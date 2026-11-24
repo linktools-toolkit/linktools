@@ -130,7 +130,7 @@ async def run_payload(payload):
         features.agent('default',allow_tools=('work',))
         binding=_Models(_UsageFunctionModel(model))
         binding.contract={**binding.contract,'input_mime_types': ['image/png']}
-        async with Persistence.open('coalesce-crash', storage=PersistenceStorage.sqlite(root/'state.db')) as persistence, Runtime.attach(persistence=persistence,features=model_features(binding,features),auto_recover=False) as runtime:
+        async with Persistence.open('coalesce-crash', storage=PersistenceStorage.sqlite(root/'state.db')) as persistence, Runtime.open(persistence=persistence,features=model_features(binding,features),auto_recover=False) as runtime:
             if mode == 'create':
                 session = await runtime.agents.get().create_session('session')
                 execution = await session.start('inspect',idempotency_key='one')

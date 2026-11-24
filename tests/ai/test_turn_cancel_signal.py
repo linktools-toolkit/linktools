@@ -75,9 +75,9 @@ async def test_source_cancel_reaches_owner_after_remote_terminal_settlement(
     database = tmp_path / "state.db"
     async with Persistence.open("source-cancel-signal", storage=PersistenceStorage.sqlite(
         database, coordination=coordination,
-    )) as owner_state, Runtime.attach(persistence=owner_state, features=features) as owner, Persistence.open(
+    )) as owner_state, Runtime.open(persistence=owner_state, features=features) as owner, Persistence.open(
         "source-cancel-signal", storage=PersistenceStorage.sqlite(database, coordination=coordination),
-    ) as remote_state, Runtime.attach(persistence=remote_state, features=features) as remote:
+    ) as remote_state, Runtime.open(persistence=remote_state, features=features) as remote:
         execution = await owner.agents.get().start("wait", idempotency_key="request")
         await asyncio.wait_for(entered.wait(), 5)
         await asyncio.wait_for(coordination.renewing.wait(), 5)
@@ -141,9 +141,9 @@ async def test_expired_scope_stops_worker_without_business_cancel(
     database = tmp_path / "state.db"
     async with Persistence.open("expired-turn-signal", storage=PersistenceStorage.sqlite(
         database, coordination=coordination,
-    )) as owner_state, Runtime.attach(persistence=owner_state, features=features) as owner, Persistence.open(
+    )) as owner_state, Runtime.open(persistence=owner_state, features=features) as owner, Persistence.open(
         "expired-turn-signal", storage=PersistenceStorage.sqlite(database, coordination=coordination),
-    ) as remote_state, Runtime.attach(persistence=remote_state, features=features) as remote:
+    ) as remote_state, Runtime.open(persistence=remote_state, features=features) as remote:
         execution = await owner.agents.get().start("wait", idempotency_key="request")
         try:
             await asyncio.wait_for(entered.wait(), 5)
@@ -189,9 +189,9 @@ async def test_remote_force_signal_preserves_unsettled_tool_effect(tmp_path: Pat
     database = tmp_path / "state.db"
     async with Persistence.open("tool-cancel-signal", storage=PersistenceStorage.sqlite(
         database, coordination=coordination,
-    )) as owner_state, Runtime.attach(persistence=owner_state, features=features) as owner, Persistence.open(
+    )) as owner_state, Runtime.open(persistence=owner_state, features=features) as owner, Persistence.open(
         "tool-cancel-signal", storage=PersistenceStorage.sqlite(database, coordination=coordination),
-    ) as remote_state, Runtime.attach(persistence=remote_state, features=features) as remote:
+    ) as remote_state, Runtime.open(persistence=remote_state, features=features) as remote:
         execution = await owner.agents.get().start("change", idempotency_key="request")
         try:
             await asyncio.wait_for(entered.wait(), 5)

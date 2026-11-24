@@ -469,7 +469,7 @@ async def test_native_runtime_consumes_fixture_with_captured_effect_policy(
         storage = PersistenceStorage.in_memory()
         # This fixture remains caller-owned and is inspected after Runtime closes.
         capture = model_features(_Models(_UsageFunctionModel(model)), group).borrow()
-        async with Persistence.open('fixture-native-runtime', storage=storage) as persistence_451, Runtime.attach(persistence=persistence_451, features=capture) as runtime:
+        async with Persistence.open('fixture-native-runtime', storage=storage) as persistence_451, Runtime.open(persistence=persistence_451, features=capture) as runtime:
             execution = await runtime.agents.get("default").start("Look up the fixture")
             result = (await execution.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED

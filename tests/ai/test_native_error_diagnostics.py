@@ -39,7 +39,7 @@ async def test_native_and_execution_errors_keep_original_diagnostics_without_tra
     features.agent("default", model="default", allow_tools=())
     try:
         async with Persistence.open("native-errors", storage=PersistenceStorage.sql(engine)) as state:
-            async with Runtime.attach(
+            async with Runtime.open(
                 persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
             ) as runtime:
                 session = await runtime.agents.get().create_session("session")

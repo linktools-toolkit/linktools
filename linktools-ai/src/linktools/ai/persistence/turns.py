@@ -199,7 +199,7 @@ class StateTurnCoordination:
     restored as a complete offline resource, never rolled back beneath a live
     producer or cloned into concurrent writers. This object supplies turn
     authority and its ownership lifetime independently of display caches.
-    Bind it after Persistence is ready and before attaching any Runtime.
+    Bind it after Persistence is ready and before opening any Runtime.
     """
 
     def __init__(

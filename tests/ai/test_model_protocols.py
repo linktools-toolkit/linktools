@@ -355,7 +355,7 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     features.capability(TraceCapability(), scope="runtime")
     features.capability(ExecutionCapability(), scope="runtime")
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    async with Persistence.open('default', storage=storage) as persistence_341, Runtime.attach(persistence=persistence_341, features=features) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_341, Runtime.open(persistence=persistence_341, features=features) as runtime:
         session = await runtime.agents.get("old").create_session("session")
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
@@ -376,7 +376,7 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     replacement.agent("replacement", model="default", allow_tools=())
     replacement.capability(TraceCapability(), scope="runtime")
     replacement.capability(ExecutionCapability(), scope="runtime")
-    async with Persistence.open('default', storage=storage) as persistence_362, Runtime.attach(persistence=persistence_362, features=replacement) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_362, Runtime.open(persistence=persistence_362, features=replacement) as runtime:
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
             assert meta.status_code == 200, meta.text

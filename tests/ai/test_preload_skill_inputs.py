@@ -110,7 +110,7 @@ async def test_preload_root_is_preloaded_while_resources_and_other_skills_stay_l
     features = _features(store, model, allowed=("optional", "inline"))
     path = tmp_path / "runtime.db"
     async with Persistence.open("preload-live", storage=PersistenceStorage.sqlite(path)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features.borrow()) as runtime:
+        async with Runtime.open(persistence=persistence, features=features.borrow()) as runtime:
             execution = await runtime.agents.get().start("Use the preload guide", idempotency_key="run")
             result = (await execution.wait(timeout_seconds=20)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
@@ -174,7 +174,7 @@ async def test_preload_input_admission_fails_before_model_without_fixed_access(t
 
     features = _features(store, model, preload=("inline",) if failure == "unverifiable" else ("guide",), allowed=(), filtered=failure == "filtered", retained=failure != "missing")
     async with Persistence.open("preload-denied", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get().start("go", idempotency_key="run")
             result = (await execution.wait(timeout_seconds=20)).result
             expected = ErrorCode.STORAGE_INTEGRITY_ERROR if failure == "integrity" else ErrorCode.CAPABILITY_REQUIRED_MISSING
@@ -196,7 +196,7 @@ async def test_imported_empty_preload_input_cannot_rebind_current_rules(tmp_path
 
     features = _features(store, model)
     async with Persistence.open("preload-import", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             with pytest.raises(AIError) as error:
                 await runtime.agents.get().start("go", idempotency_key="run",
                     input_context=ExecutionInputContext.from_messages(()))
@@ -254,7 +254,7 @@ async def test_preload_rules_recover_from_sql_history_after_source_changes(tmp_p
             await store.put(key, _declaration("guide", "ORIGINAL_RULE"))
         features = _features(store, model, allowed=())
         async with Persistence.open("preload-recovery", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-            async with Runtime.attach(persistence=persistence, features=features.borrow(), auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features.borrow(), auto_recover=False) as runtime:
                 yield runtime, store
         await store.close()
 
@@ -326,7 +326,7 @@ async def test_execution_authorization_precedes_preload_retained_read_and_model(
         raise AssertionError("denied execution must not reach model")
 
     async with Persistence.open("preload-auth", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(store, model), authorization=Authorization()) as runtime:
+        async with Runtime.open(persistence=persistence, features=_features(store, model), authorization=Authorization()) as runtime:
             # Discovery may parse declarations during configuration. Preload
             # retained-version reads are a separate, authorized admission step.
             assert store.reads == 0
@@ -380,7 +380,7 @@ async def test_imported_preload_input_cannot_select_unadmitted_history(tmp_path:
         raise AssertionError("unadmitted imported version must not reach the model")
 
     async with Persistence.open("preload-import-fake", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(store, model)) as runtime:
+        async with Runtime.open(persistence=persistence, features=_features(store, model)) as runtime:
             with pytest.raises(AIError) as error:
                 await runtime.agents.get().start("go", idempotency_key="run",
                     input_context=ExecutionInputContext.from_messages((), preload_skills=(fake,)))
@@ -432,7 +432,7 @@ async def test_preload_scope_includes_its_live_resources_but_no_unlisted_skill(t
         return result
 
     async with Persistence.open("preload-scope", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(store, model, allowed=())) as runtime:
+        async with Runtime.open(persistence=persistence, features=_features(store, model, allowed=())) as runtime:
             agent = runtime.agents.get()
             assert [item.id for item in agent.compiled.skill_definitions] == ["guide"]
             execution = await agent.start("Read the guide", idempotency_key="scope")

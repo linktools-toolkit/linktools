@@ -1683,8 +1683,7 @@ async with Runtime.open("service-runtime", storage=storage,
 `PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Advanced callers can open Persistence independently, use `Runtime.open(persistence=...)`, and pass the same Persistence to TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Retained Rule, Skill and MCP resource bytes remain Asset-owned and are not copied into Persistence snapshots. Reopened executions resolve current declarations through the supplied AssetStore; retained tool results and effect receipts remain original. Keep the corresponding AssetStore available for resource reads.
 
 For native checkpoints in the same SQL resource as Runtime control state,
-register the project capability. Runtime creates and owns the adapter for both
-`open()` and `attach()`; explicit `store=...` values remain caller-owned.
+register the project capability. Runtime creates and owns the adapter whether it owns or borrows Persistence; explicit `store=...` values remain caller-owned.
 
 ```python
 from linktools.ai.capability import StepPersistenceCapability

@@ -85,7 +85,7 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
 
         event.listen(engine, "before_cursor_execute", capture)
         try:
-            async with Runtime.attach(persistence=state, features=_features(model), metrics=None) as runtime:
+            async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
                 session = runtime.agents.get().session("session")
                 first = await session.start("old question", idempotency_key="old")
                 assert (await first.wait(timeout_seconds=5)).result.output == {"text": "answer"}
@@ -114,7 +114,7 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
             event.remove(engine, "before_cursor_execute", capture)
     # Same-version reopen keeps both authoritative turns and the admitted policy.
     async with Persistence.open("session-start-preparation", storage=storage) as state:
-        async with Runtime.attach(persistence=state, features=_features(model), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
             record = await state.execution.executions.get(second.execution_id, tenant_id=runtime.default_principal.tenant_id)
             assert record.session_context == selection
             timeline = await runtime.agents.get().session("session").timeline()
@@ -126,7 +126,7 @@ async def test_current_turn_requires_a_session_and_rejects_unknown_selection(tmp
         raise AssertionError("invalid context selection must fail before the model")
 
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(model), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
             for kwargs in ({"session_context": "current_turn"}, {"session_id": "session", "session_context": "unknown"}):
                 with pytest.raises(AIError) as error:
                     await runtime.agents.get().start("question", **kwargs)

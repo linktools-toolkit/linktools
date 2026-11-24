@@ -41,7 +41,7 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
         calls.append("cancel")
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
-    async with Persistence.open('capture', storage=storage) as persistence_38, Runtime.attach(persistence=persistence_38, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_38, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture', storage=storage) as persistence_38, Runtime.open(persistence=persistence_38, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_38, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         capture_state = runtime._state.task.tasks.state_store
         original_publish = capture_module.publish_capture_record
         entered = asyncio.Event()
@@ -83,7 +83,7 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
         same = await engine.start(graph, principal=principal, idempotency_key="capture")
         assert (await same.state()).node_states[0].execution_id == state.execution_id
         assert calls == []
-    async with Persistence.open('capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_80, Runtime.attach(persistence=persistence_80, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_80, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_80, Runtime.open(persistence=persistence_80, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_80, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         with pytest.raises(AIError) as missing:
             await runtime_engine.inputs.capture_input(state.execution_id, CaptureInputRequest(principal, "failed-input"))
         assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
@@ -106,7 +106,7 @@ async def test_invocation_capture_failed_cleanup_retains_recoverable_execution(
         calls.append("cancel")
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
-    async with Persistence.open('capture', storage=storage) as persistence_103, Runtime.attach(persistence=persistence_103, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_103, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture', storage=storage) as persistence_103, Runtime.open(persistence=persistence_103, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_103, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         capture_state = runtime._state.task.tasks.state_store
         original_publish = capture_module.publish_capture_record
         original_cancel = runtime_engine._execution_service.cancel_task
@@ -183,7 +183,7 @@ async def test_invocation_capture_repeated_cancellation_waits_for_cleanup(
         calls.append("cancel")
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
-    async with Persistence.open('capture', storage=storage) as persistence_180, Runtime.attach(persistence=persistence_180, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_180, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture', storage=storage) as persistence_180, Runtime.open(persistence=persistence_180, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_180, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         capture_state = runtime._state.task.tasks.state_store
         original_publish = capture_module.publish_capture_record
         original_cancel = runtime_engine._execution_service.cancel_task
@@ -259,7 +259,7 @@ async def test_callable_capture_waits_for_original_input_and_dependencies(
     producer = Task("capture.producer", produce, effect_policy="none")
     consumer = Task("capture.consumer", consume, normalize=normalize, effect_policy="none")
     candidate = Task("capture.candidate", consume, normalize=reproject, effect_policy="none")
-    async with Persistence.open('callable-ready', storage=storage) as persistence_256, Runtime.attach(persistence=persistence_256, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_256, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('callable-ready', storage=storage) as persistence_256, Runtime.open(persistence=persistence_256, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_256, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         capture_state = runtime._state.task.tasks.state_store
         original_publish = capture_module.publish_capture_record
         entered, release = asyncio.Event(), asyncio.Event()
@@ -318,7 +318,7 @@ async def test_standalone_callable_input_capture_does_not_require_invocation(tmp
     from linktools.ai.task import TaskBindingContract
 
     principal = service_principal("default", "owner")
-    async with Persistence.open('standalone-callable', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_314, Runtime.attach(persistence=persistence_314, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_314, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('standalone-callable', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_314, Runtime.open(persistence=persistence_314, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_314, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         binding = TaskBindingContract("standalone.task", 1, "none", {"kind": "json"}, None, 1, 0)
         execution = await runtime_engine._execution_service.start_task(binding, principal=principal,
             input={"standalone": True}, idempotency_key="source", correlation={})

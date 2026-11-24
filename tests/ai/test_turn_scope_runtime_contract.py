@@ -166,7 +166,7 @@ async def test_authority_only_context_lives_in_one_task_beyond_handle_and_waiter
     ), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=authority)
-    async with Persistence.open("scope-contract", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("scope-contract", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -218,7 +218,7 @@ async def test_pending_publish_cannot_install_worker_after_captured_owner_is_los
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=authority, coordination=authority)
-    async with Persistence.open("publish-owner-loss", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("publish-owner-loss", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         backend = runtime._execution_service.runtime_backend()

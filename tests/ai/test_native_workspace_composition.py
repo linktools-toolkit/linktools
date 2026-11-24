@@ -128,7 +128,7 @@ async def test_runtime_native_shell_uses_admitted_tools_and_explicit_environment
     features.agent("default", allow_tools=("terminal:*",))
     features.model("default", _FeatureModels(_FeatureFunctionModel(_command_model)))
     async with Persistence.open("native-shell", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get().run("execute command", timeout_seconds=10)
             assert execution.result.status.value == "SUCCEEDED", execution.result
             assert "done" in str(execution.result.output)
@@ -226,7 +226,7 @@ async def test_shell_only_runtime_does_not_require_resource_projection_extension
     features.agent("default", allow_tools=("run_command",))
     features.model("default", _FeatureModels(_FeatureFunctionModel(_command_model)))
     async with Persistence.open("commands-only", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get().run("execute command", timeout_seconds=10)
             assert execution.result.status.value == "SUCCEEDED", execution.result
     executing = [backend for backend in backends if backend.calls]
@@ -251,7 +251,7 @@ async def test_runtime_rejects_owned_provider_without_close_before_activation(tm
     features.capability(FileSystem(Workspace.load(tmp_path)))
     async with Persistence.open("no-cleanup", storage=PersistenceStorage.in_memory()) as persistence:
         with pytest.raises(AIError) as rejected:
-            async with Runtime.attach(persistence=persistence, features=features):
+            async with Runtime.open(persistence=persistence, features=features):
                 raise AssertionError("provider without cleanup was accepted")
         assert rejected.value.code is ErrorCode.SANDBOX_UNAVAILABLE
         assert rejected.value.safe_details["reason"] == "workspace_cleanup_required"
@@ -326,7 +326,7 @@ async def test_runtime_file_selectors_expose_only_unified_model_schemas(
     features.agent("default", allow_tools=(selector,))
     features.model("default", _FeatureModels(_FeatureFunctionModel(model)))
     async with Persistence.open("unified-files", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get().run("inspect tool availability", timeout_seconds=10)
             assert execution.result.status.value == "SUCCEEDED", execution.result
     assert len(observed) == 1

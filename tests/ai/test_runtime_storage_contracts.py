@@ -703,7 +703,7 @@ async def test_shared_storage_configuration_binds_independent_runtime_lifetimes(
     async with AsyncExitStack() as stack:
         async def open_runtime():
             persistence = await stack.enter_async_context(Persistence.open("shared-configuration", storage=storage))
-            runtime = await stack.enter_async_context(Runtime.attach(
+            runtime = await stack.enter_async_context(Runtime.open(
                 persistence=persistence, features=model_features(RuntimeUsageModels()),
             ))
             return runtime
@@ -724,7 +724,7 @@ async def test_shared_storage_configuration_binds_independent_runtime_lifetimes(
     assert storage.plan is plan
     assert storage.object_store is objects
 
-    async with Persistence.open('shared-configuration', storage=storage) as persistence_928, Runtime.attach(persistence=persistence_928, features=model_features(RuntimeUsageModels())) as reopened:
+    async with Persistence.open('shared-configuration', storage=storage) as persistence_928, Runtime.open(persistence=persistence_928, features=model_features(RuntimeUsageModels())) as reopened:
         assert reopened._state is not first._state
         assert reopened._state is not second._state
         assert reopened._state.ready

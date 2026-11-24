@@ -48,7 +48,7 @@ async def test_portable_export_identifies_native_dependency_without_runtime_feat
     storage = PersistenceStorage.sql(engine)
     try:
         async with Persistence.open("backup", storage=storage) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
                 session = await runtime.agents.get().create_session("session")
                 execution = await session.start("question", idempotency_key="input")
@@ -83,7 +83,7 @@ async def test_callable_task_without_native_store_keeps_portable_backup(tmp_path
     storage = PersistenceStorage.sqlite(tmp_path / 'task-only.db')
     task = Task('echo', echo, effect_policy='none')
     async with Persistence.open('task-only-backup', storage=storage) as state:
-        async with Runtime.attach(persistence=state) as runtime:
+        async with Runtime.open(persistence=state) as runtime:
             engine = await runtime.tasks.bind(task)
             run = await engine.start(TaskGraph('graph', (TaskNode('echo', task=task, input={}),)), idempotency_key='run')
             result = (await run.wait(timeout_seconds=5)).result

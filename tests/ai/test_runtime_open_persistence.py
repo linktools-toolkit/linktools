@@ -20,10 +20,9 @@ async def test_open_owned_storage_retains_existing_namespace_and_tenant_contract
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entry", ["open", "attach"])
-async def test_open_and_compatibility_attach_borrow_without_closing(entry: str) -> None:
+async def test_open_borrows_persistence_without_closing() -> None:
     async with Persistence.open("borrowed-runtime", storage=PersistenceStorage.in_memory(), tenant_id="owner") as state:
-        async with getattr(Runtime, entry)(persistence=state) as runtime:
+        async with Runtime.open(persistence=state) as runtime:
             assert runtime._state is state
             assert runtime.namespace == "borrowed-runtime" and runtime.tenant_id == "owner"
         assert state.ready

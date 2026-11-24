@@ -108,7 +108,7 @@ async def test_snapshot_roundtrips_turn_references_and_execution_payload_owners(
     attachment = b"input attachment" * 8192
     _canonical_output(monkeypatch, output)
     storage = _storage(tmp_path, backend)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_113, Runtime.attach(persistence=persistence_113, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_113, Runtime.open(persistence=persistence_113, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         result = (await session.run(("original input", BinaryContent(attachment, media_type="text/plain")), timeout_seconds=5)).result

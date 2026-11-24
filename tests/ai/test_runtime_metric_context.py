@@ -87,7 +87,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
     )
 
     features = workspace_features("workspace", workspace=workspace)
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory(), tenant_id='tenant') as persistence_93, Runtime.attach(persistence=persistence_93, metrics=metrics, context=context, features=model_features(models, features)) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory(), tenant_id='tenant') as persistence_93, Runtime.open(persistence=persistence_93, metrics=metrics, context=context, features=model_features(models, features)) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]
         assert isinstance(control, MetricsService)
         assert await control.try_record(observation) is True
@@ -179,8 +179,8 @@ async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> N
 
     metrics = Metrics.in_memory()
     features = RuntimeFeatures("shared-metrics").borrow()
-    async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_187, Runtime.attach(persistence=persistence_187, metrics=metrics, features=features) as first:
-        async with Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.attach(persistence=persistence_190, metrics=metrics, features=features) as second:
+    async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_187, Runtime.open(persistence=persistence_187, metrics=metrics, features=features) as first:
+        async with Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.open(persistence=persistence_190, metrics=metrics, features=features) as second:
             observation = Observation(
                 version=1, observation_id="second-pending", kind="test.metric",
                 occurred_at=datetime.now(timezone.utc), source_namespace="second",
@@ -266,7 +266,7 @@ async def test_metrics_resources_do_not_enter_captured_agent_binding_identity() 
     capture = await features.resolve()
     bindings = []
     for metrics in (None, Metrics.in_memory(), Metrics.in_memory()):
-        async with Persistence.open('metric-resource-identity', storage=PersistenceStorage.in_memory()) as persistence_290, Runtime.attach(persistence=persistence_290, features=features.borrow(), metrics=metrics) as runtime:
+        async with Persistence.open('metric-resource-identity', storage=PersistenceStorage.in_memory()) as persistence_290, Runtime.open(persistence=persistence_290, features=features.borrow(), metrics=metrics) as runtime:
             compiled = runtime.agents.get().derive(instructions=("fixed binding",)).compiled
             assert compiled is not None
             compiler = AgentCompiler(

@@ -69,7 +69,7 @@ async def test_preload_removed_by_request_hooks_fails_without_delivery_receipt(t
     features.capability(hook, id="change-preload", revision=1, scope="agent")
     try:
         async with Persistence.open("preload-delivery", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-            async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            async with Runtime.open(persistence=persistence, features=features) as runtime:
                 execution = await runtime.agents.get().start("go")
                 result = (await execution.wait(timeout_seconds=15)).result
                 assert result.status is ExecutionStatus.FAILED, result

@@ -42,7 +42,7 @@ async def test_current_turn_keeps_tool_results_across_runtime_recovery(tmp_path)
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open("session-context-recovery", storage=storage) as state:
-        async with Runtime.attach(persistence=state, features=features, metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=features, metrics=None) as runtime:
             session = runtime.agents.get("reader").session("session")
             old = await session.start("old question")
             assert (await old.wait(timeout_seconds=5)).result.output == {"text": "old answer"}
@@ -61,7 +61,7 @@ async def test_current_turn_keeps_tool_results_across_runtime_recovery(tmp_path)
                 decided_at=datetime.now(timezone.utc),
             )
     async with Persistence.open("session-context-recovery", storage=storage) as state:
-        async with Runtime.attach(persistence=state, features=features, metrics=None, auto_recover=True) as runtime:
+        async with Runtime.open(persistence=state, features=features, metrics=None, auto_recover=True) as runtime:
             finished = await runtime.executions.wait(execution.execution_id, principal=runtime.default_principal, timeout_seconds=10)
             assert finished.result.status is ExecutionStatus.SUCCEEDED
             assert finished.result.output == {"text": "done"}

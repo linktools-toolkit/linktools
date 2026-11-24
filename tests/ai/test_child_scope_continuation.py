@@ -127,7 +127,7 @@ def _storage(tmp_path: Path) -> PersistenceStorage:
 async def test_live_parent_authorizes_paused_child_continuation(tmp_path: Path, kind: str) -> None:
     scenario = _Scenario(kind)
     async with Persistence.open("child-continuation", storage=_storage(tmp_path)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=scenario.features) as runtime:
+        async with Runtime.open(persistence=persistence, features=scenario.features) as runtime:
             parent = await runtime.agents.get().start("delegate", idempotency_key="parent")
             child_id = await scenario.paused_child(runtime, parent.execution_id)
             backend = runtime._execution_service.runtime_backend()
@@ -144,12 +144,12 @@ async def test_live_parent_authorizes_paused_child_continuation(tmp_path: Path, 
 async def test_cold_runtime_does_not_infer_child_continuation_authority(tmp_path: Path, kind: str) -> None:
     scenario = _Scenario(kind)
     async with Persistence.open("child-continuation", storage=_storage(tmp_path)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=scenario.features) as runtime:
+        async with Runtime.open(persistence=persistence, features=scenario.features) as runtime:
             parent = await runtime.agents.get().start("delegate", idempotency_key="parent")
             child_id = await scenario.paused_child(runtime, parent.execution_id)
             await asyncio.wait_for(runtime.handoff(), 10)
         before = await persistence.execution.executions.get(child_id, tenant_id=runtime.tenant_id)
-        async with Runtime.attach(persistence=persistence, features=scenario.features, auto_recover=False) as cold:
+        async with Runtime.open(persistence=persistence, features=scenario.features, auto_recover=False) as cold:
             with pytest.raises(AIError) as unavailable:
                 await scenario.resolve(cold, child_id)
             assert unavailable.value.code is ErrorCode.STORAGE_CONFLICT
@@ -164,11 +164,11 @@ async def test_cold_runtime_does_not_infer_child_continuation_authority(tmp_path
 async def test_explicit_parent_recovery_reattaches_original_paused_child(tmp_path: Path, kind: str) -> None:
     scenario = _Scenario(kind)
     async with Persistence.open("child-continuation", storage=_storage(tmp_path)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=scenario.features) as runtime:
+        async with Runtime.open(persistence=persistence, features=scenario.features) as runtime:
             parent = await runtime.agents.get().start("delegate", idempotency_key="parent")
             child_id = await scenario.paused_child(runtime, parent.execution_id)
             await asyncio.wait_for(runtime.handoff(), 10)
-        async with Runtime.attach(persistence=persistence, features=scenario.features, auto_recover=False) as recovered:
+        async with Runtime.open(persistence=persistence, features=scenario.features, auto_recover=False) as recovered:
             with pytest.raises(AIError) as unavailable:
                 await scenario.resolve(recovered, child_id)
             assert unavailable.value.safe_details.get("phase") == "subagent_parent_unavailable"

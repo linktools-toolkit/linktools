@@ -107,7 +107,7 @@ async def _terminal_race(
                 return result
 
             monkeypatch.setattr(state.execution.executions, "_reserve_start", reserve)
-        async with Runtime.attach(persistence=state, features=features) as delayed_runtime:
+        async with Runtime.open(persistence=state, features=features) as delayed_runtime:
             if session:
                 await delayed_runtime.agents.get().create_session("session")
             original_admit = delayed_runtime._execution_service._admit_execution_start
@@ -123,7 +123,7 @@ async def _terminal_race(
             ), name="late-replay")
             try:
                 await asyncio.wait_for(absent.wait(), 5)
-                async with Runtime.attach(persistence=state, features=features) as winner_runtime:
+                async with Runtime.open(persistence=state, features=features) as winner_runtime:
                     assert winner_runtime.default_principal == delayed_runtime.default_principal
                     winner = await start(winner_runtime, prompt="same request", hold_id="original-hold")
                     if outcome == "cancelled":
@@ -271,7 +271,7 @@ async def test_admission_terminal_replay_does_not_restart_live_winner(
         ),
     )
     async with Persistence.open("live-replay", storage=storage) as state:
-        async with Runtime.attach(persistence=state, features=features) as delayed_runtime, Runtime.attach(
+        async with Runtime.open(persistence=state, features=features) as delayed_runtime, Runtime.open(
             persistence=state, features=features,
         ) as winner_runtime:
             original_admit = delayed_runtime._execution_service._admit_execution_start

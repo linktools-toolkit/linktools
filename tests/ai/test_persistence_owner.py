@@ -73,12 +73,12 @@ async def test_persistence_owner_runtime_borrows_scope_without_closing_it() -> N
     from linktools.ai.runtime import Runtime
 
     async with Persistence.open("audit", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as persistence:
-        async with Runtime.attach(persistence=persistence, context=ExecutionContext("application"), auto_recover=False) as runtime:
+        async with Runtime.open(persistence=persistence, context=ExecutionContext("application"), auto_recover=False) as runtime:
             assert runtime.namespace == "audit"
             assert runtime.tenant_id == "tenant"
             assert runtime.context.app == "application"
         assert persistence.ready
-        async with Runtime.attach(persistence=persistence, auto_recover=False):
+        async with Runtime.open(persistence=persistence, auto_recover=False):
             pass
         assert persistence.ready
 
@@ -89,11 +89,11 @@ async def test_persistence_owner_runtime_failure_does_not_close_borrowed_storage
 
     async with Persistence.open("audit", storage=PersistenceStorage.in_memory()) as persistence:
         with pytest.raises(ValueError, match="body failed"):
-            async with Runtime.attach(persistence=persistence, auto_recover=False):
+            async with Runtime.open(persistence=persistence, auto_recover=False):
                 raise ValueError("body failed")
         assert persistence.ready
         with pytest.raises(TypeError):
-            async with Runtime.attach(persistence=persistence, features=object(), auto_recover=False):
+            async with Runtime.open(persistence=persistence, features=object(), auto_recover=False):
                 pytest.fail("invalid features admitted")
         assert persistence.ready
 
@@ -106,7 +106,7 @@ async def test_persistence_owner_runtime_cancellation_leaves_borrowed_storage_op
         entered = asyncio.Event()
 
         async def run() -> None:
-            async with Runtime.attach(persistence=persistence, auto_recover=False):
+            async with Runtime.open(persistence=persistence, auto_recover=False):
                 entered.set()
                 await asyncio.Event().wait()
 
@@ -138,7 +138,7 @@ async def test_persistence_owner_runtime_composition_failure_preserves_borrowed_
     async with Persistence.open("audit", storage=PersistenceStorage.in_memory()) as persistence:
         monkeypatch.setattr(_factory, "DefaultExecutionService", fail_execution)
         with pytest.raises(ValueError, match="execution construction failed"):
-            async with Runtime.attach(features=RuntimeFeatures(), persistence=persistence, auto_recover=False):
+            async with Runtime.open(features=RuntimeFeatures(), persistence=persistence, auto_recover=False):
                 pytest.fail("failed execution service admitted")
         assert persistence.ready
         assert persistence.execution.executions.tenant_id == "default"
@@ -197,10 +197,10 @@ async def test_persistence_owner_isolates_runtime_callbacks_revisions_and_close(
         first_features.capability(first, revision=1)
         second_features.capability(second, revision=2)
         async with AsyncExitStack() as stack:
-            second_runtime = await stack.enter_async_context(Runtime.attach(
+            second_runtime = await stack.enter_async_context(Runtime.open(
                 persistence=persistence, features=second_features, auto_recover=False,
             ))
-            async with Runtime.attach(persistence=persistence, features=first_features, auto_recover=False) as first_runtime:
+            async with Runtime.open(persistence=persistence, features=first_features, auto_recover=False) as first_runtime:
                 assert first_runtime._run_store is not second_runtime._run_store
                 assert first_runtime._run_store is not persistence.run_store
                 assert first_runtime._run_store.capability_revisions == {"audit": 1}
@@ -251,7 +251,7 @@ async def test_producer_scope_settles_cancelled_cleanup_before_storage_closes(
             holders.append(persistence)
             async with AsyncExitStack() as stack:
                 if producer == "agent":
-                    owner = await stack.enter_async_context(Runtime.attach(
+                    owner = await stack.enter_async_context(Runtime.open(
                         persistence=persistence, features=RuntimeFeatures(), auto_recover=False,
                     ))
                     target, attribute = owner._agent_lifecycle, "close"

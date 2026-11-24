@@ -314,7 +314,7 @@ async def test_agent_result_wait_recovers_without_repeating_model(monkeypatch: p
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Persistence.open("agent-confirmation", storage=PersistenceStorage.in_memory()) as state:
         captured = []
-        async with Runtime.attach(persistence=state, features=features) as runtime:
+        async with Runtime.open(persistence=state, features=features) as runtime:
             port = runtime._execution_service._port
             read = port.result_record
 

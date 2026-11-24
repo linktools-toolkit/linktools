@@ -84,7 +84,7 @@ async def test_runtime_discovers_and_reloads_skills_in_one_native_run(tmp_path, 
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.agent("default", allow_tools=(), allow_skills=selectors, metadata={"role": "analyst"})
     async with Persistence.open("live", storage=PersistenceStorage.sqlite(tmp_path / "live.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             assert runtime.agents.get().derive(model="default").compiled.skill_definitions == ()
             session = await runtime.agents.get().create_session("session")
             execution = await session.start("Use the new skill", idempotency_key="input")
@@ -127,7 +127,7 @@ async def test_derived_skill_permissions_compare_selectors_without_catalog_membe
     features.model("default", _Models(_UsageFunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("done")]))))
     features.agent("default", allow_skills=("future",))
     async with Persistence.open("derive", storage=PersistenceStorage.sqlite(tmp_path / "derive.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             root = runtime.agents.get()
             assert root.derive(allow_skills=("future",)).compiled.skill_definitions == ()
             assert root.derive(allow_skills=()).compiled.skill_definitions == ()
@@ -171,7 +171,7 @@ async def test_next_run_materializes_current_local_skill_resources(tmp_path):
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.agent("default", allow_tools=(), allow_skills=("guide",))
     async with Persistence.open("current-resources", storage=PersistenceStorage.sqlite(tmp_path / "resources.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             for expected in ("First", "Second"):
                 resource.write_text(expected)
                 session = await runtime.agents.get().create_session(expected)
@@ -206,7 +206,7 @@ async def test_recovery_keeps_committed_skill_observation_and_reads_current_with
         features.model("default", _Models(_UsageFunctionModel(model)))
         features.agent("default", allow_tools=(), allow_skills=("*",), metadata={"role": role})
         async with Persistence.open("skill-recovery", storage=PersistenceStorage.sqlite(tmp_path / "recovery.db")) as persistence:
-            async with Runtime.attach(persistence=persistence, features=features, auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features, auto_recover=False) as runtime:
                 yield runtime, persistence, checkpoints.store
 
     async def interrupted(messages, info):
@@ -340,7 +340,7 @@ async def test_custom_skill_loader_keeps_ownership_and_resolves_current_slot(tmp
     assets.loader("skill", ReplacedLoader())
     try:
         async with Persistence.open("custom-loader", storage=PersistenceStorage.sqlite(tmp_path / "custom.db")) as persistence:
-            async with Runtime.attach(persistence=persistence, features=features.borrow()) as runtime:
+            async with Runtime.open(persistence=persistence, features=features.borrow()) as runtime:
                 assert {skill.id for skill in runtime.agents.get().derive(model="default").compiled.skill_definitions} == {"custom", "inline", "other"}
                 visible_static = False
                 execution = await runtime.agents.get().start("Use custom", idempotency_key="start")

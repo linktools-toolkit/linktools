@@ -238,7 +238,7 @@ Task、真正 Checkpoint、tool effect、授权/幂等/恢复控制仍在必要�
 
 ### 8.2 自动指标与宿主写入节奏
 
-热点读取、Trace 缓冲和自动指标各有独立 owner。`Metrics` 是同步 source/query dataset，同时结构化满足 `MetricRecorderProvider`；`Runtime.open/attach` 与独立 `TaskEngine` 继续通过已有 `metrics=` 接收 provider。只有 `recorder() -> MetricRecorder` 一个无参组合点，不要求 producer 创建 SQL dataset，不添加具体中间件依赖。
+热点读取、Trace 缓冲和自动指标各有独立 owner。`Metrics` 是同步 source/query dataset，同时结构化满足 `MetricRecorderProvider`；`Runtime.open` 与独立 `TaskEngine` 继续通过已有 `metrics=` 接收 provider。只有 `recorder() -> MetricRecorder` 一个无参组合点，不要求 producer 创建 SQL dataset，不添加具体中间件依赖。
 
 每次 recorder 调用返回独立 scope，创建时不启动 I/O 或任务；producer 关闭自身 scope，不关闭共享 provider/client。Runtime 的 Agent 和 TaskEngine 各自拥有 scope，Evaluation 借 TaskEngine。自动观测保留原 observation ID、tenant/source namespace 与 enrichment；宿主固定目标 dataset，不能把业务来源字段当成投递目标。
 

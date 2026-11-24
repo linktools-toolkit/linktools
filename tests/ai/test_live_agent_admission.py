@@ -437,7 +437,7 @@ async def test_restored_handle_resolves_hooks_and_routes_added_after_runtime_sta
     features = model_features(model, RuntimeFeatures("live-restore"))
     features.agent("root", allow_subagents=())
     async with Persistence.open("live-restore", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             features.capability(_Extra(), revision=2, scope="agent")
             features.model("added", model)
             features.agent("root", revision=2, model="added", allow_subagents=())
@@ -484,7 +484,7 @@ async def test_live_derived_handle_validates_current_scope_and_keeps_ordered_ove
     features = model_features(_Models(_UsageFunctionModel(respond)), RuntimeFeatures("live-derive"))
     features.agent("root", allow_tools=("before",), allow_skills=("before",), allow_subagents=())
     async with Persistence.open("live-derive", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             features.agent("root", revision=2, allow_tools=("before", "after"),
                            allow_skills=("before", "after"), allow_subagents=())
             derived = runtime.agents.get("root").derive(allow_tools=("after",), allow_skills=("after",))
@@ -538,7 +538,7 @@ async def test_restored_derivation_keeps_historical_contract_across_entry_points
                    allow_subagents=("child",), metadata={"origin": "historical"})
     features.agent("child", revision=1, allow_subagents=())
     async with Persistence.open("captured-derive", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             observed = await runtime.agents.get("root").resolve()
             output = bind_output(_Answer)
             historical = replace(observed.execution_port.binding_contract,

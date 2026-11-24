@@ -129,7 +129,7 @@ async def test_runtime_policy_survives_checkpoint_and_cold_trace_read(
     features.capability(WrapperCapability(TraceCapability(record_http_bodies=enabled), id='wrapped-trace'))
     features.capability(native_checkpoint())
     root = tmp_path / 'state'
-    async with Persistence.open('body-policy', storage=PersistenceStorage.from_root(root, exclusive_writer=True)) as persistence_126, Runtime.attach(persistence=persistence_126, features=model_features(models, features)) as runtime:
+    async with Persistence.open('body-policy', storage=PersistenceStorage.from_root(root, exclusive_writer=True)) as persistence_126, Runtime.open(persistence=persistence_126, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get().start('question')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         execution_id = execution.execution_id

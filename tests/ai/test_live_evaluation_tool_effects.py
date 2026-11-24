@@ -73,7 +73,7 @@ async def test_evaluation_enforces_effect_limit_against_next_step_declarations(
     features.tool(read, effect_policy="none")
     async with (
         Persistence.open("live-effects", storage=PersistenceStorage.in_memory(), tenant_id=TENANT) as state,
-        Runtime.attach(persistence=state, context=CONTEXT, features=features) as runtime,
+        Runtime.open(persistence=state, context=CONTEXT, features=features) as runtime,
     ):
         target = Task.from_agent("effects.target", runtime.agents.get())
         scorer = Task("effects.score", exact, effect_policy="none")
@@ -123,7 +123,7 @@ async def test_expanded_agent_inherits_durable_graph_tool_limit(tmp_path: Path, 
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     async with (
         Persistence.open("expanded-effects", storage=storage, tenant_id=TENANT) as state,
-        Runtime.attach(persistence=state, context=CONTEXT, features=features) as runtime,
+        Runtime.open(persistence=state, context=CONTEXT, features=features) as runtime,
     ):
         child = Task.from_agent("effects.child", runtime.agents.get())
         initial = Task("effects.seed", seed, effect_policy="none")
@@ -147,7 +147,7 @@ async def test_expanded_agent_inherits_durable_graph_tool_limit(tmp_path: Path, 
     if reopen:
         async with (
             Persistence.open("expanded-effects", storage=storage, tenant_id=TENANT) as state,
-            Runtime.attach(persistence=state, context=CONTEXT, features=features) as runtime,
+            Runtime.open(persistence=state, context=CONTEXT, features=features) as runtime,
         ):
             child = Task.from_agent("effects.child", runtime.agents.get())
             expander = TaskExpander("effects.expand", lambda context: (
@@ -191,7 +191,7 @@ async def test_subagent_inherits_parent_tool_limit_for_live_child_declarations(t
     features.model("default", _Models(_UsageFunctionModel(respond)))
     async with (
         Persistence.open("child-effects", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id=TENANT) as state,
-        Runtime.attach(persistence=state, context=CONTEXT, features=features) as runtime,
+        Runtime.open(persistence=state, context=CONTEXT, features=features) as runtime,
     ):
         target = Task.from_agent("effects.parent", runtime.agents.get())
         async with TaskEngine.open(target, persistence=state, context=CONTEXT) as engine:
@@ -232,7 +232,7 @@ async def test_read_only_graph_validates_selected_memory_tools(tmp_path: Path, t
     features.model("default", _Models(_UsageFunctionModel(respond)))
     async with (
         Persistence.open("memory-effects", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id=TENANT) as state,
-        Runtime.attach(persistence=state, context=CONTEXT, features=features) as runtime,
+        Runtime.open(persistence=state, context=CONTEXT, features=features) as runtime,
     ):
         target = Task.from_agent("effects.memory", runtime.agents.get())
         async with TaskEngine.open(target, persistence=state, context=CONTEXT) as engine:
@@ -280,7 +280,7 @@ async def test_imported_memory_obeys_effect_limit_without_current_memory_declara
     })
     async with (
         Persistence.open("imported-effects", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id=TENANT) as state,
-        Runtime.attach(persistence=state, context=CONTEXT, features=features) as runtime,
+        Runtime.open(persistence=state, context=CONTEXT, features=features) as runtime,
     ):
         source = await runtime.agents.get().start("go", principal=PRINCIPAL, input_context=context)
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -333,7 +333,7 @@ async def test_retry_and_fork_keep_tool_limit_while_new_runs_default_to_live(tmp
     features.model("default", _Models(_UsageFunctionModel(respond)))
     async with (
         Persistence.open("retry-effects", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id=TENANT) as state,
-        Runtime.attach(persistence=state, context=CONTEXT, features=features) as runtime,
+        Runtime.open(persistence=state, context=CONTEXT, features=features) as runtime,
     ):
         target = Task.from_agent("effects.source", runtime.agents.get())
         async with TaskEngine.open(target, persistence=state, context=CONTEXT) as engine:

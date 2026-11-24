@@ -211,7 +211,7 @@ async def test_upstream_capability_runs_through_existing_runtime(tmp_path: Path)
     features.tool(work, effect_policy='replay_safe')
     features.agent('default', model='default', allow_tools=('work',))
     async with Persistence.open('upstream_passthrough', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get().create_session('session')
             execution = await session.start('question', idempotency_key='question')
             result = await execution.wait(timeout_seconds=10)

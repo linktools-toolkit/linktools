@@ -67,7 +67,7 @@ async def test_instruction_discovery_and_sibling_fences_work_with_zero_retry_bud
     features = workspace_features("instruction-feedback", workspace=Workspace.load(tmp_path))
     features.agent("reader", allow_tools=("read_file",), tool_retries=0, output_retries=0)
     async with Persistence.open("instruction-feedback", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             result = (await runtime.agents.get("reader").run("read", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
             assert requests == len(scopes) + 2
@@ -94,7 +94,7 @@ async def test_instruction_feedback_preserves_previously_consumed_ordinary_retry
     features = workspace_features("preserve-retry-budget", workspace=Workspace.load(tmp_path))
     features.agent("reader", allow_tools=("read_file",), tool_retries=1, output_retries=0)
     async with Persistence.open("preserve-retry-budget", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             result = (await runtime.agents.get("reader").run("read", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.FAILED
             assert result.error_code == ErrorCode.MODEL_RESPONSE_INVALID.value
@@ -124,7 +124,7 @@ async def test_instruction_feedback_does_not_override_same_response_final_answer
                    output_schema={"type": "object", "properties": {"answer": {"type": "string"}},
                                   "required": ["answer"], "additionalProperties": False})
     async with Persistence.open("instruction-final", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get("reader").create_session("session")
             execution = await session.start("read")
             result = (await execution.wait(timeout_seconds=10)).result
@@ -169,7 +169,7 @@ async def test_instruction_feedback_does_not_swallow_a_sibling_approval_pause(tm
         for item in features._contributions
     ]
     async with Persistence.open("instruction-pause", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get("reader").start("read and ask")
             await _wait_for_committed(
                 lambda: persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id),

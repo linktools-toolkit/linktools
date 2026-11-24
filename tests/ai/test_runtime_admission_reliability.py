@@ -52,7 +52,7 @@ async def test_invalid_convenience_keys_never_activate_or_write(
     key: object, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = PersistenceStorage.in_memory()
-    async with Persistence.open('admission-validation', storage=storage) as persistence_45, Runtime.attach(persistence=persistence_45, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_45, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('admission-validation', storage=storage) as persistence_45, Runtime.open(persistence=persistence_45, features=model_features(RuntimeUsageModels())) as runtime, TaskEngine.open(persistence=persistence_45, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
         session = agent.session("session")
         principal = runtime.default_principal
@@ -101,7 +101,7 @@ async def test_invalid_convenience_keys_never_activate_or_write(
 
 @pytest.mark.asyncio
 async def test_omitted_keys_generate_independent_admissions_and_explicit_keys_replay() -> None:
-    async with Persistence.open('generated-keys', storage=PersistenceStorage.in_memory()) as persistence_94, Runtime.attach(persistence=persistence_94, features=model_features(RuntimeUsageModels())) as runtime:
+    async with Persistence.open('generated-keys', storage=PersistenceStorage.in_memory()) as persistence_94, Runtime.open(persistence=persistence_94, features=model_features(RuntimeUsageModels())) as runtime:
         agent = runtime.agents.get()
         first = await agent.start("prompt")
         await first.wait()

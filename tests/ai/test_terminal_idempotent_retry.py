@@ -49,7 +49,7 @@ def test_terminal_worker_exit_retries_idempotent_effect_as_new_turn(tmp_path: Pa
             async with Persistence.open('terminal-retry', storage=PersistenceStorage.sqlite(
                 root / 'state.db', cache=InMemoryCacheBackend(max_bytes=4*1024*1024),
                 coordination=InMemoryCacheBackend(max_bytes=4*1024*1024),
-            )) as state, Runtime.attach(persistence=state,
+            )) as state, Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(model)), features),
                 metrics=None, auto_recover=False,
             ) as runtime:

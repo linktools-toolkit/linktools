@@ -42,7 +42,7 @@ async def test_pending_unsuccessful_turn_has_one_source_commit_and_no_model_repl
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open("pending-outcome", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("pending-outcome", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         agent = runtime.agents.get()
@@ -108,7 +108,7 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
     await persistence.initialize(namespace="pending-ownership", tenant_id="default")
     source_group = persistence.execution.executions.state_store.storage_group
     try:
-        context = Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features))
+        context = Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features))
         runtime = await context.__aenter__()
         try:
             backend = runtime._execution_service.runtime_backend()
@@ -219,7 +219,7 @@ async def test_pending_tools_share_local_owner_without_per_call_renewal(
     features.tool(work, effect_policy="replay_safe")
     features.agent("default", model="default", allow_tools=("work",))
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache)
-    async with Persistence.open("pending-owner-local", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("pending-owner-local", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         backend = runtime._execution_service.runtime_backend()

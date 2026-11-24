@@ -98,7 +98,7 @@ async def test_runtime_open_compiles_routes_without_eager_model_loading() -> Non
     features.model("default", load)
     features.model("unused", lambda: pytest.fail("unused model loaded"))
     features.agent("assistant", model="default", allow_subagents=())
-    async with Persistence.open('lazy-model-test', storage=PersistenceStorage.in_memory()) as persistence_96, Runtime.attach(persistence=persistence_96, features=features) as runtime:
+    async with Persistence.open('lazy-model-test', storage=PersistenceStorage.in_memory()) as persistence_96, Runtime.open(persistence=persistence_96, features=features) as runtime:
         assert calls == []
         agent = runtime.agents.get("assistant")
         assert calls == []
@@ -246,7 +246,7 @@ async def test_model_loader_refreshes_each_run_and_reuses_within_tool_rounds(ses
     @features.tool
     def echo(ctx: AgentContext[object]) -> str:
         return "echo"
-    async with Persistence.open('per-run-model', storage=PersistenceStorage.in_memory()) as persistence_240, Runtime.attach(persistence=persistence_240, features=features) as runtime:
+    async with Persistence.open('per-run-model', storage=PersistenceStorage.in_memory()) as persistence_240, Runtime.open(persistence=persistence_240, features=features) as runtime:
         assert loads == []
         agent = runtime.agents.get()
         target = await agent.create_session("session") if session is True else agent
@@ -295,7 +295,7 @@ async def test_task_run_refreshes_configuration_under_the_same_registered_model(
     features = RuntimeFeatures()
     features.model("default", load)
     features.agent("default", model="default")
-    async with Persistence.open('task-model', storage=PersistenceStorage.in_memory()) as persistence_287, Runtime.attach(persistence=persistence_287, features=features) as runtime, TaskEngine.open(persistence=persistence_287) as engine:
+    async with Persistence.open('task-model', storage=PersistenceStorage.in_memory()) as persistence_287, Runtime.open(persistence=persistence_287, features=features) as runtime, TaskEngine.open(persistence=persistence_287) as engine:
         task = Task.from_agent("answer", runtime.agents.get())
         assert loads == ["first"]  # Task declaration freezes the model contract.
         state["credential"] = "second"
@@ -335,7 +335,7 @@ async def test_recovery_uses_one_fresh_binding_for_validation_and_model(tmp_path
         return binding
     features = _capabilities()
     features.model("default", load)
-    async with Persistence.open(_NAMESPACE, storage=_storage(database, phase)) as persistence_326, Runtime.attach(persistence=persistence_326, features=features) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(database, phase)) as persistence_326, Runtime.open(persistence=persistence_326, features=features) as runtime:
         before = len(loads)
         if phase == "reserved":
             handle = await runtime.agents.get("default").session("session").start("Wait", idempotency_key="start")

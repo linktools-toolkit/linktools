@@ -106,7 +106,7 @@ async def test_wrapper_retry_reuses_snapshot_and_keeps_dispatch_fence(tmp_path: 
     features.agent("default", model="default", allow_tools=())
     try:
         async with Persistence.open("native-boundary", storage=PersistenceStorage.sql(engine)) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", idempotency_key="work")
                 result = await execution.wait(timeout_seconds=5)
@@ -329,7 +329,7 @@ async def test_empty_retry_boundary_keeps_database_fence_and_resolves_lost_ack(t
     features.agent("default", model="default", allow_tools=())
     try:
         async with Persistence.open("fenced-retry", storage=PersistenceStorage.sql(engine)) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", idempotency_key="work")
                 await asyncio.wait_for(first_call.wait(), timeout=5)

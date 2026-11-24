@@ -83,7 +83,7 @@ def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: 
             features = RuntimeFeatures()
             features.model("default", OfflineModelBinding())
             task = Task("local.answer", answer, effect_policy="none")
-            async with Persistence.open("without-mcp-client", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+            async with Persistence.open("without-mcp-client", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
                 persistence=persistence, features=features,
             ) as runtime, TaskEngine.open(task, persistence=persistence) as engine:
                 agent_result = (await runtime.agents.get("default").run(
@@ -312,7 +312,7 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
     application.agent("default", model="default", allow_tools=())
 
     application.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_312, Runtime.attach(persistence=persistence_312, features=model_features(RuntimeUsageModels(), application)) as runtime:
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_312, Runtime.open(persistence=persistence_312, features=model_features(RuntimeUsageModels(), application)) as runtime:
         result = (await runtime.agents.get("default").run(
             "hello",
             timeout_seconds=10,

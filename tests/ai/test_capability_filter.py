@@ -159,7 +159,7 @@ async def test_runtime_wires_filter_into_roots_and_derived_agents(tmp_path):
     group.agent("root")
     group.model("default", create_model(api='openai', model='test'))
     group._contributions.append(CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions"))))
-    async with Persistence.open('capability-filter-test', storage=PersistenceStorage.from_root(tmp_path)) as persistence_153, Runtime.attach(persistence=persistence_153, features=group) as runtime:
+    async with Persistence.open('capability-filter-test', storage=PersistenceStorage.from_root(tmp_path)) as persistence_153, Runtime.open(persistence=persistence_153, features=group) as runtime:
         root = runtime.agents.get("root")
         assert root.derive(allow_skills=("*",)).compiled.skill_definitions == ()
         assert root.derive(allow_skills=("guide",)).compiled.skill_definitions == ()
@@ -304,11 +304,11 @@ async def test_filter_configuration_rejects_invalid_values_and_old_runtime_param
         with pytest.raises(TypeError, match="filter must be callable"):
             replace(capture, filter=invalid)
     with pytest.raises(TypeError, match="capability_filter"):
-        Runtime.attach(persistence=None, features=model_features(create_model(api='openai', model="test")),
+        Runtime.open(persistence=None, features=model_features(create_model(api='openai', model="test")),
                      capability_filter=lambda *_: True)
 
 
 def test_runtime_rejects_removed_runtime_features_keyword():
     with pytest.raises(TypeError, match="runtime_features"):
-        Runtime.attach(persistence=None, features=model_features(create_model(api='openai', model="test")),
+        Runtime.open(persistence=None, features=model_features(create_model(api='openai', model="test")),
                      runtime_features=RuntimeFeatures("old"))

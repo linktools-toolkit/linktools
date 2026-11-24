@@ -224,7 +224,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
 
     features = workspace_features("workspace", workspace=workspace)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace)) as persistence_225, Runtime.attach(persistence=persistence_225, features=model_features(models, features)) as runtime:
+    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace)) as persistence_225, Runtime.open(persistence=persistence_225, features=model_features(models, features)) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
         created = await runtime.agents.get("default").create_session("remember")
@@ -236,12 +236,12 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
             )
         ).items == ()
 
-    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace), tenant_id='tenant-a') as persistence_241, Runtime.attach(persistence=persistence_241, context=ExecutionContext(None), features=model_features(models, features)) as runtime:
+    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace), tenant_id='tenant-a') as persistence_241, Runtime.open(persistence=persistence_241, context=ExecutionContext(None), features=model_features(models, features)) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
         await runtime.agents.get("default").create_session("custom-tenant")
 
-    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace)) as persistence_251, Runtime.attach(persistence=persistence_251, features=model_features(models, features)) as runtime:
+    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace)) as persistence_251, Runtime.open(persistence=persistence_251, features=model_features(models, features)) as runtime:
         loaded = await runtime.sessions.get(
             created.session_id,
             principal=runtime.default_principal,
