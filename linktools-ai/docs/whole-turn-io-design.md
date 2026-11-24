@@ -99,6 +99,9 @@ bundle calls.
   unconditional history fetch. If the final projection differs from live
   deltas, send the correction from the confirmed result. The connected page
   continues to display turn state in place without a mandatory final GET.
+  A published turn updates transcript content and order only. It must not
+  clear or replace the current active execution: occupancy follows the
+  session observer, including transitions with an unchanged semantic revision.
 - Each subscriber still gets authorization, including for a fallback read.
   Reuse the existing event-driven observation contract. Capture a cursor
   before stitching backlog/live events, merge by existing event identity,
@@ -172,6 +175,11 @@ production MySQL numbers or expected gains.
   mixing generations. In the crash-before-dispatch fixture, a same-key retry
   returns the original execution ID, a passive reload makes no model calls,
   and two authorized recoveries elect one writer and publish one terminal turn.
+- **Browser ordering:** deliver A's terminal projection before its release,
+  then test B's active snapshot arriving before A's delayed projection.
+  In both orders A appears once in canonical order; Send follows observed
+  occupancy and, once B is active, Stop targets B. Neither intact sequence
+  requires a final GET; an actual observation gap uses the targeted fallback.
 - **Full-path measurement:** compare at identical SDK/DB/profile for plain
   and single-tool turns, Trace off/on, 0/1/2 observers, cold vs warm, and
   reconnect. Label intentional history reads separately from “no observer”;
