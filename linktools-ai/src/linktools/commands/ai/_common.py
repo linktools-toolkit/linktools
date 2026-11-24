@@ -8,7 +8,7 @@ from argparse import Namespace
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding
     from linktools.ai.runtime import Runtime
-    from linktools.ai.session import SessionTurnNotice, ToolProcessItem, ToolProcessStatus
+    from linktools.ai.session import SessionTurnNotice, ToolProcessItem
     from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
@@ -237,22 +237,11 @@ class _LocalSessionFeed:
             row = value.get("process")
             if not isinstance(row, dict):
                 return
-            key, name, status = row.get("key"), row.get("tool_name"), row.get("status")
-            if (row.get("kind") != "tool" or not isinstance(key, str) or not key.startswith("tool:")
-                    or len(key) <= len("tool:") or not isinstance(name, str) or not name
-                    or status not in ("RUNNING", "SUCCEEDED", "FAILED", "INTERRUPTED", "CANCELLED")):
-                return
-            position = row.get("position")
-            if position is not None:
-                if not isinstance(position, list) or len(position) != 2:
-                    return
-                message_seq, part_index = position
-                if type(message_seq) is not int or message_seq < 1 or type(part_index) is not int or part_index < 0:
-                    return
-                position = (message_seq, part_index)
             from linktools.ai.session import ToolProcessItem
 
-            item = ToolProcessItem(key, name, cast("ToolProcessStatus", status), position)
+            item = ToolProcessItem.from_notice(row)
+            if item is None:
+                return
             for callback in tuple(self._callbacks[session_id]):
                 callback(execution_id, item)
 

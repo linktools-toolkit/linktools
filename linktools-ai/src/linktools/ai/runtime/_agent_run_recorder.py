@@ -47,12 +47,13 @@ from ..observe.journal import (
     await_request_handoff,
 )
 from ..model.messages import (
-    THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY,
+    THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ARGUMENT_PREVIEWS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY,
     freeze_model_messages, model_response_usage,
 )
 from ._run_context import RunContextProjection
 from ._trace_capture import ModelInteractionCapture, TraceStagingPort
 from ..persistence.contracts import LoadedModelContext
+from ..session import tool_argument_preview
 from ..persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
 from ..persistence.runs import (
     TOOL_ERROR_CODE_METADATA_KEY,
@@ -85,6 +86,7 @@ class AgentRunRecorder:
         history_boundary: Callable[[], Awaitable[None]] | None = None,
         checkpoint_sink: Callable[[AgentRunCheckpoint], Awaitable[None]] | None = None,
         checkpoint_sink_accepts_frozen: bool = False,
+        preview_tool_names: frozenset[str] = frozenset(),
     ) -> None:
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise ValueError("agent_run_id is required")
@@ -95,6 +97,7 @@ class AgentRunRecorder:
         self._checkpoint_sink = checkpoint_sink
         self._checkpoint_sink_accepts_frozen = checkpoint_sink_accepts_frozen
         self._agent_run_id = agent_run_id
+        self._preview_tool_names = preview_tool_names
         initial_request = initial_messages[-1] if initial_messages else None
         self._initial_request = (
             freeze_model_messages((initial_request,))[0]
@@ -151,10 +154,11 @@ class AgentRunRecorder:
                 if not isinstance(value, ModelResponse)
             }
 
-    @property
-    def direct_stream(self) -> bool:
-        """A true stream without a separately tracked provider attempt."""
-        return self._streaming and "stream_attempt_seq" not in self._stream_position
+    def direct_stream_attempt_seq(self, model_request_seq: int) -> int | None:
+        """Use a request-local first attempt for genuine streams without transport tracking."""
+        return 1 if (self._streaming
+                     and self._stream_position.get("model_request_seq") == model_request_seq
+                     and "stream_attempt_seq" not in self._stream_position) else None
 
     def observe_thinking_part(self, part: ThinkingPart, index: int, *, complete: bool) -> int | None:
         if not self._streaming or "message_seq" in self._stream_position:
@@ -783,6 +787,7 @@ class AgentRunRecorder:
             return captured
         replayed_indices: list[int] = []
         new_calls: dict[str, int] = {}
+        previews: dict[str, str] = {}
         seen_call_ids: set[str] = set()
         for part_index, part in enumerate(response.parts):
             if not isinstance(part, ToolCallPart):
@@ -791,6 +796,8 @@ class AgentRunRecorder:
             if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             seen_call_ids.add(call_id)
+            if (preview := self._preview_tool_arguments(part)) is not None:
+                previews[call_id] = preview
             if call_id in self._tool_call_origins:
                 previous_call = self._restored_tool_calls.get(call_id)
                 if previous_call is None or not self._same_tool_call(previous_call, part):
@@ -803,12 +810,15 @@ class AgentRunRecorder:
             for index, part in enumerate(response.parts)
             if (measurement := self._thinking_elapsed.get(index)) is not None and measurement[0] == part
         }
-        if elapsed or (response.metadata and THINKING_ELAPSED_MS_METADATA_KEY in response.metadata):
+        projections = ((THINKING_ELAPSED_MS_METADATA_KEY, elapsed),
+                       (TOOL_ARGUMENT_PREVIEWS_METADATA_KEY, previews))
+        if any(value or key in (response.metadata or {}) for key, value in projections):
             metadata = dict(response.metadata or {})
-            if elapsed:
-                metadata[THINKING_ELAPSED_MS_METADATA_KEY] = elapsed
-            else:
-                metadata.pop(THINKING_ELAPSED_MS_METADATA_KEY, None)
+            for key, value in projections:
+                if value:
+                    metadata[key] = value
+                else:
+                    metadata.pop(key, None)
             # The SDK retains this response for both the final checkpoint and our transcript.
             response.metadata = metadata or None
         self.append_transcript_message(response)
@@ -819,6 +829,22 @@ class AgentRunRecorder:
         self._model_responses[fact.model_request_seq] = captured
         self._last_response_position = (fact.model_request_seq, message_seq)
         return captured
+
+    def tool_argument_preview_for_call(self, tool_call_id: str) -> str | None:
+        position = self._tool_call_origins.get(tool_call_id)
+        if position is None:
+            return None
+        message = self._transcript_messages[position[1] - 1]
+        previews = (message.metadata or {}).get(TOOL_ARGUMENT_PREVIEWS_METADATA_KEY)
+        return previews.get(tool_call_id) if isinstance(previews, Mapping) else None
+
+    def _preview_tool_arguments(self, part: ToolCallPart) -> str | None:
+        if part.tool_name not in self._preview_tool_names:
+            return None
+        try:
+            return tool_argument_preview(part.tool_name, part.args_as_dict())
+        except (TypeError, ValueError):
+            return None
 
     def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
         origin = self._tool_call_origins.get(tool_call_id)

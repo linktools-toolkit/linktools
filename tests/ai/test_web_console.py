@@ -1160,7 +1160,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
     principal = Principal("runtime", "default")
     raw_marker = "NOT-FOR-CHAT"
     thinking = "  SDK thinking\n<literal text>  "
-    process = ToolProcessItem("tool:id", "lookup", "SUCCEEDED", (2, 1))
+    process = ToolProcessItem("tool:id", "lookup", "SUCCEEDED", (2, 1), elapsed_ms=19)
     now = datetime.now(timezone.utc)
 
     class History:
@@ -1236,7 +1236,8 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         ]
         assert turn["items"][1]["tool_call_id"] == "id"
         assert turn["items"][1]["tool_name"] is None
-        assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup", "status": "SUCCEEDED", "position": [2, 1]}]
+        assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup",
+                                    "status": "SUCCEEDED", "position": [2, 1], "elapsed_ms": 19}]
         removed = await http.get("/api/executions/execution/events?view=chat")
         assert removed.status_code == 400
         assert removed.json()["error_code"] == "REQUEST_FIELD_INVALID"
@@ -1275,7 +1276,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
     assert frames[1][1] == {"execution_id": "execution", "text": thinking}
     assert frames[2][1]["data"]["item"] == turn["process"][0]
     assert frames[2][1]["data"]["order"] == [1, 2, 1]
-    assert frames[2][1]["data"]["elapsed_ms"] == 19
+    assert "elapsed_ms" not in frames[2][1]["data"]
     assert frames[3][1] == {"execution_id": "execution", "text": "answer"}
     assert frames[-1][1]["data"]["status"] == "SUCCEEDED"
 
@@ -1342,6 +1343,7 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
     compact = []
     terminal = []
     thinking_durations: dict[tuple[int, ...], int] = {}
+    completed_attempts: set[tuple[int, ...]] = set()
     cursor = None
 
     async def model(_messages, _info):
@@ -1433,6 +1435,12 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                         if name == "snapshot":
                             terminal.append(payload["status"])
                         part_event = payload.get("item", {}).get("event", {})
+                        if part_event.get("event_type") == "MODEL_REQUEST_FINISHED":
+                            lifecycle = part_event["payload"]
+                            assert lifecycle["status"] == "SUCCEEDED"
+                            completed_attempts.add(tuple(lifecycle[key] for key in (
+                                "agent_run_seq", "model_request_seq", "stream_attempt_seq",
+                            )))
                         if part_event.get("event_type") == "ASSISTANT_PART_COMPLETED":
                             timing = part_event["payload"]
                             assert set(timing) == {"agent_run_seq", "model_request_seq", "stream_attempt_seq",
@@ -1477,6 +1485,7 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                 ("ASSISTANT_TEXT_DELTA", "and last"),
             ]
             assert {kind for kind, _ in compact} == {"thinking", "text"}
+            assert {position[:3] for position in thinking_durations} == completed_attempts and completed_attempts
             if terminal:
                 assert terminal == ["SUCCEEDED"]
             async with client(app) as http:
@@ -1539,10 +1548,10 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
 
     release_first = asyncio.Event()
 
-    async def lookup(context: AgentContext[None], label: str) -> ToolReturn:
-        if label == "first":
+    async def lookup(context: AgentContext[None], path: str) -> ToolReturn:
+        if path == "first":
             await release_first.wait()
-        return ToolReturn(return_value=label, metadata=f"application metadata: {label}")
+        return ToolReturn(return_value=path, metadata=f"application metadata: {path}")
 
     def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
         results = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
@@ -1552,15 +1561,15 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
             }
             return ModelResponse(parts=[TextPart("done")])
         return ModelResponse(parts=[
-            ToolCallPart("lookup", {"label": "first"}, tool_call_id="z"),
+            ToolCallPart("read_file", {"path": "first"}, tool_call_id="z"),
             ThinkingPart("Between calls"),
-            ToolCallPart("lookup", {"label": "second"}, tool_call_id="a"),
+            ToolCallPart("read_file", {"path": "second"}, tool_call_id="a"),
         ])
 
     features = _persistence_capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.tool(lookup, effect_policy="none")
-    features.agent("default", model="default", allow_tools=("lookup",))
+    features.tool(lookup, name="read_file", effect_policy="none")
+    features.agent("default", model="default", allow_tools=("read_file",))
     model_features(_Models(_UsageFunctionModel(respond)), features)
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open("web-tool-order", storage=storage) as persistence, Runtime.open(
@@ -1586,14 +1595,16 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
                         continue
                     frame = _chat_frame(observation)
                     assert frame is not None
+                    assert "argument_preview" not in frame[1]["item"]
                     order = frame[1]["order"]
                     assert orders.setdefault(item.key, order) == order
                     if item.status == "RUNNING":
-                        assert "elapsed_ms" not in frame[1]
+                        assert "elapsed_ms" not in frame[1]["item"]
                         started.append(item)
                     elif item.status == "SUCCEEDED":
-                        assert type(frame[1]["elapsed_ms"]) is int and frame[1]["elapsed_ms"] >= 0
-                        live_elapsed[item.key] = frame[1]["elapsed_ms"]
+                        elapsed = frame[1]["item"]["elapsed_ms"]
+                        assert type(elapsed) is int and elapsed >= 0
+                        live_elapsed[item.key] = elapsed
                         finished.append(item)
                         if item.key == "tool:a":
                             release_first.set()
@@ -1619,6 +1630,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
 
         assert {item["key"]: item["elapsed_ms"] for item in turn["process"]} == live_elapsed
         assert "application metadata:" not in replay.text
+        assert all("argument_preview" not in item for item in turn["process"])
 
     async with Persistence.open("web-tool-order", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
@@ -1630,12 +1642,13 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
 
 
 @pytest.mark.asyncio
-async def test_passive_session_tool_notice_requires_event_authorization() -> None:
+@pytest.mark.parametrize("allowed", (True, False))
+async def test_passive_session_tool_notice_requires_event_authorization(allowed: bool) -> None:
     from types import SimpleNamespace
 
     from linktools.ai.core import Principal, SessionStatus
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.session import ToolProcessItem
+    from linktools.ai.session import project_tool_process_event
 
     class Feed:
         def subscribe(self, identity, on_process):
@@ -1651,19 +1664,77 @@ async def test_passive_session_tool_notice_requires_event_authorization() -> Non
         yield SimpleNamespace(status=SessionStatus.OPEN, active_execution_id="external", revision=1)
         await end.wait()
 
-    async def deny(identity, *, principal):
+    async def authorize(identity, *, principal):
         assert identity == "external" and principal.principal_id == "runtime"
-        feed.deliver("external", ToolProcessItem("tool:private", "private", "RUNNING"))
+        process = project_tool_process_event("TOOL_CALL_FINISHED", {
+            "call_id": "private", "tool_name": "private", "status": "SUCCEEDED", "tool_elapsed_ms": 42,
+        })
+        assert process is not None
+        feed.deliver("external", process)
         asyncio.get_running_loop().call_later(0.05, end.set)
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if not allowed:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
     runtime = SimpleNamespace(
         history=None, default_principal=Principal("runtime", "default"),
         sessions=SimpleNamespace(watch=watch),
-        events=SimpleNamespace(has_local_producer=lambda _: False, authorize_read=deny),
+        events=SimpleNamespace(has_local_producer=lambda _: False, authorize_read=authorize),
     )
     async with client(create_app(runtime=runtime, session_notices=feed)) as http:
         response = await http.get("/api/session/events?session_id=session")
     assert response.status_code == 200, response.text
-    assert "session_process" not in response.text and "private" not in response.text
+    if allowed:
+        assert "event: session_process" in response.text
+        payload = next(json.loads(line[6:]) for line in response.text.splitlines()
+                       if line.startswith("data: ") and '"elapsed_ms"' in line)
+        assert payload["item"]["elapsed_ms"] == 42
+    else:
+        assert "session_process" not in response.text and "private" not in response.text
     assert '"active_execution_id": "external"' in response.text
+
+
+
+@pytest.mark.asyncio
+async def test_native_workspace_tool_title_reuses_only_safe_stored_path(tmp_path: Path) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+
+    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.workspace import Workspace
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, workspace_features
+
+    (tmp_path / "README.md").write_text("private source contents", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("second source contents", encoding="utf-8")
+
+    def respond(messages, _info):
+        if any(isinstance(part, ToolReturnPart) for part in messages[-1].parts):
+            return ModelResponse(parts=[TextPart("done")])
+        return ModelResponse(parts=[
+            ToolCallPart("read_file", {"path": "README.md"}, tool_call_id="simple"),
+            ToolCallPart("read_file", {"path": ["README.md", "notes.txt"]}, tool_call_id="complex"),
+        ])
+
+    features = workspace_features("tool-preview", workspace=Workspace.load(tmp_path))
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("default", allow_tools=("read_file",))
+    model_features(_Models(_UsageFunctionModel(respond)), features)
+    async with Persistence.open("tool-preview", storage=PersistenceStorage.in_memory()) as state, Runtime.open(
+        persistence=state, features=features,
+    ) as runtime, client(create_app(runtime=runtime)) as http:
+        session = await runtime.agents.get("default").create_session("preview")
+        execution = await session.start("read the docs")
+        observed = {}
+
+        async def on_event(item) -> None:
+            if item.event.event_type == "TOOL_CALL_STARTED":
+                payload = item.event.payload
+                observed[f"tool:{payload['call_id']}"] = payload.get("argument_preview")
+
+        assert (await execution.wait(timeout_seconds=10, on_event=on_event)).result.status.value == "SUCCEEDED"
+        history = await http.get("/api/session?session_id=preview")
+        assert history.status_code == 200, history.text
+        turn, = history.json()["timeline"]["items"]
+        assert {item["key"]: item.get("argument_preview") for item in turn["process"]} == observed == {
+            "tool:simple": "README.md", "tool:complex": None,
+        }
+        assert "private source contents" not in history.text and "notes.txt" not in history.text

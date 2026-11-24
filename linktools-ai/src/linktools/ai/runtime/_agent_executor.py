@@ -1048,6 +1048,11 @@ async def _materialize_agent(
         current = compiled_agent if current_agent is None else await current_agent(compiled_agent)
         return current.skill_definitions
 
+    preview_tool_names = {
+        name for name, descriptor in workspace_descriptors.items()
+        if descriptor.tool_class in {"filesystem.read", "filesystem.write"}
+    }
+    preview_tool_names.update(scope.memory_tool_names)
     if scope.preload_skills or compiled_agent.spec.allow_skills and (compiled_agent.skill_definitions or asset_sources):
         initial_skills = compiled_agent.skill_definitions if scope.initial_skills is None else scope.initial_skills
         skill_capability = SkillCapability(
@@ -1063,6 +1068,7 @@ async def _materialize_agent(
             },
         )
         capabilities.append(skill_capability)
+        preview_tool_names.add("load_skill")
 
     if any(tool_class_from_metadata(_bound_tool_metadata(candidate)) != "shell"
            for candidate in compiled_agent.selected_tools if candidate.id in workspace_names) and scope.workspace is None:
@@ -1084,6 +1090,7 @@ async def _materialize_agent(
             scope.subagent_descriptions,
         )
         capabilities.append(subagent_capability)
+        preview_tool_names.add("delegate_task")
     prepare_tools = _plan_mode_prepare(
         plan_mode=scope.mode == "plan",
         compaction_policy=compaction_policy,
@@ -1142,6 +1149,7 @@ async def _materialize_agent(
         history_boundary=commit_history_boundary,
         checkpoint_sink=save_checkpoint,
         checkpoint_sink_accepts_frozen=type(scope.run_store) is RuntimeAgentRunStore,
+        preview_tool_names=frozenset(preview_tool_names),
     )
     if tool_metrics is not None:
         capabilities.append(ToolMetricsCapability(tool_metrics))
@@ -1433,13 +1441,22 @@ def _event_stream_capability(
                 )
                 if elapsed_ms is not None:
                     position["tool_elapsed_ms"] = elapsed_ms
-            if recorder.direct_stream and (isinstance(emission, LiveDelta) or "thinking_elapsed_ms" in position):
-                position["stream_attempt_seq"] = 1
-            if isinstance(emission, LiveDelta) and "stream_attempt_seq" in position:
+            # Synthesized deltas for an already captured response have a
+            # transcript message sequence, not a live preview coordinate.
+            live_preview = isinstance(emission, LiveDelta) and "message_seq" not in position
+            if live_preview or "thinking_elapsed_ms" in position:
+                request_seq = position.get("model_request_seq")
+                if type(request_seq) is int:
+                    direct_attempt_seq = recorder.direct_stream_attempt_seq(request_seq)
+                    if direct_attempt_seq is not None:
+                        position["stream_attempt_seq"] = direct_attempt_seq
+            if live_preview and "stream_attempt_seq" in position:
                 position["part_start"] = isinstance(event, PartStartEvent)
                 emission = LiveDelta(emission.event_type, emission.content, position)
             if isinstance(emission, DurableBoundary):
                 if isinstance(event, (FunctionToolCallEvent, FunctionToolResultEvent)):
+                    if (argument_preview := recorder.tool_argument_preview_for_call(event.part.tool_call_id)) is not None:
+                        position["argument_preview"] = argument_preview
                     origin = recorder.tool_call_position(event.part.tool_call_id)
                     if origin is not None:
                         position["tool_position"] = list(origin)
@@ -1522,14 +1539,12 @@ def _map_event(event: object) -> "AgentEmission | None":
             arguments = part.args_as_dict()
         except (TypeError, ValueError):
             arguments = part.args
-        return DurableBoundary(
-            ExecutionEventType.TOOL_CALL_STARTED,
-            {
-                "call_id": part.tool_call_id,
-                "tool_name": part.tool_name,
-                "arguments_digest": canonical_sha256(arguments),
-            },
-        )
+        payload = {
+            "call_id": part.tool_call_id,
+            "tool_name": part.tool_name,
+            "arguments_digest": canonical_sha256(arguments),
+        }
+        return DurableBoundary(ExecutionEventType.TOOL_CALL_STARTED, payload)
     if isinstance(event, FunctionToolResultEvent):
         part = event.part
         if isinstance(part, ToolReturnPart) and part.outcome == "retried":
@@ -1554,6 +1569,7 @@ def _map_event(event: object) -> "AgentEmission | None":
                         tool_return_content_digest(part.content) if success else None
                     ),
                     "status": "SUCCEEDED" if success else "FAILED",
+                    **({"error_code": ErrorCode.AUTHORIZATION_DENIED.value} if part.outcome == "denied" else {}),
                 },
             )
     return None

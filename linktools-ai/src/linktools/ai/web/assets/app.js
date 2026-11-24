@@ -679,15 +679,22 @@ function renderTurnPickers() {
   }
 }
 const processToolStatus={RUNNING:'In progress',SUCCEEDED:'Completed',FAILED:'Failed',INTERRUPTED:'Interrupted',CANCELLED:'Cancelled',UNCONFIRMED:'Outcome unconfirmed'};
+const processToolReason=new Map([
+  ['AUTHORIZATION_DENIED','Permission denied.'],
+  ['TOOL_RETRY_REQUIRED','The tool requested a retry.'],
+  ['STORAGE_NOT_FOUND','The requested resource was not found.'],
+  ['REQUEST_FIELD_INVALID','The request was invalid.'],
+]);
 function mergeProcessRow(previous,row) {
   if(!previous)return row;
   const position=previous.position ?? row.position;
   const next=row.status==='RUNNING' && previous.status!=='RUNNING' ? previous : row;
   const order=previous.order ?? row.order;
-  return next.position===position && next.order===order ? next : {...next,position,order};
+  const argument_preview=next.argument_preview ?? previous.argument_preview ?? row.argument_preview;
+  return next.position===position && next.order===order && next.argument_preview===argument_preview
+    ? next : {...next,position,order,argument_preview};
 }
 function showProcessElapsed(node,ms) {
-  node.elapsedMs=ms;
   if(!Number.isSafeInteger(ms) || ms<0){if(node.elapsedNode){node.elapsedNode.remove();node.elapsedNode=null;}return '';}
   const elapsed=`${ms<1000?Math.round(ms)+' ms':(ms/1000).toFixed(1)+' s'}`;
   if(!node.elapsedNode){
@@ -705,12 +712,16 @@ function toolProcessRow(rows,row,fold=false) {
     node.toolStatusNode.setAttribute('role','status');node.toolStatusNode.setAttribute('aria-live','polite');node.append(node.toolNameNode,node.toolStatusNode);
     rows.set(row.key,node);
   }
-  if(node.toolNameText!==row.tool_name){node.toolNameNode.textContent=row.tool_name;node.toolNameText=row.tool_name;}
-  if(node.toolStatusNode.textContent!==processToolStatus[row.status])node.toolStatusNode.textContent=processToolStatus[row.status];
+  const title=row.argument_preview ? `${row.tool_name} · ${row.argument_preview}` : row.tool_name;
+  if(node.toolNameText!==title){node.toolNameNode.textContent=title;node.toolNameText=title;}
+  const status=processToolStatus[row.status];
+  const reason=row.status==='FAILED' ? processToolReason.get(row.error_code) || row.error_code || 'No reason provided.' : '';
+  const detail=reason?`${status}\n${reason}`:status;
+  if(node.toolStatusNode.textContent!==detail)node.toolStatusNode.textContent=detail;
   if(fold) {
     node.classList.toggle('process-running',row.status==='RUNNING');
     const elapsed=showProcessElapsed(node,row.elapsed_ms);
-    const label=`${row.tool_name} · ${processToolStatus[row.status]}${elapsed?' · '+elapsed:''}`;
+    const label=`${title} · ${status}${elapsed?' · '+elapsed:''}`;
     if(node.toolNameNode.getAttribute('aria-label')!==label)node.toolNameNode.setAttribute('aria-label',label);
   }
   node.classList.toggle('error',row.status==='FAILED');
@@ -759,15 +770,12 @@ function thinkingMessage(label,text='') {
   const node=element('details','tool-message');node.body=element('pre','',text);
   node.append(element('summary','',label),node.body);return node;
 }
-function renderTurn(turn,liveTools=null,liveThinking=null) {
+function renderTurn(turn,openTools=null,liveThinking=null) {
   const section=element('article','turn');section.dataset.execution=turn.execution_id;
   section.append(userMessage(turn.user_input));
   const ordered=state.conversationMode==='chat',process=turnProcess();
   if(!ordered)section.append(process);
-  const originalRows=turn.conversation_committed?turn.process?.map(row=>{
-    const elapsed=liveTools?.get(row.key)?.elapsedMs;
-    return row.elapsed_ms!=null || elapsed===undefined?row:{...row,elapsed_ms:elapsed};
-  }):conversationProcessRows(turn.execution_id,turn.process);
+  const originalRows=turn.conversation_committed?turn.process:conversationProcessRows(turn.execution_id,turn.process);
   const remaining=new Map((originalRows || []).map(row=>[row.key,row])), cards=new Map();
   const savedAnswers=element('div','turn-saved-answers');section.append(savedAnswers);
   for (const item of turn.items) {
@@ -792,9 +800,9 @@ function renderTurn(turn,liveTools=null,liveThinking=null) {
     section.liveSlot=element('div','turn-live-slot');section.append(section.liveSlot);
   }
   renderTurnProcess(process,[...remaining.values()],ordered);
-  if(liveTools)for(const [key,previous] of liveTools) {
+  if(openTools)for(const key of openTools) {
     const card=cards.get(key) || process.rows.get(key);
-    if(card && previous.open)card.open=true;
+    if(card)card.open=true;
   }
   if(ordered)section.append(process);
   if(!turn.conversation_committed)section.processNode=process;
@@ -818,9 +826,9 @@ function renderCommittedTurn(timeline,id,previousError=state.timelineError) {
     renderTurnPickers();renderLive();return;
   }
   const top=container.scrollTop,follows=top+container.clientHeight>=container.scrollHeight-40;
-  const liveTools=new Map(),liveThinking=new Map();
+  const openTools=new Set(),liveThinking=new Map();
   const rememberTools=rows=>{
-    for(const [key,node] of rows || [])if(key.startsWith('tool:') && (node.open || node.elapsedMs!==undefined))liveTools.set(key,node);
+    for(const [key,node] of rows || [])if(key.startsWith('tool:') && node.open)openTools.add(key);
   };
   rememberTools(previous?.placedTools);rememberTools(previous?.processNode?.rows);
   if(state.observedExecution===id) {
@@ -842,7 +850,7 @@ function renderCommittedTurn(timeline,id,previousError=state.timelineError) {
       seen.add(item.content);
     }
   }
-  const section=renderTurn(turn,liveTools,liveThinking);
+  const section=renderTurn(turn,openTools,liveThinking);
   if(previous) {
     if(previous.contains(live))container.append(live);
     container.insertBefore(section,previous);
@@ -1813,9 +1821,7 @@ function receiveExecutionFrames(id) {
     if(envelope.type==='process') {
       if(!committed && item?.key) {
         const previous=state.liveProcess.get(item.key);
-        let row=mergeProcessRow(previous,envelope.order ? {...item,order:envelope.order} : item);
-        const elapsed=Number.isSafeInteger(envelope.elapsed_ms) && envelope.elapsed_ms>=0 ? envelope.elapsed_ms : previous?.elapsed_ms;
-        if(row.status!=='RUNNING' && elapsed!==undefined && row.elapsed_ms!==elapsed)row={...row,elapsed_ms:elapsed};
+        const row=mergeProcessRow(previous,envelope.order ? {...item,order:envelope.order} : item);
         if(row!==previous){
           if(row.status==='RUNNING')state.liveThinkingRunning=false;
           state.liveProcess.set(item.key,row);scheduleLiveRender();

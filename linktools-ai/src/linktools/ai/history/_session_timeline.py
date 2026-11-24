@@ -37,7 +37,7 @@ from ..storage import StoredPayload
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ..inputs import stored_user_input_view
-from ..model.messages import THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY
+from ..model.messages import THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ARGUMENT_PREVIEWS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY
 from ..session import SessionTurn, SessionTurnItem
 from ..persistence.contracts import (
     ConversationRepositories,
@@ -818,12 +818,15 @@ def _project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[Tool
     calls: dict[str, ToolProcessItem] = {}
     for message_seq, message in enumerate(messages, start=1):
         if isinstance(message, ModelResponse):
+            previews = (message.metadata or {}).get(TOOL_ARGUMENT_PREVIEWS_METADATA_KEY)
             for part_index, part in enumerate(message.parts):
                 if isinstance(part, ToolCallPart):
+                    preview = previews.get(part.tool_call_id) if isinstance(previews, Mapping) else None
                     calls.setdefault(
                         part.tool_call_id,
                         ToolProcessItem(
                             f"tool:{part.tool_call_id}", part.tool_name, "UNCONFIRMED", (message_seq, part_index),
+                            argument_preview=preview if isinstance(preview, str) else None,
                         ),
                     )
         elif isinstance(message, ModelRequest):
@@ -847,8 +850,11 @@ def _project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[Tool
                 else:
                     continue
                 elapsed = durations.get(part.tool_call_id) if isinstance(durations, Mapping) else None
+                reason = (ErrorCode.AUTHORIZATION_DENIED if part.outcome == "denied"
+                          else ErrorCode.TOOL_RETRY_REQUIRED if part.outcome == "retried" else None)
                 calls[part.tool_call_id] = replace(
                     call, status=status, elapsed_ms=elapsed if type(elapsed) is int and elapsed >= 0 else None,
+                    error_code=reason,
                 )
     return tuple(calls.values())
 

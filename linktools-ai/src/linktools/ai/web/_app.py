@@ -87,8 +87,13 @@ def _wire(value: object) -> object:
         return result
     if is_dataclass(value) and not isinstance(value, type):
         result = {field.name: _wire(getattr(value, field.name)) for field in fields(value)}
-        if isinstance(value, ToolProcessItem) and value.elapsed_ms is None:
-            result.pop("elapsed_ms")
+        if isinstance(value, ToolProcessItem):
+            if value.elapsed_ms is None:
+                result.pop("elapsed_ms")
+            if value.error_code is None:
+                result.pop("error_code")
+            if value.argument_preview is None:
+                result.pop("argument_preview")
         return result
     if isinstance(value, Enum):
         return value.value
@@ -151,9 +156,6 @@ def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
         if (process.position is not None and type(agent) is int and agent > 0
                 and type(request) is int and request > 0):
             frame["order"] = (agent, request, process.position[1])
-        elapsed = event.payload.get("tool_elapsed_ms")
-        if process.status != "RUNNING" and type(elapsed) is int and elapsed >= 0:
-            frame["elapsed_ms"] = elapsed
         return "message", frame, cursor
     allowed = _CHAT_STREAM_FIELDS.get(event.event_type)
     if allowed is None or not isinstance(event.payload, Mapping):

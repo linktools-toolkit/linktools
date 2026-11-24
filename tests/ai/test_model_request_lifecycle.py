@@ -87,6 +87,9 @@ class _LifecycleRecorder:
     def response_message_seq(self, model_request_seq: int) -> int | None:
         return None
 
+    def direct_stream_attempt_seq(self, model_request_seq: int) -> int | None:
+        return None
+
     async def commit_history_boundary(self) -> None:
         pass
 

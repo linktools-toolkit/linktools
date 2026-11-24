@@ -870,14 +870,14 @@ if(process.argv[3]==='tools') {
   const older={...timeline('a').items[0],items:[{item_kind:'thinking',content:'Earlier reasoning'}]};
   timelineOverrides.set('a',{items:[older,turn],next_cursor:null});streamBlocks.set(id,{});
   await select('#session=a');await until('tool stream opened',()=>streamBlocks.get(id).controller);
-  const emit=(type,item,cursor=null,order,elapsed_ms)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type,item,cursor,order,elapsed_ms})+'\n\n'));
+  const emit=(type,item,cursor=null,order)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type,item,cursor,order})+'\n\n'));
   const event=(event_type,payload)=>emit('event',{execution_id:id,depth:0,event:{event_type,payload}});
   const delta=(name,part,fields,cursor)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode(
     'id: '+JSON.stringify([id,cursor])+'\nevent: '+name+'\ndata: '+JSON.stringify({execution_id:id,part,...fields})+'\n\n'));
   const article=()=>descendants(node('conversation')).find(item=>item.dataset.execution===id);
   const olderArticle=()=>descendants(node('conversation')).find(item=>item.dataset.execution===older.execution_id);
   const processArea=()=>article()?.children.find(item=>item.className==='turn-process');
-  const tool={kind:'tool',key:'tool:call',tool_name:'lookup',status:'RUNNING',position:[2,0]};
+  const tool={kind:'tool',key:'tool:call',tool_name:'lookup',argument_preview:'README.md',status:'RUNNING',position:[2,0]};
   const laterTool={kind:'tool',key:'tool:later',tool_name:'secondary',status:'RUNNING',position:[2,1]};
   const initialThinking='  SDK thinking\n<literal>  ',sdkThinking=initialThinking+'complete phase';
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
@@ -902,7 +902,7 @@ if(process.argv[3]==='tools') {
   emit('process',laterTool,'later-tool-cursor',[1,3,0]);emit('process',tool,'tool-cursor',[1,1,1]);
   const liveParts=()=>({children:node('live').children.filter(item=>item.className==='stream-attempt')
     .flatMap(item=>item.parts.children),textContent:node('live').textContent});
-  await until('live process and answer share the turn',()=>liveParts()?.textContent.includes('lookupIn progress') && article().textContent.includes('First answer') && article().textContent.includes(sdkThinking));
+  await until('live process and answer share the turn',()=>liveParts()?.textContent.includes('lookup · README.mdIn progress') && article().textContent.includes('First answer') && article().textContent.includes(sdkThinking));
   assert.ok(article().contains(node('live')));
   assert.doesNotMatch(article().textContent,/Superseded preview|Superseded hidden thought|Late stale thought/);
   const liveThought=liveParts().children[2];
@@ -915,24 +915,28 @@ if(process.argv[3]==='tools') {
   assert.equal(first.name,'','tool cards do not write the native disclosure group name');
   assert.ok(first.className.split(' ').includes(liveThought.className));
   assert.equal(first.children[0].tagName,'SUMMARY');
-  assert.equal(first.children[0].textContent,'lookup');
+  assert.equal(first.children[0].textContent,'lookup · README.md');
   assert.equal(Boolean(first.open),false);
   assert.ok(first.className.split(' ').includes('process-running'));
-  assert.equal(first.children[0].getAttribute('aria-label'),'lookup · In progress');
+  assert.equal(first.children[0].getAttribute('aria-label'),'lookup · README.md · In progress');
   assert.ok(!descendants(article()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
   first.open=true;
   const mixedOrder=parent=>parent.children.map(row=>row.className.split(' ').includes('tool-message') && row.children[0]?.className==='tool-name' && row.children[0].textContent.replace(/(?:\d+)(?:\.\d+)? [ms]+$/, '') || row.body?.textContent || row.markdownBody?.textContent.trim() || row.textContent.trim());
-  assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup',sdkThinking,'Intermediate','secondary','Final reply']);
+  assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup · README.md',sdkThinking,'Intermediate','secondary','Final reply']);
   assert.equal(processArea().hidden,true,'positioned tools are not repeated in Process');
   assert.equal(first.children[1].getAttribute('aria-live'),'polite');
   const unranked={...tool,position:null};
-  emit('process',{...unranked,status:'SUCCEEDED'},null,undefined,125);emit('process',unranked);
+  emit('process',{...unranked,status:'SUCCEEDED',elapsed_ms:125,argument_preview:undefined});emit('process',unranked);
+  emit('process',{...laterTool,status:'FAILED',error_code:'AUTHORIZATION_DENIED'});
+  await until('safe failure reason is displayed on its tool',()=>liveParts().children[4]?.textContent.includes('Permission denied.'));
+  assert.equal(liveParts().children[4].children[0].textContent,'secondary','absent safe preview is not synthesized');
+  assert.equal(liveParts().children[4].children[1].textContent,'Failed\nPermission denied.');
   await until('completed tool cannot be reopened by replay',()=>first.children[1].textContent==='Completed');
   assert.equal(liveParts().children[1],first);
   assert.equal(first.open,true,'tool completion preserves disclosure state');
   assert.ok(!first.className.split(' ').includes('process-running'));
-  assert.equal(first.children[0].textContent,'lookup125 ms');
-  assert.equal(first.children[0].getAttribute('aria-label'),'lookup · Completed · 125 ms');
+  assert.equal(first.children[0].textContent,'lookup · README.md125 ms');
+  assert.equal(first.children[0].getAttribute('aria-label'),'lookup · README.md · Completed · 125 ms');
 
   const old=streamBlocks.get(id).controller;old.close();
   await until('process stream reconnected',()=>streamBlocks.get(id).controller!==old);
@@ -943,7 +947,7 @@ if(process.argv[3]==='tools') {
   event('ASSISTANT_PART_COMPLETED',{agent_run_seq:1,model_request_seq:2,stream_attempt_seq:2,part_index:0,thinking_elapsed_ms:375});
   await until('server timing populates exact observed segment',()=>liveThought.children[0].textContent==='Thinking375 ms');
   emit('process',unranked);await settle();
-  assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup',completedThinking,'Intermediate','secondary','Final reply']);
+  assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup · README.md',completedThinking,'Intermediate','secondary','Final reply']);
   assert.equal(liveThought.open,true,'new thinking deltas preserve the user-opened disclosure');
 
   const saved={...turn,status:'SUCCEEDED',conversation_committed:true,items:[
@@ -954,7 +958,7 @@ if(process.argv[3]==='tools') {
     {item_kind:'tool_call',tool_call_id:'later',content:null},
     {item_kind:'tool_result',content:'Private saved result'},
     {item_kind:'assistant',content:'Final reply'},
-  ],process:[{...tool,status:'SUCCEEDED',elapsed_ms:140},{...laterTool,status:'UNCONFIRMED'}]};
+  ],process:[{...tool,status:'SUCCEEDED',elapsed_ms:140},{...laterTool,status:'FAILED',error_code:'AUTHORIZATION_DENIED'}]};
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
   event('MODEL_REQUEST_FINISHED',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,status:'SUCCEEDED'});
@@ -963,7 +967,7 @@ if(process.argv[3]==='tools') {
   const modelPreview=node('live').children.find(item=>item.className==='stream-attempt');
   assert.equal(modelPreview.label.hidden,true,'normal model status belongs to the Activity disclosure, not Chat');
   assert.equal(modelPreview.label.textContent,'');
-  const expectedOrder=['First answer','lookup',completedThinking,'Intermediate','secondary','Final reply'];
+  const expectedOrder=['First answer','lookup · README.md',completedThinking,'Intermediate','secondary','Final reply'];
   assert.deepEqual(mixedOrder(liveParts()),expectedOrder,'completed model preview retains its inline order until History');
   assert.equal(liveParts().children[1],first);
   const previousArticle=olderArticle(),previousThinking=descendants(previousArticle).find(item=>item.tagName==='DETAILS');
@@ -985,7 +989,7 @@ if(process.argv[3]==='tools') {
   timelineOverrides.set('a',{items:[older,saved],next_cursor:null});
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
   const savedParts=()=>article()?.children.find(item=>item.className==='turn-saved-answers');
-  await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookup140 ms'));
+  await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookup · README.md140 ms'));
   globalThis.requestAnimationFrame=schedule;globalThis.cancelAnimationFrame=cancel;
   assert.equal(savedParts().children.at(-1).children[0].textContent,'Thinking0 ms',
     'canonical hydration preserves a completed duration even before the queued paint');
@@ -994,9 +998,9 @@ if(process.argv[3]==='tools') {
   assert.equal(document.activeElement,previousThinking.children[0]);
   assert.equal(node('live'),previousLive);
   assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
-  assert.match(savedParts().textContent,/secondaryOutcome unconfirmed/);
+  assert.match(savedParts().textContent,/secondaryFailed\nPermission denied./);
   assert.equal(savedParts().children[1].tagName,'DETAILS');
-  assert.equal(savedParts().children[1].children[0].textContent,'lookup140 ms','durable server time replaces the live tool preview');
+  assert.equal(savedParts().children[1].children[0].textContent,'lookup · README.md140 ms','durable server time replaces the live tool preview');
   assert.equal(savedParts().children[1].open,true,'the same committed tool retains its open disclosure');
   assert.ok(!descendants(savedParts()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
   const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===completedThinking);
@@ -1014,7 +1018,7 @@ if(process.argv[3]==='tools') {
   assert.match(savedParts().textContent,/Thinking375 ms/,'cold-reopened History retains thinking time without prior browser observations');
   assert.match(savedParts().textContent,/Thinking0 ms/,'a real zero duration also survives reopen');
   assert.doesNotMatch(olderArticle().textContent,/ ms/,'older archived thoughts without a duration remain untimed');
-  assert.match(savedParts().textContent,/lookup140 ms/,'cold-reopened History retains the saved tool elapsed time');
+  assert.match(savedParts().textContent,/lookup · README\.md140 ms/,'cold-reopened History retains the saved tool elapsed time');
   assert.equal(savedParts().children[4].children[0].textContent,'secondary','legacy tool without an elapsed field remains untimed');
 
   const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
@@ -1023,8 +1027,8 @@ if(process.argv[3]==='tools') {
   const executionRequests=()=>calls.filter(call=>[remote,replacement].some(id=>call.key==='/api/executions/'+id+'/events'));
   const readCount=()=>calls.filter(call=>call.key==='/api/sessions/a' && call.method==='GET').length;
   const remoteArticle=id=>descendants(node('conversation')).find(item=>item.dataset.execution===id);
-  const remoteTool={...tool,key:'tool:remote',tool_name:'External lookup'};
-  const remoteResult={...remoteTool,status:'SUCCEEDED'};
+  const remoteTool={...tool,key:'tool:remote',tool_name:'External lookup',argument_preview:null};
+  const remoteResult={...remoteTool,status:'SUCCEEDED',elapsed_ms:240};
   const historyRelease=deferred('GET /api/sessions/a'),source=sessionSources.at(-1);
   source.process(remote,{...remoteTool,key:'tool:too-early',tool_name:'Before occupancy'});
   session.local_execution=false;executions.set(remote,{...info(remote,'a'),status:'STARTED'});
@@ -1033,14 +1037,14 @@ if(process.argv[3]==='tools') {
   const initialReadCount=readCount();
   source.process('older-execution',{...remoteTool,tool_name:'Must not render'});
   source.process(remote,remoteTool);source.process(remote,remoteResult);
-  await until('remote process renders without execution SSE',()=>node('conversation').textContent.includes('External lookupCompleted'));
+  await until('remote process renders without execution SSE',()=>node('conversation').textContent.includes('External lookup240 msCompleted'));
   assert.equal(readCount(),initialReadCount,'tool notices cannot trigger history reads');
   assert.equal(executionRequests().length,0,'external owner never opens the polling execution event endpoint');
   assert.equal(calls.filter(call=>call.key==='/api/executions/'+remote).length,1,'external owner metadata is read once');
   const activeTimeline={items:[saved,remoteTurn],next_cursor:null};
   timelineOverrides.set('a',activeTimeline);
   historyRelease({session:{...session},timeline:activeTimeline});
-  await until('remote committed input uses the same external process preview',()=>remoteArticle(remote)?.textContent.includes('External lookupCompleted'));
+  await until('remote committed input uses the same external process preview',()=>remoteArticle(remote)?.textContent.includes('External lookup240 msCompleted'));
 
   const replacementRead=deferred('GET /api/sessions/a');
   executions.set(replacement,{...info(replacement,'a'),status:'STARTED'});
@@ -1049,7 +1053,7 @@ if(process.argv[3]==='tools') {
   source.process(remote,{...remoteTool,tool_name:'Stale terminal frame'});
   source.process(replacement,{...remoteTool,tool_name:'New lookup'});
   await until('replacement process isolated',()=>node('conversation').textContent.includes('New lookupIn progress'));
-  assert.match(remoteArticle(remote).textContent,/External lookupCompleted/,'keep known old tool state until canonical readback');
+  assert.match(remoteArticle(remote).textContent,/External lookup240 msCompleted/,'keep known old tool state until canonical readback');
   assert.doesNotMatch(node('conversation').textContent,/Before occupancy|Must not render|Stale terminal frame/);
   assert.equal(node('send').disabled,true);
   const finishedRemote={...remoteTurn,status:'SUCCEEDED',conversation_committed:true,process:[remoteResult],items:[{item_kind:'assistant',content:'External answer'}]};
@@ -1057,8 +1061,11 @@ if(process.argv[3]==='tools') {
   timelineOverrides.set('a',replacementTimeline);
   replacementRead({session:{...session},timeline:replacementTimeline});
   await until('same-revision replacement reads the previous committed turn',()=>remoteArticle(remote)?.textContent.includes('External answer'));
+  assert.match(remoteArticle(remote).textContent,/External lookup240 msCompleted/,'remote notice and committed history share the elapsed field');
   assert.equal(node('send').disabled,true,'older completion must not unlock a replacement owner');
   assert.match(remoteArticle(replacement).textContent,/New lookupIn progress/);
+  source.process(replacement,{...remoteTool,tool_name:'New lookup',status:'FAILED'});
+  await until('failure without a code is explicit',()=>remoteArticle(replacement).textContent.includes('No reason provided.'));
 
   const terminalRead=deferred('GET /api/sessions/a');
   session.active_execution_id=null; // Another same-revision authoritative release.
@@ -1067,7 +1074,7 @@ if(process.argv[3]==='tools') {
   const pendingReads=readCount();
   source.snapshot(); // A duplicate idle snapshot can arrive before terminal History returns.
   node('chat-mode').click();
-  assert.match(remoteArticle(replacement).textContent,/New lookupIn progress/,'duplicate idle keeps observed tool rows until canonical readback');
+  assert.match(remoteArticle(replacement).textContent,/New lookupFailed/,'duplicate idle keeps observed tool rows until canonical readback');
   assert.equal(readCount(),pendingReads,'duplicate idle must not repeat the terminal read');
   const finishedReplacement={...replacementTurn,status:'SUCCEEDED',conversation_committed:true,process:[],items:[{item_kind:'assistant',content:'Replacement answer'}]};
   const terminalTimeline={items:[saved,finishedRemote,finishedReplacement],next_cursor:null};
@@ -1076,7 +1083,7 @@ if(process.argv[3]==='tools') {
   source.snapshot();
   await settle();
   assert.equal(readCount(),pendingReads,'pending does not poll or reread on a duplicate snapshot');
-  assert.match(remoteArticle(replacement).textContent,/New lookupIn progress/);
+  assert.match(remoteArticle(replacement).textContent,/New lookupFailed/);
   assert.doesNotMatch(node('notice').textContent,/SESSION_TURN_PENDING|Runtime read unavailable/);
   timelineOverrides.set('a',terminalTimeline);
   source.disconnect();
