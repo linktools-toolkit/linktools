@@ -4525,8 +4525,10 @@ class LocalExecutionBackend:
                         )
                     )
                     return
+                error_message = (emission.live_error_message if current.session_id is not None
+                                 and current.parent_execution_id is None else None)
                 await self._append_event(current, emission.event_type, emission.payload,
-                    producer_generation=producer_generation)
+                    producer_generation=producer_generation, live_error_message=error_message)
                 if self._turn_observers and current.session_id is not None and current.parent_execution_id is None:
                     owner = self._turn_owners.get(current.execution_id)
                     if (owner is not None and owner.notice_admitted and not owner.stopping
@@ -4537,6 +4539,8 @@ class LocalExecutionBackend:
                             except AIError:
                                 return
                         process = project_tool_process_event(emission.event_type.value, emission.payload)
+                        if process is not None and error_message is not None:
+                            process = replace(process, error_message=error_message)
                         if process is not None:
                             self._notify_turn(SessionTurnNotice(
                                 "tool", current.session_id, current.execution_id, process,
@@ -5357,7 +5361,7 @@ class LocalExecutionBackend:
         execution: ExecutionRecord,
         event_type: ExecutionEventType,
         payload: JsonValue,
-        *, producer_generation: int | None = None,
+        *, producer_generation: int | None = None, live_error_message: str | None = None,
     ) -> None:
         normalized = normalize_json_value(payload)
         event_payload = normalized if isinstance(normalized, Mapping) else {"value": normalized}
@@ -5393,7 +5397,7 @@ class LocalExecutionBackend:
             self._live_broker.publish_event(
                 execution.execution_id,
                 event_type,
-                event_payload,
+                event_payload if live_error_message is None else {**event_payload, "error_message": live_error_message},
                 durable_seq=None,
             )
         _logger.debug(

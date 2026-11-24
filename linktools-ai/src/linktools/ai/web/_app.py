@@ -92,6 +92,8 @@ def _wire(value: object) -> object:
                 result.pop("elapsed_ms")
             if value.error_code is None:
                 result.pop("error_code")
+            if value.error_message is None:
+                result.pop("error_message")
             if value.argument_preview is None:
                 result.pop("argument_preview")
         return result

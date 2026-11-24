@@ -715,7 +715,7 @@ function toolProcessRow(rows,row,fold=false) {
   const title=row.argument_preview ? `${row.tool_name} · ${row.argument_preview}` : row.tool_name;
   if(node.toolNameText!==title){node.toolNameNode.textContent=title;node.toolNameText=title;}
   const status=processToolStatus[row.status];
-  const reason=row.status==='FAILED' ? processToolReason.get(row.error_code) || row.error_code || 'No reason provided.' : '';
+  const reason=row.status==='FAILED' ? row.error_message ?? processToolReason.get(row.error_code) ?? row.error_code ?? 'No reason provided.' : '';
   const detail=reason?`${status}\n${reason}`:status;
   if(node.toolStatusNode.textContent!==detail)node.toolStatusNode.textContent=detail;
   if(fold) {

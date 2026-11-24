@@ -929,10 +929,12 @@ if(process.argv[3]==='tools') {
   assert.equal(first.children[1].getAttribute('aria-live'),'polite');
   const unranked={...tool,position:null};
   emit('process',{...unranked,status:'SUCCEEDED',elapsed_ms:125,argument_preview:undefined});emit('process',unranked);
-  emit('process',{...laterTool,status:'FAILED',error_code:'AUTHORIZATION_DENIED'});
-  await until('safe failure reason is displayed on its tool',()=>liveParts().children[4]?.textContent.includes('Permission denied.'));
+  const modelError='Correct the <workspace> path.\nThen retry.';
+  emit('process',{...laterTool,status:'FAILED',error_code:'AUTHORIZATION_DENIED',error_message:modelError,exception:'internal stack trace'});
+  await until('safe failure reason is displayed on its tool',()=>liveParts().children[4]?.textContent.includes(modelError));
   assert.equal(liveParts().children[4].children[0].textContent,'secondary','absent safe preview is not synthesized');
-  assert.equal(liveParts().children[4].children[1].textContent,'Failed\nPermission denied.');
+  assert.equal(liveParts().children[4].children[1].textContent,'Failed\n'+modelError);
+  assert.doesNotMatch(liveParts().children[4].textContent,/internal stack trace|Permission denied/);
   await until('completed tool cannot be reopened by replay',()=>first.children[1].textContent==='Completed');
   assert.equal(liveParts().children[1],first);
   assert.equal(first.open,true,'tool completion preserves disclosure state');
@@ -960,7 +962,7 @@ if(process.argv[3]==='tools') {
     {item_kind:'tool_call',tool_call_id:'later',content:null},
     {item_kind:'tool_result',content:'Private saved result'},
     {item_kind:'assistant',content:'Final reply'},
-  ],process:[{...tool,status:'SUCCEEDED',elapsed_ms:140},{...laterTool,status:'FAILED',error_code:'AUTHORIZATION_DENIED'}]};
+  ],process:[{...tool,status:'SUCCEEDED',elapsed_ms:140},{...laterTool,status:'FAILED',error_code:'AUTHORIZATION_DENIED',error_message:modelError}]};
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
   event('MODEL_REQUEST_FINISHED',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,status:'SUCCEEDED'});
@@ -1000,7 +1002,7 @@ if(process.argv[3]==='tools') {
   assert.equal(document.activeElement,previousThinking.children[0]);
   assert.equal(node('live'),previousLive);
   assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
-  assert.match(savedParts().textContent,/secondaryFailed\nPermission denied./);
+  assert.equal(savedParts().children[4].children[1].textContent,'Failed\n'+modelError);
   assert.equal(savedParts().children[1].tagName,'DETAILS');
   assert.equal(savedParts().children[1].children[0].textContent,'lookup · README.md140 ms','durable server time replaces the live tool preview');
   assert.equal(savedParts().children[1].open,true,'the same committed tool retains its open disclosure');
@@ -1021,7 +1023,8 @@ if(process.argv[3]==='tools') {
   assert.match(savedParts().textContent,/Thinking0 ms/,'a real zero duration also survives reopen');
   assert.doesNotMatch(olderArticle().textContent,/ ms/,'older archived thoughts without a duration remain untimed');
   assert.match(savedParts().textContent,/lookup · README\.md140 ms/,'cold-reopened History retains the saved tool elapsed time');
-  assert.equal(savedParts().children[4].children[0].textContent,'secondary','legacy tool without an elapsed field remains untimed');
+  assert.equal(savedParts().children[4].children[0].textContent,'secondary','missing preview and elapsed remain blank');
+  assert.equal(savedParts().children[4].children[1].textContent,'Failed\n'+modelError,'cold History preserves exactly what the model received');
 
   const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
   const remoteTurn={...turn,execution_id:remote,user_input:'External question'};

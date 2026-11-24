@@ -1745,7 +1745,9 @@ async def test_workspace_tool_title_requires_native_registration(tmp_path: Path,
                 payload = item.event.payload
                 observed[f"tool:{payload['call_id']}"] = payload.get("argument_preview")
 
-        assert (await execution.wait(timeout_seconds=10, on_event=on_event)).result.status.value == "SUCCEEDED"
+        assert (await execution.wait(
+            timeout_seconds=10, on_event=on_event, include_event_content=True,
+        )).result.status.value == "SUCCEEDED"
         history = await http.get("/api/session?session_id=preview")
         assert history.status_code == 200, history.text
         turn, = history.json()["timeline"]["items"]
@@ -1759,3 +1761,75 @@ async def test_workspace_tool_title_requires_native_registration(tmp_path: Path,
         metadata = first_tool["metadata"]
         assert metadata["linktools.ai.effect_policy"] == "none"
         assert "linktools.ai.argument_preview_field" not in metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry", [False, True])
+async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit_copy(
+    tmp_path: Path, retry: bool,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+
+    from linktools.ai.capability import AgentContext, ToolCallFailed, ToolCallRetry
+    from linktools.ai.execution.events import project_event_payload
+    from linktools.ai.web._app import _chat_frame
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+    failure = "Use the original filename.\n  The second line is also model-visible."
+    release = asyncio.Event()
+    received = []
+
+    async def lookup(context: AgentContext[None]) -> str:
+        await release.wait()
+        raise (ToolCallRetry if retry else ToolCallFailed)(failure)
+
+    def respond(messages, _info):
+        for part in messages[-1].parts:
+            if isinstance(part, ToolReturnPart):
+                received.append(part.content)
+                return ModelResponse(parts=[TextPart("adapted")])
+        return ModelResponse(parts=[ToolCallPart("lookup", {}, tool_call_id="failed-lookup")])
+
+    features = _persistence_capabilities()
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.tool(lookup, effect_policy="none")
+    features.agent("default", allow_tools=("lookup",))
+    model_features(_Models(_UsageFunctionModel(respond)), features)
+    storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    async with Persistence.open("chat-tool-failure", storage=storage) as persistence, Runtime.open(
+        persistence=persistence, features=features,
+    ) as runtime:
+        session = await runtime.agents.get("default").create_session("failures")
+        execution = await session.start("lookup")
+        seen = []
+        try:
+            async with asyncio.timeout(10):
+                async for observation in execution.watch(include_content=True):
+                    frame = _chat_frame(observation)
+                    if frame is None or frame[1].get("type") != "process":
+                        continue
+                    item = frame[1]["item"]
+                    if item["status"] == "RUNNING":
+                        assert "error_message" not in item
+                        release.set()
+                    if item["status"] == "FAILED":
+                        seen.append(item["error_message"])
+                        event = observation.event
+                        projected = project_event_payload(event.event_type, event.payload, include_content=False)
+                        assert "error_message" not in projected
+        finally:
+            release.set()
+        assert (await execution.wait()).result.status.value == "SUCCEEDED"
+        assert received == seen == [failure]
+        audit = await execution.list_events(include_content=True)
+        failures = [event for event in audit.items if event.event_type == "TOOL_CALL_FINISHED"]
+        assert len(failures) == 1 and "error_message" not in failures[0].payload
+    async with Persistence.open("chat-tool-failure", storage=storage) as reopened, Runtime.open(
+        persistence=reopened, features=features,
+    ) as runtime, client(create_app(runtime=runtime)) as http:
+        replay = await http.get("/api/session?session_id=failures")
+        assert replay.status_code == 200, replay.text
+        turn, = replay.json()["timeline"]["items"]
+        item, = turn["process"]
+        assert item["status"] == "FAILED" and item["error_message"] == failure

@@ -21,6 +21,7 @@ class ToolProcessItem:
     elapsed_ms: int | None = None
     error_code: ErrorCode | None = None
     argument_preview: str | None = None
+    error_message: str | None = None
     kind: Literal["tool"] = field(default="tool", init=False)
 
 
@@ -43,6 +44,7 @@ class ToolProcessItem:
         elapsed = row.get("elapsed_ms")
         preview = row.get("argument_preview")
         code = row.get("error_code") if status == "FAILED" else None
+        message = row.get("error_message") if status == "FAILED" else None
         try:
             reason = ErrorCode(code) if isinstance(code, str) else None
         except ValueError:
@@ -51,6 +53,7 @@ class ToolProcessItem:
             key, name, cast(ToolProcessStatus, status), position,
             elapsed if status != "RUNNING" and type(elapsed) is int and elapsed >= 0 else None,
             reason, preview if isinstance(preview, str) else None,
+            message if isinstance(message, str) and message else None,
         )
 
 
@@ -94,6 +97,7 @@ def project_tool_process_event(event_type: str, payload: JsonValue) -> ToolProce
         "kind": "tool", "key": f"tool:{call_id}", "tool_name": payload.get("tool_name"),
         "status": status, "position": payload.get("tool_position"), "elapsed_ms": payload.get("tool_elapsed_ms"),
         "error_code": payload.get("error_code"), "argument_preview": payload.get("argument_preview"),
+        "error_message": payload.get("error_message"),
     })
 
 

@@ -149,7 +149,7 @@ from ._output_preview import OutputPreview
 from ._tool_metrics import (
     ToolMetricsCapability,
 )
-from ..model.messages import rehydrate_deferred_tool_results, tool_return_content_digest
+from ..model.messages import rehydrate_deferred_tool_results, tool_error_message, tool_return_content_digest
 from ..persistence.contracts import LoadedModelContext
 from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 
@@ -169,6 +169,7 @@ class LiveDelta:
 class DurableBoundary:
     event_type: ExecutionEventType
     payload: JsonValue
+    live_error_message: str | None = None
 
 
 AgentEmission = LiveDelta | DurableBoundary
@@ -1453,9 +1454,7 @@ def _event_stream_capability(
                     if origin is not None:
                         position["tool_position"] = list(origin)
                         position["tool_model_request_seq"] = recorder.model_request_seq_for_tool_call(event.part.tool_call_id)
-                emission = DurableBoundary(
-                    emission.event_type, {**emission.payload, **position}
-                )
+                emission = replace(emission, payload={**emission.payload, **position})
             if emission is None:
                 event_type = type(event)
                 _logger.debug(
@@ -1549,6 +1548,7 @@ def _map_event(event: object) -> "AgentEmission | None":
                     "status": "FAILED",
                     "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
                 },
+                live_error_message=tool_error_message(part),
             )
         if isinstance(part, ToolReturnPart):
             success = part.outcome == "success"
@@ -1563,6 +1563,7 @@ def _map_event(event: object) -> "AgentEmission | None":
                     "status": "SUCCEEDED" if success else "FAILED",
                     **({"error_code": ErrorCode.AUTHORIZATION_DENIED.value} if part.outcome == "denied" else {}),
                 },
+                live_error_message=tool_error_message(part),
             )
     return None
 

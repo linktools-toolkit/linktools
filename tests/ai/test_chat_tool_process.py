@@ -17,7 +17,7 @@ from linktools.ai.errors import ErrorCode
 from linktools.ai.session import ToolProcessItem, project_tool_process_event, tool_argument_preview
 
 
-def test_committed_chat_process_pairs_explicit_results_without_payloads() -> None:
+def test_committed_chat_process_pairs_explicit_results_and_model_feedback() -> None:
     messages = (
         ModelResponse(parts=[
             ThinkingPart(content="private thinking", signature="opaque"),
@@ -29,7 +29,7 @@ def test_committed_chat_process_pairs_explicit_results_without_payloads() -> Non
         ModelRequest(parts=[
             ToolReturnPart(tool_name="archive", content="real interruption", tool_call_id="d", outcome="interrupted"),
             ToolReturnPart(tool_name="search", content={"secret": "result"}, tool_call_id="a"),
-            ToolReturnPart(tool_name="search", content="internal diagnostic", tool_call_id="b", outcome="retried"),
+            ToolReturnPart(tool_name="search", content="model retry feedback", tool_call_id="b", outcome="retried"),
             ToolReturnPart(
                 tool_name="notify", content="synthetic interrupted", tool_call_id="c",
                 outcome="interrupted", metadata={SYNTHESIZED_TOOL_RETURN_METADATA_KEY: True},
@@ -39,7 +39,7 @@ def test_committed_chat_process_pairs_explicit_results_without_payloads() -> Non
     )
     assert _project_turn_tool_process(messages) == (
         ToolProcessItem("tool:a", "search", "SUCCEEDED", (1, 1)),
-        ToolProcessItem("tool:b", "search", "FAILED", (1, 2), error_code=ErrorCode.TOOL_RETRY_REQUIRED),
+        ToolProcessItem("tool:b", "search", "FAILED", (1, 2), error_code=ErrorCode.TOOL_RETRY_REQUIRED, error_message="model retry feedback"),
         ToolProcessItem("tool:c", "notify", "UNCONFIRMED", (1, 3)),
         ToolProcessItem("tool:d", "archive", "INTERRUPTED", (1, 4)),
     )

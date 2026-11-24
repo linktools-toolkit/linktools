@@ -37,7 +37,10 @@ from ..storage import StoredPayload
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ..inputs import stored_user_input_view
-from ..model.messages import THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ARGUMENT_PREVIEWS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY
+from ..model.messages import (
+    THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ARGUMENT_PREVIEWS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY,
+    tool_error_message,
+)
 from ..session import SessionTurn, SessionTurnItem
 from ..persistence.contracts import (
     ConversationRepositories,
@@ -855,6 +858,7 @@ def _project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[Tool
                 calls[part.tool_call_id] = replace(
                     call, status=status, elapsed_ms=elapsed if type(elapsed) is int and elapsed >= 0 else None,
                     error_code=reason,
+                    error_message=tool_error_message(part),
                 )
     return tuple(calls.values())
 

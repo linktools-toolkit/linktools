@@ -851,9 +851,17 @@ class AgentRunRecorder:
         if field is None:
             return None
         try:
-            return tool_argument_preview(part.args_as_dict().get(field))
+            value = part.args_as_dict().get(field)
         except (TypeError, ValueError):
             return None
+        if field != "command":
+            return tool_argument_preview(value)
+        if not isinstance(value, str):
+            return None
+        command = "".join(char if char.isprintable() else " " for char in value)
+        if not command.strip():
+            return None
+        return command if len(command) <= 80 else command[:79] + "…"
 
     def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
         origin = self._tool_call_origins.get(tool_call_id)
