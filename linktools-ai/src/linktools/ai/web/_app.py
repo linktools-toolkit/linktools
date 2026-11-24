@@ -390,21 +390,14 @@ class _Console:
                 raise ValueError("invalid session turn selector")
             if environ.debug:
                 request.state.phase = "session.turn"
-            if turn_state == "committed":
-                try:
-                    turn = await history.session_turn(identity, execution_id, principal=self.principal)
-                except AIError as error:
-                    if error.code is not ErrorCode.SESSION_HISTORY_UNAVAILABLE:
-                        raise
-                    items = ()
-                else:
-                    items = (turn,)
             if turn_state == "active":
                 detail = await history.session_detail(identity, principal=self.principal, limit=1)
                 session = detail.session
                 items = tuple(turn for turn in detail.timeline.items if turn.execution_id == execution_id)
             else:
+                turn = await history.session_turn(identity, execution_id, principal=self.principal)
                 session = await history.inspect_session(identity, principal=self.principal)
+                items = (turn,)
             return _json({"session": session, "timeline": _chat_timeline(Page(items, None))})
         if include_timeline == "true":
             if environ.debug:

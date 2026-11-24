@@ -1007,6 +1007,31 @@ if(process.argv[3]==='tools') {
   assert.doesNotMatch(node('conversation').textContent,/Stale after release|New lookup/);
   assert.equal(executionRequests().length,0);
   assert.equal(node('send').disabled,false);
+  // A replacement owner supersedes a pending exact read, even if that response arrives last.
+  const superseded='superseded-terminal',successor='successor-after-pending';
+  const successorTurn={...remoteTurn,execution_id:successor,user_input:'New owner input'};
+  executions.set(superseded,{...info(superseded,'a'),status:'STARTED'});
+  executions.set(successor,{...info(successor,'a'),status:'STARTED'});
+  timelineOverrides.set('a',{items:[...terminalTimeline.items,{...remoteTurn,execution_id:superseded}],next_cursor:null});
+  session.active_execution_id=superseded;
+  await until('superseded turn active input',()=>remoteArticle(superseded)?.textContent.includes('External question'));
+  const stalePending=deferred('GET /api/sessions/a');
+  session.active_execution_id=null;
+  await stalePending.requested;
+  delays.delete('GET /api/sessions/a');
+  session.revision++;
+  const successorRead=deferred('GET /api/sessions/a');
+  session.active_execution_id=successor;
+  await successorRead.requested;
+  delays.delete('GET /api/sessions/a');
+  const beforeStale=readCount();
+  stalePending({code:'SESSION_TURN_PENDING'},409);
+  await settle();
+  assert.equal(readCount(),beforeStale,'a superseded pending turn cannot start another exact read');
+  assert.doesNotMatch(node('notice').textContent,/SESSION_TURN_PENDING|Runtime read unavailable/);
+  successorRead({session:{...session},timeline:{items:[successorTurn],next_cursor:null}});
+  await until('new owner readback remains active',()=>remoteArticle(successor)?.textContent.includes('New owner input'));
+  assert.equal(node('send').disabled,true);
   console.log('Public process survives reconnect, commit and external-owner transitions without polling the execution');process.exit(0);
 }
 if(process.argv[3]==='thinking') {

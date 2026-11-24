@@ -489,7 +489,7 @@ function refreshSessionTimeline(watch, executionId=null, releasedTurn=null) {
       refreshSessionTimeline(sessionWatch);
     else retryAfterReconnect();
   }).catch(error=>{
-    if(!current())return;
+    if(!current() || refresh.attempt!==attempt)return;
     failed();
     if(error.code==='SESSION_TURN_PENDING') {
       // Wait for an authoritative occupancy edge or a reconnect, not a timer.

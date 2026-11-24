@@ -1289,6 +1289,7 @@ async def test_web_exact_session_turn_keeps_pending_and_recovery_distinct_withou
     async with client(create_app(history=history)) as http:
         for code, status in (
             (ErrorCode.SESSION_TURN_PENDING, 409),
+            (ErrorCode.SESSION_HISTORY_UNAVAILABLE, 503),
             (ErrorCode.STORAGE_RECOVERY_REQUIRED, 503),
             (ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, 503),
         ):
