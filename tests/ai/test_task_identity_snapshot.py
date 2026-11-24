@@ -34,7 +34,7 @@ async def _snapshot(
         submission = await _seed_legacy(state) if version == 1 else await _service(state).prepare_submission(_request())
         features = RuntimeFeatures("snapshot-agent")
         features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-        async with Runtime.attach(persistence=state, features=model_features(FixtureModels(), features)) as runtime:
+        async with Runtime.open(persistence=state, features=model_features(FixtureModels(), features)) as runtime:
             task = Task.from_agent("identity.agent", runtime.agents.get())
             captures = TaskGraphBindingCaptureStore(state.namespace, state.task.tasks.state_store)
             await captures.capture(submission.admission, submission.graph, tasks=(task,))

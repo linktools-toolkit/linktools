@@ -40,7 +40,7 @@ async def test_start_identity_reads_once_unless_local_settlement_publishes_owner
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("start-identity-reads", storage=storage) as state:
-        async with Runtime.attach(persistence=state,
+        async with Runtime.open(persistence=state,
             features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get().create_session("session")
             service = runtime._execution_service

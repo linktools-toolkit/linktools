@@ -150,7 +150,7 @@ async def test_mcp_reads_admitted_files_without_changing_receipts_and_cleans_aft
     models = _Models(_UsageFunctionModel(respond))
     models.contract = {**models.contract, "input_mime_types": ["application/pdf"]}
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    async with Persistence.open("mcp-original-inputs", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("mcp-original-inputs", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(models, group),
     ) as runtime:
         execution = await runtime.agents.get().start(["Inspect the admitted original", reference])

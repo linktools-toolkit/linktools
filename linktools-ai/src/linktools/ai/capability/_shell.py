@@ -12,7 +12,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
 from ..errors import AIError, ErrorCode
 from ..workspace import SupportsCommandJobs, ToolPermissionPolicy, WorkspaceOperationRejected
-from ._tool_metadata import tool_metadata
+from ._tool_metadata import _registered_preview, tool_metadata
 from ._tool_signal import ToolCallRetry
 from ._workspace_policy import workspace_policy_toolset
 
@@ -192,7 +192,9 @@ def _tools(backend: SupportsCommandJobs | None, names: Sequence[str]) -> tuple[T
     return tuple(Tool(
         getattr(surface, name), takes_ctx=False, name=name,
         metadata=tool_metadata(tool_class="shell", effect_policy="none" if name == "check_command" else "non_replay_safe",
-                               plan_safe=name == "check_command"),
+                               plan_safe=name == "check_command",
+                               base=_registered_preview("command")
+                               if backend is not None and name in ("run_command", "start_command") else None),
     ) for name in names)
 
 

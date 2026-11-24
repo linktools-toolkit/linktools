@@ -61,7 +61,7 @@ async def test_turn_owner_survives_handle_return_timeout_and_promotion(tmp_path:
     features.agent("default", model="default", allow_tools=())
     cache = _ObservedCache()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
-    async with Persistence.open("lifecycle-probe", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("lifecycle-probe", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -127,7 +127,7 @@ async def test_parent_and_parallel_children_keep_independent_turn_owners(tmp_pat
     features.agent("child", model="child", allow_tools=(), allow_subagents=("default",))
     cache = _ObservedCache()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
-    async with Persistence.open("subagent-owner-probe", storage=storage) as persistence, Runtime.attach(persistence=persistence, features=features) as runtime:
+    async with Persistence.open("subagent-owner-probe", storage=storage) as persistence, Runtime.open(persistence=persistence, features=features) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("delegate twice", idempotency_key="parent-request")
         try:
@@ -171,7 +171,7 @@ async def test_turn_owner_outlives_worker_until_owned_work_settles(tmp_path: Pat
     features.agent("default", model="default", allow_tools=())
     cache = _ObservedCache()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
-    async with Persistence.open("owned-work", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("owned-work", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -224,7 +224,7 @@ async def test_lease_renewal_failure_stops_worker_and_releases_ownership(tmp_pat
     features.agent("default", model="default", allow_tools=())
     cache = LostLeaseCache()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
-    async with Persistence.open("lost-owner", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("lost-owner", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -244,7 +244,7 @@ async def test_lease_renewal_failure_stops_worker_and_releases_ownership(tmp_pat
         with pytest.raises(AIError) as local_wait:
             await execution.wait(timeout_seconds=2)
         assert local_wait.value.safe_details["phase"] == "turn_owner_lost"
-        async with Runtime.attach(persistence=persistence, features=model_features(
+        async with Runtime.open(persistence=persistence, features=model_features(
             _Models(_UsageFunctionModel(model)), features,
         )) as observer:
             observed = await observer.executions.inspect(execution.execution_id, principal=observer.default_principal)
@@ -285,7 +285,7 @@ async def test_runtime_handoff_stops_child_wait_without_cancelling_logical_child
     cache = _ObservedCache() if coordinated else None
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
     async with Persistence.open("subagent-handoff", storage=storage) as persistence:
-        runtime = Runtime.attach(persistence=persistence, features=features)
+        runtime = Runtime.open(persistence=persistence, features=features)
         await runtime.__aenter__()
         backend = runtime._execution_service.runtime_backend()
         try:
@@ -357,7 +357,7 @@ async def test_parent_lease_loss_stops_only_old_workers_without_logical_child_ca
     cache = LostParent()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
     with pytest.raises(AIError) if checkpoint else nullcontext():
-        async with Persistence.open("parent-owner-loss", storage=storage) as persistence, Runtime.attach(
+        async with Persistence.open("parent-owner-loss", storage=storage) as persistence, Runtime.open(
             persistence=persistence, features=features,
         ) as runtime:
             session = await runtime.agents.get().create_session("session")
@@ -413,7 +413,7 @@ async def test_child_owner_loss_does_not_force_cancel_logical_child(tmp_path: Pa
     cache = LostChild()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
     with pytest.raises(AIError):
-        async with Persistence.open("child-owner-loss", storage=storage) as persistence, Runtime.attach(
+        async with Persistence.open("child-owner-loss", storage=storage) as persistence, Runtime.open(
             persistence=persistence, features=features,
         ) as runtime:
             session = await runtime.agents.get().create_session("session")

@@ -54,7 +54,7 @@ async def test_admission_capture_is_stable_while_cancellation_stops_provider(
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Persistence.open('launch-change', storage=first_state) as persistence_48, Runtime.attach(persistence=persistence_48, features=model_features(models, group)) as first, Persistence.open('launch-change', storage=second_state) as persistence_48, Runtime.attach(persistence=persistence_48, features=model_features(models, group)) as second:
+    async with Persistence.open('launch-change', storage=first_state) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models, group)) as first, Persistence.open('launch-change', storage=second_state) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models, group)) as second:
         session = await first.agents.get().create_session("session", metadata={"marker": "before"})
         execution = await session.start("question", idempotency_key="same")
         await asyncio.wait_for(launched.wait(), 5)
@@ -140,7 +140,7 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Persistence.open('launch-winner', storage=first_state) as persistence_119, Runtime.attach(persistence=persistence_119, features=model_features(models, group)) as first, Persistence.open('launch-winner', storage=second_state) as persistence_119, Runtime.attach(persistence=persistence_119, features=model_features(models, group)) as second:
+    async with Persistence.open('launch-winner', storage=first_state) as persistence_119, Runtime.open(persistence=persistence_119, features=model_features(models, group)) as first, Persistence.open('launch-winner', storage=second_state) as persistence_119, Runtime.open(persistence=persistence_119, features=model_features(models, group)) as second:
         await first.agents.get().create_session("session")
         one = await first.agents.get().session("session").start("question", idempotency_key="same")
         await asyncio.wait_for(launched.wait(), 5)
@@ -177,7 +177,7 @@ async def test_restartable_launch_reuses_reads_but_requires_attempt_claim(
     features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     storage = (_split_sqlite_storage if split_storage else PersistenceStorage.sqlite)(tmp_path / "state.db")
-    async with Persistence.open("initial-capture", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("initial-capture", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         await runtime.agents.get().create_session("session")

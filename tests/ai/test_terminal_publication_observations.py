@@ -45,7 +45,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
         native = await persistence.create_step_store(max_cached_messages=0)
         try:
             application.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
-            async with Runtime.attach(persistence=persistence, features=model_features(_ToolModels(), application)) as runtime:
+            async with Runtime.open(persistence=persistence, features=model_features(_ToolModels(), application)) as runtime:
                 async def snapshot():
                     async def read(tx):
                         return (

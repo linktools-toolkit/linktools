@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Focused regression coverage for the final Agent composition contract."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -15,7 +15,8 @@ from linktools.ai.capability import CapabilityContribution, SkillDefinition
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 
-from linktools.ai.execution import ExecutionHandle, ExecutionRequest, ResumeSessionRequest
+from linktools.ai.execution import ExecutionHandle, ExecutionRequest
+from linktools.ai.session import ResumeSessionRequest
 from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.spec import CapabilityRef, AgentSpec, MCPServerSpec, SkillSpec
 from linktools.ai.core import Principal, PrincipalKind, SessionStatus
@@ -166,7 +167,7 @@ async def test_binding_preserves_declaration_order_and_capability_registration_o
     )
     spec = AgentSpec("agent")
     compiler = AgentCompiler(
-        models={"default": create_model(api='openai', model="test-model")},
+        models={"default": create_model_binding(api='openai', model="test-model")},
         candidates=(*capture.contributions, skill),
         agents={spec.id: spec},
     )

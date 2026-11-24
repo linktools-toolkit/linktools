@@ -9,7 +9,7 @@ from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding
 
 
-def create_model(
+def create_model_binding(
     *,
     api: str,
     model: str,
@@ -60,4 +60,4 @@ def create_model(
     )
 
 
-__all__ = ["create_model"]
+__all__ = ["create_model_binding"]

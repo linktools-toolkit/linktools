@@ -100,7 +100,7 @@ async def test_agent_and_agent_task_share_the_runtime_scope() -> None:
 async def test_attached_scope_does_not_close_borrowed_persistence() -> None:
     task = Task("echo", _echo, effect_policy="none")
     async with Persistence.open("shared", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence) as runtime:
+        async with Runtime.open(persistence=persistence) as runtime:
             engine = await runtime.tasks.bind(task)
             assert engine.persistence is persistence
         assert persistence.ready
@@ -389,8 +389,8 @@ async def test_evaluations_stop_before_tasks_and_failed_task_close_does_not_clos
 async def test_explicit_external_agent_keeps_its_owner_and_authorization() -> None:
     agent_policy, task_policy = _Policy(), _Policy()
     async with Persistence.open("shared-agent", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(), authorization=agent_policy) as agent_owner:
-            async with Runtime.attach(persistence=persistence, authorization=task_policy) as task_owner:
+        async with Runtime.open(persistence=persistence, features=_features(), authorization=agent_policy) as agent_owner:
+            async with Runtime.open(persistence=persistence, authorization=task_policy) as task_owner:
                 task = Task.from_agent("external.agent", agent_owner.agents.get())
                 engine = await task_owner.tasks.bind(task)
                 graph = TaskGraph("external", (TaskNode("answer", task=task, input=AgentTaskInput("answer")),))

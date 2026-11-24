@@ -61,7 +61,7 @@ async def test_pending_admission_shares_fresh_identity_and_session_transaction(
     event.listen(Engine, "before_cursor_execute", sql)
     try:
         async with Persistence.open("pending-admission-reads", storage=storage) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
                 session = await runtime.agents.get().create_session("session")
                 for index in range(2):

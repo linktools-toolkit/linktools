@@ -115,7 +115,7 @@ async def _runtime_start(tmp_path: Path, *, outcome: str = "success", backend: s
         async with Persistence.open("native-start", storage=PersistenceStorage.sql(engine)) as state:
             event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
             try:
-                async with Runtime.attach(persistence=state,
+                async with Runtime.open(persistence=state,
                         features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
                     execution = await runtime.agents.get().start("work", idempotency_key="work")
                     if outcome == "cancel":
@@ -446,7 +446,7 @@ async def test_trace_without_native_checkpoints_publishes_and_seals_inline_histo
     storage = (PersistenceStorage.in_memory() if backend == "memory" else
                PersistenceStorage.sqlite(tmp_path / "trace-only.db"))
     async with Persistence.open("trace-without-checkpoints", storage=storage) as state:
-        async with Runtime.attach(persistence=state,
+        async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             execution = await runtime.agents.get().start("work", idempotency_key="work")
             assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -588,7 +588,7 @@ async def test_native_source_write_failure_prevents_provider_dispatch(tmp_path: 
         async with Persistence.open("rejected-source", storage=PersistenceStorage.sql(engine)) as state:
             event.listen(engine.sync_engine, "before_cursor_execute", reject)
             try:
-                async with Runtime.attach(persistence=state,
+                async with Runtime.open(persistence=state,
                         features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
                     execution = await runtime.agents.get().start("work", idempotency_key="work")
                     try:

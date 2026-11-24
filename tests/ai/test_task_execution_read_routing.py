@@ -313,7 +313,7 @@ async def test_mixed_graph_results_preserve_callable_failure_and_agent_output(tm
     features.model("default", _Models(_UsageFunctionModel(model)))
     features.agent("reader", allow_tools=(), allow_subagents=())
     async with Persistence.open("mixed-read", storage=_storage(backend, tmp_path)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             agent = Task.from_agent("mixed-read.agent", runtime.agents.get("reader"))
             callable_task = Task("mixed-read.callable", fail, effect_policy="none")
             async with TaskEngine.open(agent, callable_task, persistence=persistence) as engine:

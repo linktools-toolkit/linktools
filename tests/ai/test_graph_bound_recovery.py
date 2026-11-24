@@ -6,7 +6,7 @@ from linktools.ai.task.engine import TaskEngine
 from linktools.ai.persistence import Persistence
 """Graph recovery authorizes control separately from bound execution identity."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 
 import asyncio
@@ -121,7 +121,7 @@ async def _graph_recovery(
     storage = PersistenceStorage.in_memory()
     capabilities = RuntimeFeatures("bound-recovery")
     capabilities.agent("default", model="default", allow_tools=())
-    async with Persistence.open('bound-recovery', storage=storage) as persistence_115, Runtime.attach(persistence=persistence_115, authorization=authorization, features=model_features(create_model(api='openai', model='gpt-test'), capabilities)) as runtime, TaskEngine.open(persistence=persistence_115, authorization=authorization, context=runtime.context) as runtime_engine:
+    async with Persistence.open('bound-recovery', storage=storage) as persistence_115, Runtime.open(persistence=persistence_115, authorization=authorization, features=model_features(create_model_binding(api='openai', model='gpt-test'), capabilities)) as runtime, TaskEngine.open(persistence=persistence_115, authorization=authorization, context=runtime.context) as runtime_engine:
         task = Task.from_agent("test.bound-agent", runtime.agents.get("default"))
         graph = TaskGraph("bound-graph", tuple(
             TaskNode(node_id, task=task, input={"prompt": "recover"}, output_type=output_type)

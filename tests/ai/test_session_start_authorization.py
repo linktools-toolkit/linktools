@@ -63,7 +63,7 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
     owner, peer = Principal("owner", "default"), Principal("peer", "default")
     async with Persistence.open(
         "session-start-authorization", storage=PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache),
-    ) as state, Runtime.attach(
+    ) as state, Runtime.open(
         persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
         authorization=policy,
     ) as runtime:

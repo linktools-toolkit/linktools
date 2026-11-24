@@ -187,6 +187,7 @@ class SessionTurnItem:
     content: JsonValue
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
+    elapsed_ms: "int | None" = None
 
     def __post_init__(self) -> None:
         if self.ordinal < 1 or not self.item_kind:

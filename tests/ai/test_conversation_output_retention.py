@@ -85,7 +85,7 @@ async def test_completed_output_uses_execution_owner_after_reopen(
 ) -> None:
     _canonical_output(monkeypatch, output)
     storage = _storage(tmp_path, backend)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_90, Runtime.attach(persistence=persistence_90, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_90, Runtime.open(persistence=persistence_90, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         result = (await session.run("original user input", timeout_seconds=5)).result
@@ -105,19 +105,19 @@ async def test_completed_output_uses_execution_owner_after_reopen(
         assert owner is not None and owner.result.output.decode() == output
         assert owner.stored_user_input.payload.decode() == "original user input"
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend), tenant_id="default", read_only=True) as history_persistence_115, History.open(persistence=history_persistence_115) as history:
-        page = await history.session_timeline("session", principal=principal)
+        page = (await history.session_detail("session", principal=principal)).timeline
         assert page.items == live
         assert page.items[0].output == output
         with pytest.raises(AIError) as denied:
-            await history.session_timeline("session", principal=Principal("other-owner", principal.tenant_id))
+            await history.session_detail("session", principal=Principal("other-owner", principal.tenant_id))
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
         with pytest.raises(AIError) as foreign:
-            await history.session_timeline("session", principal=Principal(principal.principal_id, "foreign-tenant"))
+            await history.session_detail("session", principal=Principal(principal.principal_id, "foreign-tenant"))
         assert foreign.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
 async def test_missing_execution_owner_never_falls_back_to_conversation_payloads(tmp_path: Path) -> None:
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence, Runtime.open(persistence=persistence, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         await session.run("canonical input", timeout_seconds=5)
@@ -129,7 +129,7 @@ async def test_missing_execution_owner_never_falls_back_to_conversation_payloads
         )) == 1
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), read_only=True) as persistence, History.open(persistence=persistence) as history:
         with pytest.raises(AIError) as missing:
-            await history.session_timeline("session", principal=principal)
+            await history.session_detail("session", principal=principal)
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -137,7 +137,7 @@ async def test_missing_execution_owner_never_falls_back_to_conversation_payloads
 async def test_committed_turn_validates_membership_independently_of_actor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str,
 ) -> None:
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence, Runtime.open(persistence=persistence, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         execution = (await session.run("owned input", timeout_seconds=5)).result
@@ -172,7 +172,7 @@ async def test_committed_turn_validates_membership_independently_of_actor(
 async def test_terminal_execution_facts_are_immutable_but_control_updates_preserve_timeline(
     tmp_path: Path, backend: str,
 ) -> None:
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend)) as persistence, Runtime.open(persistence=persistence, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         execution = (await session.run("original input", timeout_seconds=5)).result
@@ -210,7 +210,7 @@ async def test_terminal_execution_facts_are_immutable_but_control_updates_preser
         assert updated.completed_at == owner.completed_at
         assert (await session.timeline()).items == timeline
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend), read_only=True) as persistence, History.open(persistence=persistence) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == timeline
+        assert (await history.session_detail("session", principal=principal)).timeline.items == timeline
 
 
 async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
@@ -221,7 +221,7 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
     output = {"canonical": "x" * (80 * 1024)}
     _canonical_output(monkeypatch, output)
     storage = _storage(tmp_path, objects=objects)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_132, Runtime.attach(persistence=persistence_132, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_132, Runtime.open(persistence=persistence_132, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         result = (await session.run(("inspect original", BinaryContent(
@@ -268,7 +268,7 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
     finally:
         await storage.close()
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, objects=objects), tenant_id="default", read_only=True) as history_persistence_175, History.open(persistence=history_persistence_175) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
     storage = _storage(tmp_path, objects=objects)
     storage = Persistence(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
@@ -296,7 +296,7 @@ async def test_fork_retains_only_selected_history_and_independent_turn_outputs(
         count += 1
         return replace(result, output={"turn": count})
     monkeypatch.setattr(AgentExecutor, "execute", execute)
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_199, Runtime.attach(persistence=persistence_199, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_199, Runtime.open(persistence=persistence_199, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         parent = await runtime.agents.get().create_session("parent")
         await parent.run("first", timeout_seconds=5)
@@ -307,16 +307,16 @@ async def test_fork_retains_only_selected_history_and_independent_turn_outputs(
         assert [item.output for item in live] == [{"turn": 1}, {"turn": 3}]
         assert [item.user_input["prompt"]["text"] for item in live] == ["first", "child only"]
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_219, History.open(persistence=history_persistence_219) as history:
-        assert (await history.session_timeline("child", principal=principal)).items == live
-        newest = await history.session_timeline("child", principal=principal, limit=1)
+        assert (await history.session_detail("child", principal=principal)).timeline.items == live
+        newest = (await history.session_detail("child", principal=principal, limit=1)).timeline
         assert newest.items == live[-1:] and newest.next_cursor is not None
-        oldest = await history.session_timeline("child", principal=principal, limit=1, cursor=newest.next_cursor)
+        oldest = (await history.session_detail("child", principal=principal, limit=1, cursor=newest.next_cursor)).timeline
         assert oldest.items == live[:1] and oldest.next_cursor is None
 
 
 async def test_disabled_conversation_does_not_retain_new_chat_or_break_results(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_226, Runtime.attach(persistence=persistence_226, features=model_features(_models(), _features(conversation=False))) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_226, Runtime.open(persistence=persistence_226, features=model_features(_models(), _features(conversation=False))) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         result = (await session.run("not retained as chat", timeout_seconds=5)).result
@@ -325,7 +325,7 @@ async def test_disabled_conversation_does_not_retain_new_chat_or_break_results(t
         )
         assert commits == ()
         assert (await runtime.executions.result(result.execution_id, principal=principal)).output == result.output
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_235, Runtime.attach(persistence=persistence_235, features=model_features(_models(), _features(conversation=False))) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_235, Runtime.open(persistence=persistence_235, features=model_features(_models(), _features(conversation=False))) as runtime:
         assert (await runtime.executions.result(result.execution_id, principal=principal)).output == result.output
 
 
@@ -344,7 +344,7 @@ async def test_zero_message_failure_keeps_input_and_never_reuses_prior_output(
         return replace(result, output={"completed_turn": count})
     monkeypatch.setattr(AgentExecutor, "execute", execute)
     storage = _storage(tmp_path)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_254, Runtime.attach(persistence=persistence_254, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_254, Runtime.open(persistence=persistence_254, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         await session.run("first success", timeout_seconds=5)
@@ -363,7 +363,7 @@ async def test_zero_message_failure_keeps_input_and_never_reuses_prior_output(
         assert len(commits) == 3 and commits[1].execution_id == failed.execution_id
         assert commits[1].start_message_index == commits[1].end_message_index
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_282, History.open(persistence=history_persistence_282) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
 
 
 async def test_cancelled_turn_retains_original_input_without_completed_output(tmp_path: Path) -> None:
@@ -372,7 +372,7 @@ async def test_cancelled_turn_retains_original_input_without_completed_output(tm
     async def respond(messages, info):
         entered.set()
         await asyncio.Event().wait()
-    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_289, Runtime.attach(persistence=persistence_289, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence_289, Runtime.open(persistence=persistence_289, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("cancelled original input")
@@ -388,7 +388,7 @@ async def test_cancelled_turn_retains_original_input_without_completed_output(tm
         assert live[0].output is None
         assert live[0].user_input["prompt"]["text"] == "cancelled original input"
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_314, History.open(persistence=history_persistence_314) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
 
 
 async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
@@ -403,7 +403,7 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
         tmp_path / "state.db", cache=cache,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
      coordination=cache)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_329, Runtime.attach(persistence=persistence_329, features=model_features(_models(), features)) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_329, Runtime.open(persistence=persistence_329, features=model_features(_models(), features)) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         group = runtime._state.execution.executions.state_store.storage_group
@@ -447,7 +447,7 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
         monkeypatch.setattr(type(group), "mutate", original_mutate)
         monkeypatch.setattr(type(group), "read_many", original_read)
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_380, History.open(persistence=history_persistence_380) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
 
 
 async def test_completed_display_cache_avoids_full_execution_and_transcript_reads(
@@ -458,7 +458,7 @@ async def test_completed_display_cache_avoids_full_execution_and_transcript_read
     storage = PersistenceStorage.sqlite(
         tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_391, Runtime.attach(persistence=persistence_391, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_391, Runtime.open(persistence=persistence_391, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         await session.run("retained cached input", timeout_seconds=5)
@@ -492,7 +492,7 @@ async def test_split_route_never_publishes_completed_output_before_execution_ter
     )
     storage = PersistenceStorage.from_plan(plan)
     entered, release = asyncio.Event(), asyncio.Event()
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_426, Runtime.attach(persistence=persistence_426, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_426, Runtime.open(persistence=persistence_426, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         executions = runtime._state.execution.executions
@@ -544,7 +544,7 @@ async def test_split_route_never_publishes_completed_output_before_execution_ter
         monkeypatch.setattr(executions, "commit_terminal_in_transaction", original_terminal)
         monkeypatch.setattr(sessions.state_store, "mutate", original_mutate)
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as history_persistence_485, History.open(persistence=history_persistence_485) as history:
-        assert (await history.session_timeline("session", principal=principal)).items == live
+        assert (await history.session_detail("session", principal=principal)).timeline.items == live
 
 
 async def test_display_cache_five_refresh_measurement(tmp_path: Path) -> None:
@@ -553,7 +553,7 @@ async def test_display_cache_five_refresh_measurement(tmp_path: Path) -> None:
     storage = PersistenceStorage.sqlite(
         tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_494, Runtime.attach(persistence=persistence_494, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_494, Runtime.open(persistence=persistence_494, features=model_features(_models(), _features())) as runtime:
         session = await runtime.agents.get().create_session("session")
         await session.run("measure retained display", timeout_seconds=5)
         engine = runtime._state.conversation.sessions.state_store.storage_group.context.engine
@@ -587,7 +587,7 @@ async def test_split_object_stores_read_canonical_result_and_binary_input_after_
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     )
-    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan)) as persistence, Runtime.open(persistence=persistence, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         source = persistence.object_store(PersistenceDomain.EXECUTION)
         conversation_objects = persistence.object_store(PersistenceDomain.CONVERSATION)
@@ -615,7 +615,7 @@ async def test_split_object_stores_read_canonical_result_and_binary_input_after_
             assert await conversation_objects.stat(ref.key) is None
         live = (await session.timeline()).items
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as persistence, History.open(persistence=persistence) as history:
-        page = await history.session_timeline("session", principal=principal)
+        page = (await history.session_detail("session", principal=principal)).timeline
         assert page.items == live and page.items[0].output == output
         owner = await persistence.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
         restored = await ExecutionInputMaterializer(
@@ -633,7 +633,7 @@ async def test_split_terminal_without_conversation_receipt_requires_recovery(
     )
     storage = PersistenceStorage.from_plan(plan)
     entered, release = asyncio.Event(), asyncio.Event()
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_575, Runtime.attach(persistence=persistence_575, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_575, Runtime.open(persistence=persistence_575, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         sessions = runtime._state.conversation.sessions
@@ -735,7 +735,7 @@ async def test_cancelled_unconfirmed_model_response_does_not_enter_following_con
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     )) if split else _storage(tmp_path)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_677, Runtime.attach(persistence=persistence_677, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_677, Runtime.open(persistence=persistence_677, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
         session = await runtime.agents.get().create_session("session")
         assert (await session.run("confirmed first input", timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         second = await session.start("unconfirmed cancelled input")

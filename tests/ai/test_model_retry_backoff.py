@@ -20,7 +20,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.model._binding import _RetryingModel
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 
 class ScriptedProvider(TestModel):
@@ -142,13 +142,13 @@ async def test_configured_cap_bounds_jitter_without_shortening_initial_base(
 @pytest.mark.parametrize("invalid", (-1, float("nan"), float("inf"), True, None, "120", 10**400))
 def test_public_retry_max_delay_requires_finite_non_negative_number(invalid: object) -> None:
     with pytest.raises(ValueError, match="retry_max_delay must be a finite non-negative number"):
-        create_model(api="openai", model="fixture", retry_max_delay=invalid)
+        create_model_binding(api="openai", model="fixture", retry_max_delay=invalid)
 
 
 @pytest.mark.parametrize("invalid", (0, 0.5, float("nan"), float("inf"), True, None, "2", 10**400))
 def test_public_retry_backoff_factor_requires_finite_number_at_least_one(invalid: object) -> None:
     with pytest.raises(ValueError, match="retry_backoff_factor"):
-        create_model(api="openai", model="fixture", retry_backoff_factor=invalid)
+        create_model_binding(api="openai", model="fixture", retry_backoff_factor=invalid)
 
 
 @pytest.mark.asyncio
@@ -355,7 +355,7 @@ async def test_public_binding_uses_sdk_normalized_retry_after(
         return result
 
     monkeypatch.setattr("linktools.ai.model._openai.DefaultAsyncHttpxClient", client)
-    binding = create_model(api="openai", model="fixture", api_key="synthetic",
+    binding = create_model_binding(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=1, retry_delay=1)
     async with binding.materialize() as model:
         response = await model.request([], None, ModelRequestParameters())
@@ -393,10 +393,10 @@ async def test_public_binding_passes_custom_backoff_to_each_protocol(
 
     module = "_anthropic" if protocol == "anthropic" else "_openai"
     monkeypatch.setattr(f"linktools.ai.model.{module}.DefaultAsyncHttpxClient", client)
-    binding = create_model(api=protocol, model="fixture", api_key="synthetic",
+    binding = create_model_binding(api=protocol, model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=3,
                            retry_delay=5, retry_max_delay=120, retry_backoff_factor=4)
-    assert binding.contract == create_model(api=protocol, model="fixture").contract
+    assert binding.contract == create_model_binding(api=protocol, model="fixture").contract
     async with binding.materialize() as model:
         result = await model.request([ModelRequest([UserPromptPart("synthetic")])],
                                      None, ModelRequestParameters())
@@ -428,7 +428,7 @@ async def test_public_deadline_interrupts_server_wait_beyond_local_cap(
             pass
 
     monkeypatch.setattr("linktools.ai.model._openai.DefaultAsyncHttpxClient", client)
-    binding = create_model(api="openai", model="fixture", api_key="synthetic",
+    binding = create_model_binding(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=2, retry_delay=1)
     async with Agent(binding.materialize()) as agent:
         with pytest.raises(sdk_errors.ModelRequestTimeout):

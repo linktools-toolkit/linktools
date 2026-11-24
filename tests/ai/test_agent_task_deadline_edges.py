@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Deadline outcome races and bounded cancellation preserve authoritative results."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 import asyncio
 from dataclasses import replace
@@ -283,7 +283,7 @@ async def test_recovery_binding_candidate_ignores_model_connection_changes() -> 
     contracts = []
     for endpoint in ("https://first.example/v1", "https://second.example/v1"):
         compiler = AgentCompiler(
-            models={"default": create_model(api='openai',
+            models={"default": create_model_binding(api='openai',
                 model="gpt-test", base_url=endpoint, api_key="test-placeholder",
             )},
             candidates=(), agents=specs,

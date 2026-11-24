@@ -96,7 +96,7 @@ async def test_public_split_recovery_preserves_unknown_admission_after_process_e
     app.capability(native_checkpoint(database=native_database), scope="runtime")
     app.capability(TraceCapability(), scope="runtime")
     async with Persistence.open("session-tool-crash", storage=PersistenceStorage.sqlite(database)) as state:
-        async with Runtime.attach(persistence=state, features=model_features(_ToolModels(), app), auto_recover=False) as runtime:
+        async with Runtime.open(persistence=state, features=model_features(_ToolModels(), app), auto_recover=False) as runtime:
             execution = await runtime.agents.get("default").session("session").start("inspect", idempotency_key="turn-1")
             tenant = runtime.default_principal.tenant_id
             before = await state.checkpoint.tools.list_by_execution(execution.execution_id, tenant_id=tenant)

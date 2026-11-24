@@ -3713,21 +3713,22 @@ class StateCommands:
                         conversation_transaction = group.transaction(self._conversation.state_store)
                         if conversation_agent_run is None or conversation_checkpoint is None:
                             if publish_turn:
-                                turn_commit = await self._conversation.commit_timeline_turn_in_transaction(
+                                final_session, turn_commit = await self._conversation.publish_and_release_turn_in_transaction(
                                     conversation_transaction, session_id, tenant_id=self._tenant_id,
                                     execution_id=commit.execution.execution_id,
                                     start_message_index=0 if timeline_range is None else timeline_range[0],
                                     end_message_index=0 if timeline_range is None else timeline_range[1],
-                                    allow_unadmitted=commit.execution.started_at is None, admitted_turn=session_turn,
+                                    history_unavailable=commit.execution.invalidates_session_history,
+                                    allow_unadmitted=commit.execution.started_at is None,
                                 )
-                            final_session = await self._conversation.release_execution_in_transaction(
-                                conversation_transaction,
-                                session_id,
-                                tenant_id=self._tenant_id,
-                                execution_id=commit.execution.execution_id,
-                                history_unavailable=commit.execution.invalidates_session_history,
-                                require_turn_commit=commit.execution.conversation,
-                            )
+                            else:
+                                final_session = await self._conversation.release_execution_in_transaction(
+                                    conversation_transaction,
+                                    session_id,
+                                    tenant_id=self._tenant_id,
+                                    execution_id=commit.execution.execution_id,
+                                    history_unavailable=commit.execution.invalidates_session_history,
+                                )
                         else:
                             if next_cursor is None or self._conversation_run_store is None:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4314,19 +4315,20 @@ class StateCommands:
         if session_id is not None:
             async def release_conversation(transaction: StateTransaction) -> None:
                 if publish_turn:
-                    await self._conversation.commit_timeline_turn_in_transaction(
+                    await self._conversation.publish_and_release_turn_in_transaction(
                         transaction, session_id, tenant_id=self._tenant_id,
                         execution_id=commit.execution.execution_id,
                         start_message_index=0 if timeline_range is None else timeline_range[0],
                         end_message_index=0 if timeline_range is None else timeline_range[1],
+                        history_unavailable=commit.execution.invalidates_session_history,
                         allow_unadmitted=commit.execution.started_at is None,
                     )
-                await self._conversation.release_execution_in_transaction(
-                    transaction, session_id, tenant_id=self._tenant_id,
-                    execution_id=commit.execution.execution_id,
-                    history_unavailable=commit.execution.invalidates_session_history,
-                    require_turn_commit=commit.execution.conversation,
-                )
+                else:
+                    await self._conversation.release_execution_in_transaction(
+                        transaction, session_id, tenant_id=self._tenant_id,
+                        execution_id=commit.execution.execution_id,
+                        history_unavailable=commit.execution.invalidates_session_history,
+                    )
 
             for attempt in range(2):
                 try:
@@ -4357,17 +4359,11 @@ class StateCommands:
         start, end = (0, 0) if message_range is None else message_range
 
         async def finish(transaction: StateTransaction) -> None:
-            await self._conversation.commit_timeline_turn_in_transaction(
+            await self._conversation.publish_and_release_turn_in_transaction(
                 transaction, execution.session_id, tenant_id=self._tenant_id,
-                execution_id=execution.execution_id, start_message_index=start,
-                end_message_index=end,
-                allow_unadmitted=execution.started_at is None,
-            )
-            await self._conversation.release_execution_in_transaction(
-                transaction, execution.session_id, tenant_id=self._tenant_id,
-                execution_id=execution.execution_id,
+                execution_id=execution.execution_id, start_message_index=start, end_message_index=end,
                 history_unavailable=execution.invalidates_session_history,
-                require_turn_commit=True,
+                allow_unadmitted=execution.started_at is None,
             )
 
         try:

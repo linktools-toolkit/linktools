@@ -190,7 +190,7 @@ def _validate_sdk_retry_settings(settings: Mapping[str, object] | None) -> None:
             raise AIError(
                 ErrorCode.MODEL_CONFIG_INVALID,
                 "model_settings.max_retries must be 0 or omitted; "
-                "configure transport retries with create_model(max_retries=...)",
+                "configure transport retries with create_model_binding(max_retries=...)",
                 retryable=False, safe_details={"field": "max_retries", "owner": "model_binding"},
             )
 

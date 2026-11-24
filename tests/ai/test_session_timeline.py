@@ -33,7 +33,8 @@ from linktools.ai.core import (
 )
 import linktools.ai.history._session_timeline as timeline_module
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.execution import ExecutionView, SessionHistoryItem
+from linktools.ai.execution import ExecutionView
+from linktools.ai.session import SessionHistoryItem
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence.contracts import (
     ConversationCursor,

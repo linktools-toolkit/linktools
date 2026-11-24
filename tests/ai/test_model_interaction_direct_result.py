@@ -161,7 +161,7 @@ async def test_response_kind_survives_sqlite_reopen_without_invented_request(
     calls: list[str] = []
     name = "direct" if direct else "provider"
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls, direct=_DirectResponse(model_id=model_id), direct_last=direct_last),
     ) as runtime:
         session = await runtime.agents.get(name).create_session("session")
@@ -176,7 +176,7 @@ async def test_response_kind_survives_sqlite_reopen_without_invented_request(
         assert [part.content for message in messages if isinstance(message, ModelResponse)
                 for part in message.parts if isinstance(part, TextPart)] == [f"{name} answer"]
     assert calls == ([] if direct else ["provider"])
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls),
     ) as runtime:
         restored = await _assert_interaction(runtime, execution_id, principal, direct=direct, model_id=model_id, with_attachment=direct)
@@ -196,7 +196,7 @@ async def test_parallel_direct_and_provider_interactions_remain_distinct(tmp_pat
         provider_entered=provider_entered, provider_release=direct_entered,
     )
     storage = PersistenceStorage.sqlite(tmp_path / "parallel.sqlite")
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         async def run(name: str) -> ModelInteractionItem:
@@ -257,7 +257,7 @@ async def test_direct_observation_distinguishes_bound_wrappers_with_different_po
     features = _features(calls, direct=inner, direct_last=True)
     features.capability(outer, id="outer-response")
     storage = PersistenceStorage.sqlite(tmp_path / "positions.sqlite")
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         execution = await runtime.agents.get("direct").start("hello")
@@ -268,7 +268,7 @@ async def test_direct_observation_distinguishes_bound_wrappers_with_different_po
     assert wrappers == ["outermost", "innermost"]
     assert sorted(bindings) == ["innermost", "outermost"]
     assert len(factories) == int(binding == "dynamic")
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         assert await _assert_interaction(runtime, execution_id, principal, direct=True) == original
@@ -280,7 +280,7 @@ async def test_cancelled_wrapper_without_response_does_not_claim_direct_result(t
     entered, release = asyncio.Event(), asyncio.Event()
     features = _features(calls, direct=_DirectResponse(entered=entered, release=release))
     storage = PersistenceStorage.sqlite(tmp_path / "cancelled.sqlite")
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         session = await runtime.agents.get("direct").create_session("session")
@@ -295,7 +295,7 @@ async def test_cancelled_wrapper_without_response_does_not_claim_direct_result(t
         assert items[0].status == "CANCELLED"
         assert items[0].request == {} and items[0].response is None
     assert calls == []
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls),
     ) as runtime:
         restored = (await runtime.executions.model_interactions(
@@ -358,7 +358,7 @@ async def test_direct_tool_response_then_provider_result_keeps_both_interactions
         assert sum(isinstance(part, ToolReturnPart) for part in parts) == 1
         assert [part.content for part in parts if isinstance(part, TextPart)] == ["final answer"]
 
-    async with Persistence.open("direct-tool", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-tool", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -366,7 +366,7 @@ async def test_direct_tool_response_then_provider_result_keeps_both_interactions
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         execution_id, principal = execution.execution_id, runtime.default_principal
         await check(runtime, execution_id, principal)
-    async with Persistence.open("direct-tool", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-tool", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         await check(runtime, execution_id, principal)
@@ -377,7 +377,7 @@ async def test_direct_tool_response_then_provider_result_keeps_both_interactions
 async def test_equal_provider_text_in_distinct_turns_is_not_deduplicated(tmp_path: Path) -> None:
     calls: list[str] = []
     storage = PersistenceStorage.sqlite(tmp_path / "repeated.sqlite")
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls),
     ) as runtime:
         session = await runtime.agents.get("provider").create_session("session")
@@ -411,7 +411,7 @@ async def test_cancellation_during_direct_synthetic_events_keeps_single_captured
                 await release.wait()
 
     storage = PersistenceStorage.sqlite(tmp_path / "cancelled-after-response.sqlite")
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls, direct=PauseDirectEnd()),
     ) as runtime:
         session = await runtime.agents.get("direct").create_session("session")
@@ -431,7 +431,7 @@ async def test_cancellation_during_direct_synthetic_events_keeps_single_captured
         assert [(item.item_kind, item.content, item.model_request_seq) for item in transcript.items] == [
             ("assistant", "direct answer", 1),
         ]
-    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls),
     ) as runtime:
         assert await _assert_interaction(runtime, execution_id, principal, direct=True) == captured

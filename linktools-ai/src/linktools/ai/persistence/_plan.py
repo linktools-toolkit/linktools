@@ -12,13 +12,6 @@ from ..storage import ObjectStore, StorageRoute, StorageRetentionMode
 from ..core import PersistenceDomain, validate_capability_id
 
 
-def runtime_domain_uses_object_store(domain: PersistenceDomain) -> bool:
-    """All Runtime persistence addresses support object-store data."""
-    if not isinstance(domain, PersistenceDomain):
-        raise TypeError("domain must be PersistenceDomain")
-    return True
-
-
 @dataclass(frozen=True, slots=True)
 class PersistencePlan:
     conversation: StorageRoute = field(default_factory=StorageRoute.memory)
@@ -53,13 +46,9 @@ class PersistencePlan:
         return MappingProxyType({domain: self.route(domain) for domain in PersistenceDomain})
 
     def validate_object_store(self, object_store: ObjectStore | None) -> None:
-        if object_store is not None and not any(
-            runtime_domain_uses_object_store(domain)
-            and self.route(domain).retention is StorageRetentionMode.DURABLE
-            for domain in PersistenceDomain
-        ):
+        if object_store is not None and not self.durable_domains:
             raise ValueError(
-                "object_store requires at least one durable object-capable PersistenceDomain"
+                "object_store requires at least one durable PersistenceDomain"
             )
         if (
             self.route(PersistenceDomain.CONVERSATION).retention
@@ -100,5 +89,4 @@ class PersistencePlan:
 __all__ = [
     "PersistenceDomain",
     "PersistencePlan",
-    "runtime_domain_uses_object_store",
 ]

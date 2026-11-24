@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """Focused regressions for durable composition and close ownership."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from linktools.ai.persistence import Persistence
 import asyncio
@@ -83,7 +83,7 @@ def _compiler(
     candidates: tuple[CapabilityContribution[object], ...] = (),
 ) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(api='openai', model="gpt-test")},
+        models={"default": create_model_binding(api='openai', model="gpt-test")},
         candidates=candidates,
         agents={"durable-contract": _spec()},
     )

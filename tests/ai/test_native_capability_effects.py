@@ -151,7 +151,7 @@ async def test_native_error_recovery_is_not_a_raw_success_projection():
 @pytest.mark.asyncio
 async def test_bound_workspace_enforces_its_policy_without_a_runtime(tmp_path):
     from pydantic_ai import DeferredToolRequests, DeferredToolResults
-    from linktools.ai.capability import PydanticToolControlCapability, FileSystem, ShellCapability
+    from linktools.ai.capability import PydanticToolControlCapability, FileSystemCapability, ShellCapability
 
     from linktools.ai.workspace import (
         LocalWorkspaceBackend, ToolPermissionPolicy, ToolPermissionRule, Workspace, WorkspacePolicy,
@@ -184,7 +184,7 @@ async def test_bound_workspace_enforces_its_policy_without_a_runtime(tmp_path):
         return ModelResponse(parts=[TextPart("done")])
 
     try:
-        cap = FileSystem(workspace).bind(("write_file",), backend=session)
+        cap = FileSystemCapability(workspace).bind(("write_file",), backend=session)
         shell_cap = ShellCapability().bind(("run_command",), backend=session, policy=workspace.policy.tool_permissions)
         backend = session
         agent = Agent(model=FunctionModel(respond), tools=[business_echo],

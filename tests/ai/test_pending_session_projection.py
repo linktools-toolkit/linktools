@@ -19,7 +19,8 @@ from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, StateTurnResources
-from linktools.ai.execution import CancelExecutionRequest, ListSessionRequest
+from linktools.ai.execution import CancelExecutionRequest
+from linktools.ai.session import ListSessionRequest
 from linktools.ai.persistence.state import active_state_scope, record_key
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
@@ -64,7 +65,7 @@ async def _runtimes(tmp_path, *, cache, shared=True, source_authority=False, fai
             storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache,
                 coordination=StateTurnResources(pending_cache=cache) if source_authority else cache)
             persistence = await stack.enter_async_context(Persistence.open("pending-session-display", storage=storage))
-            runtime = await stack.enter_async_context(Runtime.attach(
+            runtime = await stack.enter_async_context(Runtime.open(
                 persistence=persistence, features=model_features(models, group()),
             ))
             values.append((runtime, runtime._state))

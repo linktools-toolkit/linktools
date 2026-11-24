@@ -44,7 +44,7 @@ async def test_web_sends_tool_start_while_tool_is_still_running() -> None:
     features.agent("default", model="default", allow_tools=("wait_for_release",))
     features.capability(TraceCapability(), scope="runtime")
     async with Persistence.open("web-live-tool", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(_Models(FunctionModel(stream_function=model)), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(FunctionModel(stream_function=model)), features)) as runtime:
             execution = await runtime.agents.get("default").start("Use the waiting tool")
             app = create_app(runtime=runtime)
             initial = False

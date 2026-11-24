@@ -45,7 +45,7 @@ async def _delete_session(state):
 @pytest.mark.parametrize("method", ("start", "run", "plan"))
 async def test_session_start_preparation_reads_one_authorized_snapshot_per_call(tmp_path, monkeypatch, entry, method):
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(_answer), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=_features(_answer), metrics=None) as runtime:
             await runtime.agents.get().create_session("session")
             engine = state.conversation.sessions.state_store.storage_group.context.engine
             active = ContextVar("session_authorized_read", default=False)
@@ -87,7 +87,7 @@ async def test_session_start_preparation_reads_one_authorized_snapshot_per_call(
 @pytest.mark.parametrize("entry", ("missing-lazy", "deleted-loaded"))
 async def test_session_start_preserves_create_and_reauthorizes_created_record(tmp_path, monkeypatch, entry):
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(_answer), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=_features(_answer), metrics=None) as runtime:
             if entry == "deleted-loaded":
                 await runtime.agents.get().create_session("session")
                 target = await runtime.sessions.get("session", principal=runtime.default_principal)
@@ -143,7 +143,7 @@ async def test_session_start_rechecks_live_authority_status_and_binding(tmp_path
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None)
     async with Persistence.open("session-start-preparation", storage=storage) as state:
-        async with Runtime.attach(persistence=state, features=features, metrics=None, authorization=Policy()) as runtime:
+        async with Runtime.open(persistence=state, features=features, metrics=None, authorization=Policy()) as runtime:
             await runtime.agents.get().create_session("session")
             target = await runtime.sessions.get("session", principal=runtime.default_principal)
 
@@ -207,10 +207,10 @@ async def test_two_runtimes_with_same_prepared_session_keep_source_admission_cas
 
     path = tmp_path / "shared.db"
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(path)) as first_state:
-        async with Runtime.attach(persistence=first_state, features=_features(model), metrics=None) as first:
+        async with Runtime.open(persistence=first_state, features=_features(model), metrics=None) as first:
             await first.agents.get().create_session("session")
             async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(path)) as second_state:
-                async with Runtime.attach(persistence=second_state, features=_features(model), metrics=None) as second:
+                async with Runtime.open(persistence=second_state, features=_features(model), metrics=None) as second:
                     monkeypatch.setattr(RuntimeSessionService, "_prepare_resume_session", read_prepared)
                     try:
                         outcomes = await asyncio.wait_for(asyncio.gather(
@@ -236,7 +236,7 @@ async def test_created_session_view_cannot_replace_fresh_read_authorization(tmp_
         return await _answer(messages, info)
 
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(model), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
             original = RuntimeSessionService.create
 
             async def create_then_replace(self, *args, **kwargs):
@@ -261,7 +261,7 @@ async def test_execution_authorization_failure_is_not_session_creation_retry(tmp
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(_answer), metrics=None, authorization=Policy()) as runtime:
+        async with Runtime.open(persistence=state, features=_features(_answer), metrics=None, authorization=Policy()) as runtime:
             target = await runtime.agents.get().create_session("session")
 
             async def unexpected_create(*args, **kwargs):
@@ -284,7 +284,7 @@ async def test_prepared_open_session_does_not_override_fresh_source_closed_statu
         return await _answer(messages, info)
 
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(model), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
             target = await runtime.agents.get().create_session("session")
             original = RuntimeSessionService._prepare_resume_session
 
@@ -314,7 +314,7 @@ async def test_session_start_reuses_authorized_source_and_commit_receipt(tmp_pat
         return await _answer(messages, info)
 
     async with Persistence.open("session-start-receipt", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(model), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
             target = await runtime.agents.get().create_session("session")
             service = runtime._execution_service
             load_session = service._load_session
@@ -358,7 +358,7 @@ async def test_session_start_reuses_authorized_source_and_commit_receipt(tmp_pat
 
 async def test_reconciled_unknown_session_refreshes_source_before_start(tmp_path, monkeypatch):
     async with Persistence.open("session-start-reconciled", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(_answer), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=_features(_answer), metrics=None) as runtime:
             target = await runtime.agents.get().create_session("session")
             service = runtime._execution_service
             load_session = service._load_session
@@ -407,7 +407,7 @@ async def test_session_start_authorizes_source_owner_after_remote_cached_replace
     async with Persistence.open("session-start-source-owner", storage=PersistenceStorage.sqlite(path)) as writer:
         await writer.conversation.sessions.create(replace(_session(), owner_principal_id="runtime", agent_id="default"))
         async with Persistence.open("session-start-source-owner", storage=storage) as reader:
-            async with Runtime.attach(persistence=reader, features=_features(model), metrics=None, authorization=Policy()) as runtime:
+            async with Runtime.open(persistence=reader, features=_features(model), metrics=None, authorization=Policy()) as runtime:
                 target = runtime.agents.get().session("session")
                 original = await reader.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
                 await _delete_session(writer)
@@ -445,7 +445,7 @@ async def test_session_start_identity_capture_is_call_local_and_invalidated_by_s
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
     storage = PersistenceStorage.sqlite(tmp_path / "capture.db") if backend == "sqlite" else PersistenceStorage.in_memory()
     async with Persistence.open("session-start-preparation", storage=storage) as state:
-        async with Runtime.attach(persistence=state, features=features, metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=features, metrics=None) as runtime:
             target = await runtime.agents.get().create_session("session")
             handle = await target.start("question", idempotency_key="request")
             await handle.wait(timeout_seconds=5)

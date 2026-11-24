@@ -139,7 +139,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
                 else:
                     capability = native_checkpoint(database=tmp_path / "native.db")
                 features.capability(capability, scope="runtime")
-            async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            async with Runtime.open(persistence=persistence, features=features) as runtime:
                 session = await runtime.agents.get("reader").create_session("session")
                 await run(session, "learn", discover="PACKAGE-V1")
                 stored = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
@@ -147,14 +147,14 @@ async def test_session_reloads_known_scopes_before_first_model_request(
                 assert "PACKAGE-V1" not in str(encode_domain(stored))
 
             if full_mutation_path:
-                async with Runtime.attach(persistence=persistence, features=features) as runtime:
+                async with Runtime.open(persistence=persistence, features=features) as runtime:
                     session = runtime.agents.get("reader").session("session")
                     await run(session, "same", initial="PACKAGE-V1")
 
             # Reload the scope, not the previous execution's content pin, before
             # the first model request in the new Runtime.
             rules.write_text("PACKAGE-V2", encoding="utf-8")
-            async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            async with Runtime.open(persistence=persistence, features=features) as runtime:
                 session = runtime.agents.get("reader").session("session")
                 await run(session, "changed", initial="PACKAGE-V2", absent=("PACKAGE-V1",))
                 current_rule = "PACKAGE-V2"
@@ -197,7 +197,7 @@ async def test_session_remembers_initial_cwd_scopes_and_refresh_failure_is_not_c
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.agent("reader", model="default", allow_tools=())
     async with Persistence.open("cwd-scopes", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get("reader").create_session("session", cwd="pkg")
             assert (await session.run("initial", timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
             current = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
@@ -310,7 +310,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open("recover-scopes", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             session = await runtime.agents.get("reader").create_session("session")
             execution = await session.start("read")
             tenant = runtime.tenant_id
@@ -331,7 +331,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
                 decided_at=datetime.now(timezone.utc),
                 resolution_metadata={"linktools": {"repository_instruction_frontier": "0" * 64}},
             )
-        async with Runtime.attach(persistence=persistence, features=features, auto_recover=True) as runtime:
+        async with Runtime.open(persistence=persistence, features=features, auto_recover=True) as runtime:
             finished = await runtime.executions.wait(
                 execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
             )
@@ -417,7 +417,7 @@ async def test_attachment_scopes_are_in_first_request_and_sources_are_deduplicat
         features.agent("reader", model="default", allow_tools=())
         features = model_features(_Models(_UsageFunctionModel(model)), features)
         async with Persistence.open("attachment-scopes", storage=PersistenceStorage.in_memory()) as persistence:
-            async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            async with Runtime.open(persistence=persistence, features=features) as runtime:
                 agent = runtime.agents.get("reader")
                 target = await agent.create_session("session") if session_backed else agent
                 prompt = ("inspect", WorkspaceFileInput("pkg/file.txt")) if entry != "files" else "inspect"
@@ -455,7 +455,7 @@ async def test_initial_scope_union_is_validated_before_session_scope_write(
     features.agent("reader", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     async with Persistence.open("initial-limits", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             session = await runtime.agents.get("reader").create_session("session")
             scopes = ("other", "pkg") if entry == "remembered" else ()
             sessions = persistence.conversation.sessions
@@ -510,7 +510,7 @@ async def test_subagent_attachments_extend_but_do_not_refresh_parent_pin_or_sess
     features.agent("child", model="default", allow_tools=(), allow_subagents=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     async with Persistence.open("child-attachment", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             session = await runtime.agents.get("reader").create_session("session")
             result = (await session.run("delegate", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
@@ -565,7 +565,7 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
         for item in features._contributions
     ]
     async with Persistence.open("native-approval", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get("reader").start("check")
             tenant = runtime.tenant_id
             principal_id = runtime.default_principal.principal_id
@@ -585,7 +585,7 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
             decided_at=datetime.now(timezone.utc),
             resolution_metadata={"linktools": {"repository_instruction_frontier": "0" * 64}},
         )
-        async with Runtime.attach(persistence=persistence, features=features, auto_recover=True) as runtime:
+        async with Runtime.open(persistence=persistence, features=features, auto_recover=True) as runtime:
             finished = await runtime.executions.wait(
                 execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
             )
@@ -635,7 +635,7 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
             persistence = await stack.enter_async_context(Persistence.open(
                 "scope-admission", storage=PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache),
             ))
-            runtimes.append(await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features)))
+            runtimes.append(await stack.enter_async_context(Runtime.open(persistence=persistence, features=features)))
         session = await runtimes[0].agents.get("reader").create_session("session")
         handles = await asyncio.gather(
             session.start("same", idempotency_key="same-key"),
@@ -701,7 +701,7 @@ async def test_accepted_context_owns_instruction_pin_before_model_dispatch(
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None,
     )
     async with Persistence.open("instruction-owner", storage=storage) as persistence:
-        async with Runtime.attach(
+        async with Runtime.open(
             persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
         ) as runtime:
             agent = runtime.agents.get("reader")

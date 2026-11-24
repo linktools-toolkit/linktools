@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import CreateSessionRequest
+from linktools.ai.session import CreateSessionRequest
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.persistence import PersistenceStorage, StateTurnResources
 from linktools.ai.runtime import Runtime, RuntimeFeatures

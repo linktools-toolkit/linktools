@@ -259,12 +259,12 @@ async def test_model_input_failure_reaches_parent_and_receipt_without_losing_saf
     from pydantic_ai.capabilities import AbstractCapability
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
     from pydantic_ai.models.function import FunctionModel
-    from linktools.ai.model import create_model, validate_model_input
+    from linktools.ai.model import create_model_binding, validate_model_input
     from linktools.ai.capability import PydanticToolControlCapability
     from linktools.ai.runtime._tool import RuntimeToolOperationBridge
     from linktools.ai.storage import InMemoryObjectStore
 
-    binding = create_model(api="openai", model="example-model")
+    binding = create_model_binding(api="openai", model="example-model")
     with pytest.raises(AIError) as rejected:
         validate_model_input(binding, "image/png")
     original = rejected.value
@@ -391,10 +391,10 @@ async def test_model_input_rejection_does_not_copy_connection_fields_into_diagno
 
 
 async def test_subagent_feedback_preserves_opaque_identities_and_real_fallback_model_identity():
-    from linktools.ai.model import FallbackBinding, create_model, validate_model_input
+    from linktools.ai.model import FallbackBinding, create_model_binding, validate_model_input
     identity = "子任务 'review'"
-    binding = FallbackBinding(create_model(api="openai", model="first"),
-                              create_model(api="openai", model="second"))
+    binding = FallbackBinding(create_model_binding(api="openai", model="first"),
+                              create_model_binding(api="openai", model="second"))
     with pytest.raises(AIError) as rejected:
         validate_model_input(binding, "image/png")
     assert rejected.value.safe_details["model_identity"] == binding.model_identity

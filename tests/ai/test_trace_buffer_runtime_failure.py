@@ -79,7 +79,7 @@ async def test_rejected_trace_payload_finishes_source_control_without_replaying_
         capabilities.append(native_checkpoint())
     features = model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(*capabilities))
     async with Persistence.open("trace-buffer-failure", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features, metrics=None) as runtime:
+        async with Runtime.open(persistence=persistence, features=features, metrics=None) as runtime:
             backend = runtime._execution_service.runtime_backend()
             commit_terminal = backend._runtime_commands.commit_terminal_checkpoint
             if rejection == "terminal":
@@ -216,7 +216,7 @@ async def test_trace_buffer_cancellation_keeps_control_settled(tmp_path, monkeyp
         TraceCapability(commit=policy),
     ))
     async with Persistence.open("terminal-trace-cancel", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features, metrics=None) as runtime:
+        async with Runtime.open(persistence=persistence, features=features, metrics=None) as runtime:
             store = runtime._run_store
             archive = store.read_store(PersistenceDomain.TRACE)
             repository = persistence.execution.executions

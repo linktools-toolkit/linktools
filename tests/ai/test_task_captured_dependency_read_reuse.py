@@ -50,7 +50,7 @@ async def test_captured_dependency_reads_one_contract(tmp_path: Path, monkeypatc
         return json.dumps(result)
 
     producer = Task('reuse.source', source, effect_policy='none')
-    async with Persistence.open('capture-reuse', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence, context=runtime.context, authorization=runtime._execution_service._authorization) as engine:
+    async with Persistence.open('capture-reuse', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence, Runtime.open(persistence=persistence, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence, context=runtime.context, authorization=runtime._execution_service._authorization) as engine:
         principal = Principal('capture', runtime.tenant_id)
         consumer = Task.from_agent('reuse.target', runtime.agents.get(), build_input=build)
         engine = engine.with_definitions(producer, consumer)

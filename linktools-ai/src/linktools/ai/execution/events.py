@@ -71,7 +71,8 @@ _SHARED_PRODUCER_STATUSES = frozenset(
 
 _BOUNDARY_METADATA_FIELDS = {
     ExecutionEventType.TOOL_CALL_STARTED.value: frozenset(
-        {"agent_run_seq", "call_id", "tool_name", "tool_position", "arguments_digest"}
+        {"agent_run_seq", "call_id", "tool_name", "tool_position", "tool_model_request_seq",
+         "arguments_digest"}
     ),
     ExecutionEventType.TOOL_CALL_FINISHED.value: frozenset(
         {
@@ -79,6 +80,8 @@ _BOUNDARY_METADATA_FIELDS = {
             "call_id",
             "tool_name",
             "tool_position",
+            "tool_model_request_seq",
+            "tool_elapsed_ms",
             "result_digest",
             "status",
             "error_code",
@@ -92,6 +95,7 @@ _BOUNDARY_METADATA_FIELDS = {
             "stream_attempt_seq",
             "part_index",
             "part_type",
+            "thinking_elapsed_ms",
             "digest",
             "characters",
         }

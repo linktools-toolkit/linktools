@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import CreateSessionRequest
+from linktools.ai.session import CreateSessionRequest
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.persistence._step_archive import StateStepArchive
@@ -82,7 +82,7 @@ async def test_terminal_cleanup_requires_confirmed_matching_seal(
     def respond(_messages, _info):
         return ModelResponse(parts=[TextPart("complete")])
 
-    async with Persistence.open("terminal-seal-receipt", storage=storage) as state, Runtime.attach(
+    async with Persistence.open("terminal-seal-receipt", storage=storage) as state, Runtime.open(
         persistence=state,
         features=model_features(_Models(_UsageFunctionModel(respond)), features),
     ) as runtime:

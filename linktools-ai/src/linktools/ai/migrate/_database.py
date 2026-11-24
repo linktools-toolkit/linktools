@@ -10,7 +10,6 @@ from linktools.core import environ
 from ..asset import build_asset_sql_metadata
 from ..observe import build_metrics_sql_metadata
 from ..persistence import PersistenceDomain
-from ..persistence.objects import runtime_domain_uses_object_store
 from ..persistence.schema import build_runtime_sql_metadata, build_step_sql_metadata, build_step_domain_sql_metadata
 from ..storage import SqlStorageContext, build_object_sql_metadata, provision_sql, validate_sql
 
@@ -79,16 +78,14 @@ async def provision_runtime_database(
     selected = frozenset(domains)
     if not selected:
         raise ValueError("at least one PersistenceDomain is required")
-    if not selected.issubset(frozenset(PersistenceDomain)):
+    if any(not isinstance(domain, PersistenceDomain) for domain in selected):
         raise ValueError("domains must contain PersistenceDomain values")
     from sqlalchemy import MetaData
 
     metadata = MetaData()
     build_step_domain_sql_metadata(selected, metadata=metadata)
     build_runtime_sql_metadata(selected, metadata=metadata)
-    if object_store is None and any(
-        runtime_domain_uses_object_store(domain) for domain in selected
-    ):
+    if object_store is None:
         build_object_sql_metadata(metadata=metadata)
     await provision_sql(engine, metadata)
 

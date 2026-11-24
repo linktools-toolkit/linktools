@@ -54,7 +54,7 @@ async def test_terminal_trace_handoff_recovers_same_execution_without_losing_adm
 
     database = tmp_path / "state.db"
     async with Persistence.open("terminal-trace-handoff", storage=PersistenceStorage.sqlite(database)) as state:
-        async with Runtime.attach(persistence=state, features=features(blocked), metrics=None) as owner:
+        async with Runtime.open(persistence=state, features=features(blocked), metrics=None) as owner:
             session = await owner.agents.get().create_session("session")
             execution = await session.start("Remember blue", idempotency_key="turn")
             await asyncio.wait_for(entered.wait(), 5)
@@ -78,7 +78,7 @@ async def test_terminal_trace_handoff_recovers_same_execution_without_losing_adm
             assert buffer.close_calls == 0
 
     async with Persistence.open("terminal-trace-handoff", storage=PersistenceStorage.sqlite(database)) as state:
-        async with Runtime.attach(persistence=state, features=features(answer), metrics=None,
+        async with Runtime.open(persistence=state, features=features(answer), metrics=None,
                                   auto_recover=False) as successor:
             principal = successor.default_principal
             before = await successor.executions.inspect(execution.execution_id, principal=principal)

@@ -139,7 +139,7 @@ async def test_workspace_edit_miss_explains_unique_match_requirement(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_workspace_unknown_attachment_type_requires_model_support(tmp_path: Path) -> None:
-    from linktools.ai.model import create_model
+    from linktools.ai.model import create_model_binding
     (tmp_path / "evidence.unknown").write_bytes(b"\x00\x01")
     workspace = Workspace.load(tmp_path)
     session = LocalWorkspaceBackend(workspace.root)
@@ -149,7 +149,7 @@ async def test_workspace_unknown_attachment_type_requires_model_support(tmp_path
             workspace,
             ("read_file",),
             backend=session,
-            model_binding=create_model(api="openai", model="test", input_types=("image",)),
+            model_binding=create_model_binding(api="openai", model="test", input_types=("image",)),
         )[0]
         toolset = capability.get_toolset()
         with pytest.raises(ToolCallRetry, match="does not support this file type"):

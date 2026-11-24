@@ -183,7 +183,7 @@ async def test_exact_batch_http_content_and_permission_parity() -> None:
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
     async with Persistence.open("batch-http", storage=PersistenceStorage.in_memory()) as state:
-        async with Runtime.attach(persistence=state, features=features) as runtime:
+        async with Runtime.open(persistence=state, features=features) as runtime:
             execution = await runtime.agents.get().start("hello")
             await execution.wait()
             async with client(create_app(runtime=runtime)) as http:

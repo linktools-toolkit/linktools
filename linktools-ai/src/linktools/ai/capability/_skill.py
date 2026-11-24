@@ -32,7 +32,7 @@ from ._skill_source import (
     require_skill_resource_path,
 )
 from ._tool_signal import ToolCallFailed, ToolCallRetry
-from ._tool_metadata import tool_metadata
+from ._tool_metadata import _registered_preview, tool_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +131,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             metadata=tool_metadata(
                 plan_safe=True,
                 compaction_keep_result=True,
+                base=_registered_preview("skill_id"),
             )
         )
         async def load_skill(

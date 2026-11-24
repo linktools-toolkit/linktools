@@ -168,8 +168,7 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
         async with Persistence.open(
             namespace, storage=storage, tenant_id=principal.tenant_id, read_only=True,
         ) as persistence, History.open(persistence=persistence, authorization=authorization) as history:
-            print(await history.inspect_session(session_id, principal=principal))
-            timeline = await history.session_timeline(
+            detail = await history.session_detail(
                 session_id, principal=principal, limit=20,
             )
             transcript = await history.transcript(
@@ -177,7 +176,7 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
                 include_content=True, limit=20,
             )
             result = await history.result(execution_id, principal=principal)
-            print(timeline.items, transcript.items, result.output)
+            print(detail.session, detail.timeline.items, transcript.items, result.output)
 
 Persistence.open 负责绑定 namespace/tenant 与物理资源，并在外层退出时关闭自身拥有的资源。History.open 只借用已经打开的 Persistence，关闭时仅清理自己的读取订阅；不会关闭 Persistence、运行中的 Runtime 或共享缓存。此例以 read_only=True 打开独立只读 Persistence。示例仅读首个 timeline/transcript 页面；完整分页继续使用返回的 next_cursor 与相同查询参数。构造函数不会替调用者找已有会话，目录和身份参数需由宿主提供。
 
@@ -239,7 +238,7 @@ Task、真正 Checkpoint、tool effect、授权/幂等/恢复控制仍在必要�
 
 ### 8.2 自动指标与宿主写入节奏
 
-热点读取、Trace 缓冲和自动指标各有独立 owner。`Metrics` 是同步 source/query dataset，同时结构化满足 `MetricRecorderProvider`；`Runtime.open/attach` 与独立 `TaskEngine` 继续通过已有 `metrics=` 接收 provider。只有 `recorder() -> MetricRecorder` 一个无参组合点，不要求 producer 创建 SQL dataset，不添加具体中间件依赖。
+热点读取、Trace 缓冲和自动指标各有独立 owner。`Metrics` 是同步 source/query dataset，同时结构化满足 `MetricRecorderProvider`；`Runtime.open` 与独立 `TaskEngine` 继续通过已有 `metrics=` 接收 provider。只有 `recorder() -> MetricRecorder` 一个无参组合点，不要求 producer 创建 SQL dataset，不添加具体中间件依赖。
 
 每次 recorder 调用返回独立 scope，创建时不启动 I/O 或任务；producer 关闭自身 scope，不关闭共享 provider/client。Runtime 的 Agent 和 TaskEngine 各自拥有 scope，Evaluation 借 TaskEngine。自动观测保留原 observation ID、tenant/source namespace 与 enrichment；宿主固定目标 dataset，不能把业务来源字段当成投递目标。
 

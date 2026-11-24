@@ -26,12 +26,12 @@ from linktools.ai.workspace import (
 async def test_disabled_workspace_factory_is_fail_closed(tmp_path: Path) -> None:
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.capability import FileSystem
+    from linktools.ai.capability import FileSystemCapability
     from linktools.ai.workspace import Workspace
     from ._runtime_test_helpers import RuntimeUsageModels, model_features
 
     features = RuntimeFeatures("disabled", workspace_factory=None)
-    features.capability(FileSystem(Workspace.load(tmp_path)))
+    features.capability(FileSystemCapability(Workspace.load(tmp_path)))
     (tmp_path / "evidence.txt").write_text("private evidence")
     async with Runtime.open("disabled", storage=PersistenceStorage.in_memory(), features=model_features(RuntimeUsageModels(), features)) as runtime:
         with pytest.raises(AIError) as error:

@@ -51,6 +51,6 @@ async def test_recent_execution_metadata_pages_without_payload_recovery(
         monkeypatch.setattr(ExecutionRepositoryImpl, "_decode_many", no_payloads)
         history = History(_service(repository), tenant_id="tenant", executions=repository,
                           authorization=TenantAuthorizationPolicy("tenant"))
-        actual = await history.recent_executions(principal=Principal("caller", "tenant", "service"), limit=2)
+        actual = await history.scan_recent_executions(principal=Principal("caller", "tenant", "service"), limit=2)
         assert actual == tuple(_project_execution_info(record) for record in reversed(records[1:]))
         assert len(pages) == 3 and pages[0] is None and all(pages[1:])

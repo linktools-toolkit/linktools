@@ -8,11 +8,12 @@ from argparse import Namespace
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
+from linktools.errors import ConfigCastError
 
 from linktools.ai.asset import (
     AssetStore,
@@ -31,11 +32,12 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding
     from linktools.ai.runtime import Runtime
-    from linktools.ai.session import SessionTurnNotice, ToolProcessItem, ToolProcessStatus
+    from linktools.ai.session import SessionTurnNotice, ToolProcessItem
     from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
 MODEL_API = ConfigField(name="MODEL_API", cast=str, default=None)
+MODEL_VISION = ConfigField(name="MODEL_VISION", cast=bool)
 _MODEL_NUMERIC_OPTIONS = (
     ("context_window", int, "context window in tokens"),
     ("max_tokens", int, "maximum output tokens"),
@@ -104,19 +106,23 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
     return Metrics.sqlite(path, namespace="default")
 
 
-def _local_input_config(
-    workspace: Workspace,
-) -> tuple[str, ...]:
-
+def _local_input_config(workspace: Workspace) -> tuple[str, ...]:
     try:
         values = workspace.config.get("input_types", [])
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
             raise ValueError("input_types must be a list of input type strings")
-        return tuple(values)
-    except (TypeError, ValueError) as error:
+        vision = environ.config.get(MODEL_VISION, default=None)
+        if vision is None:
+            return tuple(values)
+        if vision:
+            return (*values, "image")
+        return tuple(item for item in values if item != "image" and not (
+            item.startswith("mime:") and item[5:].strip().lower().startswith("image/")
+        ))
+    except (ConfigCastError, TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
-            "Invalid workspace input_types configuration",
+            "Invalid workspace input_types or LINKTOOLS_MODEL_VISION configuration",
             retryable=False,
             safe_details={"reason": "model_input_configuration_invalid"},
         ) from error
@@ -172,13 +178,13 @@ class _ModelOptions:
                           safe_details={"reason": "model_configuration_invalid"}) from error
         return cls(api, model, options["base_url"], options["api_key"], input_types, limits)
 
-    def create_model(self) -> "ModelBinding":
-        from linktools.ai.model import create_model
+    def create_model_binding(self) -> "ModelBinding":
+        from linktools.ai.model import create_model_binding
 
         if not self.model:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
         try:
-            return create_model(
+            return create_model_binding(
                 api=self.api, model=self.model, input_types=self.input_types,
                 base_url=self.base_url, api_key=self.api_key,
                 model_settings={name: value for name, value in self.limits.items() if name in {"max_tokens", "timeout"}},
@@ -237,22 +243,11 @@ class _LocalSessionFeed:
             row = value.get("process")
             if not isinstance(row, dict):
                 return
-            key, name, status = row.get("key"), row.get("tool_name"), row.get("status")
-            if (row.get("kind") != "tool" or not isinstance(key, str) or not key.startswith("tool:")
-                    or len(key) <= len("tool:") or not isinstance(name, str) or not name
-                    or status not in ("RUNNING", "SUCCEEDED", "FAILED", "INTERRUPTED", "CANCELLED")):
-                return
-            position = row.get("position")
-            if position is not None:
-                if not isinstance(position, list) or len(position) != 2:
-                    return
-                message_seq, part_index = position
-                if type(message_seq) is not int or message_seq < 1 or type(part_index) is not int or part_index < 0:
-                    return
-                position = (message_seq, part_index)
             from linktools.ai.session import ToolProcessItem
 
-            item = ToolProcessItem(key, name, cast("ToolProcessStatus", status), position)
+            item = ToolProcessItem.from_notice(row)
+            if item is None:
+                return
             for callback in tuple(self._callbacks[session_id]):
                 callback(execution_id, item)
 
@@ -282,7 +277,7 @@ async def _open_local_runtime(
     status: "Mapping[str, object] | None" = None,
 ) -> "AsyncIterator[LocalRuntime]":
     from linktools.ai.capability import (
-        AssetCapability, ExecutionCapability, FileSystem, MemoryCapability,
+        AssetCapability, ExecutionCapability, FileSystemCapability, MemoryCapability,
         ShellCapability, StepPersistenceCapability, TraceCapability,
     )
     from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -290,7 +285,7 @@ async def _open_local_runtime(
     features = RuntimeFeatures("workspace")
     features.model("default", model)
     features.capability(AssetCapability(_local_runtime_assets(workspace)))
-    features.capability(FileSystem(workspace))
+    features.capability(FileSystemCapability(workspace))
     features.capability(ShellCapability())
     features.capability(MemoryCapability())
     features.capability(ExecutionCapability(retain_history=True))
@@ -321,7 +316,7 @@ def run_local(
     async def run() -> int:
         workspace = _load_workspace(args.project)
         options = _ModelOptions.load(workspace, args)
-        model = options.create_model()
+        model = options.create_model_binding()
         async with _open_local_runtime(
             workspace, model=model, status=options.status(model),
         ) as local:

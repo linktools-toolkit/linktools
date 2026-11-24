@@ -7,7 +7,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import CreateSessionRequest
+from linktools.ai.session import CreateSessionRequest
 from linktools.ai.persistence import runs
 from linktools.ai.persistence._sql import SqlStateStorageGroup, _SqlTransaction
 from linktools.ai.persistence.durability import DurableCommitState

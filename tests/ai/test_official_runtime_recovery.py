@@ -38,7 +38,7 @@ async def _runtime(database: Path, model, tool, *, restart_checkpoints: bool = T
     features.agent("default", model="default", allow_tools=(tool.__name__,))
     try:
         async with Persistence.open("native-recovery", storage=PersistenceStorage.sql(engine)) as persistence:
-            async with Runtime.attach(persistence=persistence,
+            async with Runtime.open(persistence=persistence,
                 features=model_features(_Models(_UsageFunctionModel(model)), features),
                 auto_recover=False, authorization=authorization) as runtime:
                 yield runtime, persistence, steps

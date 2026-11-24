@@ -6,13 +6,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
-from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn
+from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn, SessionService
 from ..agent import AgentBindingContract
 from ..core import BudgetUsage, Principal
 from ..observe import WaitResult, RuntimeMetricsControl
 from ..inputs import CaptureInputRequest, ExecutionInputCaptureRef, InputCaptures
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
-from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, CloseSessionRequest, CreateSessionRequest, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ForkSessionRequest, ListExecutionRequest, ListSessionRequest, ModelInteractionItem, Page, RetryExecutionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, TranscriptItem, UpdateSessionRequest, UsageReadCutoff, ExecutionService, SessionService
+from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ListExecutionRequest, ModelInteractionItem, Page, RetryExecutionRequest, UsageReadCutoff, ExecutionService
+from ..session import CloseSessionRequest, CreateSessionRequest, ForkSessionRequest, ListSessionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, UpdateSessionRequest
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -196,9 +197,6 @@ class RuntimeExecutions(Generic[AppT]):
             step_index=step_index,
             tool_call_id=tool_call_id,
         )
-
-    async def transcript(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, limit: int = 100) -> Page[TranscriptItem]:
-        return await self._service.transcript(execution_id, principal=principal, cursor=cursor, include_content=include_content, limit=limit)
 
     async def history(
         self,

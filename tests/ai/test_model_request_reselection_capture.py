@@ -107,7 +107,7 @@ async def test_reselected_model_history_retains_preload_receipt(tmp_path: Path) 
     features.capability(_ReselectModel(_UsageFunctionModel(provider)), id="select-model", scope="agent")
     try:
         async with Persistence.open("preload-reselection", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-            async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            async with Runtime.open(persistence=persistence, features=features) as runtime:
                 execution = await runtime.agents.get().start("go")
                 result = (await execution.wait(timeout_seconds=15)).result
                 assert result.status is ExecutionStatus.SUCCEEDED, result

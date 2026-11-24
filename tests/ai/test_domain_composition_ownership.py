@@ -28,7 +28,7 @@ async def test_evaluation_borrowers_keep_engine_and_shared_storage_open(
     storage = PersistenceStorage.sqlite(tmp_path / "domains.sqlite")
     async with Persistence.open("domains", storage=storage) as persistence:
         async with TaskEngine.open(persistence=persistence) as peer:
-            async with Runtime.attach(persistence=persistence) if compose else TaskEngine.open(
+            async with Runtime.open(persistence=persistence) if compose else TaskEngine.open(
                 persistence=persistence,
             ) as scope:
                 engine = await scope.tasks.bind() if compose else scope

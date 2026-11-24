@@ -66,7 +66,7 @@ def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
                     assert response.json()['output'] == {'text': 'done'}
 
     monkeypatch.setattr(Runtime, 'open', tracked_open)
-    monkeypatch.setattr(common_command._ModelOptions, 'create_model', lambda _self: RuntimeUsageModels())
+    monkeypatch.setattr(common_command._ModelOptions, 'create_model_binding', lambda _self: RuntimeUsageModels())
     monkeypatch.setattr(uvicorn, 'Server', Server)
     for _ in range(2):
         args = web_command.command.create_parser().parse_args([
@@ -118,7 +118,7 @@ def test_run_command_history_is_readable_after_command_close(
     from linktools.ai.history import History
     from linktools.commands.ai._common import _load_workspace, _local_runtime_storage
 
-    monkeypatch.setattr(common_command._ModelOptions, 'create_model', lambda _self: RuntimeUsageModels())
+    monkeypatch.setattr(common_command._ModelOptions, 'create_model_binding', lambda _self: RuntimeUsageModels())
     args = run_command.command.create_parser().parse_args([
         '--project', str(tmp_path), '--model', 'fake', '--json', 'hello',
     ])

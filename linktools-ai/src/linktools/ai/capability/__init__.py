@@ -49,6 +49,8 @@ from ._tool_metadata import (
     TOOL_PATH_FIELDS_METADATA_KEY,
     TOOL_PLAN_SAFE_METADATA_KEY,
     tool_class_from_metadata,
+    durable_tool_metadata,
+    tool_argument_preview_field,
     tool_compaction_keep_result_from_metadata,
     tool_context_dedupe_from_metadata,
     tool_effect_policy_from_metadata,
@@ -59,7 +61,7 @@ from ._tool_metadata import (
 )
 from ._shell import ShellCapability
 from ._filesystem import (
-    FileSystem,
+    FileSystemCapability,
     FileSystemToolDeclaration,
     filesystem_capabilities,
     filesystem_tool_declarations,
@@ -82,7 +84,7 @@ __all__ = [
     "ToolResultsCapability",
     "RunCallbacks", "RunCallbackScope", "bind_run_callbacks",
     "AssetCapability",
-    "FileSystem",
+    "FileSystemCapability",
     "ShellCapability",
     "ToolClass",
     "ToolEffectPolicy",
@@ -130,6 +132,8 @@ __all__ = [
     "validate_resource_path",
     "validate_resource_tree",
     "tool_class_from_metadata",
+    "durable_tool_metadata",
+    "tool_argument_preview_field",
     "tool_compaction_keep_result_from_metadata",
     "tool_context_dedupe_from_metadata",
     "tool_effect_policy_from_metadata",

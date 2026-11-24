@@ -12,7 +12,8 @@ from pydantic_ai.models.test import TestModel
 
 from linktools.ai.capability import StepPersistenceCapability
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, service_principal
-from linktools.ai.execution import CreateSessionRequest, ForkSessionRequest, RetryExecutionRequest
+from linktools.ai.execution import RetryExecutionRequest
+from linktools.ai.session import CreateSessionRequest, ForkSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext

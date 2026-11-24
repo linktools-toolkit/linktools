@@ -61,7 +61,7 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
         native = await persistence.create_step_store()
         accepted.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
         try:
-            async with Runtime.attach(
+            async with Runtime.open(
                 persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), accepted),
             ) as runtime:
                 execution = await runtime.agents.get().session("session").start("retained older question")
@@ -109,7 +109,7 @@ async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
         native = await persistence.create_step_store()
         accepted.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
         try:
-            async with Runtime.attach(
+            async with Runtime.open(
                 persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), accepted),
             ) as runtime:
                 original = await runtime.agents.get().start("accept the original output limit")
@@ -130,7 +130,7 @@ async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
         native = await persistence.create_step_store()
         application.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
         try:
-            async with Runtime.attach(
+            async with Runtime.open(
                 persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), application),
             ) as runtime:
                 original = await runtime.executions.get(execution_id)

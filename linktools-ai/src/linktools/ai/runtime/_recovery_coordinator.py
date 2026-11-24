@@ -43,6 +43,7 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import StoredPayload
 from ..spec import CapabilityRef, RepositoryInstructionResolver, RepositoryInstructions
 from ..inputs import CanonicalUserInput
+from ._tool_boundary import is_instruction_file_read
 from ._repository_instructions import (
     _RepositoryInstructionApproval,
     _merge_repository_instructions,
@@ -429,7 +430,6 @@ class _RecoveryCoordinator:
         path_fields: tuple[str, ...],
         producer_generation: int | None = None,
     ) -> tuple[RepositoryInstructions | None, bool]:
-        del tool_name
         paths = _instruction_paths(arguments, path_fields)
         resolver = self._instruction_resolver
         if not paths or resolver is None:
@@ -456,11 +456,12 @@ class _RecoveryCoordinator:
             if barrier.agent_run_id == current.recovery.agent_run_id
             and barrier.tool_call_id == tool_call_id
         )
+        instruction_read = is_instruction_file_read(tool_name, arguments, path_fields)
         if matching:
             barrier = matching[0]
             if barrier.arguments_digest != arguments_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return persisted_overlay, True
+            return persisted_overlay, not instruction_read
 
         active = _merge_repository_instructions(initial, persisted_overlay)
         excluded = frozenset(
@@ -480,7 +481,7 @@ class _RecoveryCoordinator:
                 discovered.append(document)
         if not discovered:
             return persisted_overlay, (
-                _repository_instruction_signature(overlay)
+                not instruction_read and _repository_instruction_signature(overlay)
                 != _repository_instruction_signature(persisted_overlay)
             )
         new_documents = RepositoryInstructions(tuple(discovered))
@@ -518,7 +519,7 @@ class _RecoveryCoordinator:
             current.recovery.agent_run_id,
             tool_call_id,
         )
-        return committed_overlay, True
+        return committed_overlay, not instruction_read
 
     async def commit_deferred_pause(
         self,

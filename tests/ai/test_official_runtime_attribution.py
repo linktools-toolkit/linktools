@@ -182,7 +182,7 @@ async def test_two_turn_storage_measurement(
     event.listen(Engine, "begin", begin)
     event.listen(Engine, "commit", commit)
     try:
-        async with Persistence.open("turn-io", storage=storage) as persistence, Runtime.attach(
+        async with Persistence.open("turn-io", storage=storage) as persistence, Runtime.open(
             persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
         ) as runtime:
             session = await runtime.agents.get().create_session("session")

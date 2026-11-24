@@ -15,7 +15,7 @@ from linktools.ai.capability import AgentContext, ExecutionCapability, Reference
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
-from linktools.ai.model import ReferencedContent, create_model, model_binding_error, model_request_error
+from linktools.ai.model import ReferencedContent, create_model_binding, model_binding_error, model_request_error
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
@@ -182,7 +182,7 @@ async def test_provider_rejection_identifiers_survive_history_reopen(
     monkeypatch.setattr("linktools.ai.model._openai.DefaultAsyncHttpxClient", client)
     features = RuntimeFeatures("provider-diagnostics")
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
-    features.model("default", create_model(api="openai-responses", model="gpt-4.1", input_types=("document",), api_key="synthetic-secret",
+    features.model("default", create_model_binding(api="openai-responses", model="gpt-4.1", input_types=("document",), api_key="synthetic-secret",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0))
     features.capability(ExecutionCapability(retain_history=True))
     features.capability(TraceCapability(record_http_bodies=False))
@@ -198,7 +198,7 @@ async def test_provider_rejection_identifiers_survive_history_reopen(
     storage = lambda: PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     expected = {"type": "invalid_request_error", "code": rejection, "param": param,
                 "request_id": "req_offline-diagnostic"}
-    async with Persistence.open("provider-diagnostics", storage=storage()) as persistence, Runtime.attach(
+    async with Persistence.open("provider-diagnostics", storage=storage()) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         execution = await runtime.agents.get().start(prompt)

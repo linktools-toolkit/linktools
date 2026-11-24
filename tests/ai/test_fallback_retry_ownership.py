@@ -20,7 +20,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import TraceCapability
 from linktools.ai.core import ExecutionStatus, TaskStatus
-from linktools.ai.model import FallbackBinding, ModelBinding, create_model
+from linktools.ai.model import FallbackBinding, ModelBinding, create_model_binding
 from linktools.ai.model._binding import _RetryingModel
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -62,7 +62,7 @@ async def test_fresh_fallback_request_uses_each_candidate_budget_once(
 ) -> None:
     sent: list[str] = []
     _offline_failures(monkeypatch, protocol, sent)
-    leaves = [create_model(
+    leaves = [create_model_binding(
         api=protocol, model=f"candidate-{index}", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=retries, retry_delay=0,
     ) for index in range(3)]
@@ -71,7 +71,7 @@ async def test_fresh_fallback_request_uses_each_candidate_budget_once(
             assert model.wrapped.provider.client.max_retries == 0
     binding = FallbackBinding(*leaves)
     if runtime_request:
-        async with Persistence.open('retry-budget', storage=PersistenceStorage.in_memory()) as persistence_68, Runtime.attach(persistence=persistence_68, features=_features(binding)) as runtime:
+        async with Persistence.open('retry-budget', storage=PersistenceStorage.in_memory()) as persistence_68, Runtime.open(persistence=persistence_68, features=_features(binding)) as runtime:
             execution = await runtime.agents.get().start("synthetic")
             result = (await execution.wait(timeout_seconds=15)).result
             assert result.status is ExecutionStatus.FAILED
@@ -90,7 +90,7 @@ async def test_fresh_fallback_request_uses_each_candidate_budget_once(
 def test_nested_fallback_is_rejected_before_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     sent: list[str] = []
     _offline_failures(monkeypatch, "openai", sent)
-    leaves = [create_model(
+    leaves = [create_model_binding(
         api="openai", model=f"candidate-{index}", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0,
     ) for index in range(3)]
@@ -127,7 +127,7 @@ async def test_cancellation_during_candidate_backoff_stops_retry_and_fallback(mo
     binding = FallbackBinding(
         _Models(_RetryingModel(_UsageFunctionModel(primary), 2, 0)), _Models(_UsageFunctionModel(secondary)),
     )
-    async with Persistence.open('retry-budget', storage=PersistenceStorage.in_memory()) as persistence_126, Runtime.attach(persistence=persistence_126, features=_features(binding)) as runtime:
+    async with Persistence.open('retry-budget', storage=PersistenceStorage.in_memory()) as persistence_126, Runtime.open(persistence=persistence_126, features=_features(binding)) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         await asyncio.wait_for(waiting.wait(), 5)
         await execution.cancel()
@@ -154,7 +154,7 @@ async def test_runtime_partial_retry_stays_with_original_candidate() -> None:
         _Models(_RetryingModel(FunctionModel(stream_function=primary), 2, 0)),
         _Models(_RetryingModel(FunctionModel(stream_function=secondary), 2, 0)),
     )
-    async with Persistence.open('retry-budget', storage=PersistenceStorage.in_memory()) as persistence_155, Runtime.attach(persistence=persistence_155, features=_features(binding)) as runtime:
+    async with Persistence.open('retry-budget', storage=PersistenceStorage.in_memory()) as persistence_155, Runtime.open(persistence=persistence_155, features=_features(binding)) as runtime:
         execution = await runtime.agents.get().start("synthetic")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.FAILED
         assert len((await execution.model_interactions()).items) == 1
@@ -184,7 +184,7 @@ async def test_output_correction_has_its_own_bounded_requests_without_restarting
         _Models(_RetryingModel(_UsageFunctionModel(primary), 2, 0)),
         _Models(_RetryingModel(_UsageFunctionModel(invalid), 2, 0)),
     )
-    async with Persistence.open('retry-budget', storage=PersistenceStorage.in_memory()) as persistence_187, Runtime.attach(persistence=persistence_187, features=_features(binding, output_retries=2)) as runtime, TaskEngine.open(persistence=persistence_187, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('retry-budget', storage=PersistenceStorage.in_memory()) as persistence_187, Runtime.open(persistence=persistence_187, features=_features(binding, output_retries=2)) as runtime, TaskEngine.open(persistence=persistence_187, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         if as_task:
             definition = Task.from_agent("one-task", runtime.agents.get())
             run = await runtime_engine.with_definitions(definition).start(TaskGraph("probe", (

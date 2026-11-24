@@ -77,7 +77,7 @@ async def test_pending_execution_and_trace_payloads_share_the_terminal_source_bo
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("pending-trace-payload", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             target = runtime.agents.get() if sessionless else await runtime.agents.get().create_session("session")
             backend = runtime._execution_service.runtime_backend()
@@ -160,7 +160,7 @@ async def test_unbuffered_terminal_trace_keeps_its_source_admission(
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("unbuffered-terminal-trace", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             execution = await runtime.agents.get().start("question")
             try:

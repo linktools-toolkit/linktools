@@ -17,7 +17,7 @@ from pydantic_ai.models import ModelRequestParameters
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ReferencedContent, create_model, _openai
+from linktools.ai.model import ReferencedContent, create_model_binding, _openai
 from linktools.ai.model.messages import (
     RetiredReferencedContent, SummaryPromptPart, decode_model_messages,
     encode_model_messages,
@@ -84,7 +84,7 @@ async def test_provider_continuation_still_detects_changed_history_after_restore
         return DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond), **kwargs)
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
-    binding = create_model(
+    binding = create_model_binding(
         api="openai-responses", model="gpt-5", api_key="test-key",
         base_url="https://continuation.invalid/v1", max_retries=0,
         model_settings={"openai_previous_response_id": "auto"},

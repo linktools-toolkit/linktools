@@ -18,7 +18,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .capability import ExecutionCapability, FileSystem
+from .capability import ExecutionCapability, FileSystemCapability
 from .runtime import RuntimeFeatures
 from .persistence import PersistenceStorage
 from .core import (
@@ -29,7 +29,8 @@ from .core import (
     Principal,
 )
 from .errors import AIError, ErrorCode
-from .execution import ExecutionTreeEvent, ListSessionRequest
+from .execution import ExecutionTreeEvent
+from .session import ListSessionRequest
 from .runtime import Runtime
 from .session import project_tool_process_event
 from .workspace import Workspace
@@ -173,7 +174,7 @@ class ACPAgent:
     async def fork_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         acp, schema = _require_acp()
-        from .execution import ForkSessionRequest
+        from .session import ForkSessionRequest
 
         try:
             logical_cwd = self._workspace_cwd(cwd)
@@ -207,7 +208,7 @@ class ACPAgent:
     async def close_session(self, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
-        from .execution import CloseSessionRequest
+        from .session import CloseSessionRequest
 
         await self._runtime.sessions.close(session_id, CloseSessionRequest(self._principal, uuid4().hex))
         return schema.CloseSessionResponse()
@@ -343,7 +344,7 @@ class ACPApplication:
 
     def __post_init__(self) -> None:
         """Complete this application's feature declarations once, before serving."""
-        self.features.capability(FileSystem(self.workspace))
+        self.features.capability(FileSystemCapability(self.workspace))
         from .capability import ShellCapability
         self.features.capability(ShellCapability())
         self.features.capability(

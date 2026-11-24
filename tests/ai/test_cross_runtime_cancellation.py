@@ -71,7 +71,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
     group.agent("default", model="default", allow_tools=())
     remote_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     try:
-        async with Persistence.open('remote-cancel-release', storage=owner_storage) as persistence_69, Runtime.attach(persistence=persistence_69, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as owner, Persistence.open('remote-cancel-release', storage=remote_storage) as persistence_72, Runtime.attach(persistence=persistence_72, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as remote:
+        async with Persistence.open('remote-cancel-release', storage=owner_storage) as persistence_69, Runtime.open(persistence=persistence_69, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as owner, Persistence.open('remote-cancel-release', storage=remote_storage) as persistence_72, Runtime.open(persistence=persistence_72, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as remote:
             await owner.agents.get("default").create_session("session")
             session = owner.agents.get("default").session("session")
             for turn in range(3):
@@ -250,7 +250,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
     group.tool(slow, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("fast", "slow"))
     owner_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
-    async with Persistence.open('individual-tool-cancel', storage=owner_storage) as persistence_248, Runtime.attach(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('individual-tool-cancel', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_251, Runtime.attach(persistence=persistence_251, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
+    async with Persistence.open('individual-tool-cancel', storage=owner_storage) as persistence_248, Runtime.open(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('individual-tool-cancel', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_251, Runtime.open(persistence=persistence_251, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
         execution = await owner.agents.get("default").start("run both")
         try:
             await asyncio.wait_for(asyncio.gather(fast_entered.wait(), slow_entered.wait()), 10)
@@ -349,7 +349,7 @@ async def test_forced_remote_cancel_drains_sibling_after_late_known_result(
     group.tool(slow, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("fast", "slow"))
     owner_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
-    async with Persistence.open('individual-tool-cancel', storage=owner_storage) as persistence_248, Runtime.attach(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('individual-tool-cancel', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_251, Runtime.attach(persistence=persistence_251, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
+    async with Persistence.open('individual-tool-cancel', storage=owner_storage) as persistence_248, Runtime.open(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('individual-tool-cancel', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_251, Runtime.open(persistence=persistence_251, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
         execution = await owner.agents.get("default").start("run both")
         try:
             await asyncio.wait_for(asyncio.gather(fast_entered.wait(), slow_entered.wait()), 10)
@@ -466,7 +466,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         )
 
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
-    async with Persistence.open('projection-cancel-conflict', storage=owner_storage) as persistence_336, Runtime.attach(persistence=persistence_336, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('projection-cancel-conflict', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_339, Runtime.attach(persistence=persistence_339, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
+    async with Persistence.open('projection-cancel-conflict', storage=owner_storage) as persistence_336, Runtime.open(persistence=persistence_336, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('projection-cancel-conflict', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_339, Runtime.open(persistence=persistence_339, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
         # The paused cancellation snapshot must coexist with the projection commit.
         with closing(sqlite3.connect(tmp_path / "runtime.db")) as connection:
             assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
@@ -599,13 +599,13 @@ async def test_remote_cancel_during_tool_budget_admission_never_dispatches(
             storage = await stack.enter_async_context(Persistence.open(
                 "budget-cancel", storage=PersistenceStorage.sqlite(database),
             ))
-            owner = await stack.enter_async_context(Runtime.attach(
+            owner = await stack.enter_async_context(Runtime.open(
                 persistence=storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
             ))
             other_storage = await stack.enter_async_context(Persistence.open(
                 "budget-cancel", storage=PersistenceStorage.sqlite(database),
             ))
-            remote = await stack.enter_async_context(Runtime.attach(
+            remote = await stack.enter_async_context(Runtime.open(
                 persistence=other_storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
             ))
         execution = await owner.agents.get().start("work", budget=RunBudget(tool_calls=1))

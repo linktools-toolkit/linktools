@@ -39,7 +39,7 @@ async def test_actual_runtime_output_selects_exact_native_projection(tmp_path: P
     features.capability(TraceCapability(), scope="runtime")
     config = PersistenceStorage.sqlite(tmp_path / "outputs.db")
     expected = {"text": "plain"} if case == "assistant" else {"count": 3}
-    async with Persistence.open("native-output", tenant_id="tenant", storage=config) as state, Runtime.attach(
+    async with Persistence.open("native-output", tenant_id="tenant", storage=config) as state, Runtime.open(
         persistence=state, features=model_features(_Models(_UsageFunctionModel(respond)), features),
     ) as runtime:
         result = (await runtime.agents.get().run("review", output=AssistantTextOutput if case == "assistant" else _Count,

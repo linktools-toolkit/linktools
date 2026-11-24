@@ -69,11 +69,17 @@ send('MODEL_ATTEMPT_FINISHED',1,{model_request_seq:3,status:'CANCELLED',retry_sc
 send('MODEL_ATTEMPT_STARTED',1,{model_request_seq:3});
 send('ASSISTANT_TEXT_DELTA',1,{model_request_seq:3,text:'after cancel'});
 assert.equal(request(1,3).attempts.get(1).status,'CANCELLED');assert.equal(request(1,3).attempts.get(1).text,'');
+send('ASSISTANT_THINKING_DELTA',1,{model_request_seq:8,part_index:0,part_start:true,text:'completed thought'});
+send('ASSISTANT_PART_COMPLETED',1,{model_request_seq:8,part_index:0,thinking_elapsed_ms:375});
+send('MODEL_REQUEST_FINISHED',1,{model_request_seq:8,status:'SUCCEEDED'});
 send('ASSISTANT_TEXT_DELTA',1,{model_request_seq:4,text:'truncated'});
 updateStreamAttempts(requests,{execution_id:'root',event:{event_type:'STREAM_RESET',payload:{}}});
 assert.equal(request(1,4).attempts.get(1).text,'');assert.equal(request(1,4).current,1);
 assert.equal(request().attempts.get(1).text,'partial','cursor gaps do not erase failed attempt diagnostics');
 assert.equal(streamResponsePreview(request()).text,'winner continued','a completed logical response is not cleared by another request gap');
+assert.deepEqual(streamResponsePreview(request(1,8)).parts,[{
+  index:0,kind:'thinking',start:true,content:'completed thought',elapsedMs:375,
+}]);
 assert.equal(request(1,1,'child').attempts.get(1).text,'other agent');
 send('ASSISTANT_TEXT_DELTA',1,{model_request_seq:4,text:'retained tail'});
 assert.equal(request(1,4).attempts.get(1).truncated,true);

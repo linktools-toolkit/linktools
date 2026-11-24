@@ -101,7 +101,7 @@ Conversation, Checkpoint and Trace persistence owners keep their existing
 module-specific reads, buffers and commit boundaries.
 
 Tool-owning capabilities supply their tool declarations and native binding together.
-`MemoryCapability`, `ShellCapability` and `FileSystem` contribute ordinary Agent tool
+`MemoryCapability`, `ShellCapability` and `FileSystemCapability` contribute ordinary Agent tool
 candidates: the default `allow_tools=("*",)` includes available tools, and explicit
 `allow_tools` or the candidate filter can narrow them. Runtime owns the borrowed storage
 or workspace, not a second tool-name registry. An admitted execution retains its captured
@@ -161,7 +161,7 @@ not grant it.
 `StepPersistenceCapability` retains the official committed snapshots. Its default
 `capture_frontier=True` also saves accepted input and model tool-call frontiers
 before tool dispatch. Runtime creates and closes the default native adapter over
-Persistence's Execution SQL resource, for both `Runtime.open` and `Runtime.attach`.
+Persistence's Execution SQL resource, whether Runtime owns or borrows Persistence.
 It never creates a separate database or invents durable storage for a memory route.
 An explicit `store=...` is borrowed; custom native `StepPersistence` declarations
 retain their existing hook behavior and caller-owned store lifetime. Hosts can use
@@ -399,7 +399,7 @@ features.capability(ExecutionCapability(
 ))
 features.capability(TraceCapability(commit=CommitPolicy.terminal(buffer=write_buffer)))
 # write_buffer and coordination are explicitly supplied, host-owned resources.
-# Register the model binding, then open Persistence and attach Runtime.
+# Register the model binding, then open Persistence and pass it to Runtime.open().
 storage = PersistenceStorage.sqlite("chat.db", coordination=coordination)
 ```
 

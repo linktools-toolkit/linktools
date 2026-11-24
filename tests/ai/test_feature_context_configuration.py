@@ -75,7 +75,7 @@ async def test_runtime_uses_host_policy_and_captured_limits_when_filter_rejects_
     policy = Policy()
     limits = PromptLimits(max_binary_input_parts=1)
     features = RuntimeFeatures('policy', limits=limits, filter=lambda *_: False)
-    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.attach(persistence=persistence_75, features=features, authorization=policy) as runtime:
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.open(persistence=persistence_75, features=features, authorization=policy) as runtime:
         assert runtime._execution_service._authorization is policy
         assert runtime._session_service._authorization is policy
         assert runtime._execution_service._input_materializer._limits is limits
@@ -90,7 +90,7 @@ async def test_runtime_uses_host_policy_and_captured_limits_when_filter_rejects_
 @pytest.mark.parametrize('tenant', ('one', 'two'))
 async def test_default_policy_resolves_per_open_tenant(tenant):
     capture = RuntimeFeatures('reused').borrow()
-    async with Persistence.open('test', storage=PersistenceStorage.in_memory(), tenant_id=tenant) as persistence_86, Runtime.attach(persistence=persistence_86, context=ExecutionContext(None), features=capture) as runtime:
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory(), tenant_id=tenant) as persistence_86, Runtime.open(persistence=persistence_86, context=ExecutionContext(None), features=capture) as runtime:
         policy = runtime._execution_service._authorization
         ref = ResourceRef(ResourceKind.EXECUTION, 'execution', tenant)
         await policy.authorize(service_principal(tenant, 'actor'), AuthorizationAction.EXECUTION_READ, ref)
@@ -152,7 +152,7 @@ async def test_captured_limits_reject_oversized_input_before_execution():
     from pydantic_ai import BinaryContent
 
     features = RuntimeFeatures('limits', limits=PromptLimits(max_binary_input_parts=1))
-    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_140, Runtime.attach(persistence=persistence_140, features=features) as runtime:
+    async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_140, Runtime.open(persistence=persistence_140, features=features) as runtime:
         with pytest.raises(AIError) as caught:
             await runtime._execution_service._input_materializer.materialize(
                 (BinaryContent(b'one', media_type='text/plain'), BinaryContent(b'two', media_type='text/plain')), (),
@@ -208,7 +208,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     policy = Policy()
     group.model("default", _FeatureModels())
     capture = group.borrow()
-    async with Persistence.open('restore-policy', storage=source_storage()) as persistence_198, Runtime.attach(persistence=persistence_198, features=capture, authorization=policy) as runtime:
+    async with Persistence.open('restore-policy', storage=source_storage()) as persistence_198, Runtime.open(persistence=persistence_198, features=capture, authorization=policy) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await execution.wait(timeout_seconds=5)

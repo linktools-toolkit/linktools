@@ -244,7 +244,7 @@ async def test_independent_history_does_not_claim_another_producers_staging(
                else PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
     async with (
         Persistence.open("history-reader-visibility", storage=storage) as persistence,
-        Runtime.attach(persistence=persistence,
+        Runtime.open(persistence=persistence,
                      features=model_features(_Models(_UsageFunctionModel(respond)), features)) as producer,
         History.open(persistence=persistence) as independent,
     ):

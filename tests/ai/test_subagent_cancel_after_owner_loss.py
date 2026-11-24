@@ -63,7 +63,7 @@ async def test_explicit_parent_cancel_reaches_child_after_owner_loss(tmp_path: P
     # Existing checkpoint cancellation cannot confirm a lost active producer's
     # effects. Keep its failure visible at close rather than erase the UNKNOWN.
     with pytest.raises(AIError) as shutdown:
-        async with Persistence.open("child-loss-business-cancel", storage=storage) as persistence, Runtime.attach(
+        async with Persistence.open("child-loss-business-cancel", storage=storage) as persistence, Runtime.open(
             persistence=persistence, features=features,
         ) as runtime:
             execution = await runtime.agents.get().start("delegate", idempotency_key="parent-request")
@@ -129,7 +129,7 @@ async def test_terminal_child_cleanup_preserves_prior_failed_cancel_receipt(tmp_
     features.agent("child", model="child", allow_tools=())
     async with Persistence.open("child-terminal-cancel", storage=PersistenceStorage.sqlite(
         tmp_path / "terminal.db",
-    )) as persistence, Runtime.attach(persistence=persistence, features=features) as runtime:
+    )) as persistence, Runtime.open(persistence=persistence, features=features) as runtime:
         execution = await runtime.agents.get().start("delegate", idempotency_key="parent-request")
         await asyncio.wait_for(entered.wait(), 5)
         children = await runtime.executions.list_children(execution.execution_id,

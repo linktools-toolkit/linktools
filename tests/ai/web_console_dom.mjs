@@ -9,6 +9,7 @@ class Element {
   constructor(tag='div') {
     this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.hidden=false;this.disabled=false;
     this.isConnected=false;this.value='';this.checked=false;this.open=false;this.className='';this.scrollTop=0;this.clientHeight=300;this._text='';
+    if(this.tagName==='DETAILS')Object.defineProperty(this,'name',{get:()=>this.getAttribute('name') || '',set:value=>this.setAttribute('name',typeof value==='object'?'[object HTMLElement]':value)});
     this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on??!names.has(name))names.add(name);else names.delete(name);this.className=[...names].join(' ');},remove:name=>this.classList.toggle(name,false),add:name=>this.classList.toggle(name,true)};
   }
   get id(){return this._id;}
@@ -20,6 +21,8 @@ class Element {
   get scrollHeight(){return this.children.length*80;}
   connect(value){this.isConnected=value;if(this.id){if(value)nodes.set(this.id,this);else if(nodes.get(this.id)===this)nodes.delete(this.id);}this.children.forEach(child=>child.connect?.(value));if(!value && document.activeElement===this)document.activeElement=null;}
   append(...children){children.forEach(child=>{if(child.parentElement)child.parentElement.children=child.parentElement.children.filter(item=>item!==child);});this.children.push(...children);children.forEach(child=>{child.parentElement=this;child.connect?.(this.isConnected);});}
+  insertBefore(child,anchor){if(anchor===null){this.append(child);return;}const index=this.children.indexOf(anchor);assert.ok(index>=0);this.children.splice(index,0,child);child.parentElement=this;child.connect(this.isConnected);}
+  remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(item=>item!==this);this.parentElement=null;this.connect(false);}
   replaceChildren(...children){this.children.forEach(child=>child.connect?.(false));this._text='';this.children=[];this.append(...children);}
   contains(node){return node===this || this.children.some(child=>child.contains?.(node));}
   querySelectorAll(selector){const matches=[];for(const child of this.children){if(selector==='[data-request-focus]' && child.dataset?.requestFocus)matches.push(child);matches.push(...(child.querySelectorAll?.(selector)||[]));}return matches;}
@@ -864,80 +867,164 @@ if(process.argv[3]==='attempts') {
 if(process.argv[3]==='tools') {
   const id='a-tools', turn={execution_id:id,status:'STARTED',user_input:'Use tools',conversation_committed:false,items:[],process:[]};
   sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});
-  timelineOverrides.set('a',{items:[turn],next_cursor:null});streamBlocks.set(id,{});
+  const older={...timeline('a').items[0],items:[{item_kind:'thinking',content:'Earlier reasoning'}]};
+  timelineOverrides.set('a',{items:[older,turn],next_cursor:null});streamBlocks.set(id,{});
   await select('#session=a');await until('tool stream opened',()=>streamBlocks.get(id).controller);
-  const emit=(type,item,cursor=null)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type,item,cursor})+'\n\n'));
+  const emit=(type,item,cursor=null,order)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type,item,cursor,order})+'\n\n'));
   const event=(event_type,payload)=>emit('event',{execution_id:id,depth:0,event:{event_type,payload}});
   const delta=(name,part,fields,cursor)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode(
     'id: '+JSON.stringify([id,cursor])+'\nevent: '+name+'\ndata: '+JSON.stringify({execution_id:id,part,...fields})+'\n\n'));
   const article=()=>descendants(node('conversation')).find(item=>item.dataset.execution===id);
+  const olderArticle=()=>descendants(node('conversation')).find(item=>item.dataset.execution===older.execution_id);
   const processArea=()=>article()?.children.find(item=>item.className==='turn-process');
-  const tool={kind:'tool',key:'tool:call',tool_name:'lookup',status:'RUNNING',position:[2,0]};
+  const tool={kind:'tool',key:'tool:call',tool_name:'lookup',argument_preview:'README.md',status:'RUNNING',position:[2,0]};
   const laterTool={kind:'tool',key:'tool:later',tool_name:'secondary',status:'RUNNING',position:[2,1]};
-  const sdkThinking='  SDK thinking\n<literal>  ';
+  const initialThinking='  SDK thinking\n<literal>  ',sdkThinking=initialThinking+'complete phase';
   assert.equal(processArea().hidden,true,'no process is inferred before observable data arrives');
+  assert.ok(!descendants(article()).some(item=>item.className==='badge' && item.textContent==='STARTED'),
+    'Chat omits the turn STARTED footer badge');
+  assert.doesNotMatch(article().textContent,/Incomplete turn; history is not yet committed/);
   assert.equal(sessionSources.at(-1).url.searchParams.get('view'),'chat');
   assert.equal(calls.filter(call=>call.key==='/api/executions/'+id+'/events').length,0,'Chat uses its session EventSource only');
-  delta('thinking','1.1.1.0',{start:true,text:sdkThinking},'thinking-start');
-  delta('text','1.1.1.1',{start:true,text:'Superseded preview'},'old-text');
-  delta('text','1.1.1.1',{start:true},'empty-start');
-  delta('text','1.1.1.1',{text:'Answer'},'answer');
-  emit('process',laterTool,'later-tool-cursor');emit('process',tool,'tool-cursor');
-  await until('live process and answer share the turn',()=>processArea().textContent.includes('lookupIn progress') && article().textContent.includes('Answer') && article().textContent.includes(sdkThinking));
+  delta('text','1.1.1.0',{start:true,text:'Superseded preview'},'old-text');
+  delta('text','1.1.1.0',{start:true},'empty-start');
+  delta('text','1.1.1.0',{text:'First answer'},'answer');
+  const spinningThoughts=()=>descendants(node('live')).filter(item=>item.className==='tool-message process-running' && item.body);
+  delta('thinking','1.2.1.0',{start:true,text:'Superseded hidden thought'},'old-attempt-thinking');
+  await until('active thinking spins',()=>spinningThoughts().some(item=>item.body.textContent==='Superseded hidden thought'));
+  event('MODEL_ATTEMPT_FINISHED',{agent_run_seq:1,model_request_seq:2,stream_attempt_seq:1,status:'FAILED'});
+  await until('failed attempt removes its thinking spinner',()=>!spinningThoughts().length);
+  delta('thinking','1.2.2.0',{start:true,text:initialThinking},'thinking-start');
+  await until('retry current thinking spins',()=>spinningThoughts().some(item=>item.body.textContent===initialThinking));
+  delta('thinking','1.2.2.0',{text:'complete phase'},'thinking-more');
+  delta('thinking','1.2.1.0',{text:'Late stale thought'},'discarded-attempt');
+  event('ASSISTANT_PART_COMPLETED',{agent_run_seq:1,model_request_seq:2,stream_attempt_seq:1,part_index:0,thinking_elapsed_ms:999});
+  delta('text','1.2.2.1',{start:true,text:'Intermediate'},'intermediate');
+  delta('text','1.4.1.0',{start:true,text:'Final reply'},'final');
+  emit('process',laterTool,'later-tool-cursor',[1,3,0]);emit('process',tool,'tool-cursor',[1,1,1]);
+  const liveParts=()=>({children:node('live').children.filter(item=>item.className==='stream-attempt')
+    .flatMap(item=>item.parts.children),textContent:node('live').textContent});
+  await until('live process and answer share the turn',()=>liveParts()?.textContent.includes('lookup · README.mdIn progress') && article().textContent.includes('First answer') && article().textContent.includes(sdkThinking));
   assert.ok(article().contains(node('live')));
-  assert.doesNotMatch(article().textContent,/Superseded preview/,'an empty part start replaces content');
-  const liveThought=node('live').children.find(item=>item.className==='stream-attempt').thinking;
-  assert.equal(liveThought.open,true,'live positioned thinking is visible without clicking');
-  assert.equal(liveThought.hidden,false);
-  const first=processArea().children[1];
-  assert.deepEqual(processArea().children.slice(1).map(row=>row.name.textContent),['lookup','secondary']);
-  assert.equal(first.status.getAttribute('aria-live'),'polite');
+  assert.doesNotMatch(article().textContent,/Superseded preview|Superseded hidden thought|Late stale thought/);
+  const liveThought=liveParts().children[2];
+  assert.equal(Boolean(liveThought.open),false,'live positioned thinking starts collapsed');
+  assert.equal(spinningThoughts().length,0,'following answer and newer request stop older thinking');
+  assert.equal(liveThought.children[0].textContent,'Thinking','text transitions and stale attempt events cannot invent timings');
+  liveThought.open=true;
+  const first=liveParts().children[1];
+  assert.equal(first.tagName,'DETAILS');
+  assert.equal(first.name,'','tool cards do not write the native disclosure group name');
+  assert.ok(first.className.split(' ').includes(liveThought.className));
+  assert.equal(first.children[0].tagName,'SUMMARY');
+  assert.equal(first.children[0].textContent,'lookup · README.md');
+  assert.equal(Boolean(first.open),false);
+  assert.ok(first.className.split(' ').includes('process-running'));
+  assert.equal(first.children[0].getAttribute('aria-label'),'lookup · README.md · In progress');
+  assert.ok(!descendants(article()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
+  first.open=true;
+  const mixedOrder=parent=>parent.children.map(row=>row.className.split(' ').includes('tool-message') && row.children[0]?.className==='tool-name' && row.children[0].textContent.replace(/(?:\d+)(?:\.\d+)? [ms]+$/, '') || row.body?.textContent || row.markdownBody?.textContent.trim() || row.textContent.trim());
+  assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup · README.md',sdkThinking,'Intermediate','secondary','Final reply']);
+  assert.equal(processArea().hidden,true,'positioned tools are not repeated in Process');
+  assert.equal(first.children[1].getAttribute('aria-live'),'polite');
   const unranked={...tool,position:null};
-  emit('process',{...unranked,status:'SUCCEEDED'});emit('process',unranked);
-  await until('completed tool cannot be reopened by replay',()=>first.status.textContent==='Completed');
-  assert.equal(processArea().children[1],first);
+  emit('process',{...unranked,status:'SUCCEEDED',elapsed_ms:125,argument_preview:undefined});emit('process',unranked);
+  const modelError='Correct the <workspace> path.\nThen retry.';
+  emit('process',{...laterTool,status:'FAILED',error_code:'AUTHORIZATION_DENIED',error_message:modelError,exception:'internal stack trace'});
+  await until('safe failure reason is displayed on its tool',()=>liveParts().children[4]?.textContent.includes(modelError));
+  assert.equal(liveParts().children[4].children[0].textContent,'secondary','absent safe preview is not synthesized');
+  assert.equal(liveParts().children[4].children[1].textContent,'Failed\n'+modelError);
+  assert.doesNotMatch(liveParts().children[4].textContent,/internal stack trace|Permission denied/);
+  await until('completed tool cannot be reopened by replay',()=>first.children[1].textContent==='Completed');
+  assert.equal(liveParts().children[1],first);
+  assert.equal(first.open,true,'tool completion preserves disclosure state');
+  assert.ok(!first.className.split(' ').includes('process-running'));
+  assert.equal(first.children[0].textContent,'lookup · README.md125 ms');
+  assert.equal(first.children[0].getAttribute('aria-label'),'lookup · README.md · Completed · 125 ms');
 
   const old=streamBlocks.get(id).controller;old.close();
   await until('process stream reconnected',()=>streamBlocks.get(id).controller!==old);
   assert.equal(streamBlocks.get(id).resumeCursor,'tool-cursor');
   const completedThinking=sdkThinking+' + continuation';
-  delta('thinking','1.1.1.0',{text:' + continuation'},'resume-thinking');
+  delta('thinking','1.2.2.0',{text:' + continuation'},'resume-thinking');
   await until('stable native part continues after reconnect',()=>liveThought.body.textContent===completedThinking);
+  event('ASSISTANT_PART_COMPLETED',{agent_run_seq:1,model_request_seq:2,stream_attempt_seq:2,part_index:0,thinking_elapsed_ms:375});
+  await until('server timing populates exact observed segment',()=>liveThought.children[0].textContent==='Thinking375 ms');
   emit('process',unranked);await settle();
-  assert.deepEqual(processArea().children.slice(1).map(row=>row.textContent),['lookupCompleted','secondaryIn progress']);
+  assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup · README.md',completedThinking,'Intermediate','secondary','Final reply']);
+  assert.equal(liveThought.open,true,'new thinking deltas preserve the user-opened disclosure');
 
   const saved={...turn,status:'SUCCEEDED',conversation_committed:true,items:[
-    {item_kind:'thinking',content:completedThinking},
+    {item_kind:'assistant',content:'First answer'},
+    {item_kind:'tool_call',tool_call_id:'call',content:null},
+    {item_kind:'thinking',content:completedThinking,elapsed_ms:375},
+    {item_kind:'assistant',content:'Intermediate'},
+    {item_kind:'tool_call',tool_call_id:'later',content:null},
     {item_kind:'tool_result',content:'Private saved result'},
-    {item_kind:'assistant',content:'Answer'},
-  ],process:[{...tool,status:'SUCCEEDED'},{...laterTool,status:'UNCONFIRMED'}]};
+    {item_kind:'assistant',content:'Final reply'},
+  ],process:[{...tool,status:'SUCCEEDED',elapsed_ms:140},{...laterTool,status:'FAILED',error_code:'AUTHORIZATION_DENIED',error_message:modelError}]};
   const modelReads=()=>calls.filter(call=>call.key==='/api/executions/'+id+'/models').length;
   const readsBeforeCommit=modelReads();
   event('MODEL_REQUEST_FINISHED',{agent_run_seq:1,model_request_seq:1,stream_attempt_seq:1,status:'SUCCEEDED'});
-  await until('logical model finish arrives before conversation commit',()=>node('live').textContent.includes('model request finished'));
+  await settle();
+  assert.equal(node('live-activity'),undefined,'ordinary model lifecycle is not disclosed in Chat');
   const modelPreview=node('live').children.find(item=>item.className==='stream-attempt');
   assert.equal(modelPreview.label.hidden,true,'normal model status belongs to the Activity disclosure, not Chat');
   assert.equal(modelPreview.label.textContent,'');
-  assert.equal(modelPreview.thinking.body.textContent,completedThinking,'thinking remains visible until History replaces the preview');
-  assert.equal(modelPreview.body.hidden,false,'a completed model request is still a visible Chat preview until History arrives');
-  assert.equal(modelPreview.body.children[0].textContent.trim(),'Answer');
-  timelineOverrides.set('a',{items:[saved],next_cursor:null});
+  const expectedOrder=['First answer','lookup · README.md',completedThinking,'Intermediate','secondary','Final reply'];
+  assert.deepEqual(mixedOrder(liveParts()),expectedOrder,'completed model preview retains its inline order until History');
+  assert.equal(liveParts().children[1],first);
+  const previousArticle=olderArticle(),previousThinking=descendants(previousArticle).find(item=>item.tagName==='DETAILS');
+  previousThinking.open=true;previousThinking.children[0].focus();
+  const previousLive=node('live'),finalThought='Final thinking span';
+  delta('thinking','1.4.1.1',{start:true,text:'Final thinking'},'final-thinking-start');
+  await until('last thinking span starts',()=>spinningThoughts().some(item=>item.body.textContent==='Final thinking'));
+  // Hold the scheduled paint: canonical History is allowed to arrive before it.
+  const schedule=requestAnimationFrame,cancel=cancelAnimationFrame;
+  let paintQueued=false;globalThis.requestAnimationFrame=()=>{paintQueued=true;return -1;};
+  globalThis.cancelAnimationFrame=id=>{if(id!==-1)cancel(id);};
+  delta('thinking','1.4.1.1',{text:' span'},'final-thinking-tail');
+  event('ASSISTANT_PART_COMPLETED',{agent_run_seq:1,model_request_seq:4,stream_attempt_seq:1,part_index:1,thinking_elapsed_ms:0});
+  event('MODEL_ATTEMPT_FINISHED',{agent_run_seq:1,model_request_seq:4,stream_attempt_seq:1,status:'SUCCEEDED'});
+  await until('last thinking timing is queued',()=>paintQueued);
+  assert.doesNotMatch(previousLive.textContent,/Final thinking span/);
+  saved.items.push({item_kind:'thinking',content:finalThought,elapsed_ms:0});
+  expectedOrder.push(finalThought);
+  timelineOverrides.set('a',{items:[older,saved],next_cursor:null});
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
-  streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));
-  streamBlocks.get(id).controller.close();
-  await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && processArea().textContent.includes('lookupCompleted'));
-  const current=processArea();
-  assert.deepEqual(current.children.map(item=>item.textContent),['Process','lookupCompleted','secondaryOutcome unconfirmed']);
+  const savedParts=()=>article()?.children.find(item=>item.className==='turn-saved-answers');
+  await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookup · README.md140 ms'));
+  globalThis.requestAnimationFrame=schedule;globalThis.cancelAnimationFrame=cancel;
+  assert.equal(savedParts().children.at(-1).children[0].textContent,'Thinking0 ms',
+    'canonical hydration preserves a completed duration even before the queued paint');
+  assert.equal(olderArticle(),previousArticle,'terminal History leaves older article nodes untouched');
+  assert.equal(previousThinking.open,true);
+  assert.equal(document.activeElement,previousThinking.children[0]);
+  assert.equal(node('live'),previousLive);
+  assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
+  assert.equal(savedParts().children[4].children[1].textContent,'Failed\n'+modelError);
+  assert.equal(savedParts().children[1].tagName,'DETAILS');
+  assert.equal(savedParts().children[1].children[0].textContent,'lookup · README.md140 ms','durable server time replaces the live tool preview');
+  assert.equal(savedParts().children[1].open,true,'the same committed tool retains its open disclosure');
+  assert.ok(!descendants(savedParts()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
   const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===completedThinking);
   assert.equal(savedThought.length,1);
-  assert.equal(savedThought[0].open,false,'committed History keeps thinking collapsed');
-  assert.equal(article().textContent.match(/Answer/g).length,1);
+  assert.equal(savedThought[0].open,true,'exact committed thinking keeps its existing disclosure state');
+  assert.ok(!savedThought[0].className.includes('process-running'),'committed thinking is not running');
+  assert.equal(savedThought[0].children[0].textContent,'Thinking375 ms','canonical History uses its exact recorded duration');
+  assert.equal(article().textContent.match(/First answer/g).length,1);
   assert.equal(modelReads(),readsBeforeCommit,'Chat terminal readback never loads retained model contents');
   assert.doesNotMatch(article().textContent,/Private saved result/);
   await select('#session=b');assert.doesNotMatch(node('conversation').textContent,/SDK thinking|lookupCompleted/);
   await select('#session=a');
-  assert.deepEqual(processArea().children.slice(1).map(row=>row.textContent),['lookupCompleted','secondaryOutcome unconfirmed']);
+  assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
   assert.ok(descendants(article()).some(item=>item.tagName==='PRE' && item.textContent===completedThinking));
+  assert.match(savedParts().textContent,/Thinking375 ms/,'cold-reopened History retains thinking time without prior browser observations');
+  assert.match(savedParts().textContent,/Thinking0 ms/,'a real zero duration also survives reopen');
+  assert.doesNotMatch(olderArticle().textContent,/ ms/,'older archived thoughts without a duration remain untimed');
+  assert.match(savedParts().textContent,/lookup · README\.md140 ms/,'cold-reopened History retains the saved tool elapsed time');
+  assert.equal(savedParts().children[4].children[0].textContent,'secondary','missing preview and elapsed remain blank');
+  assert.equal(savedParts().children[4].children[1].textContent,'Failed\n'+modelError,'cold History preserves exactly what the model received');
 
   const session=sessions.get('a'),remote='remote-process',replacement='next-remote-process';
   const remoteTurn={...turn,execution_id:remote,user_input:'External question'};
@@ -945,8 +1032,8 @@ if(process.argv[3]==='tools') {
   const executionRequests=()=>calls.filter(call=>[remote,replacement].some(id=>call.key==='/api/executions/'+id+'/events'));
   const readCount=()=>calls.filter(call=>call.key==='/api/sessions/a' && call.method==='GET').length;
   const remoteArticle=id=>descendants(node('conversation')).find(item=>item.dataset.execution===id);
-  const remoteTool={...tool,key:'tool:remote',tool_name:'External lookup'};
-  const remoteResult={...remoteTool,status:'SUCCEEDED'};
+  const remoteTool={...tool,key:'tool:remote',tool_name:'External lookup',argument_preview:null};
+  const remoteResult={...remoteTool,status:'SUCCEEDED',elapsed_ms:240};
   const historyRelease=deferred('GET /api/sessions/a'),source=sessionSources.at(-1);
   source.process(remote,{...remoteTool,key:'tool:too-early',tool_name:'Before occupancy'});
   session.local_execution=false;executions.set(remote,{...info(remote,'a'),status:'STARTED'});
@@ -955,14 +1042,14 @@ if(process.argv[3]==='tools') {
   const initialReadCount=readCount();
   source.process('older-execution',{...remoteTool,tool_name:'Must not render'});
   source.process(remote,remoteTool);source.process(remote,remoteResult);
-  await until('remote process renders without execution SSE',()=>node('conversation').textContent.includes('External lookupCompleted'));
+  await until('remote process renders without execution SSE',()=>node('conversation').textContent.includes('External lookup240 msCompleted'));
   assert.equal(readCount(),initialReadCount,'tool notices cannot trigger history reads');
   assert.equal(executionRequests().length,0,'external owner never opens the polling execution event endpoint');
   assert.equal(calls.filter(call=>call.key==='/api/executions/'+remote).length,1,'external owner metadata is read once');
   const activeTimeline={items:[saved,remoteTurn],next_cursor:null};
   timelineOverrides.set('a',activeTimeline);
   historyRelease({session:{...session},timeline:activeTimeline});
-  await until('remote committed input uses the same external process preview',()=>remoteArticle(remote)?.textContent.includes('External lookupCompleted'));
+  await until('remote committed input uses the same external process preview',()=>remoteArticle(remote)?.textContent.includes('External lookup240 msCompleted'));
 
   const replacementRead=deferred('GET /api/sessions/a');
   executions.set(replacement,{...info(replacement,'a'),status:'STARTED'});
@@ -971,7 +1058,7 @@ if(process.argv[3]==='tools') {
   source.process(remote,{...remoteTool,tool_name:'Stale terminal frame'});
   source.process(replacement,{...remoteTool,tool_name:'New lookup'});
   await until('replacement process isolated',()=>node('conversation').textContent.includes('New lookupIn progress'));
-  assert.match(remoteArticle(remote).textContent,/External lookupCompleted/,'keep known old tool state until canonical readback');
+  assert.match(remoteArticle(remote).textContent,/External lookup240 msCompleted/,'keep known old tool state until canonical readback');
   assert.doesNotMatch(node('conversation').textContent,/Before occupancy|Must not render|Stale terminal frame/);
   assert.equal(node('send').disabled,true);
   const finishedRemote={...remoteTurn,status:'SUCCEEDED',conversation_committed:true,process:[remoteResult],items:[{item_kind:'assistant',content:'External answer'}]};
@@ -979,8 +1066,11 @@ if(process.argv[3]==='tools') {
   timelineOverrides.set('a',replacementTimeline);
   replacementRead({session:{...session},timeline:replacementTimeline});
   await until('same-revision replacement reads the previous committed turn',()=>remoteArticle(remote)?.textContent.includes('External answer'));
+  assert.match(remoteArticle(remote).textContent,/External lookup240 msCompleted/,'remote notice and committed history share the elapsed field');
   assert.equal(node('send').disabled,true,'older completion must not unlock a replacement owner');
   assert.match(remoteArticle(replacement).textContent,/New lookupIn progress/);
+  source.process(replacement,{...remoteTool,tool_name:'New lookup',status:'FAILED'});
+  await until('failure without a code is explicit',()=>remoteArticle(replacement).textContent.includes('No reason provided.'));
 
   const terminalRead=deferred('GET /api/sessions/a');
   session.active_execution_id=null; // Another same-revision authoritative release.
@@ -989,16 +1079,49 @@ if(process.argv[3]==='tools') {
   const pendingReads=readCount();
   source.snapshot(); // A duplicate idle snapshot can arrive before terminal History returns.
   node('chat-mode').click();
-  assert.match(remoteArticle(replacement).textContent,/New lookupIn progress/,'duplicate idle keeps observed tool rows until canonical readback');
+  assert.match(remoteArticle(replacement).textContent,/New lookupFailed/,'duplicate idle keeps observed tool rows until canonical readback');
   assert.equal(readCount(),pendingReads,'duplicate idle must not repeat the terminal read');
   const finishedReplacement={...replacementTurn,status:'SUCCEEDED',conversation_committed:true,process:[],items:[{item_kind:'assistant',content:'Replacement answer'}]};
   const terminalTimeline={items:[saved,finishedRemote,finishedReplacement],next_cursor:null};
+  terminalRead({code:'SESSION_TURN_PENDING'},409);
+  await settle();
+  source.snapshot();
+  await settle();
+  assert.equal(readCount(),pendingReads,'pending does not poll or reread on a duplicate snapshot');
+  assert.match(remoteArticle(replacement).textContent,/New lookupFailed/);
+  assert.doesNotMatch(node('notice').textContent,/SESSION_TURN_PENDING|Runtime read unavailable/);
   timelineOverrides.set('a',terminalTimeline);
-  terminalRead({session:{...session},timeline:terminalTimeline});
-  await until('same-revision remote release reads committed history',()=>remoteArticle(replacement)?.textContent.includes('Replacement answer'));
+  source.disconnect();
+  await until('reconnect reads the now-committed turn',()=>remoteArticle(replacement)?.textContent.includes('Replacement answer'));
+  assert.equal(readCount(),pendingReads+1,'reconnect makes one exact read');
   assert.doesNotMatch(node('conversation').textContent,/Stale after release|New lookup/);
   assert.equal(executionRequests().length,0);
   assert.equal(node('send').disabled,false);
+  // A replacement owner supersedes a pending exact read, even if that response arrives last.
+  const superseded='superseded-terminal',successor='successor-after-pending';
+  const successorTurn={...remoteTurn,execution_id:successor,user_input:'New owner input'};
+  executions.set(superseded,{...info(superseded,'a'),status:'STARTED'});
+  executions.set(successor,{...info(successor,'a'),status:'STARTED'});
+  timelineOverrides.set('a',{items:[...terminalTimeline.items,{...remoteTurn,execution_id:superseded}],next_cursor:null});
+  session.active_execution_id=superseded;
+  await until('superseded turn active input',()=>remoteArticle(superseded)?.textContent.includes('External question'));
+  const stalePending=deferred('GET /api/sessions/a');
+  session.active_execution_id=null;
+  await stalePending.requested;
+  delays.delete('GET /api/sessions/a');
+  session.revision++;
+  const successorRead=deferred('GET /api/sessions/a');
+  session.active_execution_id=successor;
+  await successorRead.requested;
+  delays.delete('GET /api/sessions/a');
+  const beforeStale=readCount();
+  stalePending({code:'SESSION_TURN_PENDING'},409);
+  await settle();
+  assert.equal(readCount(),beforeStale,'a superseded pending turn cannot start another exact read');
+  assert.doesNotMatch(node('notice').textContent,/SESSION_TURN_PENDING|Runtime read unavailable/);
+  successorRead({session:{...session},timeline:{items:[successorTurn],next_cursor:null}});
+  await until('new owner readback remains active',()=>remoteArticle(successor)?.textContent.includes('New owner input'));
+  assert.equal(node('send').disabled,true);
   console.log('Public process survives reconnect, commit and external-owner transitions without polling the execution');process.exit(0);
 }
 if(process.argv[3]==='thinking') {
@@ -1124,11 +1247,10 @@ if(process.argv[3]==='sdk') {
   console.log('SDK messages stay readable without HTTP capture, preserving ordered parts and separate instruction/tool metadata');process.exit(0);
 }
 if(process.argv[3]==='streaming') {
-  const frames=new Map();let frameId=0,copied;
+  const frames=new Map();let frameId=0;
   globalThis.requestAnimationFrame=callback=>{const id=++frameId;frames.set(id,callback);return id;};
   globalThis.cancelAnimationFrame=id=>frames.delete(id);
   const flushFrame=()=>{const pending=[...frames.values()];frames.clear();pending.forEach(callback=>callback(performance.now()));};
-  Object.defineProperty(globalThis,'navigator',{value:{clipboard:{writeText:async value=>{copied=value;}}},configurable:true});
   const id='smooth-preview';sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});streamBlocks.set(id,{});
   await select('#session=a');const stream=streamBlocks.get(id);await until('streaming preview opened',()=>Boolean(stream.controller));
   const emit=(event_type,text,fragmented=false)=>{
@@ -1139,18 +1261,20 @@ if(process.argv[3]==='streaming') {
   await until('queued live update',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));
   assert.equal(frames.size,1,'Incoming deltas share a pending frame');assert.doesNotMatch(node('live').textContent,/Hello/);
   flushFrame();let expected='**Hello 你好🌱**';
-  const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0],copy=message.children[1];
+  const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0];
   const emitThinking=text=>stream.controller.enqueue(new TextEncoder().encode(
     'event: thinking\ndata: '+JSON.stringify({execution_id:id,text})+'\n\n'));
-  copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emitThinking('thinking');
+  node('prompt').focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emitThinking('thinking');
   await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
-  assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);
-  const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking'));
-  assert.equal(thinking.open,true,'live fallback thinking is visible without clicking');
+  assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,1);assert.equal(document.activeElement,node('prompt'));
+  const thinking=descendants(node('live')).find(item=>item.className.split(' ').includes('tool-message') && item.textContent.startsWith('Thinking'));
+  assert.equal(Boolean(thinking.open),false,'live fallback thinking starts collapsed');
+  assert.ok(thinking.className.includes('process-running'));
   thinking.open=false;
   emitThinking(' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
   await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
-  assert.equal(thinking.open,false,'additional deltas must not reopen thinking the user collapsed');assert.match(thinking.textContent,/thinking continued/);await copy.click();assert.equal(copied,expected);
+  assert.ok(!thinking.className.includes('process-running'),'following fallback text stops thinking');
+  assert.equal(thinking.open,false,'additional deltas must not reopen thinking the user collapsed');assert.match(thinking.textContent,/thinking continued/);
   const {renderMarkdown}=await import(messageURL);assert.equal(body.innerHTML,renderMarkdown(expected));
   // A paused/background animation frame keeps only current accumulated text.
   for(const part of ['\n\n[ref]', '[ref]: https://example.test\n', '\nfinal'])emit('ASSISTANT_TEXT_DELTA',part);
@@ -1162,12 +1286,11 @@ if(process.argv[3]==='streaming') {
   for(let i=0;i<2;i++){emit('ASSISTANT_TEXT_DELTA',' costly');await until('costly frame',()=>frames.size>0);flushFrame();expected+=' costly';}delete body.innerHTML;
   emit('ASSISTANT_TEXT_DELTA',' bounded');await new Promise(resolve=>setImmediate(resolve));assert.equal(frames.size,0,'Expensive parsing is not rescheduled immediately on every frame');
   await until('bounded expensive render',()=>frames.size>0);flushFrame();expected+=' bounded';
-  node('conversation').clientHeight=1;node('conversation').scrollTop=0;copy.focus();
+  node('conversation').clientHeight=1;node('conversation').scrollTop=0;node('prompt').focus();
   emit('ASSISTANT_TEXT_DELTA',' discarded');emit('STREAM_RESET','');emit('ASSISTANT_TEXT_DELTA','**Restart 你好🌱**',true);
   await until('reset coalesced with latest text',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected='**Restart 你好🌱**';
-  assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);assert.equal(thinking.isConnected,false);
+  assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(message.children.length,1);assert.equal(document.activeElement,node('prompt'));assert.equal(thinking.isConnected,false);
   assert.equal(node('conversation').scrollTop,0,'Streaming respects a reader away from the bottom');node('conversation').clientHeight=300;
-  await copy.click();assert.equal(copied,expected);
   // A final snapshot flushes pending text even while animation frames are paused.
   const release=deferred('GET /api/sessions/a');emit('ASSISTANT_TEXT_DELTA',' terminal');expected+=' terminal';
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
@@ -1789,8 +1912,8 @@ if(process.argv[3]==='workspace'){
   assert.match(node('conversation').textContent,/src\/example.py/);
   assert.doesNotMatch(node('conversation').textContent,/Original input|Markdown source/);
   assert.equal(descendants(node('conversation')).some(item=>item.className==='message-source'),false);
-  let copied;Object.defineProperty(globalThis,'navigator',{value:{clipboard:{writeText:async value=>{copied=value;}}},configurable:true});
-  await descendants(node('conversation')).find(item=>item.textContent==='Copy' && item.tagName==='BUTTON').click();assert.equal(copied,markdown);
+  assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
+  assert.doesNotMatch(rendered,/<button\b/,'Markdown code renders without Copy controls');
   node('prompt').value='Unsent **Alpha**';node('planning').checked=true;
   await select('#session=b');assert.equal(node('prompt').value,'');node('prompt').value='Beta draft';
   await select('#session=a');
@@ -1844,7 +1967,7 @@ if(process.argv[3]==='workspace'){
   node('prompt').value='Accepted before next edit';const nextAdmission=deferred('POST /api/sessions/a/messages');
   const nextSend=node('composer').requestSubmit();await nextAdmission.requested;view('executions').click();await hashChanged;node('prompt').value='Newer draft';
   nextAdmission({execution_id:'a-run'});await nextSend;view('sessions').click();await hashChanged;assert.equal(node('prompt').value,'Newer draft');
-  console.log('Workspace contracts passed: Markdown, copy source, drafts, inspection, Metrics, reattachment and active-owner controls');process.exit(0);
+  console.log('Workspace contracts passed: Markdown without Copy, drafts, inspection, Metrics, reattachment and active-owner controls');process.exit(0);
 }
 
 sessions.get('a').active_execution_id='active-other';executions.set('active-other',{...info('active-other','a'),status:'STARTED'});
@@ -2011,8 +2134,9 @@ const stream=streamBlocks.get('a-new');
 stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'a-new',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'New execution text'}}},cursor:'resume-cursor'})+'\n\n'));
 await until('live assistant text',()=>node('live').textContent.includes('New execution text'));assert.match(node('live').textContent,/New execution text/);
 const liveEvent=(event_type,seq,depth=0,payload={})=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:depth?'child':'a-new',agent_id:'default',depth,event:{event_type,durable_seq:seq,payload}},cursor:null})+'\n\n'));
-liveEvent('TOOL_CALL_STARTED',1);await until('tool start event',()=>node('live-activity').textContent.includes('tool call started'));assert.equal(node('live-activity').open,false);
-node('live-activity').open=true;node('live-activity').ontoggle();node('live-activity').children[0].focus();liveEvent('MODEL_REQUEST_STARTED',2);await until('model start event',()=>node('live-activity').textContent.includes('model request started'));assert.equal(node('live-activity').open,true);assert.equal(document.activeElement,node('live-activity').children[0]);
+liveEvent('TOOL_CALL_STARTED',1);liveEvent('MODEL_REQUEST_STARTED',2);
+await settle();assert.equal(node('live-activity'),undefined);
+assert.doesNotMatch(newTurn.textContent,/Incomplete turn; history is not yet committed/);
 liveEvent('EXECUTION_FAILED',3,1);
 liveEvent('MODEL_REQUEST_FINISHED',4,0,{agent_run_seq:1,model_request_seq:1,status:'FAILED'});
 liveEvent('TOOL_CALL_FINISHED',5,0,{agent_run_seq:1,call_id:'failed-call',tool_name:'query',status:'FAILED',error_code:'TOOL_RETRY_REQUIRED'});
@@ -2021,13 +2145,13 @@ liveEvent('TOOL_CALL_FINISHED',7,0,{agent_run_seq:1,call_id:'successful-call',to
 for(const [index,event] of ['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','CANCEL_REQUESTED','EXECUTION_CANCELLED'].entries())liveEvent(event,8+index);
 await until('final event in stream batch',()=>node('live').textContent.includes('execution cancelled'));
 for(const name of ['execution failed','model request finished · FAILED','tool call finished · FAILED · TOOL_RETRY_REQUIRED','model request finished · CANCELLED','execution start unknown','execution recovery required','cancel requested','execution cancelled'])assert.ok(node('live').children.some(child=>child.className.includes('live-event') && child.textContent.includes(name)),name);
-assert.ok(node('live-activity').children.some(child=>child.className.includes('live-event') && child.textContent.includes('tool call finished · SUCCEEDED')));
+assert.equal(node('live-activity'),undefined);
 assert.ok(!node('live').children.some(child=>child.className.includes('live-event') && child.textContent.includes('SUCCEEDED')));
-const focusedChild=node('live').children.find(child=>child.className.includes('live-event') && child.textContent.includes('execution failed')).children.find(child=>child.tagName==='BUTTON');focusedChild.focus();liveEvent('TOOL_CALL_STARTED',12,0,{agent_run_seq:1,call_id:'next-call'});await until('next tool event',()=>node('live-activity').textContent.includes('next-call'));assert.equal(document.activeElement.dataset.liveFocus,focusedChild.dataset.liveFocus);
+const focusedChild=node('live').children.find(child=>child.className.includes('live-event') && child.textContent.includes('execution failed')).children.find(child=>child.tagName==='BUTTON');focusedChild.focus();liveEvent('TOOL_CALL_STARTED',12,0,{agent_run_seq:1,call_id:'next-call'});await settle();assert.equal(node('live-activity'),undefined);assert.equal(document.activeElement.dataset.liveFocus,focusedChild.dataset.liveFocus);
 releaseRefresh({session:sessions.get('a'),timeline:timeline('a')});await settle();
-assert.match(node('live').textContent,/New execution text/);assert.equal(node('live-activity').open,true);
+assert.match(node('live').textContent,/New execution text/);assert.equal(node('live-activity'),undefined);
 const focusBeforeRefresh=document.activeElement.dataset.liveFocus;
-await refresh();assert.equal(node('live-activity').open,true);
+await refresh();assert.equal(node('live-activity'),undefined);
 assert.equal(document.activeElement.dataset.liveFocus,focusBeforeRefresh);
 // A disconnected running observation reconnects from the last Runtime cursor.
 const disconnected=stream.controller;

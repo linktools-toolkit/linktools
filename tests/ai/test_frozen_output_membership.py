@@ -114,7 +114,7 @@ async def test_membership_correction_uses_frozen_input_without_schema_enumeratio
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"sources": selected})])
 
     async with Persistence.open("frozen-output-membership", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(model, effects)) as runtime:
+        async with Runtime.open(persistence=persistence, features=_features(model, effects)) as runtime:
             execution = await runtime.agents.get().start("Review the admitted input.", input_context=context)
             result = (await execution.wait(timeout_seconds=15)).result
             valid = sources == ("source-0",)
@@ -149,7 +149,7 @@ async def test_cancelling_semantic_correction_keeps_completed_tool_single() -> N
         raise AssertionError("cancelled correction must not finish")
 
     async with Persistence.open("frozen-output-membership", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(model, effects)) as runtime:
+        async with Runtime.open(persistence=persistence, features=_features(model, effects)) as runtime:
             execution = await runtime.agents.get().start("Review.", input_context=context)
             await asyncio.wait_for(correcting.wait(), 15)
             await execution.cancel()
@@ -179,7 +179,7 @@ async def test_membership_reopens_with_frozen_input_and_does_not_repeat_complete
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = Principal("reviewer", "default", "service")
     async with Persistence.open("frozen-output-membership", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(model, effects, approval=True),
+        async with Runtime.open(persistence=persistence, features=_features(model, effects, approval=True),
                                   auto_recover=False) as runtime:
             execution = await runtime.agents.get().start("Review.", input_context=context, principal=principal)
             execution_id = execution.execution_id
@@ -192,7 +192,7 @@ async def test_membership_reopens_with_frozen_input_and_does_not_repeat_complete
     context = ExecutionInputContext.from_messages((), session_metadata={"accepted_sources": original})
     assert context.session_metadata["accepted_sources"] == ["replacement-source"]
     async with Persistence.open("frozen-output-membership", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=_features(model, effects, approval=True),
+        async with Runtime.open(persistence=persistence, features=_features(model, effects, approval=True),
                                   auto_recover=False) as runtime:
             await runtime.approvals.decide(execution_id, ApprovalDecisionRequest(
                 principal, pending[0].approval_id, "approve", ApprovalDecision.APPROVE,
@@ -236,7 +236,7 @@ async def test_membership_recovery_keeps_consumed_output_retry_budget(
     for index in range(handoffs + 1):
         async with Persistence.open("frozen-output-membership", storage=storage) as persistence:
             features = _features(model, effects, retries=handoffs, approval=True, checkpoints=checkpoints)
-            async with Runtime.attach(persistence=persistence, features=features, auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features, auto_recover=False) as runtime:
                 if index == 0:
                     execution = await runtime.agents.get().start("Review.", input_context=context, principal=principal)
                     execution_id = execution.execution_id
@@ -277,7 +277,7 @@ async def test_new_execution_does_not_charge_previous_session_output_retries(
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open("frozen-output-membership", storage=storage) as persistence:
         features = _features(model, [], checkpoints=checkpoints)
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             session = await runtime.agents.get().create_session("review", metadata={"accepted_sources": ["source"]})
             for turn in range(2):
                 execution = await session.start("Review.")
@@ -308,7 +308,7 @@ async def test_recovery_rejects_overdrawn_output_budget_before_model_request(tmp
     for reopening in (False, True):
         async with Persistence.open("frozen-output-membership", storage=storage) as persistence:
             features = _features(model, [], approval=True, checkpoints=True)
-            async with Runtime.attach(persistence=persistence, features=features, auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features, auto_recover=False) as runtime:
                 if not reopening:
                     execution = await runtime.agents.get().start("Review.", input_context=context, principal=principal)
                     execution_id = execution.execution_id

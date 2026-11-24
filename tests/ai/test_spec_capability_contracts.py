@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Declaration, capability contract, and runtime-leaf contracts."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 import asyncio
 import hashlib
@@ -58,7 +58,7 @@ from linktools.ai.runtime._tool_boundary import (
     BoundaryToolset,
 )
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.objects import runtime_domain_uses_object_store
+from linktools.ai.persistence.objects import ObjectKeyFactory
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecAdapter,
@@ -363,7 +363,7 @@ def test_mcp_server_token_collision_fails_at_compiler_boundary(
     )
     with pytest.raises(AIError) as error:
         AgentCompiler(
-            models={"default": create_model(api='openai', model="gpt-test")},
+            models={"default": create_model_binding(api='openai', model="gpt-test")},
             candidates=candidates,
             agents={"agent": AgentSpec("agent")},
         )
@@ -603,23 +603,12 @@ async def test_business_tool_adapter_preserves_ctx_keyword_for_async_tools() -> 
     ) == "business-value"
 
 
-def test_runtime_domain_object_store_trait_has_one_owner() -> None:
-    object_domains = {
-        PersistenceDomain.CONVERSATION,
-        PersistenceDomain.EXECUTION,
-        PersistenceDomain.MEMORY,
-        PersistenceDomain.ARTIFACT,
-        PersistenceDomain.TASK,
-        PersistenceDomain.EVALUATION,
-        PersistenceDomain.CHECKPOINT,
-        PersistenceDomain.TRACE,
-        PersistenceDomain.CHECKPOINT,
-    }
-    assert {
-        domain
-        for domain in PersistenceDomain
-        if runtime_domain_uses_object_store(domain)
-    } == object_domains
+def test_runtime_object_keys_accept_every_persistence_domain() -> None:
+    keys = ObjectKeyFactory("example")
+    digest = "a" * 64
+    assert len({keys.key(domain, "tenant", digest) for domain in PersistenceDomain}) == 1
+    with pytest.raises(TypeError, match="domain must be PersistenceDomain"):
+        keys.key(PersistenceDomain.EXECUTION.value, "tenant", digest)
 
 
 def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:

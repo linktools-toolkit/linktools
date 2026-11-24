@@ -8,7 +8,14 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Literal, Protocol, cast
 
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai.messages import (
+    SYNTHESIZED_TOOL_RETURN_METADATA_KEY,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+)
 
 from ..core import (
     AuthorizationAction,
@@ -30,7 +37,11 @@ from ..storage import StoredPayload
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ..inputs import stored_user_input_view
-from ..execution import SessionTurn, SessionTurnItem
+from ..model.messages import (
+    THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ARGUMENT_PREVIEWS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY,
+    tool_error_message,
+)
+from ..session import SessionTurn, SessionTurnItem
 from ..persistence.contracts import (
     ConversationRepositories,
     ConversationHistoryRecord,
@@ -39,7 +50,7 @@ from ..persistence.contracts import (
     TranscriptHeadRecord,
 )
 from ..execution import ExecutionRecord, ExecutionTimelineRecord, StoredUserInput
-from ..session import SessionRecord, SessionTurnCommit, SessionTurnRef, project_turn_tool_process
+from ..session import SessionRecord, SessionTurnCommit, SessionTurnRef, ToolProcessItem, ToolProcessStatus
 from ..persistence.runs import ConversationPersistence
 from ..persistence.repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
 from ..persistence.repositories import ExecutionRepositoryImpl
@@ -79,20 +90,18 @@ class SessionTimelineTranscriptStore(Protocol):
 def _timeline_items(messages: tuple[ModelMessage, ...]) -> tuple[SessionTurnItem, ...]:
     values: list[SessionTurnItem] = []
     for message in messages:
-        projected = project_session_history_message(message)
         if isinstance(message, ModelRequest):
-            projected = tuple(
-                item for item in projected if item.item_kind == "tool_result"
-            )
+            kinds, durations = {"tool_result"}, None
         elif isinstance(message, ModelResponse):
-            projected = tuple(
-                item
-                for item in projected
-                if item.item_kind in {"assistant", "thinking", "tool_call"}
-            )
+            kinds = {"assistant", "thinking", "tool_call"}
+            durations = (message.metadata or {}).get(THINKING_ELAPSED_MS_METADATA_KEY)
         else:
             continue
-        for item in projected:
+        # ModelResponse history projection emits one item per part, in part order.
+        for part_index, item in enumerate(project_session_history_message(message)):
+            if item.item_kind not in kinds:
+                continue
+            elapsed = durations.get(str(part_index)) if item.item_kind == "thinking" and isinstance(durations, Mapping) else None
             values.append(
                 SessionTurnItem(
                     len(values) + 1,
@@ -100,6 +109,7 @@ def _timeline_items(messages: tuple[ModelMessage, ...]) -> tuple[SessionTurnItem
                     item.content,
                     item.tool_name,
                     item.tool_call_id,
+                    elapsed if type(elapsed) is int and elapsed >= 0 else None,
                 )
             )
     return tuple(values)
@@ -597,8 +607,7 @@ async def project_session_turn(
 
     async def capture(group: StateGroupTransaction) -> SessionTimelineCapture:
         root = await sessions.get(session_id, tenant_id=principal.tenant_id)
-        if (root is None or header.kind is not ResourceKind.SESSION
-                or header.tenant_id != principal.tenant_id or root.session_id != header.id
+        if (root is None or root.session_id != header.id
                 or root.owner_principal_id != header.owner_principal_id):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         histories = _timeline_history_capture_repository(conversation, transcript_store)
@@ -611,7 +620,7 @@ async def project_session_turn(
                     sessions.state_store: histories.history_record_keys(root.history_id),
                 },
             )
-        # As for session_timeline, session policy authorizes the reader, not the
+        # As for session_detail, session policy authorizes the reader, not the
         # actor who admitted the execution. Validate durable membership below.
         records = await executions.get_timeline_many(
             (execution_id,), tenant_id=principal.tenant_id,
@@ -620,9 +629,18 @@ async def project_session_turn(
         if (execution is None or execution.session_id != session_id
                 or execution.parent_execution_id is not None):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        pending = (
+            root.active_execution_id == execution_id
+            and root.status in {SessionStatus.OPEN, SessionStatus.CLOSING}
+            and execution.completed_at is None
+            and execution.status in {
+                ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.FINALIZING,
+                ExecutionStatus.WAITING_DEFERRED, ExecutionStatus.WAITING_RETRY, ExecutionStatus.CANCELLING,
+            }
+        )
         commit = await sessions.pending_turn_commit_in_transaction(
             group.transaction(sessions.state_store), session_id=session_id,
-            execution_id=execution_id, allow_unadmitted=True,
+            execution_id=execution_id, allow_unadmitted=True, allow_pending=pending,
         )
         if commit is None:
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
@@ -794,8 +812,56 @@ def _format_session_turn(
     return SessionTurn(
         ref.execution_id, execution.status, execution.created_at, updated_at, user_input, committed,
         _timeline_items(messages), execution.error_code, execution.safe_error_details, output=output,
-        process=project_turn_tool_process(messages),
+        process=_project_turn_tool_process(messages),
     )
+
+
+def _project_turn_tool_process(messages: tuple[ModelMessage, ...]) -> tuple[ToolProcessItem, ...]:
+    """Summarize root transcript tool calls in occurrence order, without inferring outcomes."""
+    calls: dict[str, ToolProcessItem] = {}
+    for message_seq, message in enumerate(messages, start=1):
+        if isinstance(message, ModelResponse):
+            previews = (message.metadata or {}).get(TOOL_ARGUMENT_PREVIEWS_METADATA_KEY)
+            for part_index, part in enumerate(message.parts):
+                if isinstance(part, ToolCallPart):
+                    preview = previews.get(part.tool_call_id) if isinstance(previews, Mapping) else None
+                    calls.setdefault(
+                        part.tool_call_id,
+                        ToolProcessItem(
+                            f"tool:{part.tool_call_id}", part.tool_name, "UNCONFIRMED", (message_seq, part_index),
+                            argument_preview=preview if isinstance(preview, str) else None,
+                        ),
+                    )
+        elif isinstance(message, ModelRequest):
+            durations = (message.metadata or {}).get(TOOL_ELAPSED_MS_METADATA_KEY)
+            for part in message.parts:
+                if not isinstance(part, ToolReturnPart):
+                    continue
+                call = calls.get(part.tool_call_id)
+                if call is None or part.tool_name != call.tool_name:
+                    continue
+                status: ToolProcessStatus
+                if part.outcome == "success":
+                    status = "SUCCEEDED"
+                elif part.outcome in ("failed", "denied", "retried"):
+                    status = "FAILED"
+                elif part.outcome == "interrupted" and not (
+                    isinstance(part.metadata, Mapping)
+                    and part.metadata.get(SYNTHESIZED_TOOL_RETURN_METADATA_KEY) is True
+                ):
+                    status = "INTERRUPTED"
+                else:
+                    continue
+                elapsed = durations.get(part.tool_call_id) if isinstance(durations, Mapping) else None
+                reason = (ErrorCode.AUTHORIZATION_DENIED if part.outcome == "denied"
+                          else ErrorCode.TOOL_RETRY_REQUIRED if part.outcome == "retried" else None)
+                calls[part.tool_call_id] = replace(
+                    call, status=status, elapsed_ms=elapsed if type(elapsed) is int and elapsed >= 0 else None,
+                    error_code=reason,
+                    error_message=tool_error_message(part),
+                )
+    return tuple(calls.values())
+
 
 
 def project_materialized_session_turn(

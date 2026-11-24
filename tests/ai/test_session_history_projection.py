@@ -17,7 +17,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.execution import ForkSessionRequest
+from linktools.ai.session import ForkSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.history._projection import StepSessionHistoryReader
 from linktools.ai.runtime._session import RuntimeSessionService

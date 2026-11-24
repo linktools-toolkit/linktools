@@ -62,7 +62,7 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
     # Keep one durable sentinel; projection variants exercise the same live owner.
     storage = (PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True)
                if durable else PersistenceStorage.in_memory())
-    async with Persistence.open('clean-input', storage=storage) as persistence_60, Runtime.attach(persistence=persistence_60, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('clean-input', storage=storage) as persistence_60, Runtime.open(persistence=persistence_60, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         agent_task = Task.from_agent("clean.agent", runtime.agents.get(),
             build_input=project if task_mode == "projected" else None)

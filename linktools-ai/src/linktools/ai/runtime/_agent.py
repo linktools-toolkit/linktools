@@ -14,7 +14,8 @@ from ..execution import Execution
 from ..observe.stream import validate_wait
 from ..execution import ExecutionInputContext
 from ..model import ModelBinding, UserPromptInput, validate_user_input
-from ..execution import ExecutionResult, ExecutionTreeEvent, SessionHistoryItem, SessionTurn, SessionView
+from ..execution import ExecutionResult, ExecutionTreeEvent
+from ..session import SessionHistoryItem, SessionTurn, SessionView
 
 if TYPE_CHECKING:
     from .agent_execution import AgentExecutionPort

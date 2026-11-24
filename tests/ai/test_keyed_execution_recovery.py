@@ -111,7 +111,7 @@ async def _recoverable(
                 session = await persistence_54.conversation.sessions.get("session", tenant_id="default")
                 assert session is not None and session.active_execution_id == execution_id
                 assert await persistence_54.execution.operations.get("recovery", tenant_id="default") is None
-            async with Runtime.attach(persistence=persistence_54, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(native_database=native_database))) as runtime, Persistence.open(_NAMESPACE, storage=other_state) as persistence_57, Runtime.attach(persistence=persistence_57, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(native_database=native_database))) as other:
+            async with Runtime.open(persistence=persistence_54, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(native_database=native_database))) as runtime, Persistence.open(_NAMESPACE, storage=other_state) as persistence_57, Runtime.open(persistence=persistence_57, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(native_database=native_database))) as other:
                 try:
                     yield runtime, other, runtime._state, execution_id, calls, release
                 finally:

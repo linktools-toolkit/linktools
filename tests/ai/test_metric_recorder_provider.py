@@ -136,7 +136,7 @@ async def test_provider_scope_close_failure_is_retryable(owner_kind: str) -> Non
     provider = _HostProvider()
     async with Persistence.open("retry-close", storage=PersistenceStorage.in_memory()) as persistence:
         if owner_kind == "runtime":
-            owner = Runtime.attach(persistence=persistence, features=model_features(_FeatureModels(), _definitions()), metrics=provider)
+            owner = Runtime.open(persistence=persistence, features=model_features(_FeatureModels(), _definitions()), metrics=provider)
             await owner.__aenter__()
         else:
             owner = TaskEngine(persistence=persistence, metrics=provider)
@@ -204,14 +204,14 @@ async def test_runtime_initialization_failure_closes_only_its_provider_scope(mon
         with monkeypatch.context() as patch:
             patch.setattr(_factory, "DefaultExecutionHistoryService", fail)
             with pytest.raises(RuntimeError, match="runtime dependency unavailable"):
-                async with Runtime.attach(
+                async with Runtime.open(
                     persistence=persistence, features=model_features(_FeatureModels(), _definitions()), metrics=provider,
                 ):
                     pytest.fail("initialization failure was ignored")
         assert len(provider.scopes) == 1
         assert provider.scopes[0].closed
         assert persistence.ready
-        async with Runtime.attach(
+        async with Runtime.open(
             persistence=persistence, features=model_features(_FeatureModels(), _definitions()), metrics=provider,
         ) as runtime:
             await runtime.agents.get().run("retry", timeout_seconds=5)
@@ -223,7 +223,7 @@ async def test_cancelled_runtime_close_preserves_provider_cleanup_until_retry(mo
     provider = _HostProvider()
     entered, release = asyncio.Event(), asyncio.Event()
     async with Persistence.open("cancel-close", storage=PersistenceStorage.in_memory()) as persistence:
-        runtime = Runtime.attach(persistence=persistence, features=model_features(_FeatureModels(), _definitions()), metrics=provider)
+        runtime = Runtime.open(persistence=persistence, features=model_features(_FeatureModels(), _definitions()), metrics=provider)
         await runtime.__aenter__()
         scope = provider.scopes[0]
         original_close = scope.close

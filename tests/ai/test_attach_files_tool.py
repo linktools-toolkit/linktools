@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Whole-file read_file input contracts."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from ._runtime_test_helpers import workspace_features
 
@@ -246,7 +246,7 @@ async def test_whole_file_read_rejects_unknown_image_before_read(
 ) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
-    boundary, tool = await _boundary(workspace, session, model_binding=create_model(api='openai', model="gpt-test"))
+    boundary, tool = await _boundary(workspace, session, model_binding=create_model_binding(api='openai', model="gpt-test"))
 
     with pytest.raises(
         ToolCallRetry,

@@ -175,7 +175,7 @@ async def test_unconfirmed_terminal_does_not_publish_context(tmp_path, monkeypat
 
 async def test_fork_and_snapshot_keep_exact_summary_after_latest_replacement(tmp_path):
     from linktools.ai.core import Principal
-    from linktools.ai.execution import ForkSessionRequest
+    from linktools.ai.session import ForkSessionRequest
     from linktools.ai.persistence.snapshots import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
     from .test_session_history_projection import _service

@@ -32,7 +32,7 @@ async def _environment(
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with (
         Persistence.open("projection", storage=PersistenceStorage.sqlite(path)) as persistence,
-        Runtime.attach(persistence=persistence, features=model_features(_TaskTestModels(), features)) as runtime,
+        Runtime.open(persistence=persistence, features=model_features(_TaskTestModels(), features)) as runtime,
         TaskEngine.open(persistence=persistence, context=runtime.context,
                         authorization=runtime._execution_service._authorization) as engine,
     ):

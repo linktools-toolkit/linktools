@@ -16,7 +16,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-from linktools.ai.execution import CreateSessionRequest
+from linktools.ai.session import CreateSessionRequest
 pytest.importorskip("starlette")
 
 from linktools.ai.web import create_app
@@ -174,6 +174,8 @@ async def test_other_process_tools_use_the_web_session_stream_without_idle_sql(t
                     saved, = turns
                     assert saved["conversation_committed"] and saved["output"] == {"text": "complete"}
                     assert saved["process"] == [process[-1]]
+                    assert type(process[-1]["elapsed_ms"]) is int and process[-1]["elapsed_ms"] >= 0
+                    assert all(item["argument_preview"] == "notice.txt" for item in process)
                 if mode == "lost":
                     return
                 _, stderr = await asyncio.wait_for(producer.communicate(), 10)

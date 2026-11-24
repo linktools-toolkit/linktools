@@ -83,7 +83,7 @@ async def test_native_container_persists_its_registered_leaf(container: str) -> 
     features.agent("default", model="default", allow_tools=())
     features.capability(group, id="custom.notes", revision=3, scope="runtime")
     async with Persistence.open("custom-container", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(
+        async with Runtime.open(
             persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features),
         ) as runtime:
@@ -106,7 +106,7 @@ async def test_custom_native_container_rejects_duplicate_persistent_ids() -> Non
     )
     async with Persistence.open("duplicate-container", storage=PersistenceStorage.in_memory()) as persistence:
         with pytest.raises(AIError) as conflict:
-            async with Runtime.attach(persistence=persistence, features=features):
+            async with Runtime.open(persistence=persistence, features=features):
                 pytest.fail("duplicate persistent capability IDs were accepted")
         assert conflict.value.code is ErrorCode.CAPABILITY_CONFLICT
 
@@ -119,6 +119,6 @@ async def test_custom_native_container_rejects_duplicate_persistence_domains() -
     features.capability(_NoteGroup(CombinedCapability([first, second])), id="custom.traces", scope="runtime")
     async with Persistence.open("duplicate-domains", storage=PersistenceStorage.in_memory()) as persistence:
         with pytest.raises(AIError) as conflict:
-            async with Runtime.attach(persistence=persistence, features=features):
+            async with Runtime.open(persistence=persistence, features=features):
                 pytest.fail("duplicate persistent domain declarations were accepted")
         assert conflict.value.code is ErrorCode.CAPABILITY_CONFLICT

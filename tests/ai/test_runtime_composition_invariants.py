@@ -4,7 +4,7 @@
 from linktools.ai.persistence import Persistence
 """Runtime composition and ownership invariants."""
 from ._runtime_test_helpers import model_features
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 from linktools.ai.capability import TraceCapability
 import json
@@ -83,7 +83,7 @@ def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: 
             features = RuntimeFeatures()
             features.model("default", OfflineModelBinding())
             task = Task("local.answer", answer, effect_policy="none")
-            async with Persistence.open("without-mcp-client", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+            async with Persistence.open("without-mcp-client", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
                 persistence=persistence, features=features,
             ) as runtime, TaskEngine.open(task, persistence=persistence) as engine:
                 agent_result = (await runtime.agents.get("default").run(
@@ -197,7 +197,7 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     async with Persistence.open("workspace", storage=PersistenceStorage.in_memory()) as persistence:
         components = await compose_runtime_components(
             persistence=persistence,
-            features=model_features(create_model(api='openai', model="gpt-test"), group),
+            features=model_features(create_model_binding(api='openai', model="gpt-test"), group),
         )
         await components.close_callback()
 
@@ -312,21 +312,16 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
     application.agent("default", model="default", allow_tools=())
 
     application.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_312, Runtime.attach(persistence=persistence_312, features=model_features(RuntimeUsageModels(), application)) as runtime:
-        result = (await runtime.agents.get("default").run(
-            "hello",
-            timeout_seconds=10,
-        )).result
+    async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_312, Runtime.open(persistence=persistence_312, features=model_features(RuntimeUsageModels(), application)) as runtime:
+        execution = await runtime.agents.get("default").start("hello")
+        result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
         history = await runtime.executions.history(
             result.execution_id,
             principal=runtime.default_principal,
         )
-        transcript = await runtime.executions.transcript(
-            result.execution_id,
-            principal=runtime.default_principal,
-        )
+        transcript = await execution.transcript()
         trace = await runtime.executions.trace(
             result.execution_id,
             principal=runtime.default_principal,
@@ -353,5 +348,5 @@ async def test_minimal_runtime_example_returns_public_wait_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     example = runpy.run_path(str(Path(__file__).resolve().parents[2] / "examples" / "minimal_runtime.py"))
-    monkeypatch.setitem(example["run"].__globals__, "create_model", lambda **kwargs: RuntimeUsageModels())
+    monkeypatch.setitem(example["run"].__globals__, "create_model_binding", lambda **kwargs: RuntimeUsageModels())
     assert await example["run"](tmp_path) == {"text": "done"}
