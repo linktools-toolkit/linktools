@@ -20,6 +20,8 @@ class Element {
   get scrollHeight(){return this.children.length*80;}
   connect(value){this.isConnected=value;if(this.id){if(value)nodes.set(this.id,this);else if(nodes.get(this.id)===this)nodes.delete(this.id);}this.children.forEach(child=>child.connect?.(value));if(!value && document.activeElement===this)document.activeElement=null;}
   append(...children){children.forEach(child=>{if(child.parentElement)child.parentElement.children=child.parentElement.children.filter(item=>item!==child);});this.children.push(...children);children.forEach(child=>{child.parentElement=this;child.connect?.(this.isConnected);});}
+  insertBefore(child,anchor){if(anchor===null){this.append(child);return;}const index=this.children.indexOf(anchor);assert.ok(index>=0);this.children.splice(index,0,child);child.parentElement=this;child.connect(this.isConnected);}
+  remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(item=>item!==this);this.parentElement=null;this.connect(false);}
   replaceChildren(...children){this.children.forEach(child=>child.connect?.(false));this._text='';this.children=[];this.append(...children);}
   contains(node){return node===this || this.children.some(child=>child.contains?.(node));}
   querySelectorAll(selector){const matches=[];for(const child of this.children){if(selector==='[data-request-focus]' && child.dataset?.requestFocus)matches.push(child);matches.push(...(child.querySelectorAll?.(selector)||[]));}return matches;}
@@ -864,13 +866,15 @@ if(process.argv[3]==='attempts') {
 if(process.argv[3]==='tools') {
   const id='a-tools', turn={execution_id:id,status:'STARTED',user_input:'Use tools',conversation_committed:false,items:[],process:[]};
   sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});
-  timelineOverrides.set('a',{items:[turn],next_cursor:null});streamBlocks.set(id,{});
+  const older={...timeline('a').items[0],items:[{item_kind:'thinking',content:'Earlier reasoning'}]};
+  timelineOverrides.set('a',{items:[older,turn],next_cursor:null});streamBlocks.set(id,{});
   await select('#session=a');await until('tool stream opened',()=>streamBlocks.get(id).controller);
   const emit=(type,item,cursor=null,order)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type,item,cursor,order})+'\n\n'));
   const event=(event_type,payload)=>emit('event',{execution_id:id,depth:0,event:{event_type,payload}});
   const delta=(name,part,fields,cursor)=>streamBlocks.get(id).controller.enqueue(new TextEncoder().encode(
     'id: '+JSON.stringify([id,cursor])+'\nevent: '+name+'\ndata: '+JSON.stringify({execution_id:id,part,...fields})+'\n\n'));
   const article=()=>descendants(node('conversation')).find(item=>item.dataset.execution===id);
+  const olderArticle=()=>descendants(node('conversation')).find(item=>item.dataset.execution===older.execution_id);
   const processArea=()=>article()?.children.find(item=>item.className==='turn-process');
   const tool={kind:'tool',key:'tool:call',tool_name:'lookup',status:'RUNNING',position:[2,0]};
   const laterTool={kind:'tool',key:'tool:later',tool_name:'secondary',status:'RUNNING',position:[2,1]};
@@ -894,8 +898,18 @@ if(process.argv[3]==='tools') {
   assert.ok(article().contains(node('live')));
   assert.doesNotMatch(article().textContent,/Superseded preview|Superseded hidden thought|Late stale thought/);
   const liveThought=liveParts().children[2];
-  assert.equal(liveThought.open,true,'live positioned thinking is visible without clicking');
+  assert.equal(Boolean(liveThought.open),false,'live positioned thinking starts collapsed');
+  liveThought.open=true;
   const first=liveParts().children[1];
+  assert.equal(first.tagName,'DETAILS');
+  assert.ok(first.className.split(' ').includes(liveThought.className));
+  assert.equal(first.children[0].tagName,'SUMMARY');
+  assert.equal(first.children[0].textContent,'lookup');
+  assert.equal(Boolean(first.open),false);
+  assert.ok(first.className.split(' ').includes('tool-running'));
+  assert.equal(first.name.getAttribute('aria-label'),'lookup · In progress');
+  assert.ok(!descendants(article()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
+  first.open=true;
   const mixedOrder=parent=>parent.children.map(row=>row.name?.textContent || row.body?.textContent || row.markdownBody?.textContent.trim() || row.textContent.trim());
   assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup',sdkThinking,'Intermediate','secondary','Final reply']);
   assert.equal(processArea().hidden,true,'positioned tools are not repeated in Process');
@@ -904,6 +918,9 @@ if(process.argv[3]==='tools') {
   emit('process',{...unranked,status:'SUCCEEDED'});emit('process',unranked);
   await until('completed tool cannot be reopened by replay',()=>first.status.textContent==='Completed');
   assert.equal(liveParts().children[1],first);
+  assert.equal(first.open,true,'tool completion preserves disclosure state');
+  assert.ok(!first.className.split(' ').includes('tool-running'));
+  assert.equal(first.name.getAttribute('aria-label'),'lookup · Completed');
 
   const old=streamBlocks.get(id).controller;old.close();
   await until('process stream reconnected',()=>streamBlocks.get(id).controller!==old);
@@ -913,6 +930,7 @@ if(process.argv[3]==='tools') {
   await until('stable native part continues after reconnect',()=>liveThought.body.textContent===completedThinking);
   emit('process',unranked);await settle();
   assert.deepEqual(mixedOrder(liveParts()),['First answer','lookup',completedThinking,'Intermediate','secondary','Final reply']);
+  assert.equal(liveThought.open,true,'new thinking deltas preserve the user-opened disclosure');
 
   const saved={...turn,status:'SUCCEEDED',conversation_committed:true,items:[
     {item_kind:'assistant',content:'First answer'},
@@ -933,14 +951,25 @@ if(process.argv[3]==='tools') {
   const expectedOrder=['First answer','lookup',completedThinking,'Intermediate','secondary','Final reply'];
   assert.deepEqual(mixedOrder(liveParts()),expectedOrder,'completed model preview retains its inline order until History');
   assert.equal(liveParts().children[1],first);
-  timelineOverrides.set('a',{items:[saved],next_cursor:null});
+  const previousArticle=olderArticle(),previousThinking=descendants(previousArticle).find(item=>item.tagName==='DETAILS');
+  previousThinking.open=true;previousThinking.children[0].focus();
+  const previousLive=node('live');
+  timelineOverrides.set('a',{items:[older,saved],next_cursor:null});
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
   streamBlocks.get(id).controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));
   streamBlocks.get(id).controller.close();
   const savedParts=()=>article()?.children.find(item=>item.className==='turn-saved-answers');
   await until('committed process replaces the preview',()=>!article()?.contains(node('live')) && savedParts()?.textContent.includes('lookupCompleted'));
+  assert.equal(olderArticle(),previousArticle,'terminal History leaves older article nodes untouched');
+  assert.equal(previousThinking.open,true);
+  assert.equal(document.activeElement,previousThinking.children[0]);
+  assert.equal(node('live'),previousLive);
   assert.deepEqual(mixedOrder(savedParts()),expectedOrder);
   assert.match(savedParts().textContent,/secondaryOutcome unconfirmed/);
+  assert.equal(savedParts().children[1].tagName,'DETAILS');
+  assert.equal(savedParts().children[1].children[0].textContent,'lookup');
+  assert.equal(savedParts().children[1].open,true,'the same committed tool retains its open disclosure');
+  assert.ok(!descendants(savedParts()).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
   const savedThought=descendants(article()).filter(item=>item.tagName==='DETAILS' && item.body?.textContent===completedThinking);
   assert.equal(savedThought.length,1);
   assert.equal(savedThought[0].open,false,'committed History keeps thinking collapsed');
@@ -1170,11 +1199,10 @@ if(process.argv[3]==='sdk') {
   console.log('SDK messages stay readable without HTTP capture, preserving ordered parts and separate instruction/tool metadata');process.exit(0);
 }
 if(process.argv[3]==='streaming') {
-  const frames=new Map();let frameId=0,copied;
+  const frames=new Map();let frameId=0;
   globalThis.requestAnimationFrame=callback=>{const id=++frameId;frames.set(id,callback);return id;};
   globalThis.cancelAnimationFrame=id=>frames.delete(id);
   const flushFrame=()=>{const pending=[...frames.values()];frames.clear();pending.forEach(callback=>callback(performance.now()));};
-  Object.defineProperty(globalThis,'navigator',{value:{clipboard:{writeText:async value=>{copied=value;}}},configurable:true});
   const id='smooth-preview';sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});streamBlocks.set(id,{});
   await select('#session=a');const stream=streamBlocks.get(id);await until('streaming preview opened',()=>Boolean(stream.controller));
   const emit=(event_type,text,fragmented=false)=>{
@@ -1185,18 +1213,18 @@ if(process.argv[3]==='streaming') {
   await until('queued live update',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));
   assert.equal(frames.size,1,'Incoming deltas share a pending frame');assert.doesNotMatch(node('live').textContent,/Hello/);
   flushFrame();let expected='**Hello 你好🌱**';
-  const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0],copy=message.children[1];
+  const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0];
   const emitThinking=text=>stream.controller.enqueue(new TextEncoder().encode(
     'event: thinking\ndata: '+JSON.stringify({execution_id:id,text})+'\n\n'));
-  copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emitThinking('thinking');
+  node('prompt').focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emitThinking('thinking');
   await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
-  assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);
+  assert.equal(message.parentElement,node('live'));assert.equal(message.children.length,1);assert.equal(document.activeElement,node('prompt'));
   const thinking=descendants(node('live')).find(item=>item.className==='tool-message' && item.textContent.startsWith('Thinking'));
-  assert.equal(thinking.open,true,'live fallback thinking is visible without clicking');
+  assert.equal(Boolean(thinking.open),false,'live fallback thinking starts collapsed');
   thinking.open=false;
   emitThinking(' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
   await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
-  assert.equal(thinking.open,false,'additional deltas must not reopen thinking the user collapsed');assert.match(thinking.textContent,/thinking continued/);await copy.click();assert.equal(copied,expected);
+  assert.equal(thinking.open,false,'additional deltas must not reopen thinking the user collapsed');assert.match(thinking.textContent,/thinking continued/);
   const {renderMarkdown}=await import(messageURL);assert.equal(body.innerHTML,renderMarkdown(expected));
   // A paused/background animation frame keeps only current accumulated text.
   for(const part of ['\n\n[ref]', '[ref]: https://example.test\n', '\nfinal'])emit('ASSISTANT_TEXT_DELTA',part);
@@ -1208,12 +1236,11 @@ if(process.argv[3]==='streaming') {
   for(let i=0;i<2;i++){emit('ASSISTANT_TEXT_DELTA',' costly');await until('costly frame',()=>frames.size>0);flushFrame();expected+=' costly';}delete body.innerHTML;
   emit('ASSISTANT_TEXT_DELTA',' bounded');await new Promise(resolve=>setImmediate(resolve));assert.equal(frames.size,0,'Expensive parsing is not rescheduled immediately on every frame');
   await until('bounded expensive render',()=>frames.size>0);flushFrame();expected+=' bounded';
-  node('conversation').clientHeight=1;node('conversation').scrollTop=0;copy.focus();
+  node('conversation').clientHeight=1;node('conversation').scrollTop=0;node('prompt').focus();
   emit('ASSISTANT_TEXT_DELTA',' discarded');emit('STREAM_RESET','');emit('ASSISTANT_TEXT_DELTA','**Restart 你好🌱**',true);
   await until('reset coalesced with latest text',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected='**Restart 你好🌱**';
-  assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(message.children.length,2);assert.equal(document.activeElement,copy);assert.equal(thinking.isConnected,false);
+  assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(message.children.length,1);assert.equal(document.activeElement,node('prompt'));assert.equal(thinking.isConnected,false);
   assert.equal(node('conversation').scrollTop,0,'Streaming respects a reader away from the bottom');node('conversation').clientHeight=300;
-  await copy.click();assert.equal(copied,expected);
   // A final snapshot flushes pending text even while animation frames are paused.
   const release=deferred('GET /api/sessions/a');emit('ASSISTANT_TEXT_DELTA',' terminal');expected+=' terminal';
   executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
@@ -1835,8 +1862,8 @@ if(process.argv[3]==='workspace'){
   assert.match(node('conversation').textContent,/src\/example.py/);
   assert.doesNotMatch(node('conversation').textContent,/Original input|Markdown source/);
   assert.equal(descendants(node('conversation')).some(item=>item.className==='message-source'),false);
-  let copied;Object.defineProperty(globalThis,'navigator',{value:{clipboard:{writeText:async value=>{copied=value;}}},configurable:true});
-  await descendants(node('conversation')).find(item=>item.textContent==='Copy' && item.tagName==='BUTTON').click();assert.equal(copied,markdown);
+  assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && item.textContent==='Copy'));
+  assert.doesNotMatch(rendered,/<button\b/,'Markdown code renders without Copy controls');
   node('prompt').value='Unsent **Alpha**';node('planning').checked=true;
   await select('#session=b');assert.equal(node('prompt').value,'');node('prompt').value='Beta draft';
   await select('#session=a');
@@ -1890,7 +1917,7 @@ if(process.argv[3]==='workspace'){
   node('prompt').value='Accepted before next edit';const nextAdmission=deferred('POST /api/sessions/a/messages');
   const nextSend=node('composer').requestSubmit();await nextAdmission.requested;view('executions').click();await hashChanged;node('prompt').value='Newer draft';
   nextAdmission({execution_id:'a-run'});await nextSend;view('sessions').click();await hashChanged;assert.equal(node('prompt').value,'Newer draft');
-  console.log('Workspace contracts passed: Markdown, copy source, drafts, inspection, Metrics, reattachment and active-owner controls');process.exit(0);
+  console.log('Workspace contracts passed: Markdown without Copy, drafts, inspection, Metrics, reattachment and active-owner controls');process.exit(0);
 }
 
 sessions.get('a').active_execution_id='active-other';executions.set('active-other',{...info('active-other','a'),status:'STARTED'});

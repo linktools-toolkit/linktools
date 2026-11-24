@@ -24,10 +24,7 @@ function button(label, action, className='quiet') {
 }
 function markdownMessage(source, className='') {
   const node=element('div',`message ${className}`), body=element('div','markdown');
-  node.append(body,button('Copy',async()=>{
-    if(!navigator.clipboard)throw new Error('Clipboard unavailable.');
-    await navigator.clipboard.writeText(node.markdownSource);
-  },'quiet copy-message'));
+  node.append(body);
   node.markdownBody=body;updateMarkdownMessage(node,source);
   return node;
 }
@@ -451,7 +448,7 @@ function reconcileOlderTurn(payload,id) {
     state.turns=[...state.turns.slice(0,index),committed,...state.turns.slice(index)];
   }
   reconcileLiveHistory({items:[committed]});
-  renderConversation();
+  renderCommittedTurn({items:[committed]},id);
 }
 function refreshSessionTimeline(watch, executionId=null, releasedTurn=null) {
   const refresh=watch.refresh,generation=state.generation,revision=watch.revision,reconnect=refresh.reconnect;
@@ -475,14 +472,14 @@ function refreshSessionTimeline(watch, executionId=null, releasedTurn=null) {
     if(!current())return;
     if(!payload.timeline){failed();}
     if(!acceptSession(payload)){if(releasedTurn)reconcileOlderTurn(payload,releasedTurn);return;}
-    state.timelineError=payload.timeline_error || '';renderSessionHeader();
+    const previousError=state.timelineError;state.timelineError=payload.timeline_error || '';renderSessionHeader();
     if(payload.timeline)state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);
     reconcileLiveHistory(payload.timeline);
     if(releasedTurn)settleReleasedTurn(payload,releasedTurn,current);
     if(executionId && sessionWatch.snapshot?.active_execution_id===executionId
       && !state.turns.some(turn=>turn.execution_id===executionId))failed();
     if(releasedTurn && !state.turns.some(turn=>turn.execution_id===releasedTurn && turn.conversation_committed))failed();
-    renderConversation();setDisabled();
+    renderCommittedTurn(payload.timeline,releasedTurn,previousError);setDisabled();
     if(releasedTurn && executionId)refreshActiveTurn(sessionWatch);
     if(releasedTurn && refresh.failed && sessionWatch.revision>revision && !sessionWatch.snapshot?.active_execution_id)
       refreshSessionTimeline(sessionWatch);
@@ -688,19 +685,25 @@ function mergeProcessRow(previous,row) {
   const order=previous.order ?? row.order;
   return next.position===position && next.order===order ? next : {...next,position,order};
 }
-function toolProcessRow(rows,row) {
+function toolProcessRow(rows,row,fold=false) {
   let node=rows.get(row.key);
   if(!node) {
-    node=element('div','live-tool');node.name=element('span','tool-name');node.status=element('span','tool-status');
+    node=fold?element('details','tool-message'):element('div','live-tool');
+    node.name=element(fold?'summary':'span','tool-name');node.status=element(fold?'pre':'span','tool-status');
     node.status.setAttribute('role','status');node.status.setAttribute('aria-live','polite');node.append(node.name,node.status);
     rows.set(row.key,node);
   }
   if(node.name.textContent!==row.tool_name)node.name.textContent=row.tool_name;
   if(node.status.textContent!==processToolStatus[row.status])node.status.textContent=processToolStatus[row.status];
+  if(fold) {
+    node.classList.toggle('tool-running',row.status==='RUNNING');
+    const label=`${row.tool_name} · ${processToolStatus[row.status]}`;
+    if(node.name.getAttribute('aria-label')!==label)node.name.setAttribute('aria-label',label);
+  }
   node.classList.toggle('error',row.status==='FAILED');
   return node;
 }
-function renderTurnProcess(section, rows) {
+function renderTurnProcess(section, rows, fold=false) {
   section.rows ||= new Map();
   const children=[section.heading];
   const keys=new Set();
@@ -712,7 +715,7 @@ function renderTurnProcess(section, rows) {
     if(typeof row.key!=='string' || keys.has(row.key))continue;
     if(typeof row.tool_name!=='string' || !Object.hasOwn(processToolStatus,row.status))continue;
     keys.add(row.key);
-    children.push(toolProcessRow(section.rows,row));
+    children.push(toolProcessRow(section.rows,row,fold));
   }
   for(const key of section.rows.keys())if(!keys.has(key))section.rows.delete(key);
   section.hidden=children.length===1;
@@ -743,11 +746,88 @@ function thinkingMessage(label,text='') {
   const node=element('details','tool-message');node.body=element('pre','',text);
   node.append(element('summary','',label),node.body);return node;
 }
+function renderTurn(turn,openTools=null) {
+  const section=element('article','turn');section.dataset.execution=turn.execution_id;
+  section.append(userMessage(turn.user_input));
+  const ordered=state.conversationMode==='chat',process=turnProcess();
+  if(!ordered)section.append(process);
+  const originalRows=turn.conversation_committed?turn.process:conversationProcessRows(turn.execution_id,turn.process);
+  const remaining=new Map((originalRows || []).map(row=>[row.key,row])), cards=new Map();
+  const savedAnswers=element('div','turn-saved-answers');section.append(savedAnswers);
+  for (const item of turn.items) {
+    if (item.item_kind==='assistant') savedAnswers.append(typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
+    else if (item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) savedAnswers.append(thinkingMessage('Thinking',item.content));
+    else if (ordered && item.item_kind==='tool_call') {
+      const key='tool:'+item.tool_call_id,row=remaining.get(key);
+      if(row){savedAnswers.append(toolProcessRow(cards,row,true));remaining.delete(key);}
+    }
+  }
+  if(turn.conversation_committed && ordered && turn.updated_at) {
+    section.committedAt=turn.updated_at;section.committedStatus=turn.status;
+  }
+  if(!turn.conversation_committed) {
+    section.dataset.openExecution=turn.execution_id;
+    section.savedProcess=turn.process;section.placedTools=cards;
+    section.liveSlot=element('div','turn-live-slot');section.append(section.liveSlot);
+  }
+  renderTurnProcess(process,[...remaining.values()],ordered);
+  if(openTools)for(const key of openTools) {
+    const card=cards.get(key) || process.rows.get(key);
+    if(card)card.open=true;
+  }
+  if(ordered)section.append(process);
+  if(!turn.conversation_committed)section.processNode=process;
+  if (!turn.conversation_committed) section.append(element('p','muted','Incomplete turn; history is not yet committed.'));
+  if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
+  const heading=element('div','turn-heading');heading.append(element('span','',date(turn.created_at)));
+  if(turn.status!=='SUCCEEDED')heading.append(element('span','badge',turn.status));
+  section.append(heading);return section;
+}
+function renderCommittedTurn(timeline,id,previousError=state.timelineError) {
+  const turn=timeline?.items.length===1 && timeline.items[0];
+  const container=$('conversation'),live=$('live');
+  if(state.view!=='sessions' || state.conversationMode!=='chat' || !turn?.conversation_committed
+    || turn.execution_id!==id || !live || state.sessionError || previousError!==state.timelineError
+    || container.dataset.renderedSession!==state.selectedSession || container.dataset.renderedMode!=='chat') {
+    renderConversation();return;
+  }
+  const previous=[...container.children].find(node=>node.dataset.execution===id);
+  if(turn.updated_at && previous?.committedAt===turn.updated_at && previous.committedStatus===turn.status) {
+    // Exact terminal history can arrive from both the occupancy and execution observers.
+    renderTurnPickers();renderLive();return;
+  }
+  const top=container.scrollTop,follows=top+container.clientHeight>=container.scrollHeight-40;
+  const openTools=new Set();
+  const rememberTools=rows=>{
+    for(const [key,node] of rows || [])if(key.startsWith('tool:') && node.open)openTools.add(key);
+  };
+  rememberTools(previous?.placedTools);rememberTools(previous?.processNode?.rows);
+  if(state.observedExecution===id) {
+    rememberTools(live.processNode?.rows);
+    for(const request of live.attemptNodes?.values() || [])rememberTools(request.partNodes);
+  }
+  const section=renderTurn(turn,openTools);
+  if(previous) {
+    if(previous.contains(live))container.append(live);
+    container.insertBefore(section,previous);
+    previous.remove();
+  } else {
+    const index=state.turns.indexOf(turn);
+    const nextIds=new Set(state.turns.slice(index+1).map(row=>row.execution_id));
+    const next=[...container.children].find(node=>nextIds.has(node.dataset.execution));
+    // First-turn completion with no active History row may leave the empty placeholder.
+    if(container.children.length===2 && container.children[0].className==='empty')container.children[0].remove();
+    container.insertBefore(section,next || (live.parentElement===container ? live : null));
+  }
+  renderTurnPickers();renderLive();
+  container.scrollTop=follows?container.scrollHeight:top;
+}
 function renderConversation({prepend=false}={}) {
   const liveFocus=document.activeElement?.dataset?.liveFocus,requestFocus=requestFocusWithin($('conversation'));
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
   const follows=previousTop+container.clientHeight>=previousHeight-40, original=state.conversationMode==='original';
-  clear('conversation');$('turns-more').hidden=!state.turnCursor;
+  clear('conversation');container.dataset.renderedSession=state.selectedSession;container.dataset.renderedMode=state.conversationMode;
+  $('turns-more').hidden=!state.turnCursor;
   const live=element('section','turn-live');live.id='live';
   renderTurnPickers();
   for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode);
@@ -755,36 +835,7 @@ function renderConversation({prepend=false}={}) {
   if(state.timelineError)container.append(element('p','empty',`${state.timelineError} · Inspect retained executions; loaded turns may be incomplete.`));
   if(original) {
     const section=element('section','model-requests');renderNativeTimeline(section,{conversation:true});container.append(section);renderTurnPickers();
-  } else state.turns.forEach(turn => {
-    const section=element('article','turn');section.dataset.execution=turn.execution_id;
-    section.append(userMessage(turn.user_input));
-    const ordered=state.conversationMode==='chat',process=turnProcess();
-    if(!ordered)section.append(process);
-    const originalRows=turn.conversation_committed?turn.process:conversationProcessRows(turn.execution_id,turn.process);
-    const remaining=new Map((originalRows || []).map(row=>[row.key,row])), cards=new Map();
-    const savedAnswers=element('div','turn-saved-answers');section.append(savedAnswers);
-    for (const item of turn.items) {
-      if (item.item_kind==='assistant') savedAnswers.append(typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
-      else if (item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) savedAnswers.append(thinkingMessage('Thinking',item.content));
-      else if (ordered && item.item_kind==='tool_call') {
-        const key='tool:'+item.tool_call_id,row=remaining.get(key);
-        if(row){savedAnswers.append(toolProcessRow(cards,row));remaining.delete(key);}
-      }
-    }
-    if(!turn.conversation_committed) {
-      section.dataset.openExecution=turn.execution_id;
-      section.savedProcess=turn.process;section.placedTools=cards;
-      section.liveSlot=element('div','turn-live-slot');section.append(section.liveSlot);
-    }
-    renderTurnProcess(process,[...remaining.values()]);
-    if(ordered)section.append(process);
-    if(!turn.conversation_committed)section.processNode=process;
-    if (!turn.conversation_committed) section.append(element('p','muted','Incomplete turn; history is not yet committed.'));
-    if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
-    const heading=element('div','turn-heading');heading.append(element('span','',date(turn.created_at)));
-    if(turn.status!=='SUCCEEDED')heading.append(element('span','badge',turn.status));
-    section.append(heading);container.append(section);
-  });
+  } else state.turns.forEach(turn=>container.append(renderTurn(turn)));
   if (!state.turns.length && !state.timelineError && !original)container.append(element('p','empty',state.selectedSession ? 'Send a message to get started.':'Choose an execution to inspect.'));
   if(original){const preview=element('details','live-preview');preview.append(element('summary','','Live preview · not original response'),live);container.append(preview);}else container.append(live);
   renderLive(liveFocus);restoreRequestFocus(container,requestFocus);
@@ -868,7 +919,6 @@ function renderLiveAttempts(live,wanted,process,tools) {
     if(!node) {
       node=element('section','stream-attempt');node.label=element('div','message-label');
       node.thinking=thinkingMessage(process?'Thinking':'Thinking · SDK display');
-      node.thinking.open=process;
       node.body=markdownMessage('');node.append(node.label,node.thinking,node.body);live.attemptNodes.set(key,node);
     }
     if(process && !node.parts){node.parts=element('div','stream-parts');node.partNodes=new Map();node.append(node.parts);}
@@ -898,11 +948,10 @@ function renderLiveAttempts(live,wanted,process,tools) {
         if(part.kind==='thinking' && !part.content.trim())continue;
         const key=part.row?.key || part.kind+':'+part.index;
         keys.add(key);
-        if(part.kind==='tool'){children.push(toolProcessRow(node.partNodes,part.row));continue;}
+        if(part.kind==='tool'){children.push(toolProcessRow(node.partNodes,part.row,true));continue;}
         let body=node.partNodes.get(key);
         if(!body){
           body=part.kind==='thinking'?thinkingMessage('Thinking'):markdownMessage('');
-          if(part.kind==='thinking')body.open=true;
           node.partNodes.set(key,body);
         }
         if(part.kind==='thinking'){
@@ -971,7 +1020,6 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   if (state.liveThinking.trim()) {
     if(!live.thinkingNode) {
       live.thinkingNode=thinkingMessage(process?'Thinking':'Live thinking · incomplete SDK response');
-      live.thinkingNode.open=process;
     }
     if(live.thinkingSource!==state.liveThinking){live.thinkingNode.body.textContent=state.liveThinking;live.thinkingSource=state.liveThinking;}
     wanted.push(live.thinkingNode);
@@ -989,13 +1037,13 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   const tools=process ? new Map(conversationProcessRows(state.observedExecution,article?.savedProcess,state.liveProcess)
     .filter(row=>{
       if(!article?.placedTools.has(row.key))return true;
-      toolProcessRow(article.placedTools,row);
+      toolProcessRow(article.placedTools,row,true);
       return false;
     }).map(row=>[row.key,row])) : null;
   renderLiveAttempts(live,wanted,process,tools);
   if(process) {
     const section=article?.processNode || (live.processNode ||= turnProcess());
-    renderTurnProcess(section,[...tools.values()]);
+    renderTurnProcess(section,[...tools.values()],true);
     if(!article && !section.hidden)wanted.push(section);
   }
   const events=[...state.events.values()].slice(-12);
@@ -1668,10 +1716,10 @@ async function refreshObservation(id, generation, snapshot=null) {
   info=observedInfo(info,readGeneration);
   if(id===state.selectedExecution){state.execution=info;state.executionError=false;renderExecution();}
   if(payload && sessionId===state.selectedSession && acceptSession(payload)) {
-    state.timelineError=payload.timeline_error || '';renderSessionHeader();
+    const previousError=state.timelineError;state.timelineError=payload.timeline_error || '';renderSessionHeader();
     if(payload.timeline)state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);
     reconcileLiveHistory(payload.timeline);
-    renderConversation();renderList();
+    renderCommittedTurn(payload.timeline,id,previousError);renderList();
   } else if(payload && sessionId===state.selectedSession)reconcileOlderTurn(payload,id);
   if(state.cancellationNoticeId===id && terminal(info.status)) {
     const noticeRevision=state.noticeRevision;
