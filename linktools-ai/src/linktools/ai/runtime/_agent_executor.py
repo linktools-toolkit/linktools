@@ -1048,11 +1048,6 @@ async def _materialize_agent(
         current = compiled_agent if current_agent is None else await current_agent(compiled_agent)
         return current.skill_definitions
 
-    preview_tool_names = {
-        name for name, descriptor in workspace_descriptors.items()
-        if descriptor.tool_class in {"filesystem.read", "filesystem.write"}
-    }
-    preview_tool_names.update(scope.memory_tool_names)
     if scope.preload_skills or compiled_agent.spec.allow_skills and (compiled_agent.skill_definitions or asset_sources):
         initial_skills = compiled_agent.skill_definitions if scope.initial_skills is None else scope.initial_skills
         skill_capability = SkillCapability(
@@ -1068,7 +1063,6 @@ async def _materialize_agent(
             },
         )
         capabilities.append(skill_capability)
-        preview_tool_names.add("load_skill")
 
     if any(tool_class_from_metadata(_bound_tool_metadata(candidate)) != "shell"
            for candidate in compiled_agent.selected_tools if candidate.id in workspace_names) and scope.workspace is None:
@@ -1090,7 +1084,6 @@ async def _materialize_agent(
             scope.subagent_descriptions,
         )
         capabilities.append(subagent_capability)
-        preview_tool_names.add("delegate_task")
     prepare_tools = _plan_mode_prepare(
         plan_mode=scope.mode == "plan",
         compaction_policy=compaction_policy,
@@ -1149,7 +1142,6 @@ async def _materialize_agent(
         history_boundary=commit_history_boundary,
         checkpoint_sink=save_checkpoint,
         checkpoint_sink_accepts_frozen=type(scope.run_store) is RuntimeAgentRunStore,
-        preview_tool_names=frozenset(preview_tool_names),
     )
     if tool_metrics is not None:
         capabilities.append(ToolMetricsCapability(tool_metrics))

@@ -17,6 +17,22 @@ TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY = (
 )
 TOOL_CONTEXT_DEDUPE_METADATA_KEY = "linktools.ai.context_dedupe"
 
+_TOOL_PREVIEW_FIELD = "linktools.ai.argument_preview_field"
+
+
+class _RegisteredPreviewField(str):
+    """Only native tool registration opts in; serialized metadata is not authority."""
+
+
+def _registered_preview(field: str) -> dict[str, object]:
+    return {_TOOL_PREVIEW_FIELD: _RegisteredPreviewField(field)}
+
+
+def tool_argument_preview_field(metadata: Mapping[str, object] | None) -> str | None:
+    field = None if metadata is None else metadata.get(_TOOL_PREVIEW_FIELD)
+    return field if isinstance(field, _RegisteredPreviewField) else None
+
+
 ToolEffectPolicy = Literal["none", "replay_safe", "non_replay_safe"]
 ToolClass = Literal[
     "business",
@@ -193,6 +209,7 @@ __all__ = [
     "TOOL_MCP_SELECTOR_METADATA_KEY",
     "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
     "TOOL_CONTEXT_DEDUPE_METADATA_KEY",
+    "tool_argument_preview_field",
     "TOOL_EFFECT_POLICY_METADATA_KEY",
     "TOOL_PATH_FIELDS_METADATA_KEY",
     "TOOL_PLAN_SAFE_METADATA_KEY",

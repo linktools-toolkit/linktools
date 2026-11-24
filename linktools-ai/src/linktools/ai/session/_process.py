@@ -33,10 +33,13 @@ class ToolProcessItem:
             return None
         position = None
         raw_position = row.get("position")
-        if isinstance(raw_position, (list, tuple)) and len(raw_position) == 2:
+        if raw_position is not None:
+            if not isinstance(raw_position, (list, tuple)) or len(raw_position) != 2:
+                return None
             message_seq, part_index = raw_position
-            if type(message_seq) is int and message_seq > 0 and type(part_index) is int and part_index >= 0:
-                position = (message_seq, part_index)
+            if type(message_seq) is not int or message_seq < 1 or type(part_index) is not int or part_index < 0:
+                return None
+            position = (message_seq, part_index)
         elapsed = row.get("elapsed_ms")
         preview = row.get("argument_preview")
         code = row.get("error_code") if status == "FAILED" else None
@@ -61,18 +64,8 @@ class SessionTurnNotice:
     process: ToolProcessItem | None = None
 
 
-def tool_argument_preview(tool_name: str, arguments: object) -> str | None:
-    """Format the single public field of an already identified built-in tool."""
-    if not isinstance(arguments, Mapping):
-        return None
-    field = {
-        "read_file": "path", "list_files": "path", "search_files": "path", "write_file": "path",
-        "load_skill": "skill_id", "delegate_task": "subagent_id",
-        "read_memory": "file", "write_memory": "file", "delete_memory": "file",
-    }.get(tool_name)
-    if field is None:
-        return None
-    path = arguments.get(field)
+def tool_argument_preview(path: object) -> str | None:
+    """Format one optional, registered, public scalar without exposing raw arguments."""
     if not isinstance(path, str) or not 0 < len(path) <= 80 or path != path.strip():
         return None
     if path == ".":

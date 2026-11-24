@@ -15,15 +15,15 @@ from pydantic_ai_harness.memory import Memory, MemoryFile, MemoryMutation, Memor
 from ..core import validate_memory_scope
 from ..errors import AIError, ErrorCode
 from ._context import AgentContext
-from ._tool_metadata import tool_metadata
+from ._tool_metadata import _registered_preview, tool_metadata
 from ._tool_signal import ToolCallRetry
 
 
-_MEMORY_TOOLS: dict[str, Mapping[str, object]] = {
-    "delete_memory": tool_metadata(tool_class="memory", effect_policy="replay_safe", compaction_keep_result=True),
-    "read_memory": tool_metadata(tool_class="memory", effect_policy="none", plan_safe=True, compaction_keep_result=True),
-    "search_memory": tool_metadata(tool_class="memory", effect_policy="none", plan_safe=True, compaction_keep_result=True),
-    "write_memory": tool_metadata(tool_class="memory", effect_policy="replay_safe", compaction_keep_result=True),
+_MEMORY_TOOLS: dict[str, tuple[Mapping[str, object], str | None]] = {
+    "delete_memory": (tool_metadata(tool_class="memory", effect_policy="replay_safe", compaction_keep_result=True), "file"),
+    "read_memory": (tool_metadata(tool_class="memory", effect_policy="none", plan_safe=True, compaction_keep_result=True), "file"),
+    "search_memory": (tool_metadata(tool_class="memory", effect_policy="none", plan_safe=True, compaction_keep_result=True), None),
+    "write_memory": (tool_metadata(tool_class="memory", effect_policy="replay_safe", compaction_keep_result=True), "file"),
 }
 
 
@@ -107,17 +107,19 @@ def _validate_memory_content(ctx: RunContext[None], content: str, **_kwargs: obj
 class _BoundMemory(Memory[None]):
     selected_tool_names: tuple[str, ...] = ()
 
-    def tool_definitions(self) -> tuple[Tool[Any], ...]:
+    def tool_definitions(self, *, bound: bool = False) -> tuple[Tool[Any], ...]:
         toolset = cast("FunctionToolset[None]", super().get_toolset())
-        for name, metadata in _MEMORY_TOOLS.items():
+        for name, (metadata, preview_field) in _MEMORY_TOOLS.items():
             tool = toolset.tools[name]
             if name == "write_memory":
                 tool.args_validator = _validate_memory_content
             tool.metadata = {**(tool.metadata or {}), **metadata}
+            if bound and preview_field is not None:
+                tool.metadata.update(_registered_preview(preview_field))
         return tuple(toolset.tools[name] for name in _MEMORY_TOOLS)
 
     def get_toolset(self) -> AbstractToolset[None] | None:
-        self.tool_definitions()
+        self.tool_definitions(bound=True)
         toolset = super().get_toolset()
         if toolset is None:
             return None

@@ -54,6 +54,7 @@ from ._run_context import RunContextProjection
 from ._trace_capture import ModelInteractionCapture, TraceStagingPort
 from ..persistence.contracts import LoadedModelContext
 from ..session import tool_argument_preview
+from ..capability import tool_argument_preview_field
 from ..persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
 from ..persistence.runs import (
     TOOL_ERROR_CODE_METADATA_KEY,
@@ -86,7 +87,6 @@ class AgentRunRecorder:
         history_boundary: Callable[[], Awaitable[None]] | None = None,
         checkpoint_sink: Callable[[AgentRunCheckpoint], Awaitable[None]] | None = None,
         checkpoint_sink_accepts_frozen: bool = False,
-        preview_tool_names: frozenset[str] = frozenset(),
     ) -> None:
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise ValueError("agent_run_id is required")
@@ -97,7 +97,7 @@ class AgentRunRecorder:
         self._checkpoint_sink = checkpoint_sink
         self._checkpoint_sink_accepts_frozen = checkpoint_sink_accepts_frozen
         self._agent_run_id = agent_run_id
-        self._preview_tool_names = preview_tool_names
+        self._preview_tools: tuple[int, dict[str, str]] | None = None
         initial_request = initial_messages[-1] if initial_messages else None
         self._initial_request = (
             freeze_model_messages((initial_request,))[0]
@@ -727,6 +727,11 @@ class AgentRunRecorder:
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
         self._streaming = streaming
+        if fact.purpose == "agent":
+            self._preview_tools = (fact.model_request_seq, {
+                tool.name: field for tool in parameters.function_tools
+                if (field := tool_argument_preview_field(tool.metadata)) is not None
+            })
         self.model_interactions.prepare_model_interaction(
             fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
@@ -796,7 +801,7 @@ class AgentRunRecorder:
             if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             seen_call_ids.add(call_id)
-            if (preview := self._preview_tool_arguments(part)) is not None:
+            if (preview := self._preview_tool_arguments(fact, part)) is not None:
                 previews[call_id] = preview
             if call_id in self._tool_call_origins:
                 previous_call = self._restored_tool_calls.get(call_id)
@@ -838,11 +843,15 @@ class AgentRunRecorder:
         previews = (message.metadata or {}).get(TOOL_ARGUMENT_PREVIEWS_METADATA_KEY)
         return previews.get(tool_call_id) if isinstance(previews, Mapping) else None
 
-    def _preview_tool_arguments(self, part: ToolCallPart) -> str | None:
-        if part.tool_name not in self._preview_tool_names:
+    def _preview_tool_arguments(self, fact: ModelRequestFact, part: ToolCallPart) -> str | None:
+        registered = self._preview_tools
+        if registered is None or registered[0] != fact.model_request_seq:
+            return None
+        field = registered[1].get(part.tool_name)
+        if field is None:
             return None
         try:
-            return tool_argument_preview(part.tool_name, part.args_as_dict())
+            return tool_argument_preview(part.args_as_dict().get(field))
         except (TypeError, ValueError):
             return None
 

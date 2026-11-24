@@ -63,24 +63,17 @@ def test_live_chat_process_uses_the_same_key_and_omits_diagnostics() -> None:
     ) is None
 
 
-@pytest.mark.parametrize(("name", "arguments", "expected"), [
-    ("read_file", {"path": "docs/README.md"}, "docs/README.md"),
-    ("search_files", {"path": "docs", "query": "secret"}, "docs"),
-    ("read_file", {"path": ["README.md", "private"]}, None),
-    ("read_file", {"path": {"token": "secret"}}, None),
-    ("read_file", {"path": "../private"}, None),
-    ("read_file", {"path": "https://site.example/token"}, None),
-    ("read_file", {"path": "x" * 81}, None),
-    ("run_command", {"path": "README.md", "command": "secret"}, None),
-    ("write_file", {"path": "README.md", "content": "private body"}, "README.md"),
-    ("load_skill", {"skill_id": "planning", "path": "private"}, "planning"),
-    ("delegate_task", {"subagent_id": "reviewer", "task": "private prompt"}, "reviewer"),
-    ("read_memory", {"file": "notes.md"}, "notes.md"),
-    ("write_memory", {"file": "notes.md", "content": "private memory"}, "notes.md"),
-    ("search_memory", {"query": "private memory"}, None),
+@pytest.mark.parametrize(("value", "expected"), [
+    ("docs/README.md", "docs/README.md"),
+    ("例子/README.md", "例子/README.md"),
+    (["README.md", "private"], None),
+    ({"token": "secret"}, None),
+    ("../private", None),
+    ("https://site.example/token", None),
+    ("x" * 81, None),
 ])
-def test_tool_title_preview_shows_only_simple_safe_fields(name: str, arguments: object, expected: str | None) -> None:
-    assert tool_argument_preview(name, arguments) == expected
+def test_tool_title_preview_accepts_only_a_simple_scalar(value: object, expected: str | None) -> None:
+    assert tool_argument_preview(value) == expected
 
 
 def test_terminal_tool_process_includes_known_reason_without_raw_diagnostic() -> None:
@@ -89,3 +82,21 @@ def test_terminal_tool_process_includes_known_reason_without_raw_diagnostic() ->
         "error_code": "STORAGE_NOT_FOUND", "error": "a raw internal diagnostic",
     })
     assert item == ToolProcessItem("tool:a", "read_file", "FAILED", elapsed_ms=0, error_code=ErrorCode.STORAGE_NOT_FOUND)
+
+
+def test_native_tool_registrations_declare_only_the_public_identifier() -> None:
+    from linktools.ai.capability import (
+        SkillCapability, SkillSourceRegistry, SubagentCapability, tool_argument_preview_field,
+    )
+
+    async def delegate(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("registration does not invoke a tool")
+
+    skills = SkillCapability((), SkillSourceRegistry()).get_toolset()
+    agents = SubagentCapability((), delegate).get_toolset()
+    assert {name: tool_argument_preview_field(tool.metadata) for name, tool in skills.tools.items()} == {
+        "list_skills": None, "load_skill": "skill_id",
+    }
+    assert {name: tool_argument_preview_field(tool.metadata) for name, tool in agents.tools.items()} == {
+        "list_subagents": None, "delegate_task": "subagent_id",
+    }

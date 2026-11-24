@@ -16,7 +16,7 @@ from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 from ._context import AgentContext
 from ._tool_signal import ToolCallFailed, ToolCallRetry
-from ._tool_metadata import tool_metadata
+from ._tool_metadata import _registered_preview, tool_metadata
 
 SUBAGENT_CAPABILITY_ID = "linktools.ai.subagents"
 
@@ -77,7 +77,7 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
             return await self.list_subagents()
 
         @toolset.tool(
-            metadata=tool_metadata(compaction_keep_result=True)
+            metadata=tool_metadata(compaction_keep_result=True, base=_registered_preview("subagent_id"))
         )
         async def delegate_task(
             ctx: PydanticRunContext[AgentContext[object]],

@@ -957,6 +957,11 @@ def test_web_cli_provides_default_memory_tools_to_messages(monkeypatch: pytest.M
                     execution = await runtimes[0].executions.get(response.json()["execution_id"])
                     result = (await execution.wait(timeout_seconds=10)).result
                     assert result.status.value == "SUCCEEDED", result
+                    history = await http.get("/api/session?session_id=memory-session")
+                    turns = history.json()["timeline"]["items"]
+                    turn = next(item for item in turns if item["execution_id"] == execution.execution_id)
+                    tool, = turn["process"]
+                    assert tool["argument_preview"] == "web-notes.md"
                     if prompt == "recall":
                         assert result.output["text"].strip() == "remembered from web"
 
@@ -1695,7 +1700,8 @@ async def test_passive_session_tool_notice_requires_event_authorization(allowed:
 
 
 @pytest.mark.asyncio
-async def test_native_workspace_tool_title_reuses_only_safe_stored_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("native", [True, False])
+async def test_workspace_tool_title_requires_native_registration(tmp_path: Path, native: bool) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
     from linktools.ai.capability import ExecutionCapability
@@ -1714,7 +1720,17 @@ async def test_native_workspace_tool_title_reuses_only_safe_stored_path(tmp_path
             ToolCallPart("read_file", {"path": ["README.md", "notes.txt"]}, tool_call_id="complex"),
         ])
 
-    features = workspace_features("tool-preview", workspace=Workspace.load(tmp_path))
+    if native:
+        features = workspace_features("tool-preview", workspace=Workspace.load(tmp_path))
+    else:
+        features = RuntimeFeatures()
+
+        async def read_file(path: str | list[str]) -> str:
+            return "custom source"
+
+        custom = features.tool(read_file, effect_policy="none")
+        # A stringified look-alike declaration is not an installed native formatter.
+        custom.metadata["linktools.ai.argument_preview_field"] = "path"
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.agent("default", allow_tools=("read_file",))
     model_features(_Models(_UsageFunctionModel(respond)), features)
@@ -1735,6 +1751,6 @@ async def test_native_workspace_tool_title_reuses_only_safe_stored_path(tmp_path
         assert history.status_code == 200, history.text
         turn, = history.json()["timeline"]["items"]
         assert {item["key"]: item.get("argument_preview") for item in turn["process"]} == observed == {
-            "tool:simple": "README.md", "tool:complex": None,
+            "tool:simple": "README.md" if native else None, "tool:complex": None,
         }
         assert "private source contents" not in history.text and "notes.txt" not in history.text
