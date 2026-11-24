@@ -728,6 +728,13 @@ class AgentRunRecorder:
     ) -> None:
         self._streaming = streaming
         if fact.purpose == "agent":
+            request = messages[-1] if messages else None
+            source_request = source_messages[-1] if source_messages else None
+            # Freeze one canonical tool-result message for Trace and checkpoint.
+            if isinstance(request, ModelRequest):
+                self._attach_tool_timings(request)
+            if source_request is not request and isinstance(source_request, ModelRequest):
+                self._attach_tool_timings(source_request)
             self._preview_tools = (fact.model_request_seq, {
                 tool.name: field for tool in parameters.function_tools
                 if (field := tool_argument_preview_field(tool.metadata)) is not None

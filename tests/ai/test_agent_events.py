@@ -79,6 +79,7 @@ def test_tool_retry_boundary_carries_error_code() -> None:
             "status": "FAILED",
             "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
         },
+        live_error_message="retry",
     )
 
 
