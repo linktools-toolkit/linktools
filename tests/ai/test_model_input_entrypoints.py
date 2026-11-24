@@ -39,6 +39,8 @@ def test_default_runtime_ignores_unrelated_environment(
 ) -> None:
     monkeypatch.setenv("OPENAI_MODEL", "testing/inputs")
     monkeypatch.setenv("OPENAI_VISION", "sometimes")
+    monkeypatch.setenv("VISION", "true")
+    monkeypatch.setenv("LINKTOOLS_VISION", "true")
     binding = _ModelOptions.load(Workspace.load(tmp_path)).create_model_binding()
     assert binding.contract["input_mime_types"] == []
 
@@ -55,3 +57,42 @@ def test_workspace_configuration_rejects_invalid_input_types(
         _ModelOptions.load(Workspace.load(tmp_path)).create_model_binding()
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.safe_details == {"reason": "model_input_configuration_invalid"}
+
+
+@pytest.mark.parametrize(("api", "override"), [
+    ("openai", None), ("openai", "true"), ("openai", "false"),
+    ("anthropic", "1"), ("anthropic", "0"),
+])
+def test_local_vision_changes_only_image_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, api: str, override: str | None,
+) -> None:
+    monkeypatch.setenv("LINKTOOLS_MODEL_API", api)
+    monkeypatch.setenv(f"{api.upper()}_MODEL", "testing/inputs")
+    if override is None:
+        monkeypatch.delenv("LINKTOOLS_MODEL_VISION", raising=False)
+    else:
+        monkeypatch.setenv("LINKTOOLS_MODEL_VISION", override)
+    values = ["mime:application/pdf", "mime:audio/*", "mime:IMAGE/PNG"]
+    if override in {"0", "false"}:
+        values += ["image", "mime:image/*"]
+    workspace = Workspace(tmp_path, {"input_types": values})
+
+    expected = ["mime:application/pdf", "mime:audio/*"]
+    if override in {"1", "true"}:
+        expected.append("image")
+    elif override is None:
+        expected.append("mime:image/png")
+    binding = _ModelOptions.load(workspace).create_model_binding()
+    authored = create_model_binding(api=api, model="testing/inputs", input_types=expected)
+    assert binding.contract == authored.contract
+    assert "vision" not in binding.contract
+
+
+def test_local_vision_rejects_invalid_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_MODEL", "testing/inputs")
+    monkeypatch.setenv("LINKTOOLS_MODEL_VISION", "sometimes")
+    with pytest.raises(AIError) as raised:
+        _ModelOptions.load(Workspace(tmp_path, {})).create_model_binding()
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID

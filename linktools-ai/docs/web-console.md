@@ -39,7 +39,7 @@ input_types:
   - mime:application/pdf
 ```
 
-Omitting `input_types` means an empty attachment allowlist. The names `image`,
+Without an override, omitting `input_types` means an empty attachment allowlist. The names `image`,
 `audio`, `document`, and `video` expand to the corresponding SDK Literal sets.
 Use `mime:` for explicit MIME values or `type/*` families; bare MIME strings and
 `text` are not categories. Plain prompt text is unaffected.
@@ -50,7 +50,11 @@ authoring tokens. These stored MIME permissions are not re-expanded at restore.
 A match permits an input but does not verify provider support; SDK encoding and
 resource limits still apply.
 
-Configure attachment permissions explicitly with workspace `input_types`.
+To allow image attachments for one invocation, use `LINKTOOLS_MODEL_VISION=1 ai-web`.
+The same environment variable works for `ai-run` and `ai-acp`. `LINKTOOLS_MODEL_VISION=1`
+(or `true`) adds the `image` category to workspace `input_types`; `LINKTOOLS_MODEL_VISION=0`
+(or `false`) removes image inputs but leaves all other types unchanged.
+When unset, the workspace list applies as written.
 
 The console opens one execution Runtime and requires a configured model.
 Persisted history remains available in the same console. Merely opening the

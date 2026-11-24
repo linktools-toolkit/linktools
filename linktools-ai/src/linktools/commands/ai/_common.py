@@ -104,19 +104,23 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
     return Metrics.sqlite(path, namespace="default")
 
 
-def _local_input_config(
-    workspace: Workspace,
-) -> tuple[str, ...]:
-
+def _local_input_config(workspace: Workspace) -> tuple[str, ...]:
     try:
         values = workspace.config.get("input_types", [])
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
             raise ValueError("input_types must be a list of input type strings")
-        return tuple(values)
+        vision = os.getenv("LINKTOOLS_MODEL_VISION")
+        if vision is None:
+            return tuple(values)
+        if environ.config.cast(vision, bool):
+            return (*values, "image")
+        return tuple(item for item in values if item != "image" and not (
+            item.startswith("mime:") and item[5:].strip().lower().startswith("image/")
+        ))
     except (TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
-            "Invalid workspace input_types configuration",
+            "Invalid workspace input_types or LINKTOOLS_MODEL_VISION configuration",
             retryable=False,
             safe_details={"reason": "model_input_configuration_invalid"},
         ) from error

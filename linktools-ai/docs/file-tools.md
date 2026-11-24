@@ -67,11 +67,13 @@ category; a text file can use `mime:text/plain`. Unmatched attachments are
 rejected. A match does not bypass SDK encoding, workspace-provider authorization, resource
 limits, or permissions.
 
-The `vision` API argument and CLI flag are removed. Legacy environment or
-workspace settings produce migration errors and must be replaced with
-`input_types`. Recovering a historical execution requires a binding whose
-contract matches its persisted historical contract; an ordinary new binding
-cannot substitute its empty allowlist for that contract.
+The `vision` API argument and `--vision` CLI flag are not supported.
+Provider-specific environment variables such as `OPENAI_VISION` and workspace
+`vision` do not control attachments. For `ai-web`, `ai-run`, and `ai-acp`,
+`LINKTOOLS_MODEL_VISION=1` adds image inputs and `LINKTOOLS_MODEL_VISION=0` removes them
+without changing other `input_types`. Recovering a historical execution requires
+a binding whose contract matches its persisted historical contract; an ordinary
+new binding cannot substitute its empty allowlist for that contract.
 
 ### Minimal model declaration
 
