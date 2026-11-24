@@ -85,7 +85,7 @@ async def test_runtime_resolves_all_model_wrappers_before_placing_publication_le
     features.agent("default", model="default", allow_tools=())
     try:
         async with Persistence.open("native-boundary", storage=PersistenceStorage.sql(engine)) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", idempotency_key="work")
                 result = await execution.wait(timeout_seconds=5)
@@ -145,7 +145,7 @@ async def test_custom_native_capability_preserves_hooks_without_provisional_effe
     try:
         async with Persistence.open("custom-native", storage=PersistenceStorage.sql(engine)) as state:
             source = state
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", idempotency_key="work")
                 result = await execution.wait(timeout_seconds=5)
@@ -211,7 +211,7 @@ async def test_unknown_tool_fact_and_native_failure_event_share_storage(
     features.agent("default", model="default", allow_tools=("perform",))
     try:
         async with Persistence.open("unknown-native", storage=PersistenceStorage.sql(engine)) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", idempotency_key="work")
                 with pytest.raises(AIError) as failure:

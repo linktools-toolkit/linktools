@@ -210,7 +210,7 @@ async def test_model_judge_receives_fixed_scoring_data_and_structured_output(tmp
     target = Task("consumer.judge-target", echo, effect_policy="none")
     async with (
         Persistence.open('judge-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_195,
-        Runtime.attach(persistence=persistence_195, context=CONTEXT, features=model_features(models, group)) as runtime,
+        Runtime.open(persistence=persistence_195, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         judge = Task.from_agent("consumer.judge", runtime.agents.get(), build_input=build_input if projected else None)
         scorer = replace(rule_scorer(judge), rubric={"criterion": "semantic equality"})
@@ -372,7 +372,7 @@ async def test_new_evaluation_actions_default_deny_and_reject_other_tenants_and_
     scorer = Task("consumer.private-score", exact, effect_policy="none")
     async with (
         Persistence.open('private-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_339,
-        Runtime.attach(persistence=persistence_339, features=model_features(FixtureModels()), context=CONTEXT) as runtime,
+        Runtime.open(persistence=persistence_339, features=model_features(FixtureModels()), context=CONTEXT) as runtime,
     ):
         async with (
             TaskEngine.open(target, scorer, persistence=persistence_339, context=CONTEXT) as engine,
@@ -607,7 +607,7 @@ async def test_binary_agent_input_reaches_scorer_as_authorized_retained_evidence
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with (
         Persistence.open('attachment-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_550,
-        Runtime.attach(persistence=persistence_550, context=CONTEXT, features=model_features(models, group)) as runtime,
+        Runtime.open(persistence=persistence_550, context=CONTEXT, features=model_features(models, group)) as runtime,
     ):
         target = Task.from_agent("consumer.attachment-target", runtime.agents.get())
         received: list[bytes] = []

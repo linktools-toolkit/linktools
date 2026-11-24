@@ -17,9 +17,10 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import (
-    CreateSessionRequest, Execution, ExecutionHandle, ForkExecutionRequest,
-    ForkSessionRequest, RetryExecutionRequest,
+    Execution, ExecutionHandle, ForkExecutionRequest,
+    RetryExecutionRequest,
 )
+from linktools.ai.session import CreateSessionRequest, ForkSessionRequest
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeExecutions, RuntimeSessions, Session

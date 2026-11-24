@@ -381,7 +381,7 @@ async def test_execution_only_provisioning_supports_default_nonrestart_trace_rea
 
     try:
         async with Persistence.open("selected-schema", storage=PersistenceStorage.sql(engine)) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                     features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
                 execution = await runtime.agents.get().run("question")
                 assert execution.result.status is ExecutionStatus.SUCCEEDED

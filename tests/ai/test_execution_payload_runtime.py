@@ -135,7 +135,7 @@ async def test_execution_payload_runtime_keeps_control_writes_compact_across_tur
     ids = []
     history = ()
     async with Persistence.open("execution-payload-runtime", storage=PersistenceStorage.sqlite(database)) as state:
-        async with Runtime.attach(persistence=state, features=model_features(models, features), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=model_features(models, features), metrics=None) as runtime:
             target = await runtime.agents.get().create_session("session") if conversation else runtime.agents.get()
             with _execution_sql_bindings(state) as bindings:
                 for index, prompt in enumerate(prompts):
@@ -170,7 +170,7 @@ async def test_execution_payload_runtime_keeps_control_writes_compact_across_tur
 
     # A fresh Runtime cannot satisfy inspect or result reads from the producer's caches.
     async with Persistence.open("execution-payload-runtime", storage=PersistenceStorage.sqlite(database)) as state:
-        async with Runtime.attach(persistence=state, features=model_features(models, features), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=model_features(models, features), metrics=None) as runtime:
             for execution_id in (ids[0], ids[-1]):
                 await _inspect_without_payload_reads(runtime, execution_id, monkeypatch)
                 result = await runtime.executions.result(execution_id, principal=runtime.default_principal)
@@ -201,7 +201,7 @@ async def test_execution_payload_runtime_pending_terminal_publishes_compact_bodi
     database = tmp_path / "pending.db"
     storage = PersistenceStorage.sqlite(database, coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("execution-payload-pending", storage=storage) as state:
-        async with Runtime.attach(persistence=state, features=model_features(models, features), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=model_features(models, features), metrics=None) as runtime:
             session = await runtime.agents.get().create_session("session")
             with _execution_sql_bindings(state) as bindings:
                 execution = await session.start(_INPUT, idempotency_key="pending")
@@ -221,7 +221,7 @@ async def test_execution_payload_runtime_pending_terminal_publishes_compact_bodi
                 await _inspect_without_payload_reads(runtime, execution.execution_id, monkeypatch)
 
     async with Persistence.open("execution-payload-pending", storage=PersistenceStorage.sqlite(database)) as state:
-        async with Runtime.attach(persistence=state, features=model_features(models, features), metrics=None) as runtime:
+        async with Runtime.open(persistence=state, features=model_features(models, features), metrics=None) as runtime:
             await _inspect_without_payload_reads(runtime, execution.execution_id, monkeypatch)
             restored = await runtime.executions.result(execution.execution_id, principal=runtime.default_principal)
             assert restored.output == {"text": _OUTPUT}
@@ -252,7 +252,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "handoff.db"
     async with Persistence.open("execution-payload-handoff", storage=_split_sqlite_storage(database)) as state:
-        async with Runtime.attach(persistence=state, features=model_features(models, features), metrics=None) as owner:
+        async with Runtime.open(persistence=state, features=model_features(models, features), metrics=None) as owner:
             backend = owner._execution_service.runtime_backend()
             reconcile = backend._reconcile_handoff
 
@@ -275,7 +275,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                     assert stored.recovery.handoff_phase is RecoveryHandoffPhase.PREPARED
                     assert stored.recovery.terminal_handoff.outcome.output.decode() == {"text": _OUTPUT}
                     async with Persistence.open("execution-payload-handoff", storage=_split_sqlite_storage(database)) as reader_state:
-                        async with Runtime.attach(persistence=reader_state,
+                        async with Runtime.open(persistence=reader_state,
                             features=model_features(models, features), metrics=None, auto_recover=True) as reader:
                             result = await reader.executions.result(execution.execution_id, principal=reader.default_principal)
                             assert result.status is ExecutionStatus.SUCCEEDED

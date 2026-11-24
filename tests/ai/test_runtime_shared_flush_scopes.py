@@ -51,7 +51,7 @@ async def test_metrics_writes_and_flush_do_not_publish_pending_trace():
     buffer = InMemoryCacheBackend(max_bytes=65536)
     policy = CommitPolicy.batch(buffer=buffer, batch_size=2, flush_interval=60)
     metrics = Metrics.in_memory()
-    async with Persistence.open("independent-flush", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+    async with Persistence.open("independent-flush", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics,
     ) as runtime:
         store = await _prepare_trace(runtime, policy)
@@ -75,9 +75,9 @@ async def test_shared_metrics_does_not_share_trace_pressure_across_runtimes():
     feature = TraceCapability(commit=policy)
     async with Persistence.open("first", storage=PersistenceStorage.in_memory()) as first_persistence, Persistence.open(
         "second", storage=PersistenceStorage.in_memory(),
-    ) as second_persistence, Runtime.attach(
+    ) as second_persistence, Runtime.open(
         persistence=first_persistence, features=model_features(_FeatureModels(), _features(feature)), metrics=metrics,
-    ) as first, Runtime.attach(
+    ) as first, Runtime.open(
         persistence=second_persistence, features=model_features(_FeatureModels(), _features(feature)), metrics=metrics,
     ) as second:
         first_store = await _prepare_trace(first, policy)
@@ -100,7 +100,7 @@ async def test_trace_stop_does_not_close_metric_recorder():
     buffer = InMemoryCacheBackend(max_bytes=65536)
     policy = CommitPolicy.batch(buffer=buffer, batch_size=10, flush_interval=60)
     metrics = Metrics.in_memory()
-    async with Persistence.open("local-stop", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+    async with Persistence.open("local-stop", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics,
     ) as runtime:
         store = await _prepare_trace(runtime, policy)
@@ -120,7 +120,7 @@ async def test_metric_source_failure_does_not_prevent_trace_flush():
     buffer = InMemoryCacheBackend(max_bytes=65536)
     policy = CommitPolicy.batch(buffer=buffer, batch_size=2, flush_interval=60)
     metrics = Metrics.from_store(FailingStore())
-    async with Persistence.open("independent-errors", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
+    async with Persistence.open("independent-errors", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability(commit=policy))), metrics=metrics,
     ) as runtime:
         store = await _prepare_trace(runtime, policy)

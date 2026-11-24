@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, PrefixTools
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import AssetCapability, ToolResponsesCapability, FileSystem
+from linktools.ai.capability import AssetCapability, ToolResponsesCapability, FileSystemCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
@@ -55,7 +55,7 @@ async def test_default_global_runs_with_empty_agent_selection_and_rejecting_filt
     capture = await features.resolve()
     assert next(item for item in capture.contributions if item.id == 'policy.agent').scope == 'agent'
     assert next(item for item in capture.contributions if item.id == global_policy.id).scope == 'runtime'
-    async with Persistence.open('global-default', storage=PersistenceStorage.in_memory()) as persistence_55, Runtime.attach(persistence=persistence_55, features=features.borrow()) as runtime:
+    async with Persistence.open('global-default', storage=PersistenceStorage.in_memory()) as persistence_55, Runtime.open(persistence=persistence_55, features=features.borrow()) as runtime:
         for name in ('default', 'worker'):
             execution = await runtime.agents.get(name).start('question')
             await execution.wait(timeout_seconds=5)
@@ -72,7 +72,7 @@ async def test_default_runtime_bootstrap_and_workspace_do_not_globalize_assets(t
         await store.put(AssetKey('agent', 'loaded/AGENT.md'), b'---\nmodel: default\n---\n')
         features = RuntimeFeatures('bootstrap')
         features.capability(AssetCapability(store))
-        features.capability(FileSystem(Workspace.load(tmp_path)))
+        features.capability(FileSystemCapability(Workspace.load(tmp_path)))
         features.capability(ToolResponsesCapability(fixture))
         capture = await features.resolve()
         assert {item.id for item in capture.contributions if item.scope == 'runtime'} == {

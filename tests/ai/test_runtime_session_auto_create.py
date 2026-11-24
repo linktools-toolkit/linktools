@@ -6,7 +6,7 @@ import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.execution import SessionView
+from linktools.ai.session import SessionView
 from linktools.ai.core import Principal, PrincipalKind
 
 

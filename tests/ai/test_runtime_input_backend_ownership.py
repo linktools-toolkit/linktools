@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from linktools.ai.capability import FileSystem
+from linktools.ai.capability import FileSystemCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
@@ -53,7 +53,7 @@ def _features(
 
     features: RuntimeFeatures[None] = RuntimeFeatures(workspace_factory=factory)
     if workspace:
-        features.capability(FileSystem(Workspace.load(tmp_path)))
+        features.capability(FileSystemCapability(Workspace.load(tmp_path)))
     return features
 
 
@@ -97,7 +97,7 @@ async def test_runtime_compile_failure_does_not_allocate_input_backend(tmp_path:
 async def test_runtime_failed_entry_keeps_input_cleanup_retryable(tmp_path: Path, close_failures: int) -> None:
     instances: list[_OwnedBackend] = []
     async with Persistence.open("input-owner", storage=PersistenceStorage.in_memory()) as persistence:
-        runtime = Runtime.attach(persistence=persistence,
+        runtime = Runtime.open(persistence=persistence,
             features=_features(tmp_path, instances, close_failures=close_failures), metrics=_FailingMetrics())
         try:
             with pytest.raises(ValueError, match="metrics initialization failed") as raised:
@@ -132,7 +132,7 @@ async def test_runtime_cancelled_entry_closes_acquired_input_backend(
 
     monkeypatch.setattr(RuntimeAgentRunStore, "prepare_archives", prepare_archives)
     async with Persistence.open("input-owner", storage=PersistenceStorage.in_memory()) as persistence:
-        runtime = Runtime.attach(persistence=persistence, features=_features(tmp_path, instances))
+        runtime = Runtime.open(persistence=persistence, features=_features(tmp_path, instances))
         task = asyncio.create_task(runtime.__aenter__())
         try:
             await asyncio.wait_for(entered.wait(), 5)
@@ -160,7 +160,7 @@ async def test_runtime_input_backend_requires_close_support(tmp_path: Path) -> N
         return object()
 
     features: RuntimeFeatures[None] = RuntimeFeatures(workspace_factory=factory)
-    features.capability(FileSystem(Workspace.load(tmp_path)))
+    features.capability(FileSystemCapability(Workspace.load(tmp_path)))
     runtime = Runtime.open("input-owner", storage=PersistenceStorage.in_memory(), features=features)
     with pytest.raises(AIError) as raised:
         await runtime.__aenter__()

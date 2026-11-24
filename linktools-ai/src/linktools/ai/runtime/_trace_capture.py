@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 from typing import Protocol
 
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
@@ -13,7 +14,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
-from ..capability import TraceCapability
+from ..capability import TraceCapability, durable_tool_metadata
 from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelStreamAttempt, model_binding_error
@@ -140,6 +141,15 @@ class ModelInteractionCapture:
                 source_refs=source_refs,
                 source_keys=source_keys,
             )
+            projected_tools = None
+            for index, tool in enumerate(parameters.function_tools):
+                metadata = durable_tool_metadata(tool.metadata)
+                if metadata is not tool.metadata:
+                    if projected_tools is None:
+                        projected_tools = list(parameters.function_tools)
+                    projected_tools[index] = replace(tool, metadata=metadata)
+            if projected_tools is not None:
+                parameters = replace(parameters, function_tools=projected_tools)
             _envelope, envelope_bytes = request_envelope(
                 model_settings=model_settings,
                 parameters=parameters,

@@ -39,7 +39,7 @@ input_types:
   - mime:application/pdf
 ```
 
-Omitting `input_types` means an empty attachment allowlist. The names `image`,
+Without an override, omitting `input_types` means an empty attachment allowlist. The names `image`,
 `audio`, `document`, and `video` expand to the corresponding SDK Literal sets.
 Use `mime:` for explicit MIME values or `type/*` families; bare MIME strings and
 `text` are not categories. Plain prompt text is unaffected.
@@ -50,7 +50,14 @@ authoring tokens. These stored MIME permissions are not re-expanded at restore.
 A match permits an input but does not verify provider support; SDK encoding and
 resource limits still apply.
 
-Configure attachment permissions explicitly with workspace `input_types`.
+To allow image attachments for one invocation, use `LINKTOOLS_MODEL_VISION=1 ai-web`.
+The same environment variable works for `ai-run` and `ai-acp`. `LINKTOOLS_MODEL_VISION=1`
+(or `true`) adds the `image` category to workspace `input_types`; `LINKTOOLS_MODEL_VISION=0`
+(or `false`) removes image inputs but leaves all other types unchanged.
+You can also set `LINKTOOLS_MODEL_VISION` in the `env` section of the
+`.linktools.json` profile in the directory where you launch the command.
+It follows the same source precedence as `LINKTOOLS_MODEL_API`. When no source
+sets it, the workspace list applies as written.
 
 The console opens one execution Runtime and requires a configured model.
 Persisted history remains available in the same console. Merely opening the
@@ -288,7 +295,7 @@ credentials present in the exception. Restrict access and retention accordingly.
 | --- | --- | --- |
 | `ai-run` | New conversation, composer, Plan mode/Thinking slider, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, History `result` |
 | Former `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and History session APIs |
-| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | History `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
+| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | History `list_executions`, `scan_recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | History `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
 | Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, captured input_mime_types allowlist, credential presence, current Agent/Tool/Skill/MCP identities | CLI composition and RuntimeFeatures source resolution |
@@ -404,7 +411,8 @@ Server shutdown uses
 Runtime's normal close behavior rather than creating browser-owned executions.
 
 A writable Conversation uses one `/api/session/events?session_id=…&view=chat`
-connection. The first event reports current occupancy; later occupancy events
+connection. The per-execution stream is for diagnostics, not Chat. The first
+event reports current occupancy; later occupancy events
 report changes. Local text and tool previews share this connection. A session
 release does not wait for an execution observer. If its final preview frame
 does not arrive, read the released turn by execution ID, not the history page.

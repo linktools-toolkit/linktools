@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.models import ModelRequestParameters
 
 from linktools.ai.errors import ErrorCode, ErrorDiagnostics
-from linktools.ai.model import create_model, model_binding_error
+from linktools.ai.model import create_model_binding, model_binding_error
 
 
 @pytest.mark.parametrize(
@@ -134,7 +134,7 @@ async def test_public_binding_distinguishes_quota_from_temporary_rate_limit(
         }})
 
     clients = _mock_clients(monkeypatch, handle)
-    binding = create_model(
+    binding = create_model_binding(
         api="openai", model="fixture", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0,
     )
@@ -170,7 +170,7 @@ async def test_public_responses_server_error_before_first_event_uses_transport_r
         ))
 
     clients = _mock_clients(monkeypatch, handle)
-    binding = create_model(
+    binding = create_model_binding(
         api="openai-responses", model="fixture", api_key="synthetic",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0,
     )

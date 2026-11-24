@@ -178,7 +178,7 @@ async def test_rule_references_and_input_captures_recover_from_separate_asset_an
         features.capability(AssetCapability(assets))
         features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         async with Persistence.open("portable-rules", storage=PersistenceStorage.from_root(source_root, exclusive_writer=True)) as state:
-            async with Runtime.attach(persistence=state, features=model_features(_NoToolsModels(), features).borrow()) as runtime:
+            async with Runtime.open(persistence=state, features=model_features(_NoToolsModels(), features).borrow()) as runtime:
                 execution = await runtime.agents.get().start("question", principal=principal)
                 assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
                 record = await state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)

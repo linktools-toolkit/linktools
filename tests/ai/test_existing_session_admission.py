@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import CreateSessionRequest
+from linktools.ai.session import CreateSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime
 

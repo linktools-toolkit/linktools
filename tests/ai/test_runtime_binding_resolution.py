@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Current resources and durable Agent contracts keep separate ownership."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 import asyncio
 from collections.abc import Mapping
@@ -161,7 +161,7 @@ async def _fixture() -> _BindingFixture:
         ),
     }
     compiler = AgentCompiler(
-        models={"default": create_model(api='openai', model="gpt-test")},
+        models={"default": create_model_binding(api='openai', model="gpt-test")},
         candidates=candidates,
         agents=specs,
     )
@@ -444,7 +444,7 @@ async def test_binding_resolution_restores_mcp_execution_contract(tmp_path: Path
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(api='openai', model="gpt-test")},
+        models={"default": create_model_binding(api='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -488,7 +488,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        models={"default": create_model(api='openai', model="gpt-test")},
+        models={"default": create_model_binding(api='openai', model="gpt-test")},
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -570,7 +570,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
             ),
         }
         compiler = AgentCompiler(
-            models={"default": create_model(api='openai', model="gpt-test")},
+            models={"default": create_model_binding(api='openai', model="gpt-test")},
             candidates=(contribution,),
             agents=specs,
         )

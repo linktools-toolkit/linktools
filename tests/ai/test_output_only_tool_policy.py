@@ -21,7 +21,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.core import JsonValue
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.model import _anthropic, _openai
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
@@ -126,7 +126,7 @@ def _model(
             profile["openai_unsupported_model_settings"] = ["parallel_tool_calls"]
     provider = _anthropic.AnthropicProvider if protocol == "anthropic" else _openai.OpenAIProvider
     monkeypatch.setattr(provider, "model_profile", staticmethod(lambda name: profile))
-    model = create_model(
+    model = create_model_binding(
         api=protocol,
         model='fixture-model',
         api_key='synthetic',
@@ -316,7 +316,7 @@ async def test_runtime_keeps_caller_supplied_sdk_model_parallel_behavior() -> No
         features.agent("default", output_schema=_SCHEMA, allow_tools=(), allow_skills=(),
                        allow_subagents=())
         features.model("default", _CustomBinding(model))
-        async with Persistence.open('custom-output', storage=PersistenceStorage.in_memory()) as persistence_312, Runtime.attach(persistence=persistence_312, features=features) as runtime:
+        async with Persistence.open('custom-output', storage=PersistenceStorage.in_memory()) as persistence_312, Runtime.open(persistence=persistence_312, features=features) as runtime:
             result = (await runtime.agents.get().run("synthetic", timeout_seconds=10)).result
             assert result.status == "SUCCEEDED"
             assert result.output == {"value": "done"}

@@ -83,7 +83,7 @@ async def test_runtime_native_producer_and_cold_trace_share_exact_registration(
 
     try:
         async with Persistence.open("native-producer", storage=PersistenceStorage.sql(engine)) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", idempotency_key="work")
                 result = await execution.wait(timeout_seconds=5)

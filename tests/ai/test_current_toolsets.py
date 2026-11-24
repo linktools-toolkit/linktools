@@ -15,7 +15,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from linktools.ai.agent import AgentCompiler, CompiledAgent
 from linktools.ai.capability import CapabilityContribution, tool_metadata
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.runtime._current_toolsets import create_current_toolset
 from linktools.ai.runtime._mcp import _MCPModelToolset, _model_tool_name
 from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDescriptor
@@ -28,7 +28,7 @@ from .test_tool_effect_semantics import _Bridge
 def _compiled(candidates: list[CapabilityContribution], selectors: tuple[str, ...] = ("*",)) -> CompiledAgent:
     spec = AgentSpec("agent", allow_tools=selectors)
     return AgentCompiler(
-        models={"default": create_model(api="openai", model="test")},
+        models={"default": create_model_binding(api="openai", model="test")},
         candidates=candidates, agents={"agent": spec},
     ).compile(spec)
 

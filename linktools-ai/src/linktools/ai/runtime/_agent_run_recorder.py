@@ -9,6 +9,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
+from time import monotonic_ns
 from typing import Protocol, cast
 
 from pydantic_ai_harness.step_persistence import RunRecord as NativeRunRecord, StepEvent as NativeStepEvent
@@ -18,6 +19,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
     ModelResponsePart,
@@ -44,10 +46,15 @@ from ..observe.journal import (
     ModelRequestFact,
     await_request_handoff,
 )
-from ..model.messages import freeze_model_messages, model_response_usage
+from ..model.messages import (
+    THINKING_ELAPSED_MS_METADATA_KEY, TOOL_ARGUMENT_PREVIEWS_METADATA_KEY, TOOL_ELAPSED_MS_METADATA_KEY,
+    freeze_model_messages, model_response_usage,
+)
 from ._run_context import RunContextProjection
 from ._trace_capture import ModelInteractionCapture, TraceStagingPort
 from ..persistence.contracts import LoadedModelContext
+from ..session import tool_argument_preview
+from ..capability import tool_argument_preview_field
 from ..persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
 from ..persistence.runs import (
     TOOL_ERROR_CODE_METADATA_KEY,
@@ -90,6 +97,7 @@ class AgentRunRecorder:
         self._checkpoint_sink = checkpoint_sink
         self._checkpoint_sink_accepts_frozen = checkpoint_sink_accepts_frozen
         self._agent_run_id = agent_run_id
+        self._preview_tools: tuple[int, dict[str, str]] | None = None
         initial_request = initial_messages[-1] if initial_messages else None
         self._initial_request = (
             freeze_model_messages((initial_request,))[0]
@@ -103,6 +111,7 @@ class AgentRunRecorder:
         self._tool_operation_ids: dict[str, str] = {}
         self._tool_execution_metadata: dict[str, tuple[dict[str, str], str | None]] = {}
         self._tool_results: dict[str, ToolReturnPart] = {}
+        self._tool_elapsed_ms: dict[str, int] = {}
         self._restored_tool_results: set[str] = set()
         self._restored_tool_calls: dict[str, ToolCallPart] = {}
         self._restored_pending = False
@@ -116,6 +125,9 @@ class AgentRunRecorder:
         self._transcript_messages = self._message_archive.snapshot(())
         self._pending_parts: dict[str, ModelMessage] = {}
         self._stream_position: dict[str, JsonValue] = {}
+        self._streaming = False
+        self._thinking_started: dict[int, int] = {}
+        self._thinking_elapsed: dict[int, tuple[ThinkingPart, int]] = {}
         self._last_response_position: tuple[int, int] | None = None
 
     @property
@@ -128,16 +140,38 @@ class AgentRunRecorder:
 
     def observe_stream_attempt(self, fact: ModelRequestFact, attempt: ModelStreamAttempt) -> None:
         if attempt.status == "RUNNING":
+            self._thinking_started.clear()
             self._stream_position = {
                 "model_request_seq": fact.model_request_seq,
                 "stream_attempt_seq": attempt.stream_attempt_seq,
             }
         elif attempt.status in {"FAILED", "CANCELLED"}:
+            self._thinking_started.clear()
+            self._thinking_elapsed.clear()
             # These previews belong to the failed attempt, not the next canonical message.
             self._pending_parts = {
                 key: value for key, value in self._pending_parts.items()
                 if not isinstance(value, ModelResponse)
             }
+
+    def direct_stream_attempt_seq(self, model_request_seq: int) -> int | None:
+        """Use a request-local first attempt for genuine streams without transport tracking."""
+        return 1 if (self._streaming
+                     and self._stream_position.get("model_request_seq") == model_request_seq
+                     and "stream_attempt_seq" not in self._stream_position) else None
+
+    def observe_thinking_part(self, part: ThinkingPart, index: int, *, complete: bool) -> int | None:
+        if not self._streaming or "message_seq" in self._stream_position:
+            return None
+        if not complete:
+            self._thinking_started[index] = monotonic_ns()
+            return None
+        started = self._thinking_started.pop(index, None)
+        if started is None:
+            return None
+        elapsed_ms = (monotonic_ns() - started) // 1_000_000
+        self._thinking_elapsed[index] = (part, elapsed_ms)
+        return elapsed_ms
 
     def response_message_seq(self, model_request_seq: int) -> int | None:
         position = self._last_response_position
@@ -179,7 +213,13 @@ class AgentRunRecorder:
                 self._restored_pending = True
                 if len(observed.pending.parts) != len(observed.pending_keys):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                tool_timings = ((observed.pending.metadata or {}).get(TOOL_ELAPSED_MS_METADATA_KEY)
+                                if isinstance(observed.pending, ModelRequest) else None)
                 for key, part in zip(observed.pending_keys, observed.pending.parts):
+                    if isinstance(part, ToolReturnPart) and isinstance(tool_timings, Mapping):
+                        elapsed_ms = tool_timings.get(part.tool_call_id)
+                        if type(elapsed_ms) is int and elapsed_ms >= 0:
+                            self._tool_elapsed_ms[part.tool_call_id] = elapsed_ms
                     self._pending_parts[key] = freeze_model_messages((
                         ModelResponse(parts=[part])
                         if isinstance(observed.pending, ModelResponse)
@@ -363,7 +403,22 @@ class AgentRunRecorder:
             for key, pending in self._pending_parts.items()
         )
 
+    def _attach_tool_timings(self, request: ModelRequest) -> None:
+        if not self._tool_elapsed_ms:
+            return
+        durations = {
+            part.tool_call_id: self._tool_elapsed_ms[part.tool_call_id]
+            for part in request.parts
+            if (isinstance(part, ToolReturnPart) and part.tool_call_id in self._tool_elapsed_ms
+                and not self._is_interrupted_tool_placeholder(part))
+        }
+        if durations:
+            # Preserve the SDK request used for the native checkpoint as well.
+            request.metadata = {**(request.metadata or {}), TOOL_ELAPSED_MS_METADATA_KEY: durations}
+
     def append_transcript_message(self, message: ModelMessage) -> ModelMessage:
+        if isinstance(message, ModelRequest):
+            self._attach_tool_timings(message)
         frozen = freeze_model_messages((message,))[0]
         if isinstance(frozen, ModelRequest):
             parts = []
@@ -496,13 +551,18 @@ class AgentRunRecorder:
         await self.commit_history_boundary()
 
     async def record_tool_result_boundary(
-        self, part: ToolReturnPart, step_index: int
-    ) -> None:
+        self, part: ToolReturnPart, step_index: int, *, elapsed_ms: int | None = None,
+    ) -> int | None:
+        if self._is_interrupted_tool_placeholder(part):
+            elapsed_ms = None
+        elif elapsed_ms is not None:
+            elapsed_ms = self._tool_elapsed_ms.setdefault(part.tool_call_id, elapsed_ms)
         interrupted = await await_request_handoff(
             self._record_tool_result_boundary(part, step_index)
         )
         if interrupted:
             raise asyncio.CancelledError
+        return elapsed_ms
 
     def _same_tool_call(self, previous: ToolCallPart, current: ToolCallPart) -> bool:
         return previous.tool_name == current.tool_name and previous.args_as_dict() == current.args_as_dict()
@@ -578,6 +638,8 @@ class AgentRunRecorder:
                 if isinstance(first, ModelResponse)
                 else ModelRequest(parts=parts)
             )
+            if isinstance(pending, ModelRequest):
+                self._attach_tool_timings(pending)
         self._staging_store.stage_transcript(
             self._agent_run_id,
             StagedTranscript(self._transcript_messages, pending, keys),
@@ -646,6 +708,9 @@ class AgentRunRecorder:
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
         self._stream_position = {"model_request_seq": fact.model_request_seq}
+        self._streaming = streaming
+        self._thinking_started.clear()
+        self._thinking_elapsed.clear()
         self.model_interactions.begin_model_interaction(
             fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
@@ -661,6 +726,19 @@ class AgentRunRecorder:
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
+        self._streaming = streaming
+        if fact.purpose == "agent":
+            request = messages[-1] if messages else None
+            source_request = source_messages[-1] if source_messages else None
+            # Freeze one canonical tool-result message for Trace and checkpoint.
+            if isinstance(request, ModelRequest):
+                self._attach_tool_timings(request)
+            if source_request is not request and isinstance(source_request, ModelRequest):
+                self._attach_tool_timings(source_request)
+            self._preview_tools = (fact.model_request_seq, {
+                tool.name: field for tool in parameters.function_tools
+                if (field := tool_argument_preview_field(tool.metadata)) is not None
+            })
         self.model_interactions.prepare_model_interaction(
             fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
@@ -721,6 +799,7 @@ class AgentRunRecorder:
             return captured
         replayed_indices: list[int] = []
         new_calls: dict[str, int] = {}
+        previews: dict[str, str] = {}
         seen_call_ids: set[str] = set()
         for part_index, part in enumerate(response.parts):
             if not isinstance(part, ToolCallPart):
@@ -729,6 +808,8 @@ class AgentRunRecorder:
             if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             seen_call_ids.add(call_id)
+            if (preview := self._preview_tool_arguments(fact, part)) is not None:
+                previews[call_id] = preview
             if call_id in self._tool_call_origins:
                 previous_call = self._restored_tool_calls.get(call_id)
                 if previous_call is None or not self._same_tool_call(previous_call, part):
@@ -736,6 +817,22 @@ class AgentRunRecorder:
                 replayed_indices.append(part_index)
             else:
                 new_calls[call_id] = part_index
+        elapsed = {
+            str(index): measurement[1]
+            for index, part in enumerate(response.parts)
+            if (measurement := self._thinking_elapsed.get(index)) is not None and measurement[0] == part
+        }
+        projections = ((THINKING_ELAPSED_MS_METADATA_KEY, elapsed),
+                       (TOOL_ARGUMENT_PREVIEWS_METADATA_KEY, previews))
+        if any(value or key in (response.metadata or {}) for key, value in projections):
+            metadata = dict(response.metadata or {})
+            for key, value in projections:
+                if value:
+                    metadata[key] = value
+                else:
+                    metadata.pop(key, None)
+            # The SDK retains this response for both the final checkpoint and our transcript.
+            response.metadata = metadata or None
         self.append_transcript_message(response)
         message_seq = len(self._transcript_messages)
         for call_id, part_index in new_calls.items():
@@ -744,6 +841,34 @@ class AgentRunRecorder:
         self._model_responses[fact.model_request_seq] = captured
         self._last_response_position = (fact.model_request_seq, message_seq)
         return captured
+
+    def tool_argument_preview_for_call(self, tool_call_id: str) -> str | None:
+        position = self._tool_call_origins.get(tool_call_id)
+        if position is None:
+            return None
+        message = self._transcript_messages[position[1] - 1]
+        previews = (message.metadata or {}).get(TOOL_ARGUMENT_PREVIEWS_METADATA_KEY)
+        return previews.get(tool_call_id) if isinstance(previews, Mapping) else None
+
+    def _preview_tool_arguments(self, fact: ModelRequestFact, part: ToolCallPart) -> str | None:
+        registered = self._preview_tools
+        if registered is None or registered[0] != fact.model_request_seq:
+            return None
+        field = registered[1].get(part.tool_name)
+        if field is None:
+            return None
+        try:
+            value = part.args_as_dict().get(field)
+        except (TypeError, ValueError):
+            return None
+        if field != "command":
+            return tool_argument_preview(value)
+        if not isinstance(value, str):
+            return None
+        command = "".join(char if char.isprintable() else " " for char in value)
+        if not command.strip():
+            return None
+        return command if len(command) <= 80 else command[:79] + "…"
 
     def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
         origin = self._tool_call_origins.get(tool_call_id)

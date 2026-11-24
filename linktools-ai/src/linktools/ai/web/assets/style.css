@@ -95,6 +95,10 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;height:100dvh}
 .message-label{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin-bottom:9px}
 .tool-message{border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#fafbfa}
 .tool-message summary{font-size:12px;padding:10px;cursor:pointer;color:var(--muted)}
+.process-running > summary::after{content:'';display:inline-block;width:7px;height:7px;margin-inline-start:8px;vertical-align:1px;border-radius:50%;background:var(--accent);animation:process-pulse 1.2s ease-in-out infinite}
+.process-elapsed{margin-inline-start:8px;color:var(--muted);font-size:11px}
+@keyframes process-pulse{50%{opacity:.45;transform:scale(.82)}}
+@media(prefers-reduced-motion:reduce){.process-running > summary::after{animation:none}}
 .tool-message pre{font-size:12px;white-space:pre-wrap;word-break:break-word;margin:12px;line-height:1.7}
 .live-event{font-size:12px;line-height:1.6;padding:8px 11px;margin:5px 0;border-left:2px solid #bccdc3;color:#51685a;background:#f3f7f2;overflow-wrap:anywhere}
 .live-event.child{margin-left:14px;border-color:#c8cce2;color:#646988}
@@ -188,7 +192,6 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .markdown .align-left{text-align:left}
 .markdown .align-center{text-align:center}
 .markdown .align-right{text-align:right}
-.copy-message{font-size:11px;margin-top:8px;padding:4px 7px}
 .user-input>details{font-size:11px;color:var(--muted);margin:8px 0 14px}
 .attachments{list-style:none;padding:0;font-size:12px;overflow-wrap:anywhere;color:var(--muted)}
 .attachments li{border:1px solid var(--line);border-radius:7px;padding:8px 10px;margin:6px 0}
@@ -292,7 +295,7 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .live-tools{margin:10px 0}
 .live-tool{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}
 .live-tool .tool-name{font-weight:600;min-width:0}.live-tool .tool-status{color:var(--muted);text-align:right;min-width:0}
-.live-tool.error .tool-status{color:var(--danger)}
+.live-tool.error .tool-status,.tool-message.error .tool-status{color:var(--danger)}
 @media(max-width:600px){.composer-bar>.composer-settings{gap:12px}.thinking-control{min-width:125px}.composer-bar{flex-wrap:wrap}.live-tool{gap:8px}}
 .turn-process{margin:10px 0 14px;padding:10px 12px;background:var(--wash);border:1px solid var(--line);border-radius:8px}
 .turn-process .tool-message:last-child{margin-bottom:0}

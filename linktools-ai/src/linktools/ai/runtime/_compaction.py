@@ -47,7 +47,8 @@ from ._budget import RunBudgetContext
 from ..observe.journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
 from ._harness import SummaryProviderModel, prepare_input_retention
 from ._metric_capability import model_request_error
-from ..model.messages import SummaryPromptPart, model_input_content, binary_content_usage, project_transient_binary_content, project_model_response_attempts
+from ..model import model_input_content, project_model_response_attempts
+from ..model.messages import SummaryPromptPart, binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20

@@ -78,7 +78,7 @@ async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
             features.capability(TraceCapability(commit=CommitPolicy.sync()), scope="runtime")
             features.agent("default", model="default", allow_tools=())
             try:
-                async with Runtime.attach(persistence=state,
+                async with Runtime.open(persistence=state,
                         features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
                     session = (await runtime.agents.get().create_session("session") if phase == 0
                                else await runtime.sessions.get("session"))

@@ -73,7 +73,7 @@ async def test_nested_tool_identity_matches_durable_ancestry_and_independent_sou
     features.tool(inspect_call, effect_policy="none")
     features.agent("default", model="root", allow_tools=(), allow_subagents=("child",))
     features.agent("child", model="leaf-model", allow_tools=("inspect_call",), allow_subagents=())
-    async with Persistence.open("nested-identity", storage=PersistenceStorage.sqlite(path), tenant_id="tenant") as state, Runtime.attach(persistence=state, features=features, metrics=None) as runtime:
+    async with Persistence.open("nested-identity", storage=PersistenceStorage.sqlite(path), tenant_id="tenant") as state, Runtime.open(persistence=state, features=features, metrics=None) as runtime:
         execution = await runtime.agents.get().start("delegate inspection", principal=principal)
         result = (await execution.wait(timeout_seconds=15)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -142,7 +142,7 @@ async def main():
     features.capability(native_checkpoint(),scope='runtime')
     features.tool(inspect_call,effect_policy='none')
     features.agent('default',allow_tools=('inspect_call',))
-    async with Persistence.open('crash-identity',storage=PersistenceStorage.sqlite(root/'state.sqlite'),tenant_id='tenant') as state, Runtime.attach(persistence=state,features=model_features(_Models(_UsageFunctionModel(model)),features),metrics=None,auto_recover=False) as runtime:
+    async with Persistence.open('crash-identity',storage=PersistenceStorage.sqlite(root/'state.sqlite'),tenant_id='tenant') as state, Runtime.open(persistence=state,features=model_features(_Models(_UsageFunctionModel(model)),features),metrics=None,auto_recover=False) as runtime:
         if stage=='create':
             session=await runtime.agents.get().create_session('session',principal=principal)
             execution=await session.start('inspect',idempotency_key='start')

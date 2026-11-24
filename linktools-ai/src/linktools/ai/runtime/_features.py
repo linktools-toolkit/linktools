@@ -41,7 +41,7 @@ from ..capability import (
     ToolEffectPolicy,
     ToolResponsesCapability,
     ReferencedInputsCapability,
-    FileSystem,
+    FileSystemCapability,
     capture_contributions,
     is_tool_effect_policy,
     tool_metadata,
@@ -361,7 +361,7 @@ class RuntimeFeatures(Generic[AppT]):
 
 def _runtime_declarations(contributions):
     """Find host resources without materializing their tool schemas."""
-    filesystem_capabilities: list[FileSystem] = []
+    filesystem_capabilities: list[FileSystemCapability] = []
     shells: list[ShellCapability] = []
     memories: list[MemoryCapability] = []
     asset_capabilities: list[AssetCapability] = []
@@ -380,7 +380,7 @@ def _runtime_declarations(contributions):
             shells.append(value)
         elif isinstance(value, MemoryCapability):
             memories.append(value)
-        elif isinstance(value, FileSystem):
+        elif isinstance(value, FileSystemCapability):
             filesystem_capabilities.append(value)
         else:
             def collect_leaf(leaf: AbstractCapability[object]) -> None:
@@ -393,7 +393,7 @@ def _runtime_declarations(contributions):
                     shells.append(leaf)
                 elif isinstance(leaf, MemoryCapability):
                     memories.append(leaf)
-                elif isinstance(leaf, FileSystem):
+                elif isinstance(leaf, FileSystemCapability):
                     filesystem_capabilities.append(leaf)
                 elif isinstance(leaf, AssetCapability):
                     asset_capabilities.append(leaf)

@@ -90,7 +90,7 @@ async def test_original_input_is_detached_and_shared_by_tools_and_output_hooks(i
     features.capability(ReferencedInputsCapability(load), id=_SOURCE.id, revision=1, scope="agent")
     features.agent("default", allow_tools=("inspect_input",), allow_skills=(), allow_subagents=())
     async with Persistence.open("original-input", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(
+        async with Runtime.open(persistence=persistence, features=model_features(
             _Models(_UsageFunctionModel(model)), features,
         )) as runtime:
             if imported:
@@ -143,7 +143,7 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
     storage = (PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
                if backend == "local_sqlite" else PersistenceStorage.sqlite(tmp_path / "state.db"))
     async with Persistence.open("original-input-reopen", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features(), auto_recover=False) as runtime:
+        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False) as runtime:
             session = await runtime.agents.get().create_session(
                 "session", principal=principal, metadata={"selected": ["original"]},
             )
@@ -155,7 +155,7 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
             await runtime.handoff()
 
     async with Persistence.open("original-input-reopen", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features(), auto_recover=False) as runtime:
+        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False) as runtime:
             current = (await runtime.sessions.refresh("session", principal=principal)).session
             await runtime.agents.get().session("session", principal=principal).update(
                 expected_revision=current.revision, metadata={"selected": ["current"]},

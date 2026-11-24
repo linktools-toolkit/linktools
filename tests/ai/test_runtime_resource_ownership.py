@@ -35,15 +35,15 @@ def _features(*capabilities: object) -> RuntimeFeatures:
     return features
 
 
-@pytest.mark.parametrize("attach", (False, True))
+@pytest.mark.parametrize("borrow_persistence", (False, True))
 @pytest.mark.parametrize("initialized", (False, True))
-async def test_runtime_owns_declared_assets_but_not_attached_persistence(attach: bool, initialized: bool) -> None:
+async def test_runtime_owns_declared_assets_but_not_borrowed_persistence(borrow_persistence: bool, initialized: bool) -> None:
     assets = _assets()
     if initialized:
         await assets.initialize()
     features = _features(AssetCapability(assets))
     async with Persistence.open("assets", storage=PersistenceStorage.in_memory()) as persistence:
-        owner = (Runtime.attach(persistence=persistence, features=features) if attach else
+        owner = (Runtime.open(persistence=persistence, features=features) if borrow_persistence else
                  Runtime.open("assets", storage=PersistenceStorage.in_memory(), features=features))
         async with owner as runtime:
             assert assets.ready
@@ -79,8 +79,8 @@ async def test_live_assets_are_borrowed_and_shared_by_two_runtimes() -> None:
     assert not assets.ready
 
 
-@pytest.mark.parametrize("attach", (False, True))
-async def test_resolution_is_inspection_only_and_cannot_transfer_asset_ownership(attach: bool) -> None:
+@pytest.mark.parametrize("borrow_persistence", (False, True))
+async def test_resolution_is_inspection_only_and_cannot_transfer_asset_ownership(borrow_persistence: bool) -> None:
     assets = _assets()
     try:
         await assets.initialize()
@@ -88,8 +88,8 @@ async def test_resolution_is_inspection_only_and_cannot_transfer_asset_ownership
         resolution = await source.resolve()
         async with Persistence.open("inspection", storage=PersistenceStorage.in_memory()) as persistence:
             with pytest.raises(TypeError, match="RuntimeFeaturesSource"):
-                if attach:
-                    Runtime.attach(persistence=persistence, features=resolution)
+                if borrow_persistence:
+                    Runtime.open(persistence=persistence, features=resolution)
                 else:
                     Runtime.open("inspection", storage=PersistenceStorage.in_memory(), features=resolution)
             assert assets.ready
@@ -241,7 +241,7 @@ async def test_created_step_adapter_closes_after_later_composition_failure(tmp_p
     monkeypatch.setattr(Persistence, "create_agent_run_store", fail)
     async with Persistence.open("partial", storage=PersistenceStorage.from_root(tmp_path)) as persistence:
         with pytest.raises(ValueError, match="run store failed"):
-            async with Runtime.attach(persistence=persistence, features=_features(StepPersistenceCapability())):
+            async with Runtime.open(persistence=persistence, features=_features(StepPersistenceCapability())):
                 pytest.fail("failed composition entered")
         assert closed.is_set()
         assert persistence.ready
@@ -282,7 +282,7 @@ async def test_producer_close_failure_keeps_owned_dependencies_until_retry(tmp_p
     monkeypatch.setattr(Persistence, "create_step_store", create_steps)
     monkeypatch.setattr(RuntimeAgentRunStore, "preflight_close", preflight_close)
     async with Persistence.open("close-order", storage=PersistenceStorage.from_root(tmp_path)) as persistence:
-        runtime = Runtime.attach(persistence=persistence, features=_features(
+        runtime = Runtime.open(persistence=persistence, features=_features(
             AssetCapability(assets), StepPersistenceCapability(),
         ))
         await runtime.__aenter__()

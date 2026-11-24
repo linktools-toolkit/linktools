@@ -43,7 +43,7 @@ async def test_public_terminal_trace_payload_and_control_share_transaction(
         TraceCapability(commit=CommitPolicy.terminal(buffer=buffer)),
     ))
     async with Persistence.open("public-terminal-trace", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features, metrics=None) as runtime:
+        async with Runtime.open(persistence=persistence, features=features, metrics=None) as runtime:
             store = runtime._run_store
             archive = store.read_store(PersistenceDomain.TRACE)
             repository = persistence.execution.executions
@@ -92,8 +92,8 @@ async def test_public_terminal_trace_scopes_are_isolated_between_runtimes(tmp_pa
     async with (
         Persistence.open("trace-scope-owner", storage=PersistenceStorage.sqlite(tmp_path / "first.db")) as first_state,
         Persistence.open("trace-scope-owner", storage=PersistenceStorage.sqlite(tmp_path / "second.db")) as second_state,
-        Runtime.attach(persistence=first_state, features=features(0), metrics=None) as first,
-        Runtime.attach(persistence=second_state, features=features(1), metrics=None) as second,
+        Runtime.open(persistence=first_state, features=features(0), metrics=None) as first,
+        Runtime.open(persistence=second_state, features=features(1), metrics=None) as second,
     ):
         first_execution = await first.agents.get().start("first question")
         second_execution = await second.agents.get().start("second question")

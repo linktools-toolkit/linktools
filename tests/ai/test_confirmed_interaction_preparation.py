@@ -138,7 +138,7 @@ async def test_retained_context_still_verifies_stored_bytes(tmp_path, retained):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('same_producer', [True, False])
 async def test_runtime_reuses_interactions_only_for_confirmed_producer(tmp_path, monkeypatch, same_producer):
-    from linktools.ai.execution import CreateSessionRequest
+    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.persistence.runs import RuntimeAgentRunStore
     from linktools.ai.persistence._step_archive import StateStepArchive
     from linktools.ai.workspace import Workspace
@@ -172,7 +172,7 @@ async def test_runtime_reuses_interactions_only_for_confirmed_producer(tmp_path,
 @pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['generation', 'execution'])
 async def test_takeover_before_finalize_never_relabels_old_confirmed_interactions(tmp_path, monkeypatch, change):
-    from linktools.ai.execution import CreateSessionRequest
+    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.persistence.runs import RuntimeAgentRunStore
     from linktools.ai.workspace import Workspace
     from linktools.commands.ai._common import _open_local_runtime

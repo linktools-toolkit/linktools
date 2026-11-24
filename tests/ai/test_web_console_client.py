@@ -201,7 +201,7 @@ async def test_thinking_request_reaches_custom_binding(
     }))
     features = RuntimeFeatures("custom")
     features.agent("default", model="default", allow_tools=())
-    async with Persistence.open('custom', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_193, Runtime.attach(persistence=persistence_193, features=model_features(models, features)) as runtime:
+    async with Persistence.open('custom', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_193, Runtime.open(persistence=persistence_193, features=model_features(models, features)) as runtime:
         await runtime.agents.get("default").create_session("a")
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id": "a", "include_timeline": "false"})

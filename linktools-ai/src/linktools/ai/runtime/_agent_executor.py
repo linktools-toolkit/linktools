@@ -87,7 +87,7 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
-    FileSystem,
+    FileSystemCapability,
     ShellCapability,
 )
 from ..core import (
@@ -149,7 +149,7 @@ from ._output_preview import OutputPreview
 from ._tool_metrics import (
     ToolMetricsCapability,
 )
-from ..model.messages import rehydrate_deferred_tool_results, tool_return_content_digest
+from ..model.messages import rehydrate_deferred_tool_results, tool_error_message, tool_return_content_digest
 from ..persistence.contracts import LoadedModelContext
 from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 
@@ -169,6 +169,7 @@ class LiveDelta:
 class DurableBoundary:
     event_type: ExecutionEventType
     payload: JsonValue
+    live_error_message: str | None = None
 
 
 AgentEmission = LiveDelta | DurableBoundary
@@ -1179,7 +1180,7 @@ async def _materialize_agent(
                 [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
                 backend=scope.workspace_backend, wrap_toolset=wrap_workspace_toolset,
             )
-        if isinstance(capability, FileSystem):
+        if isinstance(capability, FileSystemCapability):
             return capability.bind(
                 [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
                 backend=scope.workspace_backend, limits=scope.limits,
@@ -1388,11 +1389,23 @@ def _event_stream_capability(
     ) -> None:
         preview = None if output_preview is None else output_preview.new_stream()
         preview_attempt: tuple[JsonValue, JsonValue] | None = None
+        tool_started: dict[str, int] = {}
         async for event in events:
-            emission = _map_event(event)
             position: dict[str, JsonValue] = {"agent_run_seq": agent_run_seq, **recorder.stream_position}
+            if isinstance(event, FunctionToolCallEvent):
+                tool_started[event.part.tool_call_id] = monotonic_ns()
+            elif isinstance(event, FunctionToolResultEvent):
+                started = tool_started.pop(event.part.tool_call_id, None)
+                tool_elapsed_ms = None if started is None else (monotonic_ns() - started) // 1_000_000
+            emission = _map_event(event)
             if isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent)):
                 position["part_index"] = event.index
+            if isinstance(event, (PartStartEvent, PartEndEvent)) and isinstance(event.part, ThinkingPart):
+                elapsed_ms = recorder.observe_thinking_part(
+                    event.part, event.index, complete=isinstance(event, PartEndEvent),
+                )
+                if elapsed_ms is not None:
+                    position["thinking_elapsed_ms"] = elapsed_ms
             if preview is not None:
                 attempt = (position.get("model_request_seq"), position.get("stream_attempt_seq"))
                 if preview_attempt is not None and preview_attempt != attempt:
@@ -1416,18 +1429,32 @@ def _event_stream_capability(
             elif isinstance(event, FunctionToolCallEvent):
                 await recorder.record_tool_start(event.part, _ctx.run_step)
             elif isinstance(event, FunctionToolResultEvent):
-                await recorder.record_tool_result_boundary(event.part, _ctx.run_step)
-            if isinstance(emission, LiveDelta) and "stream_attempt_seq" in position:
+                elapsed_ms = await recorder.record_tool_result_boundary(
+                    event.part, _ctx.run_step, elapsed_ms=tool_elapsed_ms,
+                )
+                if elapsed_ms is not None:
+                    position["tool_elapsed_ms"] = elapsed_ms
+            # Synthesized deltas for an already captured response have a
+            # transcript message sequence, not a live preview coordinate.
+            live_preview = isinstance(emission, LiveDelta) and "message_seq" not in position
+            if live_preview or "thinking_elapsed_ms" in position:
+                request_seq = position.get("model_request_seq")
+                if type(request_seq) is int:
+                    direct_attempt_seq = recorder.direct_stream_attempt_seq(request_seq)
+                    if direct_attempt_seq is not None:
+                        position["stream_attempt_seq"] = direct_attempt_seq
+            if live_preview and "stream_attempt_seq" in position:
                 position["part_start"] = isinstance(event, PartStartEvent)
                 emission = LiveDelta(emission.event_type, emission.content, position)
             if isinstance(emission, DurableBoundary):
                 if isinstance(event, (FunctionToolCallEvent, FunctionToolResultEvent)):
+                    if (argument_preview := recorder.tool_argument_preview_for_call(event.part.tool_call_id)) is not None:
+                        position["argument_preview"] = argument_preview
                     origin = recorder.tool_call_position(event.part.tool_call_id)
                     if origin is not None:
                         position["tool_position"] = list(origin)
-                emission = DurableBoundary(
-                    emission.event_type, {**emission.payload, **position}
-                )
+                        position["tool_model_request_seq"] = recorder.model_request_seq_for_tool_call(event.part.tool_call_id)
+                emission = replace(emission, payload={**emission.payload, **position})
             if emission is None:
                 event_type = type(event)
                 _logger.debug(
@@ -1503,14 +1530,12 @@ def _map_event(event: object) -> "AgentEmission | None":
             arguments = part.args_as_dict()
         except (TypeError, ValueError):
             arguments = part.args
-        return DurableBoundary(
-            ExecutionEventType.TOOL_CALL_STARTED,
-            {
-                "call_id": part.tool_call_id,
-                "tool_name": part.tool_name,
-                "arguments_digest": canonical_sha256(arguments),
-            },
-        )
+        payload = {
+            "call_id": part.tool_call_id,
+            "tool_name": part.tool_name,
+            "arguments_digest": canonical_sha256(arguments),
+        }
+        return DurableBoundary(ExecutionEventType.TOOL_CALL_STARTED, payload)
     if isinstance(event, FunctionToolResultEvent):
         part = event.part
         if isinstance(part, ToolReturnPart) and part.outcome == "retried":
@@ -1523,6 +1548,7 @@ def _map_event(event: object) -> "AgentEmission | None":
                     "status": "FAILED",
                     "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
                 },
+                live_error_message=tool_error_message(part),
             )
         if isinstance(part, ToolReturnPart):
             success = part.outcome == "success"
@@ -1535,7 +1561,9 @@ def _map_event(event: object) -> "AgentEmission | None":
                         tool_return_content_digest(part.content) if success else None
                     ),
                     "status": "SUCCEEDED" if success else "FAILED",
+                    **({"error_code": ErrorCode.AUTHORIZATION_DENIED.value} if part.outcome == "denied" else {}),
                 },
+                live_error_message=tool_error_message(part),
             )
     return None
 

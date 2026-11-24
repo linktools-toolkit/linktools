@@ -165,7 +165,7 @@ async def test_runtime_watch_preview_opt_in_does_not_change_other_output(structu
     features.capability(TraceCapability(), scope="runtime")
     features.capability(ExecutionCapability(output_preview_field="message"), scope="runtime")
     async with Persistence.open("preview-test", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(_Models(FunctionModel(stream_function=model)), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_Models(FunctionModel(stream_function=model)), features)) as runtime:
             execution = await runtime.agents.get().start("answer")
             await asyncio.wait_for(entered.wait(), 5)
             seen = []

@@ -8,7 +8,7 @@ from ._contract import ModelBinding, ModelInputValidator
 from ._client_request import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
 from ._errors import model_binding_error, model_request_error
 from ._stream_attempt import ModelStreamAttempt
-from ._factory import create_model
+from ._factory import create_model_binding
 from ._fallback import FallbackBinding
 from ._input import model_input_content, validate_model_input, validate_model_inputs
 from ._referenced_content import ReferencedContent, ReferencedInputOrigin
@@ -32,7 +32,7 @@ __all__ = [
     "normalize_input_files",
 
     "AudioMediaType", "DocumentMediaType", "ImageMediaType", "VideoMediaType",
-    "ModelBinding", "FallbackBinding", "create_model", "model_binding_error",
+    "ModelBinding", "FallbackBinding", "create_model_binding", "model_binding_error",
     "ModelClientRequest", "ModelClientRequestRecorder", "ModelClientResponse", "ModelStreamAttempt",
     "validate_model_input", "validate_model_inputs",
 ]

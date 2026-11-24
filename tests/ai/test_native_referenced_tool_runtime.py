@@ -98,7 +98,7 @@ async def test_parallel_native_tool_outputs_keep_ids_after_reverse_completion_an
     models.contract = {**models.contract, "input_mime_types": ["image/png"]}
     features = model_features(models, group)
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
-    async with Persistence.open('native-tool-ownership', storage=storage) as persistence_74, Runtime.attach(persistence=persistence_74, features=features) as runtime:
+    async with Persistence.open('native-tool-ownership', storage=storage) as persistence_74, Runtime.open(persistence=persistence_74, features=features) as runtime:
         execution = await runtime.agents.get().start("Read both independent files")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
@@ -110,7 +110,7 @@ async def test_parallel_native_tool_outputs_keep_ids_after_reverse_completion_an
     assert all(value.origin.execution_id == execution_id and value.origin.principal == principal
                and value.origin.agent_run_seq == 1 and value.origin.model_request_seq == 1 for value in loaded)
     assert loaded[0].origin.agent_run_id == loaded[1].origin.agent_run_id
-    async with Persistence.open('native-tool-ownership', storage=storage) as persistence_81, Runtime.attach(persistence=persistence_81, features=features) as runtime:
+    async with Persistence.open('native-tool-ownership', storage=storage) as persistence_81, Runtime.open(persistence=persistence_81, features=features) as runtime:
         result = await runtime.executions.result(execution_id, principal=principal)
         assert result.status is ExecutionStatus.SUCCEEDED
         history = await runtime.executions.history(execution_id, principal=principal, include_content=True)
@@ -195,7 +195,7 @@ async def test_native_capability_tools_bind_original_producer_before_hydration(t
     group.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
     models = _Models(_UsageFunctionModel(respond))
     models.contract = {**models.contract, "input_mime_types": ["image/png"]}
-    async with Persistence.open("native-reference-origin", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence, Runtime.attach(
+    async with Persistence.open("native-reference-origin", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence, Runtime.open(
         persistence=persistence, features=model_features(models, group),
     ) as runtime:
         execution = await runtime.agents.get().start("Read the admitted original")

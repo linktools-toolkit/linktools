@@ -50,7 +50,7 @@ async def test_native_checkpoint_does_not_replace_conversation_compaction(tmp_pa
     model_features(_Models(model), features)
     storage = _split_sqlite_storage(tmp_path / "split.db") if split else PersistenceStorage.in_memory()
     async with Persistence.open("native-conversation-compaction", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             session = await runtime.agents.get().create_session("session")
             first = await session.start("work", idempotency_key="first")
             assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Consumed attachment markers retain verified, portable request metadata."""
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
 import hashlib
 import json
@@ -347,7 +347,7 @@ async def test_openai_requests_keep_unified_metadata_and_drop_only_consumed_byte
         return DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond), **kwargs)
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
-    binding = create_model(api='openai',
+    binding = create_model_binding(api='openai',
         model="gpt-file-test", input_types=("mime:image/png",),
         api_key="test-key", base_url="https://file.invalid/v1", max_retries=0,
     )

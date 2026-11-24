@@ -14,7 +14,7 @@ No runtime enable-tools registry or implicit format converter is introduced.
 
 The professional configuration selects `run_command` and `read_file` as tools,
 plus a nonempty `allow_skills` to materialize `list_skills` and `load_skill`.
-Add discovery/search only when required. The public FileSystem tool catalog contains
+Add discovery/search only when required. The public FileSystemCapability tool catalog contains
 only those four entry points; `file:read` selects the three read tools and
 `file:write` selects `write_file`. Backend implementation helpers do not become additional public model tools.
 New writes create necessary parent directories within the authorized workspace;
@@ -67,18 +67,20 @@ category; a text file can use `mime:text/plain`. Unmatched attachments are
 rejected. A match does not bypass SDK encoding, workspace-provider authorization, resource
 limits, or permissions.
 
-The `vision` API argument and CLI flag are removed. Legacy environment or
-workspace settings produce migration errors and must be replaced with
-`input_types`. Recovering a historical execution requires a binding whose
-contract matches its persisted historical contract; an ordinary new binding
-cannot substitute its empty allowlist for that contract.
+The `vision` API argument and `--vision` CLI flag are not supported.
+Provider-specific environment variables such as `OPENAI_VISION` and workspace
+`vision` do not control attachments. For `ai-web`, `ai-run`, and `ai-acp`,
+`LINKTOOLS_MODEL_VISION=1` adds image inputs and `LINKTOOLS_MODEL_VISION=0` removes them
+without changing other `input_types`. Recovering a historical execution requires
+a binding whose contract matches its persisted historical contract; an ordinary
+new binding cannot substitute its empty allowlist for that contract.
 
 ### Minimal model declaration
 
 ```python
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 
-binding = create_model(api="openai",
+binding = create_model_binding(api="openai",
     model="your-model",
     input_types=["image", "document", "mime:audio/*", "mime:text/csv"],
 )

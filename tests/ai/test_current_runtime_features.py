@@ -116,21 +116,21 @@ async def test_current_runtime_lazily_opens_workspace_for_new_stdio_mcp(tmp_path
 
 @pytest.mark.asyncio
 async def test_current_runtime_rejects_replacing_an_open_workspace_root(tmp_path):
-    from linktools.ai.capability import FileSystem
+    from linktools.ai.capability import FileSystemCapability
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.workspace import Workspace
 
     original = Workspace.initialize(tmp_path / "original")
     replacement = Workspace.initialize(tmp_path / "replacement")
     features = model_features(RuntimeUsageModels())
-    features.capability(FileSystem(original))
+    features.capability(FileSystemCapability(original))
     async with Runtime.open("root-owner", storage=PersistenceStorage.in_memory(), features=features) as runtime:
-        features.capability(FileSystem(replacement))
+        features.capability(FileSystemCapability(replacement))
         with pytest.raises(AIError) as error:
             await runtime.agents.get().start("do not use the old root")
         assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
         assert error.value.safe_details["reason"] == "runtime_resource_replacement"
-        features.capability(FileSystem(original))
+        features.capability(FileSystemCapability(original))
         assert (await runtime.agents.get().run("unchanged root")).result.status is ExecutionStatus.SUCCEEDED
 
 

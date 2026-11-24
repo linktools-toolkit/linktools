@@ -22,7 +22,7 @@ from pydantic_ai_harness.step_persistence import SqliteStepStore, StepPersistenc
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
     AgentContext, AssetCapability, ExecutionCapability,
-    FileSystem, MemoryCapability, SessionCapability, ShellCapability, TraceCapability,
+    FileSystemCapability, MemoryCapability, SessionCapability, ShellCapability, TraceCapability,
 )
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.persistence import PersistenceStorage
@@ -107,7 +107,7 @@ async def captured_assets_and_workspace(root: Path) -> None:
         features = RuntimeFeatures("capability-assets")
         features.capability(AssetCapability(store))
         features.capability(CombinedCapability([
-            FileSystem(Workspace.load(root)).prefix_tools("files"),
+            FileSystemCapability(Workspace.load(root)).prefix_tools("files"),
             ShellCapability(),
             ObserveRuns(runs),
             TraceCapability(),
@@ -135,7 +135,7 @@ async def captured_assets_and_workspace(root: Path) -> None:
     finally:
         await store.close()
     assert not store.ready
-    print("Current Skill resources, wrapped FileSystem, Shell and native hook passed")
+    print("Current Skill resources, wrapped FileSystemCapability, Shell and native hook passed")
 
 
 async def admitted_memory_after_reopen(root: Path) -> None:

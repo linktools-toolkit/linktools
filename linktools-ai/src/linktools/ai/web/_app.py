@@ -27,7 +27,8 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
 from ..history import History
-from ..execution import CreateSessionRequest, ExecutionTreeEvent, ListExecutionRequest, ListSessionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..execution import ExecutionTreeEvent, ListExecutionRequest, TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
+from ..session import CreateSessionRequest, ListSessionRequest
 from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
 from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
@@ -86,6 +87,15 @@ def _wire(value: object) -> object:
         return result
     if is_dataclass(value) and not isinstance(value, type):
         result = {field.name: _wire(getattr(value, field.name)) for field in fields(value)}
+        if isinstance(value, ToolProcessItem):
+            if value.elapsed_ms is None:
+                result.pop("elapsed_ms")
+            if value.error_code is None:
+                result.pop("error_code")
+            if value.error_message is None:
+                result.pop("error_message")
+            if value.argument_preview is None:
+                result.pop("argument_preview")
         return result
     if isinstance(value, Enum):
         return value.value
@@ -99,12 +109,19 @@ def _wire(value: object) -> object:
 
 
 def _chat_timeline(page: Page[SessionTurn]) -> Page[SessionTurn]:
-    # Chat receives rendered SDK text, not raw parts or tool payloads.
-    return replace(page, items=tuple(
-        replace(turn, items=tuple(item for item in turn.items if item.item_kind in {"assistant", "thinking"}),
-                safe_error_details={})
-        for turn in page.items
-    ))
+    # Tool markers preserve placement; names/status come from process, not tool payloads.
+    turns = []
+    for turn in page.items:
+        seen_calls = set()
+        items = []
+        for item in turn.items:
+            if item.item_kind in {"assistant", "thinking"}:
+                items.append(item)
+            elif item.item_kind == "tool_call" and item.tool_call_id and item.tool_call_id not in seen_calls:
+                seen_calls.add(item.tool_call_id)
+                items.append(replace(item, content=None, tool_name=None))
+        turns.append(replace(turn, items=tuple(items), safe_error_details={}))
+    return replace(page, items=tuple(turns))
 
 
 _CHAT_STREAM_POSITION = {"agent_run_seq", "model_request_seq", "stream_attempt_seq"}
@@ -112,6 +129,7 @@ _CHAT_TEXT_FIELDS = _CHAT_STREAM_POSITION | {"text", "part_index", "part_start",
 _CHAT_STREAM_FIELDS = {
     "ASSISTANT_TEXT_DELTA": _CHAT_TEXT_FIELDS,
     "ASSISTANT_THINKING_DELTA": _CHAT_TEXT_FIELDS,
+    "ASSISTANT_PART_COMPLETED": _CHAT_STREAM_POSITION | {"part_index", "thinking_elapsed_ms"},
     "MODEL_ATTEMPT_STARTED": _CHAT_STREAM_POSITION,
     "MODEL_ATTEMPT_FINISHED": _CHAT_STREAM_POSITION | {"status"},
     "MODEL_REQUEST_FINISHED": _CHAT_STREAM_POSITION | {"status"},
@@ -127,19 +145,29 @@ _CHAT_PART_POSITION = ("agent_run_seq", "model_request_seq", "stream_attempt_seq
 _ExecutionFrame = tuple[str, dict[str, object], str | None]
 
 
-def _chat_frame(item: ExecutionTreeEvent, *, compact: bool) -> _ExecutionFrame | None:
+def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
     if item.depth != 0:
         return None
     cursor = item.cursor
     event = item.event
     process = project_tool_process_event(event.event_type, event.payload)
-    if process is not None:
-        return "message", {"type": "process", "item": _wire(process), "cursor": cursor}, cursor
+    if process is not None and isinstance(event.payload, Mapping):
+        frame = {"type": "process", "item": _wire(process), "cursor": cursor}
+        agent = event.payload.get("agent_run_seq")
+        request = event.payload.get("tool_model_request_seq")
+        if (process.position is not None and type(agent) is int and agent > 0
+                and type(request) is int and request > 0):
+            frame["order"] = (agent, request, process.position[1])
+        return "message", frame, cursor
     allowed = _CHAT_STREAM_FIELDS.get(event.event_type)
     if allowed is None or not isinstance(event.payload, Mapping):
         return None
     source = event.payload
-    kind = _CHAT_DELTA_EVENTS.get(event.event_type) if compact else None
+    if event.event_type == "ASSISTANT_PART_COMPLETED":
+        elapsed = source.get("thinking_elapsed_ms")
+        if source.get("part_type") != "thinking" or type(elapsed) is not int or elapsed < 0:
+            return None
+    kind = _CHAT_DELTA_EVENTS.get(event.event_type)
     if kind:
         text = source.get("text")
         start = source.get("part_start")
@@ -368,10 +396,10 @@ class _Console:
             return _json(view, 201)
         if self.runtime is not None:
             return _json(await self.runtime.sessions.list(ListSessionRequest(self.principal, **_paging(request))))
-        # History currently offers recent sessions, not a read-only paged session index.
+        # The read-only console lists the newest sessions by time, without pagination.
         if request.query_params.get("cursor"):
             raise ValueError("read-only recent sessions have no cursor")
-        items = () if self.history is None else await self.history.recent_sessions(
+        items = () if self.history is None else await self.history.scan_recent_sessions(
             principal=self.principal, limit=int(_paging(request)["limit"]),
         )
         return _json({"items": items, "next_cursor": None, "recent_only": True})
@@ -389,27 +417,16 @@ class _Console:
                 raise ValueError("invalid session turn selector")
             if environ.debug:
                 request.state.phase = "session.turn"
-            if turn_state == "committed":
-                try:
-                    turn = await history.session_turn(identity, execution_id, principal=self.principal)
-                except AIError as error:
-                    if error.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE:
-                        items = ()
-                    elif error.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY:
-                        # Split storage may not support the exact committed-turn reader.
-                        turn_state = "active"
-                    else:
-                        raise
-                else:
-                    items = (turn,)
             if turn_state == "active":
                 detail = await history.session_detail(identity, principal=self.principal, limit=1)
                 session = detail.session
                 items = tuple(turn for turn in detail.timeline.items if turn.execution_id == execution_id)
             else:
+                turn = await history.session_turn(identity, execution_id, principal=self.principal)
                 session = await history.inspect_session(identity, principal=self.principal)
+                items = (turn,)
             return _json({"session": session, "timeline": _chat_timeline(Page(items, None))})
-        if include_timeline == "true" and self.runtime is not None and type(history) is History:
+        if include_timeline == "true":
             if environ.debug:
                 request.state.phase = "session.timeline"
             detail = await history.session_detail(identity, principal=self.principal, **_paging(request))
@@ -417,12 +434,7 @@ class _Console:
         if environ.debug:
             request.state.phase = "session.metadata"
         session = await history.inspect_session(identity, principal=self.principal)
-        timeline = None
-        if include_timeline == "true":
-            if environ.debug:
-                request.state.phase = "session.timeline"
-            timeline = _chat_timeline(await history.session_timeline(identity, principal=self.principal, **_paging(request)))
-        return _json({"session": session, "timeline": timeline})
+        return _json({"session": session, "timeline": None})
 
     async def session_action(self, request: Request) -> Response:
         if environ.debug:
@@ -478,7 +490,7 @@ class _Console:
                         cursor=resume_cursor if execution_id == resume_id else None,
                         include_content=True, include_descendants=False, include_model_interactions=False,
                     )
-                    frames = self._execution_frames(request, execution_id, watch, chat=True, local_only=True, compact=True)
+                    frames = self._execution_frames(request, execution_id, watch, chat=True)
                     async with aclosing(frames):
                         async for frame in frames:
                             if task.cancelling():
@@ -622,7 +634,7 @@ class _Console:
         if request.query_params.get("recent") == "true":
             if any(request.query_params.get(key) for key in ("cursor", "session_id", "agent_id", "parent_execution_id")):
                 raise ValueError("recent scan does not support cursors or filters")
-            items = () if self.history is None else await self.history.recent_executions(
+            items = () if self.history is None else await self.history.scan_recent_executions(
                 principal=self.principal, limit=int(_paging(request)["limit"]),
             )
             return _json({"items": items, "next_cursor": None, "recent_scan": True})
@@ -723,6 +735,9 @@ class _Console:
         return _json({"execution_id": result.execution_id}, 202)
 
     async def events(self, request: Request) -> Response:
+        if "view" in request.query_params:
+            # The diagnostics stream must not satisfy a request for filtered Chat data.
+            raise ValueError("select the session stream for the Chat view")
         if environ.debug:
             request.state.phase = "execution.watch"
         runtime = self.require_runtime()
@@ -730,15 +745,13 @@ class _Console:
             request.path_params["execution_id"], principal=self.principal,
         )
         cursor = request.query_params.get("cursor") or request.headers.get("last-event-id") or None
-        chat = request.query_params.get("view") == "chat"
         watch = execution.watch(
-            cursor=cursor, include_content=True, include_descendants=not chat,
-            include_model_interactions=not chat,
+            cursor=cursor, include_content=True, include_descendants=True,
+            include_model_interactions=True,
         )
-        local_only = chat and self._session_notices is not None
 
         async def stream() -> AsyncGenerator[str, None]:
-            frames = self._execution_frames(request, execution.execution_id, watch, chat=chat, local_only=local_only)
+            frames = self._execution_frames(request, execution.execution_id, watch, chat=False)
             async with aclosing(frames):
                 async for event, data, cursor in frames:
                     yield _sse_frame(event, data, cursor)
@@ -748,13 +761,13 @@ class _Console:
     async def _execution_frames(
         self, request: Request, execution_id: str,
         watch: "AsyncIterator[ExecutionTreeEvent | ExecutionObservationEvent]",
-        *, chat: bool, local_only: bool, compact: bool = False,
+        *, chat: bool,
     ) -> AsyncGenerator[_ExecutionFrame, None]:
         try:
-            with local_execution_stream() if local_only else nullcontext():
+            with local_execution_stream() if chat else nullcontext():
                 async for observation in watch:
                     if chat:
-                        frame = _chat_frame(observation, compact=compact)
+                        frame = _chat_frame(observation)
                         if frame is not None:
                             yield frame
                     else:
@@ -830,8 +843,9 @@ async def _error(request: Request, error: Exception) -> Response:
         _debug_error(request, error)
         code = error.code.value
         status = 404 if code in {"AUTHORIZATION_DENIED", "SESSION_NOT_FOUND", "EXECUTION_NOT_FOUND"} else (
-            409 if any(part in code for part in ("CONFLICT", "BUSY", "CLOSED", "MISMATCH")) else (
-                400 if any(part in code for part in ("INVALID", "REQUIRED")) else 503
+            409 if code == "SESSION_TURN_PENDING" or any(part in code for part in ("CONFLICT", "BUSY", "CLOSED", "MISMATCH")) else (
+                400 if error.code is not ErrorCode.STORAGE_RECOVERY_REQUIRED
+                and any(part in code for part in ("INVALID", "REQUIRED")) else 503
             )
         )
         return _json(asdict(error.to_safe_error(operation_id=_operation_id(request, error))), status)

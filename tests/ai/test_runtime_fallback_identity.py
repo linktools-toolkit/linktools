@@ -89,7 +89,7 @@ async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, select
         assert [(message.model_name, message.model_id) for message in responses] == [(expected_name, expected_id)]
 
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
-    async with Persistence.open("fallback-identity", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("fallback-identity", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features(),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
@@ -99,7 +99,7 @@ async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, select
         execution_id, principal = execution.execution_id, runtime.default_principal
         await assert_persisted(runtime, execution_id, principal)
 
-    async with Persistence.open("fallback-identity", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("fallback-identity", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features(),
     ) as runtime:
         await assert_persisted(runtime, execution_id, principal)
@@ -127,7 +127,7 @@ async def test_parallel_fallback_and_primary_keep_distinct_response_identities(t
     features.capability(ExecutionCapability(retain_history=True))
     features.capability(TraceCapability())
     storage = PersistenceStorage.sqlite(tmp_path / "parallel.sqlite")
-    async with Persistence.open("parallel-identities", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("parallel-identities", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
         async def run(agent, expected):

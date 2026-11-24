@@ -27,7 +27,7 @@ async def _runtime(path, model):
     storage = PersistenceStorage.sqlite(path, coordination=StateTurnResources())
     async with (
         Persistence.open("grouped-admission", storage=storage) as persistence,
-        Runtime.attach(persistence=persistence, features=features) as runtime,
+        Runtime.open(persistence=persistence, features=features) as runtime,
     ):
         yield persistence, runtime
 

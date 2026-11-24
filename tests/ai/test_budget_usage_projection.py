@@ -59,7 +59,7 @@ async def test_budget_usage_view_skips_bodies_and_preserves_pending_and_custom_s
     features = _capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Persistence.open("budget-view", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
             agent = runtime.agents.get()
             target = agent.session("budget-session") if session else agent
             handle = await target.start("large accepted input " * 10000, budget=RunBudget(model_requests=10))
@@ -67,7 +67,7 @@ async def test_budget_usage_view_skips_bodies_and_preserves_pending_and_custom_s
             execution_id = handle.execution_id
         assert terminal_errors == []
         assert bool(confirmations) is session
-        async with Runtime.attach(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
             handle = await runtime.executions.get(execution_id, principal=runtime.default_principal)
             repository = persistence.execution.executions
             original = await repository.get_fresh(handle.execution_id, tenant_id="default")

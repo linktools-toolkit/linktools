@@ -57,7 +57,7 @@ async def test_completed_turns_release_execution_buffer_ownership(
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("execution-buffer-owner-release", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             backend = runtime._execution_service.runtime_backend()
             original_release = backend.release_runtime_execution
@@ -133,7 +133,7 @@ async def test_rejected_start_releases_buffer_owner_after_exact_cleanup(
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("execution-buffer-rejected-start", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             session = await runtime.agents.get().create_session("session")
             backend = runtime._execution_service.runtime_backend()
@@ -208,7 +208,7 @@ async def test_pending_payloads_and_checkpoint_are_read_from_buffer_before_sourc
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", object_store=objects,
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("execution-payload-buffer", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             backend = runtime._execution_service.runtime_backend()
             source_preparing = False
@@ -293,7 +293,7 @@ async def test_pending_payload_dispatch_retains_exact_source_evidence(
     await persistence.initialize(namespace="execution-payload-interference", tenant_id="default")
     source_group = persistence.execution.executions.state_store.storage_group
     try:
-        context = Runtime.attach(persistence=persistence,
+        context = Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None)
         runtime = await context.__aenter__()
         owners = tuple(persistence._runtime_owners)

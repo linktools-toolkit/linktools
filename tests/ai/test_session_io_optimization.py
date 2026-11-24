@@ -17,7 +17,7 @@ from linktools.ai.core import (
     SessionStatus,
 )
 from linktools.ai.runtime._session import RuntimeSessionService
-from linktools.ai.execution import ListSessionRequest
+from linktools.ai.session import ListSessionRequest
 from linktools.ai.persistence.contracts import SessionRecord
 
 

@@ -101,7 +101,7 @@ async def test_projection_notification_requires_direct_commit_confirmation(
 ) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.execution import CreateSessionRequest
+    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.persistence import runs
     from linktools.ai.workspace import Workspace
     from linktools.commands.ai._common import _open_local_runtime

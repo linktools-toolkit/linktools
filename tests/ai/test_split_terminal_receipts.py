@@ -46,7 +46,7 @@ async def test_split_handoff_unknown_requires_source_confirmation(
             return original_publish(self, execution_id, **kwargs)
 
     async with Persistence.open("split-receipt", storage=_split_sqlite_storage(database)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(models, features)) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(models, features)) as runtime:
             repository = runtime._state.execution.executions
             original_swap = repository.compare_and_swap
 
@@ -79,7 +79,7 @@ async def test_split_handoff_unknown_requires_source_confirmation(
                 assert calls == ["model"]
 
     async with Persistence.open("split-receipt", storage=_split_sqlite_storage(database)) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(models, features), auto_recover=not committed) as runtime:
+        async with Runtime.open(persistence=persistence, features=model_features(models, features), auto_recover=not committed) as runtime:
             stored = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert stored is not None and stored.recovery_state is ExecutionRecoveryState.COMPLETED
             session = runtime.agents.get().session("session")

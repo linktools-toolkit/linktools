@@ -5,9 +5,9 @@
 import os
 from pathlib import Path
 
-from linktools.ai.capability import FileSystem
+from linktools.ai.capability import FileSystemCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.workspace import Workspace
@@ -16,7 +16,7 @@ from linktools.ai.workspace import Workspace
 async def run(project: Path) -> object:
     """Open one workspace Runtime and return an inline Agent result."""
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    binding = create_model(
+    binding = create_model_binding(
         api="openai",
         model=model,
         input_types=(),
@@ -26,7 +26,7 @@ async def run(project: Path) -> object:
     workspace = Workspace.load(project)
     application = RuntimeFeatures[None]("application")
     application.model("default", binding)
-    application.capability(FileSystem(workspace))
+    application.capability(FileSystemCapability(workspace))
     application.agent(
         "writer",
         revision=2,

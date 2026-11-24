@@ -46,7 +46,7 @@ async def test_source_execution_terminal_uses_buffer(tmp_path: Path, promotion: 
             conversation=StorageRoute.sqlite(tmp_path / "conversation.db")),
             coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open("source-payload-buffer", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             backend = runtime._execution_service.runtime_backend()
             session = await runtime.agents.get().create_session("session")
@@ -106,7 +106,7 @@ async def test_source_execution_known_rejection_settles_failed_without_rejected_
         storage = PersistenceStorage.from_plan(replace(storage.plan,
             conversation=StorageRoute.sqlite(tmp_path / "conversation.db")))
     async with Persistence.open("source-payload-rejection", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             execution = await runtime.agents.get().start("question", idempotency_key="request")
             result = (await execution.wait(timeout_seconds=10)).result
@@ -152,7 +152,7 @@ async def test_agent_task_child_source_result_handoff_uses_buffer(tmp_path: Path
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-task-buffer",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime, \
             TaskEngine.open(persistence=persistence) as engine:
             task = Task.from_agent("buffer.agent", runtime.agents.get())
@@ -211,7 +211,7 @@ async def test_source_control_outcome_survives_its_own_terminal_rejection(tmp_pa
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-control-rejection",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             execution = await runtime.agents.get().start("question", idempotency_key="request")
             result = (await execution.wait(timeout_seconds=10)).result
@@ -249,9 +249,9 @@ async def test_source_terminal_confirmation_and_remote_cancel_preserve_buffer_tr
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-terminal-race",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime, \
-            Runtime.attach(persistence=persistence,
+            Runtime.open(persistence=persistence,
                 features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as remote:
             backend = runtime._execution_service.runtime_backend()
             command = backend._runtime_commands.commit_terminal_checkpoint
@@ -330,9 +330,9 @@ async def test_pending_candidate_stops_for_cancel_during_context_prepare(
     async with Persistence.open("promotion-cancel-buffer",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db",
             coordination=_ObservedCache())) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime, \
-            Runtime.attach(persistence=persistence,
+            Runtime.open(persistence=persistence,
                 features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as remote:
             backend = runtime._execution_service.runtime_backend()
             prepare = backend._context_archive.prepare
@@ -443,7 +443,7 @@ async def test_execution_buffer_does_not_recapture_rejected_trace_checkpoint(tmp
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-trace-rejection",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             execution = await runtime.agents.get().start("question", idempotency_key="request")
             result = (await execution.wait(timeout_seconds=10)).result
@@ -527,7 +527,7 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
     async with Persistence.open("source-deferred-buffer",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
         async with AsyncExitStack() as stack:
-            context = Runtime.attach(persistence=persistence, features=features, metrics=None)
+            context = Runtime.open(persistence=persistence, features=features, metrics=None)
             runtime = await stack.enter_async_context(context)
             session = await runtime.agents.get("reader").create_session("session")
             execution = await session.start("read", idempotency_key="request")
@@ -540,7 +540,7 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
             if reopen:
                 await stack.aclose()
                 assert set(buffer.acknowledged) == set(buffer.accepted)
-                runtime = await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features, metrics=None))
+                runtime = await stack.enter_async_context(Runtime.open(persistence=persistence, features=features, metrics=None))
             await runtime.approvals.decide(execution.execution_id, ApprovalDecisionRequest(
                 Principal("approver", tenant, "service"), approvals[0].approval_id, "approve", ApprovalDecision.APPROVE))
             result = (await runtime.executions.wait(execution.execution_id,
@@ -641,7 +641,7 @@ async def test_zero_prefix_source_failure_retains_control_until_same_execution_c
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("zero-prefix-source-failure",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             backend = runtime._execution_service.runtime_backend()
             command = backend._runtime_commands.commit_terminal_checkpoint
@@ -695,7 +695,7 @@ async def test_unknown_tool_effect_retires_only_source_confirmed_execution_audit
     features.agent("default", allow_tools=("write",))
     async with Persistence.open("source-effect-unknown",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
             features=model_features(_TaskTestModels(), features), metrics=None) as runtime:
             execution = await runtime.agents.get().start("write", idempotency_key="request")
             with pytest.raises(AIError) as unknown:

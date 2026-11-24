@@ -81,12 +81,11 @@ from ..execution import (
     ModelInteractionItem,
     ModelInteractionReadBoundary,
     ModelInteractionSubscription,
-    SessionTurn,
-    SessionView,
     TranscriptItem,
     UsageReadCutoff,
     UsageSummary,
 )
+from ..session import SessionTurn, SessionView
 from ..persistence import Persistence, PersistenceDomain
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
@@ -573,7 +572,7 @@ class History:
             limit=limit,
         )
 
-    async def recent_executions(
+    async def scan_recent_executions(
         self,
         *,
         principal: Principal,
@@ -1042,7 +1041,7 @@ class History:
         Compression changes the model's working context, not this transcript.
         Pending or paused staging is excluded. Failed/cancelled turns expose
         only their committed messages; zero-message outcomes remain available
-        through ``session_timeline``.
+        through ``session_detail``.
         """
         limit = validate_page_limit(limit)
         sessions, authorization = self._require_session_reader()
@@ -1122,7 +1121,7 @@ class History:
         )
         return Page(cast(tuple[ModelMessage, ...], messages), next_cursor)
 
-    async def recent_sessions(
+    async def scan_recent_sessions(
         self,
         *,
         principal: Principal,
@@ -1328,18 +1327,6 @@ class History:
             await display_cache.write(cache_key, state, detail, started, max_age)
         return detail
 
-    async def session_timeline(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-        cursor: "str | None" = None,
-        limit: int = 100,
-    ) -> Page[SessionTurn]:
-        return (await self.session_detail(
-            session_id, principal=principal, cursor=cursor, limit=limit,
-        )).timeline
-
     async def session_turn(
         self,
         session_id: str,
@@ -1350,9 +1337,9 @@ class History:
         """Read an exact committed turn belonging to the authorized session.
 
         This is not a page of session history and does not consult the active or
-        latest execution. Pending, uncommitted and inherited turns are not
-        substituted for the requested execution. The built-in session and
-        execution repositories must share a storage group.
+        latest execution for a substitute. A requested active turn not yet
+        published raises SESSION_TURN_PENDING; inherited turns are not resolved.
+        The built-in session and execution repositories must share a storage group.
         """
         if self._conversation is None or self._session_transcript_store is None or self._session_cursor_signer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

@@ -29,7 +29,7 @@ async def _seed_current_history(path: Path) -> None:
     application.capability(TraceCapability(), scope="runtime")
     application.agent("default", model="default", allow_tools=())
     async with Persistence.open("legacy-history", storage=PersistenceStorage.sqlite(path)) as persistence:
-        async with Runtime.attach(persistence=persistence,
+        async with Runtime.open(persistence=persistence,
                                   features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
             session = await runtime.agents.get("default").create_session("session")
             result = await session.run("retained old question", timeout_seconds=10)
@@ -103,7 +103,7 @@ async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
     application = RuntimeFeatures("application")
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
-    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path)) as persistence_109, Runtime.attach(persistence=persistence_109, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
+    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path)) as persistence_109, Runtime.open(persistence=persistence_109, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
         session = runtime.agents.get("default").session("session")
         old = await session.history()
         old_execution_id = (await session.timeline()).items[0].execution_id
@@ -123,7 +123,7 @@ async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
             ("user", "new question"), ("assistant", "done"),
         ]
 
-    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path)) as persistence_132, Runtime.attach(persistence=persistence_132, features=model_features(helpers.RuntimeUsageModels(), application)) as reopened:
+    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path)) as persistence_132, Runtime.open(persistence=persistence_132, features=model_features(helpers.RuntimeUsageModels(), application)) as reopened:
         restored = await reopened.agents.get("default").session("session").history()
         assert restored.items == appended.items
         assert await _execution_evidence(reopened.history, old_execution_id, reopened.default_principal) == evidence
@@ -172,7 +172,7 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     await _seed_current_history(path)
     principal = Principal("runtime", "default", "local_trusted")
     async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_184, History.open(persistence=history_persistence_184) as history:
-        timeline = await history.session_timeline("session", principal=principal)
+        timeline = (await history.session_detail("session", principal=principal)).timeline
         execution_id = timeline.items[0].execution_id
         evidence = await _execution_evidence(history, execution_id, principal)
     state = Persistence(PersistenceStorage.sqlite(path))
@@ -190,7 +190,7 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     application = RuntimeFeatures("application")
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
-    async with Persistence.open('legacy-history', storage=PersistenceStorage.from_root(restored_root)) as persistence_206, Runtime.attach(persistence=persistence_206, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
+    async with Persistence.open('legacy-history', storage=PersistenceStorage.from_root(restored_root)) as persistence_206, Runtime.open(persistence=persistence_206, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
         assert await _execution_evidence(runtime.history, execution_id, runtime.default_principal) == evidence
         history = await runtime.agents.get("default").session("session").history()
         assert [(item.item_kind, item.content) for item in history.items if item.item_kind != "system"] == [

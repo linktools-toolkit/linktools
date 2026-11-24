@@ -58,7 +58,7 @@ def test_recovery_preserves_published_partial_tool_result(tmp_path: Path, rich: 
             group.tool(first)
             group.tool(second)
             group.agent("default", allow_tools=("first", "second"))
-            async with Persistence.open("partial-retry", storage=PersistenceStorage.sqlite(root / "source.db")) as state, Runtime.attach(
+            async with Persistence.open("partial-retry", storage=PersistenceStorage.sqlite(root / "source.db")) as state, Runtime.open(
                 persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), group),
                 auto_recover=False, metrics=None,
             ) as runtime:

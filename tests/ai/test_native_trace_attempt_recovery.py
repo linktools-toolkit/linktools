@@ -50,7 +50,7 @@ async def test_hard_killed_native_attempt_marks_its_original_request_interrupted
 
         async with Persistence.open(
             _NAMESPACE, storage=PersistenceStorage.sqlite(database),
-        ) as state, Runtime.attach(
+        ) as state, Runtime.open(
             persistence=state,
             features=model_features(_Models(FunctionModel(stream_function=unused_model)), _capabilities(conversation=True)),
             auto_recover=False,

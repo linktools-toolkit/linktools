@@ -59,7 +59,7 @@ async def test_source_first_rule_admission_survives_deleted_head_before_context(
         features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
         features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         async with Persistence.open("rule-admission", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as state:
-            async with Runtime.attach(persistence=state, features=model_features(
+            async with Runtime.open(persistence=state, features=model_features(
                 _Models(_UsageFunctionModel(model)), features).borrow()) as runtime:
                 principal = Principal("owner", runtime.tenant_id)
                 backend = runtime._execution_service.runtime_backend()

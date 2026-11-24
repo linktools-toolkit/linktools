@@ -112,7 +112,7 @@ async def test_safe_bound_refs_cover_run_hooks_and_children_without_extra_reads(
         info.capability_refs[0].id = "changed"
 
     calls.clear()
-    recent = await history.recent_executions(principal=principal)
+    recent = await history.scan_recent_executions(principal=principal)
     assert recent[0].capability_refs == info.capability_refs
     assert Counter(calls) == Counter(candidates=1, authorize=1)
     old_payload = binding.to_payload()
@@ -181,7 +181,7 @@ async def test_capability_refs_remain_behind_execution_read_authorization(entry,
         assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert "record" not in calls and "usage" not in calls
     else:
-        assert await history.recent_executions(principal=principal) == ()
+        assert await history.scan_recent_executions(principal=principal) == ()
         assert "record" not in calls and "usage" not in calls
 
 
@@ -231,7 +231,7 @@ async def test_graph_agent_refs_preserve_admitted_hooks_after_catalog_change_and
         return {"prepared": True}
 
     application_task = Task("bound-ref-prepare", prepare, effect_policy="none")
-    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_206, Runtime.attach(persistence=persistence_206, features=group.borrow()) as runtime, TaskEngine.open(persistence=persistence_206) as engine:
+    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_206, Runtime.open(persistence=persistence_206, features=group.borrow()) as runtime, TaskEngine.open(persistence=persistence_206) as engine:
         derived = runtime.agents.get("root").derive(allow_tools=())
         task = Task.from_agent("bound-ref-agent", derived)
         run = await engine.with_definitions(application_task, task).start(
@@ -253,10 +253,10 @@ async def test_graph_agent_refs_preserve_admitted_hooks_after_catalog_change_and
 
     changed = RuntimeFeatures("bound-ref-test")
     changed.agent("root", revision=2, allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_229, Runtime.attach(persistence=persistence_229, features=model_features(RuntimeUsageModels(), changed)) as current, TaskEngine.open(persistence=persistence_229) as engine:
+    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_229, Runtime.open(persistence=persistence_229, features=model_features(RuntimeUsageModels(), changed)) as current, TaskEngine.open(persistence=persistence_229) as engine:
         assert current.agents.get("root").derive(model="default").compiled.skill_definitions == ()
         assert (await current.history.inspect_execution(execution_id, principal=principal)).capability_refs == info.capability_refs
     async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_234, History.open(persistence=history_persistence_234) as history:
         reopened = await history.inspect_execution(execution_id, principal=principal)
         assert reopened.capability_refs == info.capability_refs
-        assert (await history.recent_executions(principal=principal))[0].capability_refs == info.capability_refs
+        assert (await history.scan_recent_executions(principal=principal))[0].capability_refs == info.capability_refs

@@ -44,7 +44,7 @@ async def test_retained_terminal_replay_confirms_canonical_receipt(
     errors: list[BaseException] = []
     lost_acknowledgements = 0
 
-    async with Persistence.open("terminal-receipt-replay", storage=storage) as state, Runtime.attach(
+    async with Persistence.open("terminal-receipt-replay", storage=storage) as state, Runtime.open(
         persistence=state, features=model_features(_Models(_UsageFunctionModel(respond)), features),
     ) as runtime:
         sessions = state.conversation.sessions

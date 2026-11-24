@@ -15,12 +15,12 @@ from pydantic_ai.tools import RunContext
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.agent._model_resolver import _ModelResolver
-from linktools.ai.model import ModelBinding, create_model, model_binding_error
+from linktools.ai.model import ModelBinding, create_model_binding, model_binding_error
 from linktools.ai.model._binding import _RetryingModel
 
 
 def test_model_binding_contract_excludes_secret_material() -> None:
-    registry = create_model(api="openai", model="gpt-test", api_key="secret")
+    registry = create_model_binding(api="openai", model="gpt-test", api_key="secret")
     binding = registry
 
     assert "secret" not in repr(binding)
@@ -30,16 +30,16 @@ def test_model_binding_contract_excludes_secret_material() -> None:
 
 @pytest.mark.parametrize("setting", ["timeout", "request_timeout", "first_event_timeout"])
 def test_request_deadlines_do_not_change_durable_model_semantics(setting: str) -> None:
-    first = create_model(api="openai", model="gpt-test", model_settings={setting: 1.0, "temperature": 0.2})
-    later = create_model(api="openai", model="gpt-test", model_settings={setting: 9.0, "temperature": 0.2})
-    semantic = create_model(api="openai", model="gpt-test", model_settings={setting: 1.0, "temperature": 0.5})
+    first = create_model_binding(api="openai", model="gpt-test", model_settings={setting: 1.0, "temperature": 0.2})
+    later = create_model_binding(api="openai", model="gpt-test", model_settings={setting: 9.0, "temperature": 0.2})
+    semantic = create_model_binding(api="openai", model="gpt-test", model_settings={setting: 1.0, "temperature": 0.5})
     assert first.contract == later.contract
     assert first.contract != semantic.contract
     assert setting not in first.contract["settings"]
 
 
 def test_static_connection_values_are_normalized() -> None:
-    binding = create_model(api="openai", model="gpt-test",
+    binding = create_model_binding(api="openai", model="gpt-test",
                            base_url="  https://EXAMPLE.com/v1/  ", api_key="   ")
     assert binding.base_url == "https://example.com/v1"
     assert binding.api_key is None
@@ -49,15 +49,15 @@ def test_static_connection_values_are_normalized() -> None:
                                          ("retry_delay", -1), ("max_tokens", 0)])
 def test_static_connection_and_request_settings_are_validated(field, value) -> None:
     with pytest.raises(ValueError):
-        create_model(api="openai", model="gpt-test",
+        create_model_binding(api="openai", model="gpt-test",
                      **({"model_settings": {field: value}} if field in {"max_tokens", "timeout"} else {field: value}))
 
 
 def test_model_route_capture_keeps_shared_binding_when_source_map_changes() -> None:
-    original = create_model(api="openai", model="gpt-old")
+    original = create_model_binding(api="openai", model="gpt-old")
     source = {"target": original, "alias": original, "alias-2": original}
     snapshot = _ModelResolver(source)
-    source["target"] = create_model(api="openai", model="gpt-new")
+    source["target"] = create_model_binding(api="openai", model="gpt-new")
     assert snapshot.resolve("target") is original
     assert snapshot.resolve("alias") is original
     assert snapshot.resolve("alias-2") is original

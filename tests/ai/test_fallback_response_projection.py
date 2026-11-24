@@ -20,7 +20,8 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.model.messages import model_response_usage, project_model_response_attempts
+from linktools.ai.model import project_model_response_attempts
+from linktools.ai.model.messages import model_response_usage
 from linktools.ai.runtime._metric_capability import PreparedRequestModel
 
 

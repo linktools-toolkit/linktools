@@ -307,7 +307,7 @@ async def test_mcp_acquired_process_runtime_cancel_keeps_resources_until_closed(
     ))
     features.agent("default", allow_tools=(mcp_server_selector("server"),))
     async with Persistence.open("mcp-cleanup", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get("default").start("prepare tools")
             await asyncio.wait_for(entering.wait(), 2)
             cancellation = await execution.cancel(idempotency_key="cancel-during-entry")

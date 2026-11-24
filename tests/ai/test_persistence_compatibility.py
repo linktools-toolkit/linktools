@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from ._runtime_test_helpers import workspace_features
 
 import json
@@ -284,7 +284,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         allow_skills=(),
         allow_subagents=(),
     )
-    models = {"default": create_model(api='openai', model="gpt-test")}
+    models = {"default": create_model_binding(api='openai', model="gpt-test")}
     compiler = AgentCompiler(
         models=models,
         candidates=candidates,

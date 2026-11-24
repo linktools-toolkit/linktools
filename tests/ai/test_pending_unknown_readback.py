@@ -44,7 +44,7 @@ async def test_pending_unknown_absent_readback_keeps_admission_until_late_commit
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )
     async with Persistence.open('pending-unknown', storage=storage) as persistence:
-        context = Runtime.attach(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features))
+        context = Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features))
         runtime = await context.__aenter__()
         release = asyncio.Event()
         dispatched = asyncio.Event()

@@ -89,7 +89,7 @@ async def test_terminal_handoff_survives_removed_model_route(
     database = copied / "runtime.db"
     async with Persistence.open(_NAMESPACE, storage=_storage(database, "finalizing")) as persistence:
         execution_id = await _assert_prepared_handoff(persistence, initial)
-        async with Runtime.attach(
+        async with Runtime.open(
             persistence=persistence, features=_features_without_model(native_database=copied / "native.db"),
             auto_recover=recovery == "startup",
         ) as runtime:
@@ -151,7 +151,7 @@ async def test_terminal_handoff_rejects_corruption_without_model_route(
 
         await repository.state_store.mutate(corrupt)
         with pytest.raises(AIError) as rejected:
-            async with Runtime.attach(
+            async with Runtime.open(
                 persistence=persistence, features=_features_without_model(native_database=copied / "native.db"),
                 auto_recover=recovery == "startup",
             ) as runtime:
@@ -167,7 +167,7 @@ async def test_active_recovery_still_requires_model_route(tmp_path: Path) -> Non
         execution_id = owner.initial["execution_id"]
         owner.crash()
         async with Persistence.open(_NAMESPACE, storage=_storage(database, "active")) as persistence:
-            async with Runtime.attach(
+            async with Runtime.open(
                 persistence=persistence, features=_features_without_model(), auto_recover=False,
             ) as runtime:
                 principal = runtime.default_principal

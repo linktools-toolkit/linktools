@@ -61,7 +61,7 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
         persistence = await stack.enter_async_context(Persistence.open(
             "graph-live", storage=storage(),
         ))
-        runtimes = [await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features(i)))
+        runtimes = [await stack.enter_async_context(Runtime.open(persistence=persistence, features=features(i)))
                     for i in range(producer_count)]
         tasks = [Task.from_agent(f"worker-{i}", runtime.agents.get(f"agent-{i}"))
                  for i, runtime in enumerate(runtimes)]
@@ -111,7 +111,7 @@ async def test_graph_observes_tools_before_models_finish_and_replays_after_reope
         persistence = await stack.enter_async_context(Persistence.open(
             "graph-live", storage=storage(),
         ))
-        runtimes = [await stack.enter_async_context(Runtime.attach(persistence=persistence, features=features(i)))
+        runtimes = [await stack.enter_async_context(Runtime.open(persistence=persistence, features=features(i)))
                     for i in range(producer_count)]
         tasks = [Task.from_agent(f"worker-{i}", runtime.agents.get(f"agent-{i}"))
                  for i, runtime in enumerate(runtimes)]

@@ -66,7 +66,7 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
     model_features(_Models(_UsageFunctionModel(model)), features)
 
     async with Persistence.open("failed-pending", storage=storage) as state:
-        async with Runtime.attach(persistence=state, features=features, metrics=None,
+        async with Runtime.open(persistence=state, features=features, metrics=None,
                                   auto_recover=False) as runtime:
             backend = runtime._execution_service.runtime_backend()
             cleanup_finished = asyncio.Event()

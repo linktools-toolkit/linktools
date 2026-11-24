@@ -192,7 +192,7 @@ async def test_fresh_runtime_terminal_uses_receipts_without_effect_scans(
     features.capability(native_checkpoint(), scope="runtime")
     features.tool(work, effect_policy="non_replay_safe")
     features.agent("default", model="default", allow_tools=("work",))
-    async with Runtime.attach(
+    async with Runtime.open(
         persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         execution = await runtime.agents.get().start("work", idempotency_key="work")
@@ -248,9 +248,9 @@ async def test_native_success_reuses_control_receipt_but_source_cancel_wins(
     binding = model_features(_Models(_UsageFunctionModel(provider)), features)
     try:
         async with Persistence.open("success-receipts", storage=PersistenceStorage.sql(engine)) as first:
-            async with Runtime.attach(persistence=first, features=binding) as runtime:
+            async with Runtime.open(persistence=first, features=binding) as runtime:
                 async with Persistence.open("success-receipts", storage=PersistenceStorage.sql(engine)) as second:
-                    async with Runtime.attach(persistence=second, features=binding) as remote:
+                    async with Runtime.open(persistence=second, features=binding) as remote:
                         execution = await runtime.agents.get().start("work", idempotency_key="work")
                         await asyncio.wait_for(entered.wait(), 5)
                         try:

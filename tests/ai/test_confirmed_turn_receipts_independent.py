@@ -63,7 +63,7 @@ async def test_sessionless_split_handoff_does_not_retain_precompletion_observati
 
         monkeypatch.setattr(state.retention, "confirm_terminal_publication", confirm)
         monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", complete)
-        async with Runtime.attach(persistence=state, features=model_features(_models(), _features())) as runtime:
+        async with Runtime.open(persistence=state, features=model_features(_models(), _features())) as runtime:
             handle = await runtime.agents.get().start("standalone split conversation")
             result = (await handle.wait(timeout_seconds=5)).result
             assert result.status is ExecutionStatus.SUCCEEDED
@@ -136,7 +136,7 @@ async def test_public_wait_receipt_preserves_authorization_and_worker_failure(tm
         return ModelResponse(parts=[TextPart("finished")])
 
     async with Persistence.open(_NAMESPACE, storage=_storage("sqlite", tmp_path)) as state:
-        async with Runtime.attach(persistence=state, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
+        async with Runtime.open(persistence=state, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
             session = await runtime.agents.get().create_session("receipt-wait")
             execution = await session.start("question")
             await asyncio.wait_for(entered.wait(), 5)
@@ -208,7 +208,7 @@ async def test_wait_started_after_publication_preserves_read_guards(
         return ModelResponse(parts=[TextPart("finished")])
 
     async with Persistence.open(_NAMESPACE, storage=_storage("sqlite", tmp_path)) as state:
-        async with Runtime.attach(persistence=state, features=model_features(
+        async with Runtime.open(persistence=state, features=model_features(
             _Models(_UsageFunctionModel(respond)), _features(),
         )) as runtime:
             session = await runtime.agents.get().create_session("late-receipt-wait")

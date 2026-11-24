@@ -379,7 +379,7 @@ async def test_runtime_selects_source_authority_before_sync_execution_reservatio
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     cache = _BorrowedCache()
     async with _opened("sqlite", tmp_path, cache) as state:
-        async with Runtime.attach(persistence=state, features=features) as runtime:
+        async with Runtime.open(persistence=state, features=features) as runtime:
             session = await runtime.agents.get().create_session("session")
             starting = asyncio.create_task(session.start("question", idempotency_key="request"))
             try:
@@ -425,17 +425,17 @@ async def test_failed_host_binding_does_not_admit_runtime_or_close_borrowed_cach
     def reject(*args, **kwargs):
         raise failed
 
-    def forbidden_attach(*args, **kwargs):
+    def forbidden_open(*args, **kwargs):
         attempted.append("runtime")
         raise AssertionError("a failed binding must not admit Runtime")
 
     monkeypatch.setattr(StateTurnCoordination, "__init__", reject)
-    monkeypatch.setattr(Runtime, "attach", forbidden_attach)
+    monkeypatch.setattr(Runtime, "open", forbidden_open)
     with pytest.raises(OSError) as caught:
         async with Persistence.open("source-turns", storage=configuration) as state:
             source = state.execution.executions.state_store
             configuration.coordination.bind(state)
-            Runtime.attach(persistence=state, features=RuntimeFeatures("not-admitted"))
+            Runtime.open(persistence=state, features=RuntimeFeatures("not-admitted"))
     assert caught.value is failed
     assert attempted == []
     assert not state.ready

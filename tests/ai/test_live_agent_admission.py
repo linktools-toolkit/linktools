@@ -16,7 +16,7 @@ from linktools.ai.capability import CapabilityContribution, SkillDefinition, too
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionHandle
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.runtime._agent import Agent
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.runtime.agent_execution import AgentExecutionPort
@@ -45,7 +45,7 @@ def _compiler(
     *, models: Mapping[str, object] | None = None,
 ) -> AgentCompiler:
     return AgentCompiler(
-        models={"default": create_model(api="openai", model="test")} if models is None else models,
+        models={"default": create_model_binding(api="openai", model="test")} if models is None else models,
         candidates=candidates, agents={spec.id: spec for spec in specs},
     )
 
@@ -139,7 +139,7 @@ async def test_single_observation_resolves_root_and_children_without_unrelated_m
             AgentSpec("root", revision=calls, allow_subagents=("child",)),
             AgentSpec("child", revision=calls, allow_subagents=()),
             AgentSpec("unused", model="unused", allow_subagents=()),
-        ), models={"default": create_model(api="openai", model="test"), "unused": unused_model})
+        ), models={"default": create_model_binding(api="openai", model="test"), "unused": unused_model})
 
     resolver = _AgentBindingResolver(AgentCatalog({}), old, current_compiler=provider)
     for expected in (1, 2):
@@ -291,7 +291,7 @@ def test_restore_filters_current_directory_but_preserves_admitted_run_hooks() ->
         return candidate.id != "hidden"
 
     second = AgentCompiler(
-        models={"default": create_model(api="openai", model="test")},
+        models={"default": create_model_binding(api="openai", model="test")},
         agents={"root": AgentSpec("root", revision=3, allow_tools=(), allow_capabilities=())},
         candidates=(_tool("visible"), _tool("hidden"), first_hook,
                     CapabilityContribution.from_opaque("capability", "later", _Extra("later"))),
@@ -367,7 +367,7 @@ async def test_admission_memory_scope_comes_from_current_runtime_contributions(w
 def test_current_step_compilation_reuses_admitted_model_without_loading_route() -> None:
     def unexpected_model():
         raise AssertionError("Per-step resolution must not reload the model route")
-    model = create_model(api="openai", model="admitted")
+    model = create_model_binding(api="openai", model="admitted")
     compiler = _compiler((AgentSpec("root", allow_subagents=()),), (_tool("current"),),
                          models={"default": unexpected_model})
     compiled = compiler.compile_current(AgentSpec("root", allow_subagents=()), model=model)
@@ -437,7 +437,7 @@ async def test_restored_handle_resolves_hooks_and_routes_added_after_runtime_sta
     features = model_features(model, RuntimeFeatures("live-restore"))
     features.agent("root", allow_subagents=())
     async with Persistence.open("live-restore", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             features.capability(_Extra(), revision=2, scope="agent")
             features.model("added", model)
             features.agent("root", revision=2, model="added", allow_subagents=())
@@ -484,7 +484,7 @@ async def test_live_derived_handle_validates_current_scope_and_keeps_ordered_ove
     features = model_features(_Models(_UsageFunctionModel(respond)), RuntimeFeatures("live-derive"))
     features.agent("root", allow_tools=("before",), allow_skills=("before",), allow_subagents=())
     async with Persistence.open("live-derive", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             features.agent("root", revision=2, allow_tools=("before", "after"),
                            allow_skills=("before", "after"), allow_subagents=())
             derived = runtime.agents.get("root").derive(allow_tools=("after",), allow_skills=("after",))
@@ -538,7 +538,7 @@ async def test_restored_derivation_keeps_historical_contract_across_entry_points
                    allow_subagents=("child",), metadata={"origin": "historical"})
     features.agent("child", revision=1, allow_subagents=())
     async with Persistence.open("captured-derive", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             observed = await runtime.agents.get("root").resolve()
             output = bind_output(_Answer)
             historical = replace(observed.execution_port.binding_contract,

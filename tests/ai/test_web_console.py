@@ -206,7 +206,7 @@ async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pyt
     features = RuntimeFeatures("web-session-events")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage = PersistenceStorage.in_memory(coordination=InMemoryCacheBackend(max_bytes=0))
-    async with Persistence.open("web-session-events", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("web-session-events", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(RuntimeUsageModels(), features),
     ) as runtime:
         app = create_app(runtime=runtime)
@@ -284,7 +284,7 @@ async def test_failed_history_debug_reports_stage_without_payload_or_query(
         async def inspect_session(self, identity: str, *, principal: object) -> dict[str, object]:
             return {"session_id": identity, "status": "OPEN"}
 
-        async def session_timeline(self, identity: str, **kwargs: object) -> None:
+        async def session_detail(self, identity: str, **kwargs: object) -> None:
             raise AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR, "private exception prompt",
                 operation_id="safe-operation", safe_details=details,
@@ -334,7 +334,7 @@ async def test_local_boundary_blocks_cross_site_fetches_and_unmarked_mutations()
 async def test_session_creation_returns_public_view_and_replays_without_duplicates() -> None:
     features = model_features(RuntimeUsageModels(), RuntimeFeatures("web-session-create"))
     async with Persistence.open("web-session-create", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             async with client(create_app(runtime=runtime)) as http:
                 request = {"session_id": "created", "request_id": "create", "title": "New session"}
                 created = await http.post("/api/sessions", json=request, headers=_HEADERS)
@@ -360,7 +360,7 @@ async def test_session_creation_returns_public_view_and_replays_without_duplicat
 async def test_session_creation_does_not_require_session_read_authority() -> None:
     from linktools.ai.core import AuthorizationAction, Principal, ResourceRef, TenantAuthorizationPolicy
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.execution import CreateSessionRequest
+    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.runtime import Session
 
     class CreateOnlyAuthorization(TenantAuthorizationPolicy):
@@ -403,7 +403,7 @@ async def test_session_execution_history_trace_result_and_metrics_use_runtime() 
     features = RuntimeFeatures("web-test")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('web-test', storage=PersistenceStorage.in_memory()) as persistence_104, Runtime.attach(persistence=persistence_104, metrics=metrics, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('web-test', storage=PersistenceStorage.in_memory()) as persistence_104, Runtime.open(persistence=persistence_104, metrics=metrics, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime, metrics=metrics)) as http:
             request = {"session_id": "web-session", "request_id": "new-session", "title": "Review <script>"}
             first = await http.post("/api/sessions", json=request, headers=_HEADERS)
@@ -476,7 +476,7 @@ async def test_reopened_console_preserves_history_and_hides_unavailable_resource
         return result
 
     async with Persistence.open("web-reopen", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features()) as runtime:
+        async with Runtime.open(persistence=persistence, features=features()) as runtime:
             visible = await runtime.agents.get().create_session("visible")
             other = Principal("other-owner", runtime.tenant_id, "service")
             await runtime.agents.get().create_session("private", principal=other)
@@ -484,12 +484,12 @@ async def test_reopened_console_preserves_history_and_hides_unavailable_resource
             await visible_execution.wait()
 
     async with Persistence.open("web-reopen", storage=storage, tenant_id="other-tenant") as persistence:
-        async with Runtime.attach(persistence=persistence, features=features()) as runtime:
+        async with Runtime.open(persistence=persistence, features=features()) as runtime:
             foreign_execution = await runtime.agents.get().start("other tenant message")
             await foreign_execution.wait()
 
     async with Persistence.open("web-reopen", storage=storage) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features()) as runtime:
+        async with Runtime.open(persistence=persistence, features=features()) as runtime:
             async with client(create_app(runtime=runtime)) as http:
                 restored = await http.get("/api/session?session_id=visible")
                 assert restored.status_code == 200, restored.text
@@ -531,7 +531,7 @@ async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     features = RuntimeFeatures("web-busy")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('web-busy', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.attach(persistence=persistence_190, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('web-busy', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.open(persistence=persistence_190, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
             assert created.status_code == 201
@@ -584,7 +584,7 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     features = RuntimeFeatures("web-clients")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('web-clients', storage=PersistenceStorage.in_memory()) as persistence_243, Runtime.attach(persistence=persistence_243, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('web-clients', storage=PersistenceStorage.in_memory()) as persistence_243, Runtime.open(persistence=persistence_243, features=model_features(RuntimeUsageModels(), features)) as runtime:
         app = create_app(runtime=runtime)
         async with client(app) as first, client(app) as second:
             clients = (first, second)
@@ -633,7 +633,7 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
 
 @pytest.mark.asyncio
 async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_snapshot() -> None:
-    async with Persistence.open('web-stream', storage=PersistenceStorage.in_memory()) as persistence_292, Runtime.attach(persistence=persistence_292, features=model_features(RuntimeUsageModels(), _persistence_capabilities(trace=True))) as runtime:
+    async with Persistence.open('web-stream', storage=PersistenceStorage.in_memory()) as persistence_292, Runtime.open(persistence=persistence_292, features=model_features(RuntimeUsageModels(), _persistence_capabilities(trace=True))) as runtime:
         execution = await runtime.agents.get().start("hello")
         await execution.wait()
         async with client(create_app(runtime=runtime)) as http:
@@ -662,7 +662,7 @@ async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_p
     storage = PersistenceStorage.from_root(tmp_path)
     features = RuntimeFeatures("web-history")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('default', storage=storage) as persistence_322, Runtime.attach(persistence=persistence_322, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('default', storage=storage) as persistence_322, Runtime.open(persistence=persistence_322, features=model_features(RuntimeUsageModels(), features)) as runtime:
         execution = await runtime.agents.get().start("saved", session_id="session")
         await execution.wait()
         identity = execution.execution_id
@@ -817,7 +817,7 @@ async def test_failed_execution_stream_preserves_diagnostics_and_user_content() 
         raise ValueError("api_key=provider-secret")
 
     prompt = '{"error_diagnostics":{"exception_message":"user content"}}'
-    async with Persistence.open('web-failed-stream', storage=PersistenceStorage.in_memory()) as persistence_464, Runtime.attach(persistence=persistence_464, features=model_features(_Models(_UsageFunctionModel(fail)), _persistence_capabilities(trace=True))) as runtime:
+    async with Persistence.open('web-failed-stream', storage=PersistenceStorage.in_memory()) as persistence_464, Runtime.open(persistence=persistence_464, features=model_features(_Models(_UsageFunctionModel(fail)), _persistence_capabilities(trace=True))) as runtime:
         execution = await runtime.agents.get().start(prompt)
         await execution.wait()
         async with client(create_app(runtime=runtime)) as http:
@@ -898,7 +898,7 @@ def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch
 
     monkeypatch.setattr(Runtime, "open", tracked_open)
     monkeypatch.setattr(common_command, "_local_runtime_assets", create_assets)
-    monkeypatch.setattr(common_command._ModelOptions, "create_model", lambda _self: RuntimeUsageModels())
+    monkeypatch.setattr(common_command._ModelOptions, "create_model_binding", lambda _self: RuntimeUsageModels())
     monkeypatch.setattr(uvicorn, "Server", Server)
     args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--model", "fake"])
     with pytest.raises(CommandError):
@@ -957,11 +957,16 @@ def test_web_cli_provides_default_memory_tools_to_messages(monkeypatch: pytest.M
                     execution = await runtimes[0].executions.get(response.json()["execution_id"])
                     result = (await execution.wait(timeout_seconds=10)).result
                     assert result.status.value == "SUCCEEDED", result
+                    history = await http.get("/api/session?session_id=memory-session")
+                    turns = history.json()["timeline"]["items"]
+                    turn = next(item for item in turns if item["execution_id"] == execution.execution_id)
+                    tool, = turn["process"]
+                    assert tool["argument_preview"] == "web-notes.md"
                     if prompt == "recall":
                         assert result.output["text"].strip() == "remembered from web"
 
     monkeypatch.setattr(Runtime, "open", tracked_open)
-    monkeypatch.setattr(common_command._ModelOptions, "create_model", lambda _self: _Models(_UsageFunctionModel(respond)))
+    monkeypatch.setattr(common_command._ModelOptions, "create_model_binding", lambda _self: _Models(_UsageFunctionModel(respond)))
     monkeypatch.setattr(uvicorn, "Server", Server)
     args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--model", "fake"])
     assert web_command.command.run(args) == 0
@@ -1063,7 +1068,7 @@ async def test_opaque_session_ids_round_trip_through_query_identity() -> None:
     identity = "../team/conversation?notes#你好"
     features = RuntimeFeatures("opaque-web")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('opaque-web', storage=PersistenceStorage.in_memory()) as persistence_641, Runtime.attach(persistence=persistence_641, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Persistence.open('opaque-web', storage=PersistenceStorage.in_memory()) as persistence_641, Runtime.open(persistence=persistence_641, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": identity, "request_id": "create-opaque", "title": "Opaque session"}, headers=_HEADERS)
             assert created.status_code == 201, created.text
@@ -1092,7 +1097,7 @@ async def test_end_recovery_required_execution_uses_durable_cancel_and_replays_r
     try:
         application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('web-end-recovery', storage=PersistenceStorage.in_memory()) as persistence_670, Runtime.attach(persistence=persistence_670, features=model_features(_ToolModels(), application)) as runtime, client(create_app(runtime=runtime)) as http:
+        async with Persistence.open('web-end-recovery', storage=PersistenceStorage.in_memory()) as persistence_670, Runtime.open(persistence=persistence_670, features=model_features(_ToolModels(), application)) as runtime, client(create_app(runtime=runtime)) as http:
             session = await runtime.agents.get("default").create_session("session")
             execution = await session.start("inspect", idempotency_key="turn")
             await asyncio.wait_for(started.wait(), 10)
@@ -1153,29 +1158,30 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
     from datetime import datetime, timezone
     from types import SimpleNamespace
 
-    from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Page, Principal
+    from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Page, Principal, SessionStatus
     from linktools.ai.execution import ExecutionStreamEvent, ExecutionTreeEvent
-    from linktools.ai.session import SessionTurn, SessionTurnItem, ToolProcessItem
+    from linktools.ai.session import SessionDetail, SessionTurn, SessionTurnItem, ToolProcessItem
 
     principal = Principal("runtime", "default")
     raw_marker = "NOT-FOR-CHAT"
     thinking = "  SDK thinking\n<literal text>  "
-    process = ToolProcessItem("tool:id", "lookup", "SUCCEEDED", (2, 1))
+    process = ToolProcessItem("tool:id", "lookup", "SUCCEEDED", (2, 1), elapsed_ms=19)
     now = datetime.now(timezone.utc)
 
     class History:
         async def inspect_session(self, identity, **kwargs):
             return {"session_id": identity}
 
-        async def session_timeline(self, identity, **kwargs):
-            return Page((SessionTurn(
+        async def session_detail(self, identity, **kwargs):
+            return SessionDetail(await self.inspect_session(identity, **kwargs), Page((SessionTurn(
                 "execution", ExecutionStatus.SUCCEEDED, now, now, "user", True,
                 (SessionTurnItem(1, "thinking", thinking),
-                 SessionTurnItem(2, "tool_call", raw_marker),
+                 SessionTurnItem(2, "tool_call", raw_marker, "lookup", "id"),
                  SessionTurnItem(3, "tool_result", raw_marker),
-                 SessionTurnItem(4, "assistant", "answer")),
+                 SessionTurnItem(4, "assistant", "answer"),
+                 SessionTurnItem(5, "tool_call", raw_marker, "lookup", "id")),
                 process=(process,),
-            ),))
+            ),)))
 
         async def inspect_execution(self, identity, **kwargs):
             from linktools.ai.history import ExecutionInfo
@@ -1194,7 +1200,8 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
                 ("ASSISTANT_THINKING_DELTA", {"text": thinking, "signature": raw_marker}, 0),
                 ("ASSISTANT_THINKING_DELTA", {"text": raw_marker}, 1),
                 ("TOOL_CALL_FINISHED", {"call_id": "id", "tool_name": "lookup", "status": "SUCCEEDED",
-                                        "result": raw_marker, "tool_position": [2, 1]}, 0),
+                                        "result": raw_marker, "tool_position": [2, 1], "agent_run_seq": 1,
+                                        "tool_model_request_seq": 2, "model_request_seq": 7, "tool_elapsed_ms": 19}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": "answer", "internal": raw_marker}, 0),
                 ("ASSISTANT_TEXT_DELTA", {"text": raw_marker}, 1),
                 ("MODEL_ATTEMPT_FINISHED", {"status": "SUCCEEDED", "provider_request": raw_marker}, 0),
@@ -1212,27 +1219,96 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         assert identity == "execution" and kwargs["principal"] == principal
         return Execution()
 
+    closed = asyncio.Event()
+
+    async def watch_session(identity, **kwargs):
+        assert identity == "session" and kwargs["principal"] == principal
+        yield SimpleNamespace(active_execution_id="execution", status=SessionStatus.OPEN, revision=0)
+        await closed.wait()
+
     runtime = SimpleNamespace(history=History(), default_principal=principal,
+                              sessions=SimpleNamespace(watch=watch_session),
+                              events=SimpleNamespace(has_local_producer=lambda _identity: True),
                               executions=SimpleNamespace(get=get_execution))
-    async with client(create_app(runtime=runtime)) as http:
+    app = create_app(runtime=runtime)
+    async with client(app) as http:
         history = await http.get("/api/session?session_id=session")
         assert history.status_code == 200, history.text
         assert raw_marker not in history.text
         turn = history.json()["timeline"]["items"][0]
         assert [(item["item_kind"], item["content"]) for item in turn["items"]] == [
-            ("thinking", thinking), ("assistant", "answer"),
+            ("thinking", thinking), ("tool_call", None), ("assistant", "answer"),
         ]
-        assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup", "status": "SUCCEEDED", "position": [2, 1]}]
+        assert turn["items"][1]["tool_call_id"] == "id"
+        assert turn["items"][1]["tool_name"] is None
+        assert turn["process"] == [{"kind": "tool", "key": "tool:id", "tool_name": "lookup",
+                                    "status": "SUCCEEDED", "position": [2, 1], "elapsed_ms": 19}]
+        removed = await http.get("/api/executions/execution/events?view=chat")
+        assert removed.status_code == 400
+        assert removed.json()["error_code"] == "REQUEST_FIELD_INVALID"
 
-        response = await http.get("/api/executions/execution/events?view=chat")
-        assert response.status_code == 200, response.text
-        assert raw_marker not in response.text
-        frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
-        assert [frame.get("type") for frame in frames] == ["event", "process", "event", "event", None]
-        assert frames[0]["item"]["event"]["payload"] == {"text": thinking}
-        assert frames[1]["item"] == turn["process"][0]
-        assert frames[2]["item"]["event"]["payload"] == {"text": "answer"}
-        assert frames[-1]["status"] == "SUCCEEDED"
+    started = False
+
+    async def receive():
+        nonlocal started
+        if not started:
+            started = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await closed.wait()
+        return {"type": "http.disconnect"}
+
+    frames = []
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            assert message["status"] == 200
+        body = message.get("body", b"").decode()
+        assert raw_marker not in body
+        name = next((line[7:] for line in body.splitlines() if line.startswith("event: ")), "message")
+        for line in body.splitlines():
+            if line.startswith("data: "):
+                value = json.loads(line[6:])
+                frames.append((name, value))
+                if name == "execution" and value["event"] == "snapshot":
+                    closed.set()
+
+    path = "/api/session/events"
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
+             "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"session_id=session&view=chat",
+             "headers": [], "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 12345)}
+    await asyncio.wait_for(app(scope, receive, send), 5)
+    assert [name for name, _ in frames] == ["message", "thinking", "execution", "text", "execution", "execution"]
+    assert frames[1][1] == {"execution_id": "execution", "text": thinking}
+    assert frames[2][1]["data"]["item"] == turn["process"][0]
+    assert frames[2][1]["data"]["order"] == [1, 2, 1]
+    assert "elapsed_ms" not in frames[2][1]["data"]
+    assert frames[3][1] == {"execution_id": "execution", "text": "answer"}
+    assert frames[-1][1]["data"]["status"] == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_web_exact_session_turn_keeps_pending_and_recovery_distinct_without_latest_fallback() -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    class ExactHistory:
+        tenant_id = "default"
+
+        async def session_turn(self, identity, execution_id, **kwargs):
+            assert (identity, execution_id) == ("session", "requested")
+            raise AIError(self.failure)
+
+    history = ExactHistory()
+    async with client(create_app(history=history)) as http:
+        for code, status in (
+            (ErrorCode.SESSION_TURN_PENDING, 409),
+            (ErrorCode.SESSION_HISTORY_UNAVAILABLE, 503),
+            (ErrorCode.STORAGE_RECOVERY_REQUIRED, 503),
+            (ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, 503),
+        ):
+            history.failure = code
+            response = await http.get("/api/session?session_id=session&execution_id=requested")
+            assert response.status_code == status, response.text
+            assert response.json()["code"] == code.value
 
 
 def test_compact_chat_part_boundary_and_append_share_identity() -> None:
@@ -1248,7 +1324,7 @@ def test_compact_chat_part_boundary_and_append_share_identity() -> None:
                 "part_index": 0, "part_start": start, "text": text, "stream_truncated": truncated,
             }),
             cursor="checkpoint",
-        ), compact=True)
+        ))
 
     identity = {"execution_id": "run", "part": "1.2.3.0"}
     assert frame("", start=True) == ("thinking", {**identity, "start": True}, "checkpoint")
@@ -1258,9 +1334,8 @@ def test_compact_chat_part_boundary_and_append_share_identity() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("session_stream", [False, True], ids=["execution-endpoint", "session-endpoint"])
 async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
-    tmp_path: Path, session_stream: bool,
+    tmp_path: Path,
 ) -> None:
     from pydantic_ai.models.function import DeltaThinkingPart, FunctionModel
 
@@ -1272,10 +1347,13 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
     observed = []
     compact = []
     terminal = []
+    thinking_durations: dict[tuple[int, ...], int] = {}
+    completed_attempts: set[tuple[int, ...]] = set()
     cursor = None
 
     async def model(_messages, _info):
         yield {0: DeltaThinkingPart(content=thinking, signature=signature)}
+        await asyncio.sleep(0.015)
         yield answer
         await release.wait()
         yield "and last"
@@ -1303,7 +1381,7 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
             assert active.json()["timeline"]["next_cursor"] is None
             turn, = active.json()["timeline"]["items"]
             assert turn["execution_id"] == execution_id and not turn["conversation_committed"]
-        path = "/api/session/events" if session_stream else f"/api/executions/{execution_id}/events"
+        path = "/api/session/events"
 
         def record_delta(kind: str, text: str) -> None:
             observed.append((kind, text))
@@ -1337,39 +1415,53 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                         assert signature not in line
                         payload = json.loads(line[6:])
                         name = event_name
-                        if session_stream:
-                            if event_name in ("thinking", "text"):
-                                assert payload["execution_id"] == execution_id and cursor
-                                assert payload.keys() <= {"execution_id", "part", "text", "start", "truncated"}
-                                if "part" in payload:
-                                    assert len(payload["part"].split(".")) == 4
-                                compact.append((event_name, payload))
-                                if "text" in payload:
-                                    kind = "THINKING" if event_name == "thinking" else "TEXT"
-                                    record_delta(f"ASSISTANT_{kind}_DELTA", payload["text"])
-                                continue
-                            if event_name != "execution":
-                                assert event_name == "message", payload
-                                if payload["active_execution_id"] == execution_id:
-                                    ready.set()
-                                elif payload["active_execution_id"] is None:
-                                    idle.set()
-                                continue
-                            assert payload["execution_id"] == execution_id
-                            name, payload = payload["event"], payload["data"]
-                            if name == "message":
-                                assert "cursor" not in payload, "Chat resumes from SSE id only"
+                        if event_name in ("thinking", "text"):
+                            assert payload["execution_id"] == execution_id and cursor
+                            assert payload.keys() <= {"execution_id", "part", "text", "start", "truncated"}
+                            if "part" in payload:
+                                assert len(payload["part"].split(".")) == 4
+                            compact.append((event_name, payload))
+                            if "text" in payload:
+                                kind = "THINKING" if event_name == "thinking" else "TEXT"
+                                record_delta(f"ASSISTANT_{kind}_DELTA", payload["text"])
+                            continue
+                        if event_name != "execution":
+                            assert event_name == "message", payload
+                            if payload["active_execution_id"] == execution_id:
+                                ready.set()
+                            elif payload["active_execution_id"] is None:
+                                idle.set()
+                            continue
+                        assert payload["execution_id"] == execution_id
+                        name, payload = payload["event"], payload["data"]
+                        if name == "message":
+                            assert "cursor" not in payload, "Chat resumes from SSE id only"
                         assert name != "observation_error", payload
                         if name == "snapshot":
                             terminal.append(payload["status"])
-                        event = payload.get("item", {}).get("event", {})
-                        if event.get("event_type") in ("ASSISTANT_THINKING_DELTA", "ASSISTANT_TEXT_DELTA"):
-                            assert not session_stream, "positioned Chat deltas use the named compact frames"
-                            record_delta(event["event_type"], event["payload"]["text"])
+                        part_event = payload.get("item", {}).get("event", {})
+                        if part_event.get("event_type") == "MODEL_REQUEST_FINISHED":
+                            lifecycle = part_event["payload"]
+                            assert lifecycle["status"] == "SUCCEEDED"
+                            completed_attempts.add(tuple(lifecycle[key] for key in (
+                                "agent_run_seq", "model_request_seq", "stream_attempt_seq",
+                            )))
+                        if part_event.get("event_type") == "ASSISTANT_PART_COMPLETED":
+                            timing = part_event["payload"]
+                            assert set(timing) == {"agent_run_seq", "model_request_seq", "stream_attempt_seq",
+                                                   "part_index", "thinking_elapsed_ms"}
+                            assert type(timing["thinking_elapsed_ms"]) is int and timing["thinking_elapsed_ms"] >= 0
+                            position = tuple(timing[key] for key in (
+                                "agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index",
+                            ))
+                            assert thinking_durations.setdefault(position, timing["thinking_elapsed_ms"]) == timing["thinking_elapsed_ms"]
+                        assert payload.get("item", {}).get("event", {}).get("event_type") not in (
+                            "ASSISTANT_THINKING_DELTA", "ASSISTANT_TEXT_DELTA",
+                        ), "positioned Chat deltas use the named compact frames"
 
             scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",
                      "scheme": "http", "path": path, "raw_path": path.encode(),
-                     "query_string": b"view=chat&session_id=session" if session_stream else b"view=chat",
+                     "query_string": b"view=chat&session_id=session",
                      "headers": [(b"last-event-id", resume.encode())] if resume else [],
                      "server": ("127.0.0.1", 8765), "client": ("127.0.0.1", 12345)}
             await app(scope, receive, send)
@@ -1380,28 +1472,26 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
             await asyncio.wait_for(preview.wait(), 5)
             assert not release.is_set() and not stream.done()
             assert observed == [("ASSISTANT_THINKING_DELTA", thinking), ("ASSISTANT_TEXT_DELTA", answer)]
-            if session_stream:
-                assert cursor
-                disconnected.set()
-                await asyncio.wait_for(stream, 5)
-                disconnected, ready = asyncio.Event(), asyncio.Event()
-                stream = asyncio.create_task(connect(disconnected, ready, resume=cursor))
-                await asyncio.wait_for(ready.wait(), 5)
+            assert cursor
+            disconnected.set()
+            await asyncio.wait_for(stream, 5)
+            disconnected, ready = asyncio.Event(), asyncio.Event()
+            stream = asyncio.create_task(connect(disconnected, ready, resume=cursor))
+            await asyncio.wait_for(ready.wait(), 5)
             release.set()
             await asyncio.wait_for(last_delta.wait(), 5)
             finish.set()
-            if session_stream:
-                await asyncio.wait_for(idle.wait(), 5)
-                assert not stream.done(), "session SSE stays open after the turn"
-                disconnected.set()
+            await asyncio.wait_for(idle.wait(), 5)
+            assert not stream.done(), "session SSE stays open after the turn"
+            disconnected.set()
             await asyncio.wait_for(stream, 10)
             assert observed == [
                 ("ASSISTANT_THINKING_DELTA", thinking), ("ASSISTANT_TEXT_DELTA", answer),
                 ("ASSISTANT_TEXT_DELTA", "and last"),
             ]
-            if session_stream:
-                assert {kind for kind, _ in compact} == {"thinking", "text"}
-            if terminal or not session_stream:
+            assert {kind for kind, _ in compact} == {"thinking", "text"}
+            assert {position[:3] for position in thinking_durations} == completed_attempts and completed_attempts
+            if terminal:
                 assert terminal == ["SUCCEEDED"]
             async with client(app) as http:
                 again = await http.post("/api/session/messages?session_id=session", json={
@@ -1420,6 +1510,9 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                 saved, = finished.json()["timeline"]["items"]
                 assert saved["execution_id"] == execution_id and saved["conversation_committed"]
                 assert signature not in finished.text
+                saved_thinking, = (item for item in saved["items"] if item["item_kind"] == "thinking")
+                assert list(thinking_durations.values()) == [saved_thinking["elapsed_ms"]]
+                assert saved_thinking["content"] == thinking
         finally:
             release.set()
             finish.set()
@@ -1428,16 +1521,30 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                 stream.cancel()
             await asyncio.gather(stream, return_exceptions=True)
 
+    async with common_command._open_local_runtime(
+        Workspace.load(tmp_path), model=_Models(FunctionModel(stream_function=model)),
+    ) as reopened, client(create_app(runtime=reopened.runtime)) as http:
+        restored = await http.get("/api/session", params={
+            "session_id": "session", "execution_id": execution_id,
+        })
+        assert restored.status_code == 200, restored.text
+        restored_turn, = restored.json()["timeline"]["items"]
+        restored_thinking, = (item for item in restored_turn["items"] if item["item_kind"] == "thinking")
+        assert restored_thinking["elapsed_ms"] == saved_thinking["elapsed_ms"]
+
 
 @pytest.mark.asyncio
-async def test_chat_tool_positions_match_history_when_parallel_results_finish_out_of_order() -> None:
+async def test_chat_tool_positions_match_history_when_parallel_results_finish_out_of_order(tmp_path: Path) -> None:
     from linktools.ai.capability import AgentContext
     from linktools.ai.session import project_tool_process_event
+    from linktools.ai.web._app import _chat_frame
     from pydantic_ai.messages import (
         ModelMessage,
         ModelResponse,
         TextPart,
+        ThinkingPart,
         ToolCallPart,
+        ToolReturn,
         ToolReturnPart,
     )
     from pydantic_ai.models.function import AgentInfo
@@ -1446,26 +1553,32 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
 
     release_first = asyncio.Event()
 
-    async def lookup(context: AgentContext[None], label: str) -> str:
-        if label == "first":
+    async def lookup(context: AgentContext[None], path: str) -> ToolReturn:
+        if path == "first":
             await release_first.wait()
-        return label
+        return ToolReturn(return_value=path, metadata=f"application metadata: {path}")
 
     def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
-        if any(isinstance(part, ToolReturnPart) for part in messages[-1].parts):
+        results = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
+        if results:
+            assert {part.tool_call_id: part.metadata for part in results} == {
+                "z": "application metadata: first", "a": "application metadata: second",
+            }
             return ModelResponse(parts=[TextPart("done")])
         return ModelResponse(parts=[
-            ToolCallPart("lookup", {"label": "first"}, tool_call_id="z"),
-            ToolCallPart("lookup", {"label": "second"}, tool_call_id="a"),
+            ToolCallPart("read_file", {"path": "first"}, tool_call_id="z"),
+            ThinkingPart("Between calls"),
+            ToolCallPart("read_file", {"path": "second"}, tool_call_id="a"),
         ])
 
     features = _persistence_capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.tool(lookup, effect_policy="none")
-    features.agent("default", model="default", allow_tools=("lookup",))
-    model = _Models(_UsageFunctionModel(respond))
-    async with Persistence.open("web-tool-order", storage=PersistenceStorage.in_memory()) as persistence, Runtime.attach(
-        persistence=persistence, features=model_features(model, features),
+    features.tool(lookup, name="read_file", effect_policy="none")
+    features.agent("default", model="default", allow_tools=("read_file",))
+    model_features(_Models(_UsageFunctionModel(respond)), features)
+    storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    async with Persistence.open("web-tool-order", storage=storage) as persistence, Runtime.open(
+        persistence=persistence, features=features,
     ) as runtime, client(create_app(runtime=runtime)) as http:
         created = await http.post("/api/sessions", headers=_HEADERS,
                                   json={"session_id": "tools", "request_id": "create"})
@@ -1476,6 +1589,8 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         execution = await runtime.executions.get(accepted.json()["execution_id"])
         started = []
         finished = []
+        orders = {}
+        live_elapsed: dict[str, int] = {}
         try:
             async with asyncio.timeout(10):
                 async for observation in execution.watch():
@@ -1483,9 +1598,18 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
                     item = project_tool_process_event(event.event_type, event.payload)
                     if item is None:
                         continue
+                    frame = _chat_frame(observation)
+                    assert frame is not None
+                    assert "argument_preview" not in frame[1]["item"]
+                    order = frame[1]["order"]
+                    assert orders.setdefault(item.key, order) == order
                     if item.status == "RUNNING":
+                        assert "elapsed_ms" not in frame[1]["item"]
                         started.append(item)
                     elif item.status == "SUCCEEDED":
+                        elapsed = frame[1]["item"]["elapsed_ms"]
+                        assert type(elapsed) is int and elapsed >= 0
+                        live_elapsed[item.key] = elapsed
                         finished.append(item)
                         if item.key == "tool:a":
                             release_first.set()
@@ -1498,19 +1622,38 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         assert [item.key for item in started] == ["tool:z", "tool:a"], turn
         assert [item.key for item in finished] == ["tool:a", "tool:z"], turn
         assert turn["conversation_committed"]
+        assert [(item["item_kind"], item["tool_call_id"], item["content"]) for item in turn["items"]] == [
+            ("tool_call", "z", None), ("thinking", None, "Between calls"),
+            ("tool_call", "a", None), ("assistant", None, "done"),
+        ]
+        assert orders["tool:z"][:2] == orders["tool:a"][:2]
+        assert (orders["tool:z"][2], orders["tool:a"][2]) == (0, 2)
         assert [item["key"] for item in turn["process"]] == ["tool:z", "tool:a"]
         saved = {item["key"]: tuple(item["position"]) for item in turn["process"]}
         assert {item.key: item.position for item in started} == saved
         assert {item.key: item.position for item in finished} == saved
 
+        assert {item["key"]: item["elapsed_ms"] for item in turn["process"]} == live_elapsed
+        assert "application metadata:" not in replay.text
+        assert all("argument_preview" not in item for item in turn["process"])
+
+    async with Persistence.open("web-tool-order", storage=storage) as persistence, Runtime.open(
+        persistence=persistence, features=features,
+    ) as runtime, client(create_app(runtime=runtime)) as http:
+        restored = await http.get("/api/session?session_id=tools")
+        assert restored.status_code == 200, restored.text
+        restored_turn, = restored.json()["timeline"]["items"]
+        assert {item["key"]: item["elapsed_ms"] for item in restored_turn["process"]} == live_elapsed
+
 
 @pytest.mark.asyncio
-async def test_passive_session_tool_notice_requires_event_authorization() -> None:
+@pytest.mark.parametrize("allowed", (True, False))
+async def test_passive_session_tool_notice_requires_event_authorization(allowed: bool) -> None:
     from types import SimpleNamespace
 
     from linktools.ai.core import Principal, SessionStatus
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.session import ToolProcessItem
+    from linktools.ai.session import project_tool_process_event
 
     class Feed:
         def subscribe(self, identity, on_process):
@@ -1526,19 +1669,167 @@ async def test_passive_session_tool_notice_requires_event_authorization() -> Non
         yield SimpleNamespace(status=SessionStatus.OPEN, active_execution_id="external", revision=1)
         await end.wait()
 
-    async def deny(identity, *, principal):
+    async def authorize(identity, *, principal):
         assert identity == "external" and principal.principal_id == "runtime"
-        feed.deliver("external", ToolProcessItem("tool:private", "private", "RUNNING"))
+        process = project_tool_process_event("TOOL_CALL_FINISHED", {
+            "call_id": "private", "tool_name": "private", "status": "SUCCEEDED", "tool_elapsed_ms": 42,
+        })
+        assert process is not None
+        feed.deliver("external", process)
         asyncio.get_running_loop().call_later(0.05, end.set)
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if not allowed:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
     runtime = SimpleNamespace(
         history=None, default_principal=Principal("runtime", "default"),
         sessions=SimpleNamespace(watch=watch),
-        events=SimpleNamespace(has_local_producer=lambda _: False, authorize_read=deny),
+        events=SimpleNamespace(has_local_producer=lambda _: False, authorize_read=authorize),
     )
     async with client(create_app(runtime=runtime, session_notices=feed)) as http:
         response = await http.get("/api/session/events?session_id=session")
     assert response.status_code == 200, response.text
-    assert "session_process" not in response.text and "private" not in response.text
+    if allowed:
+        assert "event: session_process" in response.text
+        payload = next(json.loads(line[6:]) for line in response.text.splitlines()
+                       if line.startswith("data: ") and '"elapsed_ms"' in line)
+        assert payload["item"]["elapsed_ms"] == 42
+    else:
+        assert "session_process" not in response.text and "private" not in response.text
     assert '"active_execution_id": "external"' in response.text
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [True, False])
+async def test_workspace_tool_title_requires_native_registration(tmp_path: Path, native: bool) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+
+    from linktools.ai.capability import ExecutionCapability, TraceCapability
+    from linktools.ai.workspace import Workspace
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, workspace_features
+
+    (tmp_path / "README.md").write_text("private source contents", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("second source contents", encoding="utf-8")
+
+    def respond(messages, _info):
+        if any(isinstance(part, ToolReturnPart) for part in messages[-1].parts):
+            return ModelResponse(parts=[TextPart("done")])
+        return ModelResponse(parts=[
+            ToolCallPart("read_file", {"path": "README.md"}, tool_call_id="simple"),
+            ToolCallPart("read_file", {"path": ["README.md", "notes.txt"]}, tool_call_id="complex"),
+        ])
+
+    if native:
+        features = workspace_features("tool-preview", workspace=Workspace.load(tmp_path))
+    else:
+        features = RuntimeFeatures()
+
+        async def read_file(path: str | list[str]) -> str:
+            return "custom source"
+
+        features.tool(read_file, effect_policy="none")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.capability(TraceCapability(), scope="runtime")
+    features.agent("default", allow_tools=("read_file",))
+    model_features(_Models(_UsageFunctionModel(respond)), features)
+    async with Persistence.open("tool-preview", storage=PersistenceStorage.in_memory()) as state, Runtime.open(
+        persistence=state, features=features,
+    ) as runtime, client(create_app(runtime=runtime)) as http:
+        session = await runtime.agents.get("default").create_session("preview")
+        execution = await session.start("read the docs")
+        observed = {}
+
+        async def on_event(item) -> None:
+            if item.event.event_type == "TOOL_CALL_STARTED":
+                payload = item.event.payload
+                observed[f"tool:{payload['call_id']}"] = payload.get("argument_preview")
+
+        assert (await execution.wait(
+            timeout_seconds=10, on_event=on_event, include_event_content=True,
+        )).result.status.value == "SUCCEEDED"
+        history = await http.get("/api/session?session_id=preview")
+        assert history.status_code == 200, history.text
+        turn, = history.json()["timeline"]["items"]
+        assert {item["key"]: item.get("argument_preview") for item in turn["process"]} == observed == {
+            "tool:simple": "README.md" if native else None, "tool:complex": None,
+        }
+        assert "private source contents" not in history.text and "notes.txt" not in history.text
+
+        trace = await execution.model_interactions(include_content=True)
+        first_tool, = trace.items[0].request["parameters"]["function_tools"]
+        metadata = first_tool["metadata"]
+        assert metadata["linktools.ai.effect_policy"] == "none"
+        assert "linktools.ai.argument_preview_field" not in metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry", [False, True])
+async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit_copy(
+    tmp_path: Path, retry: bool,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+
+    from linktools.ai.capability import AgentContext, ToolCallFailed, ToolCallRetry
+    from linktools.ai.execution.events import project_event_payload
+    from linktools.ai.web._app import _chat_frame
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+    failure = "Use the original filename.\n  The second line is also model-visible."
+    release = asyncio.Event()
+    received = []
+
+    async def lookup(context: AgentContext[None]) -> str:
+        await release.wait()
+        raise (ToolCallRetry if retry else ToolCallFailed)(failure)
+
+    def respond(messages, _info):
+        for part in messages[-1].parts:
+            if isinstance(part, ToolReturnPart):
+                received.append(part.content)
+                return ModelResponse(parts=[TextPart("adapted")])
+        return ModelResponse(parts=[ToolCallPart("lookup", {}, tool_call_id="failed-lookup")])
+
+    features = _persistence_capabilities()
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.tool(lookup, effect_policy="none")
+    features.agent("default", allow_tools=("lookup",))
+    model_features(_Models(_UsageFunctionModel(respond)), features)
+    storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    async with Persistence.open("chat-tool-failure", storage=storage) as persistence, Runtime.open(
+        persistence=persistence, features=features,
+    ) as runtime:
+        session = await runtime.agents.get("default").create_session("failures")
+        execution = await session.start("lookup")
+        seen = []
+        try:
+            async with asyncio.timeout(10):
+                async for observation in execution.watch(include_content=True):
+                    frame = _chat_frame(observation)
+                    if frame is None or frame[1].get("type") != "process":
+                        continue
+                    item = frame[1]["item"]
+                    if item["status"] == "RUNNING":
+                        assert "error_message" not in item
+                        release.set()
+                    if item["status"] == "FAILED":
+                        seen.append(item["error_message"])
+                        event = observation.event
+                        projected = project_event_payload(event.event_type, event.payload, include_content=False)
+                        assert "error_message" not in projected
+        finally:
+            release.set()
+        assert (await execution.wait()).result.status.value == "SUCCEEDED"
+        assert received == seen == [failure]
+        audit = await execution.list_events(include_content=True)
+        failures = [event for event in audit.items if event.event_type == "TOOL_CALL_FINISHED"]
+        assert len(failures) == 1 and "error_message" not in failures[0].payload
+    async with Persistence.open("chat-tool-failure", storage=storage) as reopened, Runtime.open(
+        persistence=reopened, features=features,
+    ) as runtime, client(create_app(runtime=runtime)) as http:
+        replay = await http.get("/api/session?session_id=failures")
+        assert replay.status_code == 200, replay.text
+        turn, = replay.json()["timeline"]["items"]
+        item, = turn["process"]
+        assert item["status"] == "FAILED" and item["error_message"] == failure

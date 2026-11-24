@@ -76,7 +76,7 @@ async def test_tool_identity_and_explicit_trace_frontier(tmp_path, monkeypatch, 
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
     async with (
         Persistence.open("tool-call-identity", storage=storage) as persistence,
-        Runtime.attach(persistence=persistence, features=model_features(
+        Runtime.open(persistence=persistence, features=model_features(
             _FeatureModels(_FeatureFunctionModel(model)), features,
         ), metrics=None) as runtime,
     ):

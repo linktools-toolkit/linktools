@@ -29,7 +29,7 @@ python linktools-ai/examples/domain_composition.py
 | Metrics alone | `Metrics.in_memory`, `define`, `record`, `query` | No execution engine or automatic recorder required | Metrics borrows its store and has no producer close; externally owned SQL engines stay host-owned |
 | Metrics in Agent/Task | Existing `metrics=provider` argument | Pass the same provider to both domains | Each producer closes only its own recorder, not its peer's recorder or the shared provider |
 | One-context composition | `Runtime.open`, `runtime.tasks.bind`, `runtime.evaluations.bind` | One host `async with`; no extra mandatory contexts | Runtime closes composed Evaluation, Task, Agent, then owned Persistence |
-| Shared independent domains | `Persistence.open`, `Runtime.open(persistence=...)`, `TaskEngine.open` | Explicit sharing is optional advanced composition | Attached Runtime and TaskEngine borrow the already-open Persistence |
+| Shared independent domains | `Persistence.open`, `Runtime.open(persistence=...)`, `TaskEngine.open` | Explicit sharing is optional advanced composition | Runtime and TaskEngine borrow the already-open Persistence |
 
 The program exercises each composition and ownership boundary through the
 public APIs. TaskEngine uses the existing `AgentExecutionPort`, exposed by
@@ -44,9 +44,8 @@ That port preserves the Agent producer's execution authority.
   producer. Pass `auto_recover=True` to opt into startup-wide execution
   reconciliation. `Runtime.open(persistence=..., ...)` borrows an already-open,
   writable Persistence and inherits its namespace and tenant. Do not pass a
-  namespace, tenant, or storage configuration in borrowing mode. The legacy
-  `Runtime.attach(persistence=...)` forwards to this same entry. Retain the
-  returned object when retrying cleanup after partial initialization failure.
+  namespace, tenant, or storage configuration in borrowing mode. Retain the returned Runtime when retrying
+  cleanup after partial initialization failure.
 - `RuntimeFeatures.model(name, binding)` accepts a public `ModelBinding` or a
   synchronous loader. A binding describes logical model behavior and
   materializes the actual SDK model. The offline binding in the example is
@@ -124,7 +123,7 @@ declarations still determine who initializes and closes each dependency:
 | --- | --- | --- |
 | Persistence opened by `Runtime.open` | Runtime | One Runtime context |
 | Persistence supplied to `Runtime.open` | Host; it must already be open and writable | Outer Persistence context, inner Runtime context |
-| `AssetCapability(store)` in `RuntimeFeatures` | Runtime, even with `attach` or an already initialized store | Pass the declaration directly for ownership transfer |
+| `AssetCapability(store)` in `RuntimeFeatures` | Runtime, even when borrowing Persistence or using an already initialized store | Pass the declaration directly for ownership transfer |
 | Asset source in `features.borrow()` | Host; initialize before borrowers and close after all borrowers finish | Pass the live borrowed source, not an inspection resolution |
 | Default `StepPersistenceCapability()` adapter | Runtime creates/closes the adapter over Execution storage; its external SQL engine remains host-owned | No extra store context; requires an Execution SQL route |
 | Explicit StepStore in `StepPersistenceCapability(store=...)` or native `StepPersistence(store=...)` | Caller; Runtime does not close it | Keep the store usable through producer cleanup |

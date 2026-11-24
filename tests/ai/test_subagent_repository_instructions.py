@@ -16,7 +16,7 @@ from linktools.ai.core import (
     Principal,
     TenantAuthorizationPolicy,
 )
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.execution import ExecutionRequest
 from linktools.ai.inputs import ExecutionContextArchive, RepositoryInstructionPayload
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
@@ -39,7 +39,7 @@ from ._runtime_test_helpers import execution_owner_fields
 
 def _binding() -> AgentBinding:
     spec = AgentSpec("agent", model="model")
-    models = {"model": create_model(api="openai", model="gpt-test")}
+    models = {"model": create_model_binding(api="openai", model="gpt-test")}
     compiler = AgentCompiler(
         models=models, candidates=(), agents={spec.id: spec},
     )

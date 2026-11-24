@@ -239,13 +239,21 @@ def test_local_session_feed_decodes_existing_tool_shape_without_forwarding_inval
         "kind": "tool", "session_id": "session", "execution_id": "execution",
         "process": {
             "kind": "tool", "key": "tool:abc", "tool_name": "search", "status": "SUCCEEDED", "position": [2, 0],
+            "elapsed_ms": 7,
         },
     }
-    for change in ({"key": "tool:"}, {"status": "UNCONFIRMED"}, {"position": [True, 0]}, {"kind": "other"}):
+    for change in (
+        {"key": "tool:"}, {"status": "UNCONFIRMED"}, {"kind": "other"},
+        {"position": [True, 0]}, {"position": [2, -1]}, {"position": [2]}, {"position": "2:0"},
+    ):
         feed.receive({**notice, "process": {**notice["process"], **change}})
     feed.receive(notice)
+    feed.receive({**notice, "process": {**notice["process"], "position": None}})
     unsubscribe()
     feed.receive(notice)
     feed.receive({**notice, "kind": "terminal"})
-    assert received == [("execution", ToolProcessItem("tool:abc", "search", "SUCCEEDED", (2, 0)))]
+    assert received == [
+        ("execution", ToolProcessItem("tool:abc", "search", "SUCCEEDED", (2, 0), elapsed_ms=7)),
+        ("execution", ToolProcessItem("tool:abc", "search", "SUCCEEDED", elapsed_ms=7)),
+    ]
     assert invalidations == ["session"]

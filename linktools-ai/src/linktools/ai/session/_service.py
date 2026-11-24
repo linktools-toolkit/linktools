@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Generic, Protocol, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, overload
 
 from linktools.core import environ
 from ..agent import AgentBinding, AgentBindingContract
@@ -49,7 +49,16 @@ from ._contracts import (
     UpdateSessionRequest,
     CloseSessionRequest,
     SessionView,
+    SessionDetail,
+    SessionHistoryItem,
+    SessionTurn,
+    PublishedSessionTurn,
+    SessionAdmission,
 )
+from ._process import SessionTurnNotice
+
+if TYPE_CHECKING:
+    from ..execution import ExecutionHandle
 
 HandleT = TypeVar("HandleT")
 HandleT_co = TypeVar("HandleT_co", covariant=True)
@@ -58,6 +67,90 @@ _SESSION_CURSOR_KIND = "SESSION"
 _SESSION_UPDATE_REQUEST_CONTRACT = "session-update-request-v2"
 _SESSION_FORK_REQUEST_CONTRACT = "session-fork-request-v2"
 _VIEW_ACTIVE_UNSET = object()
+
+
+class SessionService(Protocol):
+    def capture_published_turn(
+        self, session_id: str, execution_id: str, *, principal: Principal,
+    ) -> AbstractContextManager[Callable[[], Awaitable[PublishedSessionTurn | None]]]: ...
+
+    def observe_changes(self, session_id: str, on_invalidate: Callable[[], None]) -> Callable[[], None]: ...
+
+    def observe_turns(self, on_notice: Callable[[SessionTurnNotice], None]) -> Callable[[], None]: ...
+
+    def invalidate(self, session_id: str) -> None: ...
+
+    def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]: ...
+
+    async def wait_inactive(
+        self, session_id: str, *, principal: Principal, timeout_seconds: float | None = None,
+        observation_timeout_seconds: float | None = None,
+    ) -> SessionView: ...
+
+    async def lookup_admission(
+        self, session_id: str, *, principal: Principal, idempotency_key: str,
+    ) -> SessionAdmission | None: ...
+
+    async def create(
+        self, agent_id: str, request: CreateSessionRequest
+    ) -> SessionView: ...
+    async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
+    async def reconcile(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> SessionView: ...
+    async def refresh(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        limit: int = 100,
+        max_age: float = 0,
+    ) -> SessionDetail:
+        """Read a complete display; positive max_age permits bounded stale display values."""
+        ...
+    async def list(self, request: ListSessionRequest) -> "Page[SessionView]": ...
+    async def history(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[SessionHistoryItem]": ...
+    async def timeline(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[SessionTurn]": ...
+    async def resume(
+        self,
+        agent_id: str,
+        binding_digest: str,
+        session_id: str,
+        request: ResumeSessionRequest,
+        *,
+        binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: "AgentBinding | None" = None,
+        dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
+    ) -> ExecutionHandle: ...
+    async def fork(
+        self, agent_id: str, session_id: str, request: ForkSessionRequest
+    ) -> SessionView: ...
+    async def update(
+        self, agent_id: str, session_id: str, request: UpdateSessionRequest
+    ) -> SessionView: ...
+    async def close(
+        self, session_id: str, request: CloseSessionRequest
+    ) -> SessionView: ...
 
 
 class SessionExecutionState(Protocol):
@@ -1478,6 +1571,7 @@ def _decode_session_cursor(
 
 
 __all__ = [
+    "SessionService",
     "SessionManager",
     "SessionExecutionState",
     "SessionExecutionReader",

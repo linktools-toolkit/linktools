@@ -16,7 +16,7 @@ from ..capability import ToolCallFailed, ToolCallRetry
 from ..core import PersistenceDomain, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import RepositoryInstructions
-from ._tool_boundary import RepositoryInstructionBoundary
+from ._tool_boundary import RepositoryInstructionBoundary, is_instruction_file_read
 from ..inputs import RepositoryInstructionPayload
 from ..execution import ExecutionRecord
 
@@ -24,8 +24,8 @@ if TYPE_CHECKING:
     from ._recovery_coordinator import _RecoveryCoordinator
 
 _REPOSITORY_INSTRUCTION_RECONSIDER = (
-    "Repository instructions applicable to the target changed. Re-check the current "
-    "instructions before retrying the call."
+    "This call was made before the current repository instructions were available. "
+    "Re-check the current instructions before retrying the call."
 )
 
 
@@ -166,7 +166,11 @@ class _RepositoryInstructionBoundary:
         approved: bool = False,
     ) -> None:
         async with self._lock:
-            if self._observed_revision != self._revision:
+            # Reading the guidance is how the model learns it; other calls must
+            # wait for a request that has observed the newly pinned frontier.
+            if self._observed_revision != self._revision and (
+                approved or not is_instruction_file_read(tool_name, arguments, path_fields)
+            ):
                 permit = self._approved_frontiers.get(tool_call_id)
                 if (
                     not approved

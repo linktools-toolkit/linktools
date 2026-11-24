@@ -15,20 +15,20 @@ pip install "linktools-ai[openai,anthropic,web]"  # both adapters and Web consol
 
 The base package does not require either provider SDK. Core ModelBinding, Runtime
 and Web modules remain importable without them (serving Web additionally needs the
-`web` extra). Calling `create_model` for a provider without its extra fails immediately
+`web` extra). Calling `create_model_binding` for a provider without its extra fails immediately
 with the matching install hint, before connection settings or credentials are resolved.
 
 Choose the actual API, not a vendor-looking model name:
 
 ```python
-from linktools.ai.model import create_model
+from linktools.ai.model import create_model_binding
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
 
 features = RuntimeFeatures()
-features.model("default", create_model(api="openai-responses", model="gpt-5"))
-features.model("messages", create_model(api="anthropic", model="claude-sonnet-4-5"))
-features.model("compatible", create_model(api="openai", model="gateway-model", model_settings={
+features.model("default", create_model_binding(api="openai-responses", model="gpt-5"))
+features.model("messages", create_model_binding(api="anthropic", model="claude-sonnet-4-5"))
+features.model("compatible", create_model_binding(api="openai", model="gateway-model", model_settings={
     "extra_body": {"enable_thinking": True},
 }))
 
@@ -38,7 +38,7 @@ async with Runtime.open("app", storage=PersistenceStorage.in_memory(),
     ...
 ```
 
-`create_model` returns a `ModelBinding`, not a registry. It accepts input types,
+`create_model_binding` returns a `ModelBinding`, not a registry. It accepts input types,
 JSON-valued SDK model settings, credentials, timeouts and retry/token limits. Missing
 provider extras fail with the matching installation hint. Unknown `api` values
 fail with `MODEL_CONFIG_INVALID` without echoing connection values.
@@ -53,7 +53,7 @@ paths are unchanged. There is no separate public registry or `Runtime.open(model
 Keep connection/capacity options separate from request settings. For example:
 
 ```python
-features.model("default", lambda: create_model(
+features.model("default", lambda: create_model_binding(
     api="openai", model="gateway-model",
     context_window=131072, model_settings={"max_tokens": 8192, "timeout": 45},
     max_retries=3, retry_delay=5, retry_max_delay=120,
@@ -66,7 +66,7 @@ length or a provider capacity upgrade. A non-null explicit value overrides the
 SDK's inferred context window and is recorded in `contract["context_window"]`.
 `None` leaves the SDK default unchanged. Explicit values must be positive integers,
 not booleans. SDK-inferred capability profiles remain internal to the adapter;
-`create_model` does not expose a profile override.
+`create_model_binding` does not expose a profile override.
 
 `model_settings["max_tokens"]` reserves output tokens. Compaction uses a known context window minus
 the effective output reserve and current instruction/tool/output-schema overhead.
@@ -105,7 +105,7 @@ an existing `ModelBinding`:
 ```python
 def load_assistant():
     config = load_configuration()
-    return create_model(api="anthropic", model=config["model"],
+    return create_model_binding(api="anthropic", model=config["model"],
                         base_url=config["base_url"], api_key=config["api_key"])
 
 features.model("assistant", load_assistant)
@@ -140,7 +140,7 @@ For diagnostics outside Runtime, use `async with binding.materialize() as model:
 The earlier pre-release `openai-chat` / `anthropic-messages` authoring values are
 not aliases; update configuration to the current spellings. Chat diagnostic
 metadata omits the API field, interpreted as `openai`; Responses and Anthropic
-include their explicit API. All three protocols share `create_model` options.
+include their explicit API. All three protocols share `create_model_binding` options.
 Protocol and provider model metadata describe a request, not the registered model
 identity. A current binding may use a different protocol under the same route.
 
@@ -148,7 +148,7 @@ identity. A current binding may use a different protocol under the same route.
 
 Decision models answer bounded questions instead of generating free-form text.
 Register an SDK-native `DecisionModel` through the existing public `ModelBinding`; no additional LinkTools registry or
-protocol selector is required. `create_model` remains a convenience constructor
+protocol selector is required. `create_model_binding` remains a convenience constructor
 for its documented protocols, not an allowlist for Runtime models.
 
 Use a Pydantic `BaseModel` as the execution's `output=` contract. Boolean fields,
@@ -227,11 +227,11 @@ registered through the same synchronous route loader:
 
 ```python
 from pydantic_ai.models.decision import DecisionHandOff
-from linktools.ai.model import FallbackBinding, create_model
+from linktools.ai.model import FallbackBinding, create_model_binding
 from linktools.ai.runtime import RuntimeFeatures
 
 decision_binding = DecisionBinding()
-language_binding = create_model(api="openai-responses", model="gpt-5")
+language_binding = create_model_binding(api="openai-responses", model="gpt-5")
 
 features = RuntimeFeatures("decision-fallback")
 features.model("decision-route", lambda: FallbackBinding(
@@ -331,7 +331,7 @@ evidence that no provider call occurred.
 
 ## SDK model settings and native request fields
 
-`create_model(..., model_settings={...})` is the single JSON extension point for
+`create_model_binding(..., model_settings={...})` is the single JSON extension point for
 SDK common and provider-specific settings across Chat Completions, Responses and
 Anthropic Messages. `max_tokens` and `timeout` live only in this mapping, not in
 duplicate factory arguments. LinkTools does not translate proprietary switches;
@@ -339,7 +339,7 @@ the selected SDK adapter owns their interpretation. An unknown SDK settings key 
 Use nested `extra_body` for native endpoint fields:
 
 ```python
-binding = create_model(
+binding = create_model_binding(
     api="anthropic", model="claude-opus-4-5",
     model_settings={
         "max_tokens": 8192,
@@ -406,7 +406,7 @@ belongs in connection parameters, not in body fields. Semantic settings and
 the contract does not make arbitrary request logging safe for secrets.
 
 A host can forward its parsed JSON/YAML `model_settings` mapping directly to
-`create_model`; configuring these settings does not require writing a custom
+`create_model_binding`; configuring these settings does not require writing a custom
 `ModelBinding`. This is a Python construction interface, not an automatic new
 workspace/CLI configuration loader. Recovery still resolves the current binding
 under the registered route, not frozen historical settings.
@@ -441,10 +441,10 @@ Migrate the removed pre-release APIs directly; no compatibility aliases remain:
 - Move factory `max_tokens=` and `timeout=` into `model_settings`; no aliases remain.
   Keep transport retry parameters on the factory and remove SDK retry-owner overrides.
   If an old `model_settings={"max_retries": 0}` meant no transport retries, use
-  `create_model(..., max_retries=0)` instead. Leaving the factory default `2` now
+  `create_model_binding(..., max_retries=0)` instead. Leaving the factory default `2` now
   permits up to three attempts on a retryable failure; SDK zero no longer selects
   a separate retry owner.
-- Remove `create_model(profile=...)`. Move a declared `context_window` to the
+- Remove `create_model_binding(profile=...)`. Move a declared `context_window` to the
   dedicated argument; its contract location is now top-level `context_window`,
   not `profile.context_window`. Do not move the old profile wholesale into
   `model_settings` or `extra_body`: SDK capability/encoding switches such as
@@ -473,7 +473,7 @@ actual request shape, not an Agent name or a separate model route.
 Explicit SDK model or request settings, including `True`, take precedence.
 An SDK-declared unsupported setting is not added. Native structured/text output
 and externally supplied SDK models remain unchanged. This is a request default,
-not a new `AgentSpec` or `create_model` option, and it does not change retry or
+not a new `AgentSpec` or `create_model_binding` option, and it does not change retry or
 output-validation ownership. Compatible gateways must actually support and
 honor the provider field; no token reduction is inferred from the setting alone.
 
@@ -484,7 +484,7 @@ remain zero for every attempt. `model_settings["max_retries"]` may be omitted or
 exactly integer `0`; `None`, nonzero values and booleans are configuration errors,
 both at binding construction and for per-request settings. A request override
 cannot hide an invalid binding value. SDK zero does **not** disable LinkTools retries:
-use `create_model(max_retries=0)` for that. Backoff parameters never silently become
+use `create_model_binding(max_retries=0)` for that. Backoff parameters never silently become
 ineffective because of an SDK override.
 
 `max_retries` counts additional attempts (default `2`), and `retry_delay`
@@ -498,7 +498,7 @@ cap is `max(retry_max_delay, retry_delay)`, so it never shortens the initial
 base. Both delay parameters accept finite non-negative numbers. Explicit
 `retry_delay=0` keeps the local wait at zero; `max_retries=0` disables retries.
 
-For example, `create_model(..., max_retries=3, retry_delay=5,
+For example, `create_model_binding(..., max_retries=3, retry_delay=5,
 retry_max_delay=120, retry_backoff_factor=4)` allows three additional attempts
 with local waits of 5–6.25, 20–25, and 80–100 seconds. These transport settings
 do not change the model's semantic identity or contract.

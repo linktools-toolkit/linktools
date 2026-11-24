@@ -26,7 +26,7 @@ from pydantic_ai.usage import RequestUsage, RunUsage
 
 from linktools.ai.asset import AssetStore
 from linktools.ai.capability import ShellCapability
-from linktools.ai.capability import AssetCapability, FileSystem, tool_metadata
+from linktools.ai.capability import AssetCapability, FileSystemCapability, tool_metadata
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelBinding
 from linktools.ai.core import JsonValue
@@ -110,7 +110,7 @@ def workspace_features(
     if assets is not None:
         features.capability(AssetCapability(assets), scope="runtime")
     if workspace is not None:
-        features.capability(FileSystem(workspace), scope="runtime")
+        features.capability(FileSystemCapability(workspace), scope="runtime")
         features.capability(ShellCapability(), scope="runtime")
     return features
 

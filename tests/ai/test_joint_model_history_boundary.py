@@ -95,7 +95,7 @@ async def test_joint_request_preserves_sync_history_with_less_sql(tmp_path: Path
 
                     monkeypatch.setattr(repository, "get_observed_in_transaction", capture_source)
                     monkeypatch.setattr(repository, "commit_boundary_in_transaction", publish_boundary)
-                async with Runtime.attach(persistence=state,
+                async with Runtime.open(persistence=state,
                     features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                     for name, listener in listeners:
                         event.listen(engine.sync_engine, name, listener)
@@ -228,7 +228,7 @@ async def test_joint_boundary_settles_preparation_rollback_and_lost_ack(tmp_path
                 return value
 
             monkeypatch.setattr(group, "mutate", lose_ack)
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", idempotency_key="work")
                 if fault.startswith("cancel"):
@@ -357,7 +357,7 @@ async def test_custom_early_exit_keeps_prior_sync_trace(tmp_path: Path, monkeypa
     features.agent("default", model="default", allow_tools=())
     try:
         async with Persistence.open("custom-joint", storage=PersistenceStorage.sql(engine)) as state:
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", idempotency_key="work")
                 result = await execution.wait(timeout_seconds=5)

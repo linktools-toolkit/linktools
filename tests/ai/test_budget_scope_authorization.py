@@ -39,7 +39,7 @@ async def budget_runtime() -> AsyncIterator[_BudgetRuntime]:
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.in_memory()
     authorization = TenantAuthorizationPolicy("default")
-    async with Persistence.open('scope-authorization', storage=storage) as persistence_36, Runtime.attach(persistence=persistence_36, authorization=authorization, features=model_features(RuntimeUsageModels(), group)) as runtime, TaskEngine.open(persistence=persistence_36, authorization=authorization) as engine:
+    async with Persistence.open('scope-authorization', storage=storage) as persistence_36, Runtime.open(persistence=persistence_36, authorization=authorization, features=model_features(RuntimeUsageModels(), group)) as runtime, TaskEngine.open(persistence=persistence_36, authorization=authorization) as engine:
         root = await runtime.agents.get().start("root", budget=RunBudget(model_requests=20))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(root.execution_id, tenant_id="default")

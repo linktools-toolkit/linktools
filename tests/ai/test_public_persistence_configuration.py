@@ -72,7 +72,7 @@ async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
         return PersistenceStorage(replace(PersistenceStorage.from_root(root, exclusive_writer=True).plan, conversation=routes[PersistenceDomain.CONVERSATION], trace=routes[PersistenceDomain.TRACE], checkpoint=routes[PersistenceDomain.CHECKPOINT]))
 
     state = root_storage()
-    async with Persistence.open('module-routes', storage=state) as persistence_67, Runtime.attach(persistence=persistence_67, metrics=Metrics.in_memory(), features=features) as runtime:
+    async with Persistence.open('module-routes', storage=state) as persistence_67, Runtime.open(persistence=persistence_67, metrics=Metrics.in_memory(), features=features) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -149,7 +149,7 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
         state = PersistenceStorage(replace(state.plan, trace=state.plan.route(PersistenceDomain.TRACE).with_cache(trace_cache)))
     trace = TraceCapability()
     features = _features(ExecutionCapability(retain_history=True), trace)
-    async with Persistence.open('module-cache', storage=state) as persistence_135, Runtime.attach(persistence=persistence_135, features=model_features(_FeatureModels(), features)) as runtime:
+    async with Persistence.open('module-cache', storage=state) as persistence_135, Runtime.open(persistence=persistence_135, features=model_features(_FeatureModels(), features)) as runtime:
         before_root = (root_cache.reads, root_cache.writes)
         before_module = (module_cache.reads, module_cache.writes)
         assert await runtime._state.conversation.sessions.get("missing", tenant_id="default") is None
@@ -188,7 +188,7 @@ async def test_trace_route_rejects_a_different_transaction_group(tmp_path: Path)
         trace=StorageRoute.sqlite(tmp_path / "separate.db", exclusive_writer=True),
     ))
     with pytest.raises(AIError) as invalid:
-        async with Persistence.open("different-group", storage=storage) as persistence, Runtime.attach(
+        async with Persistence.open("different-group", storage=storage) as persistence, Runtime.open(
             persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability())),
         ):
             pytest.fail("Trace cannot silently split its source transaction")
@@ -201,7 +201,7 @@ async def test_native_checkpoint_accepts_an_independent_durable_store(tmp_path: 
     database = tmp_path / "independent-steps.db"
     checkpoint = native_checkpoint(database=database)
     storage = PersistenceStorage.sqlite(tmp_path / "control.db")
-    async with Persistence.open("independent-steps", storage=storage) as persistence, Runtime.attach(
+    async with Persistence.open("independent-steps", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_FeatureModels(), _features(checkpoint)),
     ) as runtime:
         execution = await runtime.agents.get().start("question")
@@ -228,7 +228,7 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
     state = PersistenceStorage(replace(state.plan, conversation=route), coordination=cache)
     features = _features()
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
-    async with Persistence.open('split-conversation', storage=state) as persistence_196, Runtime.attach(persistence=persistence_196, features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features)) as runtime:
+    async with Persistence.open('split-conversation', storage=state) as persistence_196, Runtime.open(persistence=persistence_196, features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features)) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question", idempotency_key="turn")
         try:

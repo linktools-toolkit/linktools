@@ -66,19 +66,15 @@ from ..execution import (
     ExecutionView,
     ApprovalService,
     ArtifactService,
-    CloseSessionRequest,
-    CreateSessionRequest,
     EventService,
     ExternalService,
     ExecutionService,
     ForkExecutionRequest,
-    ForkSessionRequest,
     RetryExecutionRequest,
-    SessionService,
-    SessionView,
-    UpdateSessionRequest,
     ExecutionTreeEvent,
 )
+from ..session import CloseSessionRequest, CreateSessionRequest, ForkSessionRequest, SessionView, UpdateSessionRequest
+from ..session import SessionService
 from ..persistence import Persistence, PersistenceStatus, PersistenceStorage
 from ..persistence.runs import RuntimeAgentRunStore
 from ..task import Task, TaskExpander
@@ -239,19 +235,6 @@ class Runtime(Generic[AppT]):
         return cls(
             persistence=Persistence(storage), namespace=namespace, tenant_id="default" if tenant_id is None else tenant_id,
             owns_persistence=True, context=context, features=features, metrics=metrics,
-            authorization=authorization, auto_recover=auto_recover,
-        )
-
-    @classmethod
-    def attach(
-        cls, *, persistence: Persistence, context: ExecutionContext[AppT] | None = None,
-        features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
-        metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
-        auto_recover: bool = False,
-    ) -> "Runtime[AppT]":
-        """Compatibility alias for open(persistence=...); the provider owns storage."""
-        return cls.open(
-            persistence=persistence, context=context, features=features, metrics=metrics,
             authorization=authorization, auto_recover=auto_recover,
         )
 

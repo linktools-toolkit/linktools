@@ -165,7 +165,7 @@ async def test_runtime_default_checkpoint_owner_remains_native_after_restore(tmp
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open("portable-runtime", storage=storage) as state:
-        async with Runtime.attach(persistence=state,
+        async with Runtime.open(persistence=state,
             features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             session = await runtime.agents.get().create_session("session")
             execution = await session.start("question", idempotency_key="question")

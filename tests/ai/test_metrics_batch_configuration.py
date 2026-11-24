@@ -49,8 +49,8 @@ async def test_shared_metrics_has_independent_runtime_flush_and_close(tmp_path: 
             return recorder
 
     metrics = RecordingMetrics.sqlite(tmp_path / "shared.sqlite")
-    async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_129, Runtime.attach(persistence=persistence_129, features=model_features(_FeatureModels()), metrics=metrics) as first:
-        async with Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_130, Runtime.attach(persistence=persistence_130, features=model_features(_FeatureModels()), metrics=metrics) as second:
+    async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_129, Runtime.open(persistence=persistence_129, features=model_features(_FeatureModels()), metrics=metrics) as first:
+        async with Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_130, Runtime.open(persistence=persistence_130, features=model_features(_FeatureModels()), metrics=metrics) as second:
             assert await recorders[0].try_record(_observation("first"))
             assert await recorders[1].try_record(_observation("second"))
             assert await metrics.get_observation("first") is not None

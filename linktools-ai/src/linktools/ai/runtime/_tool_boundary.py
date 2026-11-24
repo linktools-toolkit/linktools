@@ -62,6 +62,19 @@ def tool_capability_ref(tool: ToolDefinition) -> CapabilityRef | None:
     return None if value is None else CapabilityRef.from_payload(value)
 
 
+def is_instruction_file_read(
+    tool_name: str, arguments: Mapping[str, object], path_fields: tuple[str, ...]
+) -> bool:
+    if tool_name != "read_file" or path_fields != ("path",):
+        return False
+    value = arguments.get("path")
+    paths = (value,) if isinstance(value, str) else value
+    return isinstance(paths, (tuple, list)) and bool(paths) and all(
+        isinstance(path, str) and path.rsplit("/", 1)[-1] == "AGENTS.md"
+        for path in paths
+    )
+
+
 class RepositoryInstructionBoundary(Protocol):
     def render_initial(self) -> str: ...
 
@@ -341,6 +354,13 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             raise
         call = ToolCallPart(name, args=final_args, tool_call_id=call_id)
         try:
+            instruction_read = self._repository_boundary is not None and is_instruction_file_read(
+                name, final_args, path_fields,
+            )
+            # An approval must bind to the frontier that the model already saw.
+            # Authorize document reads before they can advance it.
+            if instruction_read:
+                await self._authorize(name, descriptor, final_args, approved=ctx.tool_call_approved)
             if self._repository_boundary is not None:
                 await self._repository_boundary.check(
                     tool_name=name,
@@ -349,12 +369,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     path_fields=path_fields,
                     approved=ctx.tool_call_approved,
                 )
-            await self._authorize(
-                name,
-                descriptor,
-                final_args,
-                approved=ctx.tool_call_approved,
-            )
+            if not instruction_read:
+                await self._authorize(name, descriptor, final_args, approved=ctx.tool_call_approved)
         except Exception as error:
             await self._record_pre_effect_error(
                 call,
@@ -640,5 +656,6 @@ __all__ = [
     "managed_tool_descriptor_from_metadata",
     "require_tool_effects",
     "RepositoryInstructionBoundary",
+    "is_instruction_file_read",
     "BoundaryToolset",
 ]

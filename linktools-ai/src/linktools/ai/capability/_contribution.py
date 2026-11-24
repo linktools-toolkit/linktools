@@ -22,7 +22,7 @@ from ..spec import (
 )
 from ._context import AgentContext
 from ._skill import SkillDefinition
-from ._tool_metadata import validate_tool_metadata
+from ._tool_metadata import durable_tool_metadata, validate_tool_metadata
 from ._tool_results import ToolResultsCapability
 
 AppT = TypeVar("AppT")
@@ -321,7 +321,7 @@ def _contribution_contract(
             "parameters": definition.parameters_json_schema,
             "return_schema": definition.return_schema,
             "strict": definition.strict,
-            "metadata": definition.metadata,
+            "metadata": durable_tool_metadata(definition.metadata),
         }
         if value.max_retries is not None:
             contract["max_retries"] = value.max_retries

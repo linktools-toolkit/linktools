@@ -12,7 +12,7 @@ import pytest
 from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import FileSystem
+from linktools.ai.capability import FileSystemCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
@@ -29,7 +29,7 @@ async def test_workspace_capability_is_the_only_workspace_registration(tmp_path:
     assert (await features.resolve()).workspace is None
     with pytest.raises(TypeError):
         RuntimeFeatures("workspace", workspace=workspace)
-    capability = FileSystem(workspace)
+    capability = FileSystemCapability(workspace)
     with pytest.raises(AIError) as invalid:
         features.capability(capability, scope="agent")
     assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -41,14 +41,14 @@ async def test_workspace_capability_is_the_only_workspace_registration(tmp_path:
         tool.name for tool in capability.tool_definitions()
     }
     replacement = Workspace.load(tmp_path / "replacement")
-    features.capability(FileSystem(replacement), scope="runtime")
+    features.capability(FileSystemCapability(replacement), scope="runtime")
     current = await features.resolve()
     assert current.workspace is replacement
     assert capture.workspace is workspace
     assert tuple((item.kind, item.id, item.revision) for item in current.contributions) == tuple(
         (item.kind, item.id, item.revision) for item in capture.contributions
     )
-    competing = FileSystem(workspace)
+    competing = FileSystemCapability(workspace)
     competing.id = "other.filesystem"
     with pytest.raises(AIError) as conflict:
         features.capability(competing, scope="runtime")
@@ -59,7 +59,7 @@ async def test_workspace_capability_is_the_only_workspace_registration(tmp_path:
 @pytest.mark.asyncio
 async def test_workspace_bindings_are_isolated_and_absence_keeps_resource(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    capability = FileSystem(workspace)
+    capability = FileSystemCapability(workspace)
     first = LocalWorkspaceBackend(tmp_path)
     await first.working_dir()
     second = LocalWorkspaceBackend(tmp_path)
@@ -87,12 +87,12 @@ async def test_workspace_bindings_are_isolated_and_absence_keeps_resource(tmp_pa
 @pytest.mark.asyncio
 async def test_native_wrapped_workspace_has_one_selected_tool_per_run(tmp_path: Path) -> None:
     (tmp_path / "hello.txt").write_text("hello", encoding="utf-8")
-    template = FileSystem(Workspace.load(tmp_path))
+    template = FileSystemCapability(Workspace.load(tmp_path))
     features = RuntimeFeatures("wrapped")
     features.capability(CombinedCapability([template.prefix_tools("prefix")], id="workspace.bundle"), scope="runtime")
     features.agent("default", allow_tools=("list_files",), allow_capabilities=())
     models = _FeatureModels(TestModel(call_tools=["prefix_list_files"]))
-    async with Persistence.open('workspace-native', storage=PersistenceStorage.in_memory()) as persistence_79, Runtime.attach(persistence=persistence_79, features=model_features(models, features)) as runtime:
+    async with Persistence.open('workspace-native', storage=PersistenceStorage.in_memory()) as persistence_79, Runtime.open(persistence=persistence_79, features=model_features(models, features)) as runtime:
         first, second = await asyncio.gather(
             runtime.agents.get().run("list files", timeout_seconds=10),
             runtime.agents.get().run("list files", timeout_seconds=10),
@@ -112,7 +112,7 @@ async def test_list_files_omits_unknown_mime_without_hiding_entries(tmp_path: Pa
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        capability = FileSystem(Workspace.load(tmp_path)).bind(("list_files",), backend=session)
+        capability = FileSystemCapability(Workspace.load(tmp_path)).bind(("list_files",), backend=session)
         listing = await capability.get_toolset().tools["list_files"].function()
         rows = {row.split("  ")[0]: row.split("  ") for row in listing.splitlines()}
         assert rows["known.txt"] == ["known.txt", "file", "5", "text/plain", "extension"]
@@ -136,7 +136,7 @@ async def test_prefixed_workspace_write_still_checks_original_tool_policy(tmp_pa
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        template = FileSystem(Workspace.load(tmp_path))
+        template = FileSystemCapability(Workspace.load(tmp_path))
         declarations = {tool.name: tool for tool in template.tool_definitions()}
         def wrap(toolset):
             return BoundaryToolset(
@@ -168,7 +168,7 @@ async def test_workspace_boundary_dispatches_captured_leaf_without_following_wra
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     try:
-        template = FileSystem(Workspace.load(tmp_path))
+        template = FileSystemCapability(Workspace.load(tmp_path))
         raw = template.bind(("list_files",), backend=session).get_toolset()
         declaration = next(tool for tool in template.tool_definitions() if tool.name == "list_files")
         boundary = BoundaryToolset((raw,), {"list_files": managed_tool_descriptor_from_metadata(declaration.metadata)}, id="workspace-owner", workspace_backend=session)

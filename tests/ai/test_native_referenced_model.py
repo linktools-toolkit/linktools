@@ -21,7 +21,7 @@ from pydantic_ai.usage import RequestUsage
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelClientRequestRecorder, ModelInputValidator, ReferencedContent, ReferencedInputModel, create_model
+from linktools.ai.model import ModelClientRequestRecorder, ModelInputValidator, ReferencedContent, ReferencedInputModel, create_model_binding
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 
@@ -113,7 +113,7 @@ class _Response(CompletedStreamedResponse):
 
 
 def _binding(monkeypatch: pytest.MonkeyPatch, provider: _Provider, *, allowed: bool = True):
-    binding = create_model(api="openai-responses", model="fixture", api_key="unused", max_retries=0,
+    binding = create_model_binding(api="openai-responses", model="fixture", api_key="unused", max_retries=0,
                            input_types=["mime:application/pdf"] if allowed else [])
     monkeypatch.setattr(type(binding), "_build_model", lambda self, settings: provider)
     return binding

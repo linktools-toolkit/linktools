@@ -16,14 +16,16 @@ from ._capabilities import runtime_feature_leaves
 from ..core import (BudgetUsage, OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
                     normalize_thinking, overlay_correlation, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
-from ..execution import (ExecutionHandle, Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest,
+from ..execution import (ExecutionHandle, Execution, ExecutionInputContext, ExecutionRequest,
     ExecutionView, ExecutionResult, CancelExecutionRequest, CancelExecutionResult, ExecutionHistoryService,
     ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, UsageReadCutoff)
+from ..session import ResumeSessionRequest
 from ..execution.handle import ExecutionBinding, ExecutionTreeWatcher
 from ..model import CanonicalUserInput, normalize_input_files
 if TYPE_CHECKING:
     from ._execution import DefaultExecutionService
-    from ..execution import ExecutionRecord, SessionService
+    from ..execution import ExecutionRecord
+    from ..session import SessionService
     from ..task import TaskNodeInvocation
     from ..inputs import InputCaptures
     from ..persistence import Persistence

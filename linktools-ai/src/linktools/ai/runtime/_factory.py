@@ -96,7 +96,8 @@ from ._session import RuntimeSessionService
 from ._subagent import SubagentDispatcher
 from ..history import TransientExecutionHistoryStore
 from ..capability import ToolResponseFixture
-from ..execution import CancelExecutionRequest, ExecutionHistoryReader, SessionHistoryReader
+from ..execution import CancelExecutionRequest, ExecutionHistoryReader
+from ..session import SessionHistoryReader
 from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
 from ..persistence.repositories import ExecutionRepositoryImpl

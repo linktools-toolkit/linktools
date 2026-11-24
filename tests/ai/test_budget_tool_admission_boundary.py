@@ -260,7 +260,7 @@ async def test_real_native_leaf_observes_budget_and_effect_together(
     try:
         async with Persistence.open("budget-native", storage=PersistenceStorage.sql(engine)) as persistence:
             state = persistence
-            async with Runtime.attach(persistence=state,
+            async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(provider)), features)) as runtime:
                 execution = await runtime.agents.get().start("work", budget=RunBudget(tool_calls=limit))
                 result = (await execution.wait(timeout_seconds=5)).result

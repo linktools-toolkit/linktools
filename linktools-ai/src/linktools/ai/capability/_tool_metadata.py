@@ -3,7 +3,7 @@
 """Shared Tool metadata keys and strict metadata parsing."""
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, cast, get_args
+from typing import Any, Literal, cast, get_args
 
 from ..errors import AIError, ErrorCode
 
@@ -16,6 +16,29 @@ TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY = (
     "linktools.ai.compaction_keep_result"
 )
 TOOL_CONTEXT_DEDUPE_METADATA_KEY = "linktools.ai.context_dedupe"
+
+_TOOL_PREVIEW_FIELD = "linktools.ai.argument_preview_field"
+
+
+class _RegisteredPreviewField(str):
+    """Only native tool registration opts in; serialized metadata is not authority."""
+
+
+def _registered_preview(field: str) -> dict[str, object]:
+    return {_TOOL_PREVIEW_FIELD: _RegisteredPreviewField(field)}
+
+
+def tool_argument_preview_field(metadata: Mapping[str, object] | None) -> str | None:
+    field = None if metadata is None else metadata.get(_TOOL_PREVIEW_FIELD)
+    return field if isinstance(field, _RegisteredPreviewField) else None
+
+
+def durable_tool_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Exclude native display registration from durable tool descriptions."""
+    if not isinstance(metadata, Mapping) or tool_argument_preview_field(metadata) is None:
+        return metadata
+    return {name: value for name, value in metadata.items() if name != _TOOL_PREVIEW_FIELD}
+
 
 ToolEffectPolicy = Literal["none", "replay_safe", "non_replay_safe"]
 ToolClass = Literal[
@@ -193,6 +216,8 @@ __all__ = [
     "TOOL_MCP_SELECTOR_METADATA_KEY",
     "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
     "TOOL_CONTEXT_DEDUPE_METADATA_KEY",
+    "durable_tool_metadata",
+    "tool_argument_preview_field",
     "TOOL_EFFECT_POLICY_METADATA_KEY",
     "TOOL_PATH_FIELDS_METADATA_KEY",
     "TOOL_PLAN_SAFE_METADATA_KEY",

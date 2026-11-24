@@ -48,7 +48,8 @@ from ..model import (
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
 from ..observe.journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
-from ..model.messages import project_model_response_attempts, model_response_usage, model_attempts_usage, model_attempts_details
+from ..model import project_model_response_attempts
+from ..model.messages import model_response_usage, model_attempts_usage, model_attempts_details
 from ..observe.service import (
     bind_metric_execution_context,
     metric_correlation,
@@ -63,6 +64,7 @@ _StreamObserver = Callable[[str, BaseException | None], None]
 class ModelInteractionRecorder(Protocol):
     def observe_stream_attempt(self, fact: ModelRequestFact, attempt: ModelStreamAttempt) -> None: ...
     def response_message_seq(self, model_request_seq: int) -> int | None: ...
+    def direct_stream_attempt_seq(self, model_request_seq: int) -> int | None: ...
 
     async def commit_history_boundary(self) -> None: ...
 
@@ -1204,6 +1206,10 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 message_seq = self._interaction_recorder.response_message_seq(fact.model_request_seq)
                 if message_seq is not None:
                     payload["message_seq"] = message_seq
+        elif phase != "started" and self._interaction_recorder is not None:
+            direct_attempt_seq = self._interaction_recorder.direct_stream_attempt_seq(fact.model_request_seq)
+            if direct_attempt_seq is not None:
+                payload["stream_attempt_seq"] = direct_attempt_seq
         try:
             await self._event_sink(event_type, payload)
         except (asyncio.CancelledError, RunCancelled, AIError):

@@ -23,7 +23,8 @@ from ._input_context import ExecutionInputContext
 from ..model import ModelBinding, UserPromptInput, validate_user_input
 from ..observe.cursors import decode_execution_watch_cursor, get_preview_positions, ExecutionWatchPositions, encode_execution_watch_cursor
 from ._recovery import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolution, ToolEffectResolutionResult
-from ._service_api import CancelExecutionRequest, CancelExecutionResult, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ModelInteractionItem, SessionHistoryItem, SessionTurn, SessionView, TranscriptItem, UsageReadCutoff
+from ._service_api import CancelExecutionRequest, CancelExecutionResult, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ModelInteractionItem, TranscriptItem, UsageReadCutoff
+from ..session import SessionHistoryItem, SessionTurn, SessionView
 from ..observe.stream import ExecutionStreamFailure
 
 if TYPE_CHECKING:

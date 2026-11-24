@@ -113,7 +113,7 @@ async def test_semantic_membership_uses_original_admitted_file_set(selected: tup
                    output_schema=_SCHEMA, output_retries=1)
     model_features(_Models(_UsageFunctionModel(model)), features)
     async with Persistence.open("admitted-membership", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get().start(["Review the admitted materials.", *original])
             result = (await execution.wait(timeout_seconds=30)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
