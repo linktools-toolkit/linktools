@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
     from ..core import JsonValue, RunBudget
     from .contracts import BudgetRepository
+    from ._archive import ContentArchive
     from ..execution import PendingToolContinuation
     from .state import StateGroupTransaction, StateStore
     from ..storage import SqlStorageContext
@@ -715,6 +716,27 @@ class _SplitTargetObservation:
         return self.generation == generation and self.state == state and self.receipt_id == receipt_id
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedSessionAdmission:
+    key: SessionTurnKey
+    binding_key: bytes
+    write: Callable[[AsyncSession], Awaitable[bool]]
+    store: StateStore | None
+    archive: tuple[ContentArchive, PreparedArchive] | None
+    budget: tuple[BudgetRepository, RunBudget] | None
+
+    @property
+    def stores(self) -> tuple[StateStore, ...]:
+        if self.store is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        members = (self.store,)
+        if self.archive is not None:
+            members = (*members, self.archive[0].store)
+        if self.budget is not None:
+            members = (*members, self.budget[0].state_store)
+        return tuple(dict.fromkeys(members))
+
+
 class SqlSessionTurns(SqlSessionTurnReader):
     """Write authority for one tenant’s ordinary SQL sessions."""
 
@@ -832,6 +854,26 @@ class SqlSessionTurns(SqlSessionTurnReader):
         _budget: tuple[BudgetRepository, RunBudget] | None = None,
     ) -> bool:
         """Claim and record a turn atomically; a uniqueness failure rolls back the claim."""
+        prepared = await self._prepare_accept(
+            key, expected_revision=expected_revision, context_from=context_from, context_through=context_through,
+            request_key=request_key, request=request, binding=binding, lease_seconds=lease_seconds, budget=_budget,
+        )
+        if prepared.archive is None and prepared.budget is None:
+            accepted = await self._context.run_mutation(prepared.write, domain="session.accept")
+        else:
+            stores = prepared.stores
+            accepted = await stores[0].storage_group.mutate(
+                stores, lambda transaction: self._accept_in_group(transaction, prepared),
+            )
+        if accepted:
+            self._note_accepted(prepared)
+        return accepted
+
+    async def _prepare_accept(
+        self, key: SessionTurnKey, *, expected_revision: int, context_from: int, context_through: int,
+        request_key: str, request: JsonValue, binding: JsonValue, lease_seconds: int,
+        budget: tuple[BudgetRepository, RunBudget] | None,
+    ) -> _PreparedSessionAdmission:
         if lease_seconds < 1:
             raise ValueError("the turn lease must be positive")
         if not 1 <= context_from <= context_through + 1:
@@ -843,24 +885,24 @@ class SqlSessionTurns(SqlSessionTurnReader):
             "execution-binding", encode_agent_binding_content(AgentBindingContract.from_payload(binding)),
         )
         binding_key = bytes.fromhex(content.digest)
-        prepared = None
-        budget_store = None
-        if _budget is not None:
-            if self._transcript_write_binding is None:
+        archive_write = None
+        binding_store = self._transcript_write_binding
+        store = None if binding_store is None else binding_store[0]
+        if budget is not None:
+            if store is None:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            store = self._transcript_write_binding[0]
-            budget_store = _budget[0].state_store
-            if budget_store.storage_group is not store.storage_group:
+            if budget[0].state_store.storage_group is not store.storage_group:
                 raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
         if binding_key not in self._committed_bindings:
-            if self._transcript_write_binding is None:
+            if binding_store is None:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            store, archive_provider, _ = self._transcript_write_binding
+            store, archive_provider, _ = binding_store
             archive = await archive_provider(create=True)
             if archive.store.storage_group is not store.storage_group:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             prepared = PreparedArchive()
             await archive.prepare_agent_binding(content, prepared)
+            archive_write = archive, prepared
 
         async def write(connection: AsyncSession) -> bool:
             claim = await connection.execute(self._sessions.update().filter_by(
@@ -876,31 +918,34 @@ class SqlSessionTurns(SqlSessionTurnReader):
             ))
             return True
 
-        if prepared is None and _budget is None:
-            accepted = await self._context.run_mutation(write, domain="session.accept")
-        else:
-            async def publish(transaction) -> bool:
-                if not await transaction.transaction(store).run_sql(self._context, write):
-                    return False
-                if prepared is not None:
-                    await archive.publish(transaction.transaction(archive.store), prepared)
-                if _budget is not None:
-                    repository, limits = _budget
-                    await repository.ensure_in_transaction(
-                        transaction.transaction(repository.state_store), "turn:" + key.turn_id, limits,
-                    )
-                return True
+        return _PreparedSessionAdmission(key, binding_key, write, store, archive_write, budget)
 
-            members = (store,) if prepared is None else (store, archive.store)
-            if budget_store is not None:
-                members = (*members, budget_store)
-            accepted = await store.storage_group.mutate(tuple(dict.fromkeys(members)), publish)
-        if accepted:
-            self._committed_bindings[binding_key] = None
-            self._committed_bindings.move_to_end(binding_key)
-            if len(self._committed_bindings) > 128:
-                self._committed_bindings.popitem(last=False)
-        return accepted
+    async def _accept_in_group(
+        self, transaction: StateGroupTransaction, prepared: _PreparedSessionAdmission,
+    ) -> bool:
+        """Publish the prepared admission through the already enlisted group."""
+        store = prepared.store
+        if store is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if not await transaction.transaction(store).run_sql(self._context, prepared.write):
+            return False
+        if prepared.archive is not None:
+            archive, content = prepared.archive
+            await archive.publish(transaction.transaction(archive.store), content)
+        if prepared.budget is not None:
+            repository, limits = prepared.budget
+            await repository.ensure_in_transaction(
+                transaction.transaction(repository.state_store), "turn:" + prepared.key.turn_id, limits,
+            )
+        return True
+
+    def _note_accepted(self, prepared: _PreparedSessionAdmission) -> None:
+        """Cache only the binding of a confirmed admission."""
+        key = prepared.binding_key
+        self._committed_bindings[key] = None
+        self._committed_bindings.move_to_end(key)
+        if len(self._committed_bindings) > 128:
+            self._committed_bindings.popitem(last=False)
 
     async def finish(
         self, key: SessionTurnKey, *, generation: int, turn_no: int, state: TerminalState,

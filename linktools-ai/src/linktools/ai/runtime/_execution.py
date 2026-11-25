@@ -1800,10 +1800,6 @@ class DefaultExecutionService(TaskExecutionService):
             proposed_reservation = replace(proposed_reservation, execution=replace(
                 proposed_reservation.execution, input_context=prepared_context.reference,
             ))
-        identity = proposed_reservation.idempotency
-        scope = identity.scope
-        idempotency_key = identity.idempotency_key
-        request_digest = identity.request_digest
         reservation = coordinated_receipt
         child = proposed_reservation.execution
         parent_id = child.parent_execution_id
@@ -1834,6 +1830,32 @@ class DefaultExecutionService(TaskExecutionService):
         if topology is not None and reservation.created:
             assert parent_id is not None and parent_generation is not None
             topology(parent_id, parent_generation, reservation.execution.execution_id)
+        return await self._launch_reserved_execution_start(
+            request, proposed_reservation, reservation, binding, session,
+            prepare_local_stream=prepare_local_stream, dependency_hold_id=dependency_hold_id,
+            requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id, capture_metric=capture_metric,
+        )
+
+    async def _launch_reserved_execution_start(
+        self,
+        request: ExecutionRequest,
+        proposed_reservation: ExecutionStartReservation,
+        reservation: ExecutionStartReservationResult,
+        binding: AgentBinding,
+        session: "SessionRecord | None",
+        *,
+        prepare_local_stream: bool,
+        dependency_hold_id: str | None,
+        requires_task_invocation_capture: bool,
+        budget_scope_id: str | None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
+    ) -> ExecutionHandle:
+        """Continue an already committed reservation without reserving again."""
+        identity = proposed_reservation.idempotency
+        scope = identity.scope
+        idempotency_key = identity.idempotency_key
+        request_digest = identity.request_digest
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
