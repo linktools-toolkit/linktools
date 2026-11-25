@@ -14,6 +14,7 @@ from ._ordinary_lineage import decode_session_lineage, fork_segments
 from ._session_turn_sql import SESSION_TABLE, SESSION_TURN_TABLE
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
+from ..model import decode_ordinary_transcript
 from ..storage import ObjectRef
 from .codec import decode_domain
 from .objects import ObjectKeyFactory
@@ -153,9 +154,29 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str, include_lineage: 
                     published = positions.setdefault(session_id, set())
                     if number in published or number > session_ids[session_id]["last_turn_no"]:
                         raise _invalid()
-                    if state == "succeeded" and not isinstance(result, list):
-                        raise _invalid()
-                    if state != "succeeded" and not (isinstance(result, dict) and isinstance(result.get("error_code"), str)):
+                    if state == "succeeded":
+                        if not isinstance(result, (dict, list)):
+                            raise _invalid()
+                        if isinstance(result, dict):
+                            spec = request["binding"].get("agent_spec")
+                            if not isinstance(spec, dict):
+                                raise _invalid()
+                            frozen = {}
+                            if result.get("instructions_from_binding") is True:
+                                instructions = spec.get("instructions")
+                                if not isinstance(instructions, list) or not all(isinstance(item, str) for item in instructions):
+                                    raise _invalid()
+                                frozen["instructions"] = instructions
+                            if result.get("system_prompt_from_binding") is True:
+                                system_prompt = spec.get("system_prompt")
+                                if not isinstance(system_prompt, str):
+                                    raise _invalid()
+                                frozen["system_prompt"] = system_prompt
+                            try:
+                                decode_ordinary_transcript(result, **frozen)
+                            except AIError as error:
+                                raise _invalid() from error
+                    elif not (isinstance(result, dict) and isinstance(result.get("error_code"), str)):
                         raise _invalid()
                     published.add(number)
                     row["lease_until"] = None

@@ -12,14 +12,14 @@ from pydantic_ai.messages import ModelResponse
 
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, CursorSigner, JsonValue, Principal, PrincipalKind, ResourceKind,
-    ResourceRef, TenantAuthorizationPolicy, canonical_json_bytes, canonical_sha256, decode_cursor, encode_cursor,
+    ResourceRef, TenantAuthorizationPolicy, canonical_sha256, decode_cursor, encode_cursor,
     principal_identity_payload, validate_page_limit, validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import StoredUserInput
 from ..persistence.codec import decode_domain
-from ..model.messages import decode_model_messages
+from ..model import decode_ordinary_transcript
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
 from ._session_timeline import _timeline_items
 
@@ -58,7 +58,7 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
     output = None
     items: list[JsonValue] = []
     if state == "succeeded":
-        messages = decode_model_messages(canonical_json_bytes(result))
+        messages = decode_ordinary_transcript(result, display=True)
         if not messages or not isinstance(messages[-1], ModelResponse) or messages[-1].text is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = {"text": messages[-1].text}

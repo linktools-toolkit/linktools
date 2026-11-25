@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Store the new model messages of a plain turn without copying its input."""
 
-import json
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -14,14 +13,15 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from ..core import JsonValue, canonical_json_bytes
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ..model.messages import decode_model_messages, encode_model_messages
+from ..model import decode_ordinary_transcript, encode_ordinary_transcript
 
 
 def encode_regenerable_turn(
     prompt: str | Sequence[UserContent], history: Sequence[ModelMessage],
-    messages: Sequence[ModelMessage], output: JsonValue,
+    messages: Sequence[ModelMessage], output: JsonValue, *,
+    instructions: tuple[str, ...] = (), system_prompt: str = "",
 ) -> JsonValue:
     """Keep the message envelope, substituting the admitted prompt only on read."""
     prefix = len(history)
@@ -30,13 +30,17 @@ def encode_regenerable_turn(
     suffix = tuple(messages[prefix:])
     if not suffix or reply_from_turn(suffix) != output:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Terminal output cannot be projected from the transcript")
-    return json.loads(encode_model_messages((_substitute_input(suffix[0], prompt, ""), *suffix[1:])))
+    return encode_ordinary_transcript(
+        (_substitute_input(suffix[0], prompt, ""), *suffix[1:]),
+        instructions=instructions, system_prompt=system_prompt,
+    )
 
 
 def decode_regenerable_turn(
-    prompt: str | Sequence[UserContent], payload: JsonValue,
+    prompt: str | Sequence[UserContent], payload: JsonValue, *,
+    instructions: list[str] | None = None, system_prompt: str | None = None,
 ) -> tuple[ModelMessage, ...]:
-    messages = decode_model_messages(canonical_json_bytes(payload))
+    messages = decode_ordinary_transcript(payload, instructions=instructions, system_prompt=system_prompt)
     if not messages:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn messages are missing")
     restored = prompt if isinstance(prompt, str) else list(prompt)

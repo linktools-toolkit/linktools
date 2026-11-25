@@ -163,11 +163,13 @@ class _RegenerableTurnRunner:
     def _terminal(
         self, turn: _AdmittedTurn, state: str, *, output: JsonValue = None,
         result: JsonValue = None, error_code: str | None = None,
+        instructions: list[str] | None = None, system_prompt: str | None = None,
     ) -> None:
         succeeded = state == "succeeded"
         self._store.note_terminal_context(
             turn.key, turn_no=turn.number, prompt=turn.prompt if succeeded else None,
             stored_input=turn.stored_input if succeeded else None, result=result, succeeded=succeeded,
+            instructions=instructions, system_prompt=system_prompt,
         )
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
@@ -450,11 +452,13 @@ class _RegenerableTurnRunner:
             for position in positions:
                 prior = position.request
                 prior_input = self._stored_input(prior)
-                remaining -= self._input_bytes(prior["prompt"], prior_input) + len(canonical_json_bytes(position.result))
+                remaining -= self._input_bytes(prior["prompt"], prior_input) + position.transcript_bytes
                 if remaining < 0:
                     raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
                 restored = await self._restore_prompt(prior["prompt"], prior_input)
-                history.extend(decode_regenerable_turn(restored, position.result))
+                history.extend(decode_regenerable_turn(
+                    restored, position.result, instructions=position.instructions, system_prompt=position.system_prompt,
+                ))
             contract = AgentBindingContract.from_payload(request["binding"])
             binding = await resolver.restore(contract)
             self._executor.require_regenerable(binding)
@@ -685,11 +689,13 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Missing admitted session input")
             candidate_prompt = candidate.request["prompt"]
             stored = self._stored_input(candidate.request)
-            size = self._input_bytes(candidate_prompt, stored) + len(canonical_json_bytes(candidate.result))
+            size = self._input_bytes(candidate_prompt, stored) + candidate.transcript_bytes
             if size > remaining:
                 break
             restored = await self._restore_prompt(candidate_prompt, stored)
-            history.append(decode_regenerable_turn(restored, candidate.result))
+            history.append(decode_regenerable_turn(
+                restored, candidate.result, instructions=candidate.instructions, system_prompt=candidate.system_prompt,
+            ))
             remaining -= size
             context_from = candidate.turn_no
 
@@ -736,7 +742,11 @@ class _RegenerableTurnRunner:
                 event_sink=event_sink, thinking=thinking, streamed_output_bytes=turn.terminal_bytes,
                 workspace=self._workspace, repository_instructions=turn.repository_instructions,
             )
-            result = encode_regenerable_turn(model_prompt, turn.history, outcome.messages, outcome.output)
+            frozen_spec = binding.binding_contract.agent_spec
+            result = encode_regenerable_turn(
+                model_prompt, turn.history, outcome.messages, outcome.output,
+                instructions=frozen_spec.instructions, system_prompt=frozen_spec.system_prompt,
+            )
             if len(canonical_json_bytes(result)) > turn.terminal_bytes:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         except Exception as error:
@@ -751,5 +761,11 @@ class _RegenerableTurnRunner:
             turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded", result=result,
         )
         if committed:
-            self._terminal(turn, "succeeded", output=outcome.output, result=result)
+            self._terminal(
+                turn, "succeeded", output=outcome.output, result=result,
+                instructions=list(frozen_spec.instructions)
+                if isinstance(result, dict) and result.get("instructions_from_binding") else None,
+                system_prompt=frozen_spec.system_prompt
+                if isinstance(result, dict) and result.get("system_prompt_from_binding") else None,
+            )
         return committed

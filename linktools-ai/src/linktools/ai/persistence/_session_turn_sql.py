@@ -13,6 +13,7 @@ from weakref import finalize
 
 from ..core import canonical_json_bytes, canonical_sha256, validate_idempotency_key
 from ..errors import AIError, ErrorCode
+from ..model import ordinary_transcript_size
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
@@ -67,6 +68,9 @@ class SessionContextTurn:
     request: JsonValue
     result: JsonValue
     size: int
+    transcript_bytes: int
+    instructions: list[str] | None
+    system_prompt: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,7 +296,17 @@ class SqlSessionTurnReader:
         stored_input = type_coerce(
             case((succeeded, columns.request_json["input"])), columns.request_json.type,
         ).label("stored_input")
-        statement = select(columns.turn_no, columns.state, prompt, stored_input, result).where(
+        instructions = type_coerce(case((
+            succeeded & columns.result_json["instructions_from_binding"].as_boolean().is_(True),
+            columns.request_json[("binding", "agent_spec", "instructions")],
+        )), columns.request_json.type).label("instructions")
+        system_prompt = case((
+            succeeded & columns.result_json["system_prompt_from_binding"].as_boolean().is_(True),
+            columns.request_json[("binding", "agent_spec", "system_prompt")].as_string(),
+        )).label("system_prompt")
+        statement = select(
+            columns.turn_no, columns.state, prompt, stored_input, result, instructions, system_prompt,
+        ).where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
                               after=after, through=through),
@@ -303,15 +317,22 @@ class SqlSessionTurnReader:
         if len(rows) != through - after:
             raise AIError(missing, "The finalized session context range is incomplete")
         return tuple(
-            self._context_turn(row["turn_no"], row["prompt"], row["stored_input"], row["result_json"])
+            self._context_turn(
+                row["turn_no"], row["prompt"], row["stored_input"], row["result_json"],
+                instructions=row["instructions"], system_prompt=row["system_prompt"],
+            )
             for row in rows if row["state"] == "succeeded"
         )
 
     @staticmethod
-    def _context_turn(turn_no: int, prompt: str, stored_input: JsonValue, result: JsonValue) -> SessionContextTurn:
+    def _context_turn(
+        turn_no: int, prompt: str, stored_input: JsonValue, result: JsonValue, *,
+        instructions: list[str] | None, system_prompt: str | None,
+    ) -> SessionContextTurn:
         request = {"prompt": prompt, **({"input": stored_input} if stored_input is not None else {})}
-        size = max(1024, len(canonical_json_bytes(request)) + len(canonical_json_bytes(result)))
-        return SessionContextTurn(turn_no, request, result, size)
+        transcript_bytes = ordinary_transcript_size(result, instructions=instructions, system_prompt=system_prompt)
+        size = max(1024, len(canonical_json_bytes(request)) + transcript_bytes)
+        return SessionContextTurn(turn_no, request, result, size, transcript_bytes, instructions, system_prompt)
 
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],
@@ -359,7 +380,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
     def note_terminal_context(
         self, key: SessionTurnKey, *, turn_no: int, prompt: str | None, stored_input: JsonValue,
-        result: JsonValue, succeeded: bool,
+        result: JsonValue, succeeded: bool, instructions: list[str] | None = None, system_prompt: str | None = None,
     ) -> None:
         """Advance coverage only over a known committed adjacent position."""
         cached = self._recent.get(key.session_id)
@@ -375,7 +396,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
         if succeeded:
             if prompt is None:
                 return
-            turns += (self._context_turn(turn_no, prompt, stored_input, result),)
+            turns += (self._context_turn(
+                turn_no, prompt, stored_input, result, instructions=instructions, system_prompt=system_prompt,
+            ),)
         self._remember_context(key.session_id, after=after, through=turn_no, turns=turns)
 
     async def create(self, session_id: str, *, config: JsonValue) -> None:
