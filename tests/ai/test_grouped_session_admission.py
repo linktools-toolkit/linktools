@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import CommitPolicy, ExecutionStatus, IdempotencyStatus
+from linktools.ai.core import CommitPolicy, ExecutionStatus, IdempotencyStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage, StateTurnResources
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -195,7 +195,7 @@ async def test_grouped_admission_live_owner_conflict_never_consumes_another_key(
 
 
 @pytest.mark.asyncio
-async def test_grouped_decline_rolls_back_lease_before_ordinary_fallback(tmp_path, monkeypatch):
+async def test_grouped_decline_rolls_back_lease_before_strict_retry(tmp_path, monkeypatch):
     async def model(messages, info):
         return ModelResponse(parts=[TextPart("answer")])
 
@@ -205,33 +205,44 @@ async def test_grouped_decline_rolls_back_lease_before_ordinary_fallback(tmp_pat
         commands = backend._runtime_commands
         authority = persistence.coordination_backend
         original_reserve = commands._reserve_start_in_transaction
-        original_claim = authority.claim_turn
         attempts = claims = 0
+        declined = []
+        scope = backend._pending_turns.coordination._scope
 
         async def decline_once(*args, **kwargs):
             nonlocal attempts
             attempts += 1
             if attempts == 1:
+                _, reservation, *_ = args
+                declined.append(reservation)
+                assert kwargs["authority"] is not None
                 return None
             return await original_reserve(*args, **kwargs)
 
-        async def claim(scope, **kwargs):
+        async def reject_fallback(*args, **kwargs):
             nonlocal claims
             claims += 1
-            # The grouped attempt wrote a provisional claim before the declined
-            # checkpoint; fallback is valid only after that claim rolled back.
-            assert await authority.read_turn_by_session(scope, kwargs["session_key"]) is None
-            assert await authority.read_turn_by_request(scope, kwargs["request_key"]) is None
-            assert await authority.read_turn(scope, kwargs["execution_id"]) is None
-            return await original_claim(scope, **kwargs)
+            raise AssertionError("Strict grouped admission must not fall back to another claim path")
 
         monkeypatch.setattr(commands, "_reserve_start_in_transaction", decline_once)
-        monkeypatch.setattr(authority, "claim_turn", claim)
-        handle = await runtime.sessions.start(
-            "session", "question", principal=runtime.default_principal, idempotency_key="request",
-        )
+        monkeypatch.setattr(authority, "claim_turn", reject_fallback)
+        principal = runtime.default_principal
+        with pytest.raises(AIError) as rejected:
+            await runtime.sessions.start("session", "question", principal=principal, idempotency_key="request")
+        assert rejected.value.code is ErrorCode.STORAGE_CONFLICT
+        assert len(declined) == 1
+        execution_id = declined[0].execution.execution_id
+        assert await authority.read_turn(scope, execution_id) is None
+        assert await authority.read_turn_by_session(scope, "session:session") is None
+        request_key = canonical_sha256(["session.resume", "request"])
+        assert await authority.read_turn_by_request(scope, request_key) is None
+        assert await persistence.execution.executions.get(execution_id, tenant_id=principal.tenant_id) is None
+        assert await persistence.execution.idempotency.get("session.resume", "request", tenant_id=principal.tenant_id) is None
+
+        handle = await runtime.sessions.start("session", "question", principal=principal, idempotency_key="request")
         assert (await handle.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
-        assert attempts == 2 and claims == 1
+        assert handle.execution_id != execution_id
+        assert attempts == 2 and claims == 0
 
 
 def _pause_grouped_command(runtime, monkeypatch):
@@ -317,7 +328,9 @@ async def test_grouped_admission_rechecks_late_winner_after_outer_read(tmp_path,
                 live_owner = await backend._pending_turns.coordination.read_session_owner(
                     "session", tenant_id=principal.tenant_id,
                 )
-                assert live_owner.execution_id == first.execution_id
+                # Native terminal publication releases occupancy in the same
+                # commit; producer cleanup held above is not the authority.
+                assert live_owner is None
             if case == "terminal_corrupt":
                 identity = await identities.get("session.resume", "request", tenant_id=tenant)
                 assert identity.status is IdempotencyStatus.COMPLETED
@@ -353,7 +366,7 @@ async def test_grouped_admission_rechecks_late_winner_after_outer_read(tmp_path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("start_unknown", [False, True])
-async def test_grouped_admission_late_unprepared_receipt_retains_original_semantics(tmp_path, monkeypatch, start_unknown):
+async def test_grouped_admission_does_not_start_late_unowned_receipt(tmp_path, monkeypatch, start_unknown):
     launched = 0
 
     async def model(messages, info):
@@ -388,10 +401,13 @@ async def test_grouped_admission_late_unprepared_receipt_retains_original_semant
                 assert rejected.value.code is ErrorCode.EXECUTION_START_UNKNOWN
                 assert launched == 0
             else:
-                handle = await task
-                assert handle.execution_id == reserved.execution.execution_id
-                assert (await handle.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
-                assert launched == 1
+                with pytest.raises(AIError) as rejected:
+                    await task
+                assert rejected.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+                tenant = contender.default_principal.tenant_id
+                assert await source.execution.executions.get(reserved.execution.execution_id, tenant_id=tenant) == reserved.execution
+                assert await source.execution.idempotency.get("session.resume", "request", tenant_id=tenant) == reserved.idempotency
+                assert launched == 0
             assert len(proposed) == 1
         finally:
             resume.set()
