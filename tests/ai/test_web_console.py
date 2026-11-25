@@ -19,7 +19,7 @@ pytest.importorskip("uvicorn")
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability, TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.history import History
@@ -495,7 +495,7 @@ async def test_reopened_console_preserves_history_and_hides_unavailable_resource
     def features() -> RuntimeFeatures:
         result = model_features(RuntimeUsageModels(), RuntimeFeatures("web-reopen"))
         result.capability(ExecutionCapability(retain_history=True), scope="runtime")
-        result.capability(native_checkpoint(), scope="runtime")
+        result.capability(StepPersistenceCapability(), scope="runtime")
         return result
 
     async with Persistence.open("web-reopen", storage=storage) as persistence:
@@ -1562,6 +1562,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
 
     features = _persistence_capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.capability(StepPersistenceCapability(), scope="runtime")
     features.tool(lookup, name="read_file", effect_policy="none")
     features.agent("default", model="default", allow_tools=("read_file",))
     model_features(_Models(_UsageFunctionModel(respond)), features)
@@ -1774,6 +1775,7 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
 
     features = _persistence_capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.capability(StepPersistenceCapability(), scope="runtime")
     features.tool(lookup, effect_policy="none")
     features.agent("default", allow_tools=("lookup",))
     model_features(_Models(_UsageFunctionModel(respond)), features)

@@ -1297,6 +1297,19 @@ class _RegenerableTurnRunner:
                 try:
                     await group.mutate(stores, publish)
                 except Exception as error:
+                    # Record implementation location only: provider/tool errors
+                    # may carry prompts, credentials or raw arguments.
+                    frame = error.__traceback__
+                    while frame is not None and frame.tb_next is not None:
+                        frame = frame.tb_next
+                    location = None if frame is None else (
+                        frame.tb_frame.f_globals.get("__name__"),
+                        frame.tb_frame.f_code.co_name, frame.tb_lineno,
+                    )
+                    _logger.error("Canonical Trace prefix rejected: turn=%s generation=%s code=%s exception=%s at=%s",
+                                  turn.key.turn_id, turn.generation,
+                                  error.code.value if isinstance(error, AIError) else None,
+                                  type(error).__name__, location)
                     # Do not blindly reissue a batch whose commit was unseen.
                     # Exact canonical lease takeover observes the durable prefix.
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
@@ -1388,6 +1401,18 @@ class _RegenerableTurnRunner:
                                        ErrorCode.TOOL_EFFECT_UNKNOWN}):
                 raise
             code = error.code.value if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR.value
+            if code == ErrorCode.INTERNAL_ERROR.value:
+                cause = error.__cause__ or error
+                frame = cause.__traceback__
+                while frame is not None and frame.tb_next is not None:
+                    frame = frame.tb_next
+                location = ("unknown" if frame is None else
+                            f"{frame.tb_frame.f_globals.get('__name__', '?')}:"
+                            f"{frame.tb_frame.f_code.co_name}:{frame.tb_lineno}")
+                _logger.error(
+                    "Canonical turn failed: turn=%s code=%s cause=%s at=%s",
+                    turn.key.turn_id, code, type(cause).__name__, location,
+                )
             committed = await self._store.finish(
                 turn.key, generation=turn.generation, turn_no=turn.number, state="failed", result={"error_code": code},
                 **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "failed", code, captured=captured)),

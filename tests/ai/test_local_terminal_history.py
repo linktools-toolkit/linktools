@@ -18,8 +18,10 @@ from .test_web_console import client, _HEADERS
 def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    import asyncio
     import uvicorn
     import linktools.commands.ai.web as web_command
+    from linktools.ai.runtime.turn_clients import TurnObserver
 
     opened = []
     identities = []
@@ -42,28 +44,37 @@ def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
                         'session_id': 'session', 'request_id': 'create',
                     }, headers=_HEADERS)
                     assert response.status_code == 201, response.text
-                    response = await http.post('/api/session/messages?session_id=session', json={
-                        'prompt': 'hello', 'request_id': 'turn',
-                    }, headers=_HEADERS)
-                    assert response.status_code == 202, response.text
-                    identity = response.json()['execution_id']
+                    runtime = opened[-1]
+                    with TurnObserver(runtime, 'session', runtime.default_principal, local_workspace=True) as observer:
+                        response = await http.post('/api/session/messages?session_id=session', json={
+                            'prompt': 'hello', 'request_id': 'turn',
+                        }, headers=_HEADERS)
+                        assert response.status_code == 202, response.text
+                        identity = response.json()['turn_id']
+                        async with asyncio.timeout(10):
+                            async for frame in observer.events(identity):
+                                if frame['type'] == 'terminal':
+                                    assert frame['state'] == 'succeeded', frame
+                                    assert frame['output'] == {'text': 'done'}
+                                    break
+                            else:
+                                pytest.fail('Missing terminal turn')
                     identities.append(identity)
-                    stream = await http.get(f'/api/executions/{identity}/events')
-                    assert stream.status_code == 200, stream.text
-                    assert 'OBSERVATION_FAILED' not in stream.text, stream.text
-                    result = await (await opened[-1].executions.get(identity)).wait()
-                    assert result.result.output == {'text': 'done'}
                 identity = identities[0]
                 for _ in range(2):
-                    response = await http.get(f'/api/executions/{identity}/models?include_content=true')
+                    response = await http.get(f'/api/session?session_id=session&turn_id={identity}&trace=true')
                     assert response.status_code == 200, response.text
-                    assert response.json()['items']
-                    response = await http.get(f'/api/executions/{identity}/history?include_content=true')
+                    trace = response.json()['items']
+                    assert trace and all(item['turn_id'] == identity for item in trace)
+                    response = await http.get(f'/api/session?session_id=session&turn_id={identity}')
                     assert response.status_code == 200, response.text
-                    assert response.json()['items']
-                    response = await http.get(f'/api/executions/{identity}/result')
+                    turn = response.json()
+                    assert turn['turn_id'] == identity and turn['conversation_committed']
+                    assert turn['user_input']['prompt'] == 'hello'
+                    assert [(item['item_kind'], item['content']) for item in turn['items']] == [('assistant', 'done')]
+                    response = await http.get('/api/session?session_id=session')
                     assert response.status_code == 200, response.text
-                    assert response.json()['output'] == {'text': 'done'}
+                    assert response.json()['timeline']['items'] == [turn]
 
     monkeypatch.setattr(Runtime, 'open', tracked_open)
     monkeypatch.setattr(common_command._ModelOptions, 'create_model_binding', lambda _self: RuntimeUsageModels())
