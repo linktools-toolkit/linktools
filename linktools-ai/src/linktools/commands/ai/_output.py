@@ -17,7 +17,7 @@ from linktools.cli import CommandError
 from linktools.core import environ
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._turn_client import TurnObserver, uses_turn_sessions
+from linktools.ai.runtime.turn_clients import TurnObserver, uses_turn_sessions
 from linktools.ai.session import ToolProcessItem
 
 if TYPE_CHECKING:

@@ -31,7 +31,7 @@ from ..execution import ExecutionTreeEvent, ListExecutionRequest, TaskModelProje
 from ..session import CreateSessionRequest, ListSessionRequest
 from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
-from ..runtime._turn_client import uses_turn_sessions
+from ..runtime.turn_clients import uses_turn_sessions
 from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 
 if TYPE_CHECKING:

@@ -34,7 +34,7 @@ from .errors import AIError, ErrorCode
 from .execution import ExecutionTreeEvent
 from .session import ListSessionRequest
 from .runtime import Runtime
-from .runtime._turn_client import TurnObserver, uses_turn_sessions
+from .runtime.turn_clients import TurnObserver, uses_turn_sessions
 from .session import ToolProcessItem, project_tool_process_event
 from .workspace import Workspace
 
