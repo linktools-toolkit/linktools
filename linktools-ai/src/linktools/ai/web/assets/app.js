@@ -740,7 +740,7 @@ async function readSession(id, {metadataOnly=false,executionId=null,active=false
   try {
     try {return {...await api(sessionURL(id,'',query)),readGeneration};}
     catch(error) {
-      if(metadataOnly || executionId || error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
+      if(state.config?.turn_sessions || metadataOnly || executionId || error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
       const payload=await api(sessionURL(id,'',{include_timeline:'false'}));
       return {...payload,timeline_error:error.message,readGeneration};
     }
