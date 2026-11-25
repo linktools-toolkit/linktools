@@ -16,6 +16,7 @@ def snapshot_manager(tmp_path_factory):
     """
     data = tmp_path_factory.mktemp("data")
     temp = tmp_path_factory.mktemp("temp")
+    # TLS template tests render a configured certificate; unset-root cases override it.
     manager = _harness.make_manager(data, temp)
     _harness.configure_builtin_snapshot(manager)
     return manager
@@ -36,4 +37,7 @@ def fresh_manager(tmp_path):
     Distinct from ``snapshot_manager`` (session-scoped, must stay pristine for the
     snapshot regression tests). All builtins are installed and prepared.
     """
-    return _harness.make_manager(tmp_path / "data", tmp_path / "temp")
+    # TLS template tests render a configured certificate; unset-root cases override it.
+    manager = _harness.make_manager(tmp_path / "data", tmp_path / "temp")
+    manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    return manager

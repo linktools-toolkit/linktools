@@ -690,3 +690,24 @@ def test_http_and_standalone_ldap_do_not_require_dns_root(fresh_manager, root):
     assert fresh_manager.config.get("LLDAP_BASE_DN") == "dc=example,dc=org"
     fresh_manager.config.set("LLDAP_BASE_DN", "dc=team,dc=internal")
     assert fresh_manager.config.get("LLDAP_BASE_DN") == "dc=team,dc=internal"
+
+
+@pytest.mark.parametrize("san", ["_", "localhost", "127.0.0.1", "*.*.example.test", "https://example.test"])
+def test_invalid_site_certificate_domain_fails_before_build(fresh_manager, san):
+    nginx = fresh_manager.containers["nginx"]
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
+    nginx.__dict__["sites"] = {
+        "app": SimpleNamespace(enabled=True, https=True, cert_domains=(san,)),
+    }
+    with pytest.raises(ContainerError, match="Invalid nginx certificate domain"):
+        _ = nginx.docker_compose
+
+
+def test_site_certificate_domains_allow_wildcards_and_empty_entries(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
+    nginx.__dict__["sites"] = {
+        "app": SimpleNamespace(enabled=True, https=True, cert_domains=("", "*.other.test", "app.other.test")),
+        "http": SimpleNamespace(enabled=True, https=False, cert_domains=("_",)),
+    }
+    assert nginx.acme_ssl_domains == ["example.test", "*.example.test", "*.other.test", "app.other.test"]

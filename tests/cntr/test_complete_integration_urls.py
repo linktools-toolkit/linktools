@@ -46,6 +46,7 @@ def test_authelia_written_config_uses_only_complete_resolved_callbacks(fresh_man
 
 
 def test_authelia_accepted_redirects_do_not_read_client_secret(fresh_manager, monkeypatch) -> None:
+    fresh_manager.config.unset("NGINX_ROOT_DOMAIN")
     provider = fresh_manager.containers["authelia"]
     provider.public_url = "https://sso.test"
     original = provider.get_config
