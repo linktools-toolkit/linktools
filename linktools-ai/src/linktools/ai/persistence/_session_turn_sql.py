@@ -32,6 +32,7 @@ from ._turn_sql_schema import (
     TURN_SESSION_MAX_BYTES,
 )
 from ._message_root import NativeMessageRoot
+from ._session_transcript import SESSION_TURN_TABLE
 from .state import SqlStateRowReader, state_store_key
 
 if TYPE_CHECKING:
@@ -43,7 +44,6 @@ if TYPE_CHECKING:
 
 
 SESSION_TABLE = "ai_sessions"
-SESSION_TURN_TABLE = "ai_session_turns"
 SESSION_BINDING_TABLE = "ai_session_bindings"
 TerminalState = Literal["succeeded", "failed", "cancelled"]
 _CONTEXT_POSITIONS = 128

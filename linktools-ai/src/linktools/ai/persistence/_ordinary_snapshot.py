@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -15,9 +15,8 @@ from ._ordinary_lineage import decode_session_lineage, fork_segments
 from ._session_turn_sql import SESSION_BINDING_TABLE, SESSION_TABLE, SESSION_TURN_TABLE
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
-from ..steps import NATIVE_STORE_KEY_MAX_BYTES
 from ._message_root import NativeMessageRoot
-from ._record_key import decode_key_components
+from ._session_transcript import decode_session_transcript_root
 from ..storage import ObjectRef
 from .codec import decode_domain
 from .objects import ObjectKeyFactory
@@ -25,7 +24,7 @@ from ._plan import PersistenceDomain
 from .state import SqlStateRowReader, SqlStateTransaction, StateTransaction, state_store_key
 
 if TYPE_CHECKING:
-    from ._sql import SqlStateStorageGroup, SqlStateStore
+    from ._sql import SqlStateStore
 
 _AUDIT = ("created_at", "updated_at")
 _SESSION_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "active_turn_id": TURN_EXECUTION_MAX_BYTES}
@@ -61,33 +60,13 @@ def ordinary_input_object_refs(
             yield reference
 
 
-def _transcript_root(result: object) -> NativeMessageRoot:
-    if not isinstance(result, dict) or set(result) != {"transcript", "binding_refs"}:
-        raise _invalid()
-    try:
-        root = NativeMessageRoot.from_json(result["transcript"])
-    except (TypeError, ValueError, AIError) as error:
-        raise _invalid() from error
-    refs = result["binding_refs"]
-    if not isinstance(refs, list) or any(
-        not isinstance(ref, list) or len(ref) != 2
-        or type(ref[0]) is not int or not 0 <= ref[0] < root.count
-        or ref[1] is not None and (type(ref[1]) is not int or ref[1] < 0)
-        for ref in refs
-    ):
-        raise _invalid()
-    order = [(message, -1 if part is None else part) for message, part in refs]
-    if not root.count or any(previous >= current for previous, current in zip(order, order[1:])):
-        raise _invalid()
-    return root
-
 
 def ordinary_transcript_roots(
     rows: Mapping[str, list[dict[str, object]]],
 ) -> Iterator[NativeMessageRoot]:
     for row in rows["turns"]:
         if row["state"] == "succeeded":
-            yield _transcript_root(row["result_json"])
+            yield decode_session_transcript_root(row["result_json"])
 
 
 def rekey_ordinary_transcripts(
@@ -97,7 +76,7 @@ def rekey_ordinary_transcripts(
         if row["state"] != "succeeded":
             return row
         result = row["result_json"]
-        root = _transcript_root(result)
+        root = decode_session_transcript_root(result)
         if root.group_id not in group_ids:
             raise _invalid()
         return {**row, "result_json": {
@@ -105,30 +84,6 @@ def rekey_ordinary_transcripts(
         }}
     return {**rows, "turns": [move(row) for row in rows["turns"]]}
 
-
-async def scan_ordinary_transcript_roots(group: SqlStateStorageGroup) -> AsyncIterator[NativeMessageRoot]:
-    """Offline only; visit the exact owners of native history across all scopes."""
-    from sqlalchemy import select
-
-    table = group.metadata.tables.get(SESSION_TURN_TABLE)
-    if table is None:
-        return
-    after = 0
-    async with group.context.sessions() as session:
-        await group.context.dialect.begin_consistent_read(session)
-        while True:
-            rows = (await group.context.run_statement(session.execute(select(
-                table.c.id, table.c.scope_key, table.c.result_json,
-            ).where(table.c.id > after, table.c.state == "succeeded").order_by(table.c.id).limit(128)))).mappings().all()
-            for row in rows:
-                root = _transcript_root(row["result_json"])
-                _, namespace, tenant_id = decode_key_components(root.store_key, NATIVE_STORE_KEY_MAX_BYTES)
-                if row["scope_key"] != state_store_key(namespace, tenant_id, "regenerable-session"):
-                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                yield root
-            if len(rows) < 128:
-                return
-            after = rows[-1]["id"]
 
 
 def _timestamp(value: datetime) -> datetime:
@@ -248,7 +203,7 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
                     if number in published or number > session_ids[session_id]["last_turn_no"]:
                         raise _invalid()
                     if state == "succeeded":
-                        _transcript_root(result)
+                        decode_session_transcript_root(result)
                     elif not (isinstance(result, dict) and isinstance(result.get("error_code"), str)):
                         raise _invalid()
                     published.add(number)
