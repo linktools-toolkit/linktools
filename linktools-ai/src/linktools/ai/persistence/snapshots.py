@@ -45,6 +45,7 @@ from ._turn_snapshot import (
     GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, turn_snapshot_record,
 )
 from ._turn_sql_schema import RUNTIME_TURN_SCOPE, TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
+from ._ordinary_snapshot import capture_ordinary_snapshot, decode_ordinary_snapshot, restore_ordinary_snapshot
 from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
 from ..model.messages import decode_model_message_payloads
@@ -124,37 +125,6 @@ def _require_turn_snapshot_partition(store: SqlStateStore, *, namespace: str, te
 
     if store.store_key != state_store_key(namespace, tenant_id, "execution"):
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-
-async def _require_no_unrepresented_ordinary_sessions(
-    store: SqlStateStore, *, namespace: str, tenant_id: str,
-) -> None:
-    """The v1 artifact cannot represent ordinary SQL sessions. Reject lossy export."""
-    from sqlalchemy import select
-
-    from ._session_turn_sql import SESSION_TABLE, SESSION_TURN_TABLE
-    from .state import state_store_key
-
-    scope = state_store_key(namespace, tenant_id, "regenerable-session")
-    tables = store.storage_group.metadata.tables
-    statements = tuple(
-        select(tables[name].c.id).where(tables[name].c.scope_key == scope).exists()
-        for name in (SESSION_TABLE, SESSION_TURN_TABLE)
-    )
-
-    async def read(transaction: StateTransaction) -> None:
-        if not isinstance(transaction, SqlStateRowReader):
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        row, = await transaction.read_sql_rows(
-            store.context, select(statements[0].label("sessions"), statements[1].label("turns")),
-        )
-        if row["sessions"] or row["turns"]:
-            raise AIError(
-                ErrorCode.SNAPSHOT_UNSUPPORTED,
-                "Portable v1 snapshots cannot represent ordinary SQL sessions and turns",
-            )
-
-    await store.read(read)
 
 
 class _SnapshotReader(Protocol):
@@ -492,6 +462,7 @@ class _SnapshotExportSource:
     native_projections: Mapping[str, _CapturedSnapshotReader] | None = None
     native_payloads: Mapping[str, Mapping[tuple[bytes, str], bytes]] | None = None
     run_registrations: Mapping[str, RunRecord] | None = None
+    ordinary_sessions: dict[str, list[dict[str, object]]] | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return self.archive_object_stores[domain]
@@ -635,6 +606,7 @@ class RuntimeSnapshotOperations:
         native_projections = {}
         run_registrations = {}
         native_payloads = {}
+        ordinary_sessions = None
         readers = {}
         groups = {}
         for domain in sorted(self._resources.durable_domains, key=lambda value: value.value):
@@ -665,14 +637,17 @@ class RuntimeSnapshotOperations:
                 await execution_bindings.initialize(create=False)
 
             async def capture_group(transaction: object) -> None:
-                nonlocal native
+                nonlocal native, ordinary_sessions
                 roots = []
                 event_references = []
                 for domain, store in members:
                     if domain is PersistenceDomain.CONVERSATION and isinstance(store, SqlStateStore):
-                        await _require_no_unrepresented_ordinary_sessions(
+                        captured_ordinary = await capture_ordinary_snapshot(
                             store, namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+                            accept=capture_budget.accept, page_size=capture_budget.page_size,
                         )
+                        if captured_ordinary["sessions"] or captured_ordinary["turns"]:
+                            ordinary_sessions = captured_ordinary
                     reader = _StateSnapshotReader(store,
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
                                           if domain is PersistenceDomain.TRACE else None),
@@ -844,6 +819,7 @@ class RuntimeSnapshotOperations:
             readers=readers, archives=archives(), object_stores=self._resources.object_stores,
             native_rows=native_rows, native_checkpoints=native_checkpoints, native_projections=native_projections, native_payloads=native_payloads,
             run_registrations=run_registrations,
+            ordinary_sessions=ordinary_sessions,
             archive_object_stores=(self._resources.archive_object_stores
                                   if self._resources.archive_object_stores is not None
                                   else self._resources.object_stores),
@@ -1145,7 +1121,7 @@ async def _export_snapshot(
                                 "messages": [accept(encode_native_message_row(row)) for row in retained_messages]})
     manifest = {
         "kind": "runtime-storage-snapshot",
-        "format_version": 1,
+        "format_version": 2 if source.ordinary_sessions is not None else 1,
         "namespace": source.namespace,
         "tenant_id": source.tenant_id,
         "domains": domains,
@@ -1160,6 +1136,9 @@ async def _export_snapshot(
             for group_id, projected in (source.native_projections or {}).items()],
         "objects": objects,
     }
+    if source.ordinary_sessions is not None:
+        manifest["ordinary_sessions"] = {name: [accept(row) for row in rows]
+                                         for name, rows in source.ordinary_sessions.items()}
     for optional in ("native_messages", "native_checkpoints", "native_projections"):
         if not manifest[optional]:
             del manifest[optional]
@@ -1168,7 +1147,7 @@ async def _export_snapshot(
     if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
     digest = hashlib.sha256(payload).hexdigest()
-    key = f"v1/runtime-storage-snapshot/{digest}"
+    key = f"v{manifest['format_version']}/runtime-storage-snapshot/{digest}"
     await _put_snapshot_object(object_store, key, payload)
     return ObjectRef(object_store.store_id, key, digest, len(payload))
 
@@ -1208,7 +1187,7 @@ async def restore_snapshot(
         or format_version < 1
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if format_version != 1:
+    if format_version not in (1, 2) or (format_version == 2) != ("ordinary_sessions" in manifest):
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if not isinstance(manifest.get("domains"), dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1223,6 +1202,13 @@ async def restore_snapshot(
     if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
+    ordinary_sessions = (
+        decode_ordinary_snapshot(manifest["ordinary_sessions"], tenant_id=tenant_id) if format_version == 2 else None
+    )
+    if ordinary_sessions is not None and (
+        not ordinary_sessions["sessions"] or PersistenceDomain.CONVERSATION.value not in manifest["domains"]
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     run_registrations = _decode_run_registrations(manifest.get("run_registrations", []))
     raw_domains = manifest["domains"]
     raw_objects = manifest.get("objects", [])
@@ -1608,6 +1594,11 @@ async def restore_snapshot(
     if target.exists() and any(target.iterdir()):
         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     async with open_target(target, namespace, tenant_id) as resources:
+        if ordinary_sessions is not None and (
+            resources.namespace != namespace or resources.tenant_id != tenant_id or resources.read_only
+            or not isinstance(resources.stores.get(PersistenceDomain.CONVERSATION), SqlStateStore)
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         pending_references = any(pending_operation_reference(payload) is not None
             for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
             if record.kind == "execution"
@@ -1877,6 +1868,11 @@ async def restore_snapshot(
                 await _insert_snapshot_values(transaction, state_records, state_facts, operations, sequences)
                 if restore_turn_rows is not None:
                     await transaction.run_sql(store.context, restore_turn_rows)
+                if domain is PersistenceDomain.CONVERSATION and ordinary_sessions is not None:
+                    await restore_ordinary_snapshot(
+                        store, transaction, namespace=resources.namespace, tenant_id=resources.tenant_id,
+                        rows=ordinary_sessions,
+                    )
                 if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
                     from ._model_interaction_store import ModelInteractionStateStepArchive
                     from ._step_contracts import AgentRunRecord, StepEvent
@@ -1939,6 +1935,14 @@ def snapshot_manifest_usage(
                 if not isinstance(rows, list):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 entries += len(rows)
+    if "ordinary_sessions" in manifest:
+        ordinary = manifest["ordinary_sessions"]
+        if not isinstance(ordinary, Mapping) or set(ordinary) != {"sessions", "turns"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for rows in ordinary.values():
+            if not isinstance(rows, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            entries += len(rows)
     for raw_object in objects:
         if not isinstance(raw_object, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2100,6 +2104,9 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         "native_sequences": ordered_unique(native_sequences),
         "native_messages": ordered_unique(list(native_messages.values())),
         "objects": ordered_unique(normalized_objects),
+        **({"ordinary_sessions": {section: ordered_unique(rows)
+                                  for section, rows in manifest["ordinary_sessions"].items()}}
+           if "ordinary_sessions" in manifest else {}),
     })
 
 

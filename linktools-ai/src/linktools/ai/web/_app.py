@@ -355,6 +355,7 @@ class _Console:
         self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
         status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]],
         shutdown_event: asyncio.Event | None, session_notices: _SessionNoticeFeed | None,
+        local_workspace: bool,
     ) -> None:
         self.runtime = runtime
         self.history = runtime.history if runtime is not None else history
@@ -363,6 +364,7 @@ class _Console:
         self.capabilities = tuple(capabilities)
         self._shutdown_event = shutdown_event
         self._session_notices = session_notices
+        self._local_workspace = local_workspace
         self._turn_subscribers = 0
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
@@ -383,6 +385,10 @@ class _Console:
         if self.runtime is not None:
             return self.runtime.sessions.supports_turn_sessions
         return self.history is not None and self.history.has_turn_sessions
+
+    @property
+    def local_turn_workspace(self) -> bool:
+        return self._local_workspace and self.principal.kind == PrincipalKind.LOCAL_TRUSTED.value
 
     async def config(self, request: Request) -> Response:
         return _json({
@@ -406,8 +412,8 @@ class _Console:
                 if cwd is not None and not isinstance(cwd, str):
                     raise ValueError("cwd must be a workspace-relative string or null")
                 view = await runtime.sessions.create_turn_session(
-                    _text(payload, "session_id"), _text(payload, "agent_id", "default"),
-                    principal=self.principal, idempotency_key=request.state.operation_id,
+                    _text(payload, "session_id"), principal=self.principal,
+                    idempotency_key=request.state.operation_id,
                     metadata={"title": _text(payload, "title", "New conversation")}, cwd=cwd,
                 )
                 return _json(view, 201)
@@ -417,7 +423,11 @@ class _Console:
             ))
             return _json(view, 201)
         if self.turn_sessions:
-            return _json(await self.require_history().turn_sessions(principal=self.principal, **_paging(request)))
+            if not self.local_turn_workspace:
+                return _json({"items": [], "next_cursor": None, "scope_required": True})
+            return _json(await self.require_history().turn_sessions(
+                principal=self.principal, local_workspace=True, **_paging(request),
+            ))
         if self.runtime is not None:
             return _json(await self.runtime.sessions.list(ListSessionRequest(self.principal, **_paging(request))))
         # The read-only console lists the newest sessions by time, without pagination.
@@ -440,12 +450,17 @@ class _Console:
             if "turn_id" in request.query_params:
                 turn = await history.turn_result(
                     identity, _text(request.query_params, "turn_id"), principal=self.principal,
+                    local_workspace=self.local_turn_workspace,
                 )
                 return _json(turn)
             if include_timeline == "false":
-                session = await history.turn_session_state(identity, principal=self.principal)
+                session = await history.turn_session_state(
+                    identity, principal=self.principal, local_workspace=self.local_turn_workspace,
+                )
                 return _json({"session": session, "timeline": None})
-            return _json(await history.turn_session(identity, principal=self.principal, **_paging(request)))
+            return _json(await history.turn_session(
+                identity, principal=self.principal, local_workspace=self.local_turn_workspace, **_paging(request),
+            ))
         if "execution_id" in request.query_params:
             execution_id = _text(request.query_params, "execution_id")
             turn_state = request.query_params.get("turn_state", "committed")
@@ -488,8 +503,8 @@ class _Console:
                 if payload.get("planning") or payload.get("files"):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns accept text and thinking only")
                 turn_id = await runtime.sessions.start_turn(
-                    session_id, _text(payload, "prompt"), principal=self.principal,
-                    idempotency_key=request_id, thinking=payload.get("thinking"),
+                    session_id, _text(payload, "prompt"), agent_id=_text(payload, "agent_id", "default"),
+                    principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
                 )
                 return _json({"turn_id": turn_id}, 202)
             if action in {"cancel", "recover"}:
@@ -575,7 +590,9 @@ class _Console:
                 # Subscribe before taking the authorized snapshot so an
                 # admission/commit racing the initial read cannot disappear.
                 unsubscribe = runtime.sessions.observe_turn_session(identity, receive)
-                snapshot = await self.require_history().turn_session_state(identity, principal=self.principal)
+                snapshot = await self.require_history().turn_session_state(
+                    identity, principal=self.principal, local_workspace=self.local_turn_workspace,
+                )
                 yield _sse_frame("turn", {"type": "snapshot", "session": snapshot}, str(snapshot["revision"]))
                 while True:
                     try:
@@ -1033,16 +1050,18 @@ def create_app(
     capabilities: Sequence[Mapping[str, object]] = (),
     shutdown_event: asyncio.Event | None = None,
     session_notices: _SessionNoticeFeed | None = None,
+    local_workspace: bool = False,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
 
     Set shutdown_event before draining HTTP connections to close live observers
     without shutting down their Runtime. With no Runtime, mutations and live watches are disabled. Historical reads
-    remain available without model credentials. Host/Origin headers are not
+    remain available without model credentials. Only an explicitly trusted local workspace can list ordinary sessions.
+    Host/Origin headers are not
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
-    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices)
+    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices, local_workspace)
     app = Starlette(routes=[
         Route("/", _asset), Route("/assets/{name}", _asset),
         Route("/api/config", console.config),

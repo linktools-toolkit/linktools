@@ -423,6 +423,7 @@ async def compose_runtime_components(
             catalog=catalog,
             compiler=compiler,
             authorization=selected_authorization,
+            enable_turn_sessions=authorization is not None and type(authorization) is not TenantAuthorizationPolicy,
             tenant_id=effective_tenant_id,
             namespace=resolved_namespace,
             workspace=workspace,
@@ -585,6 +586,7 @@ async def _build_local_components(
     catalog: AgentCatalog,
     compiler: AgentCompiler,
     authorization: AuthorizationPolicy,
+    enable_turn_sessions: bool,
     tenant_id: str,
     namespace: str,
     workspace: "Workspace | None",
@@ -839,7 +841,7 @@ async def _build_local_components(
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
             regenerable_turns=(
-                None if state.session_turns is None else _RegenerableTurnRunner(
+                None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(
                     state.session_turns, executor, workspace=workspace, workspace_access=input_materializer.access,
                     instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
                 )
@@ -909,6 +911,7 @@ async def _build_local_components(
         history = _borrowed_runtime_history(
             history_service, tenant_id=tenant_id, state=state, run_store=run_store,
             authorization=authorization, artifact=artifact,
+            enable_turn_sessions=enable_turn_sessions,
             pending_session_execution=(
                 None if pending_observer is None else pending_observer.read_session_execution
             ),
@@ -973,6 +976,7 @@ def _borrowed_runtime_history(
     run_store: RuntimeAgentRunStore,
     authorization: object,
     artifact: DefaultArtifactService,
+    enable_turn_sessions: bool,
     pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
     pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
 ) -> "History":
@@ -982,7 +986,7 @@ def _borrowed_runtime_history(
         executions=state.execution.executions,
         events=state.execution.events,
         sessions=state.conversation.sessions,
-        session_turn_reader=state.session_turn_reader,
+        session_turn_reader=state.session_turn_reader if enable_turn_sessions else None,
         conversation=state.conversation,
         session_transcript_store=run_store.conversation_persistence,
         pending_session_execution=pending_session_execution,

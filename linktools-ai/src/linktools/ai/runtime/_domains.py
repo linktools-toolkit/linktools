@@ -296,22 +296,18 @@ class RuntimeSessions(Generic[AppT]):
         return runner, runtime
 
     async def create_turn_session(
-        self, session_id: str, agent_id: str, *, principal: Principal,
+        self, session_id: str, *, principal: Principal,
         metadata: "Mapping[str, JsonValue] | None" = None, idempotency_key: str | None = None,
         cwd: str | None = None,
     ) -> dict[str, JsonValue]:
         runner, runtime = self._require_turn_sessions()
-        resolver = runtime._binding_resolver
-        if resolver is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         validate_resource_id(session_id)
-        validate_agent_id(agent_id)
         if idempotency_key is not None:
             validate_idempotency_key(idempotency_key)
         await self._service.require_available()
         return await runner.create_session(
-            session_id, agent_id, principal=principal, tenant_id=runtime.tenant_id,
-            authorization=runtime._authorization, resolver=resolver,
+            session_id, principal=principal, tenant_id=runtime.tenant_id,
+            authorization=runtime._authorization,
             metadata={} if metadata is None else metadata, request_key=idempotency_key, cwd=cwd,
         )
 
@@ -349,23 +345,22 @@ class RuntimeSessions(Generic[AppT]):
         row = await store.get_session(session_id)
         if row is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        owner = row["owner_principal_id"].decode("utf-8")
         await runtime._authorization.authorize(
-            principal, action, ResourceRef(ResourceKind.SESSION, session_id, runtime.tenant_id, owner),
+            principal, action, ResourceRef(ResourceKind.SESSION, session_id, runtime.tenant_id),
         )
         if action is AuthorizationAction.SESSION_CLOSE:
             return await store.close_session(
-                session_id, owner_principal_id=owner, expected_revision=expected_revision,
+                session_id, expected_revision=expected_revision,
             )
         config = {**row["config_json"], "metadata": dict(metadata or {})}
         if replace_cwd:
             config["cwd"] = await runner.canonicalize_cwd(cwd)
         return await store.update_session(
-            session_id, owner_principal_id=owner, expected_revision=expected_revision, config=config,
+            session_id, expected_revision=expected_revision, config=config,
         )
 
     async def start_turn(
-        self, session_id: str, prompt: str, *, principal: Principal,
+        self, session_id: str, prompt: str, *, agent_id: str, principal: Principal,
         idempotency_key: str, thinking: JsonValue = None,
     ) -> str:
         runner, runtime = self._require_turn_sessions()
@@ -373,12 +368,13 @@ class RuntimeSessions(Generic[AppT]):
         if resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         validate_resource_id(session_id)
+        validate_agent_id(agent_id)
         validate_idempotency_key(idempotency_key)
         if not isinstance(prompt, str) or not prompt.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A plain text prompt is required")
         await self._service.require_available()
         return await runner.start_session(
-            session_id, prompt=prompt, principal=principal, namespace=runtime.namespace,
+            session_id, agent_id=agent_id, prompt=prompt, principal=principal, namespace=runtime.namespace,
             tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
             resolver=resolver, request_key=idempotency_key, limits=PromptLimits(),
             event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking),

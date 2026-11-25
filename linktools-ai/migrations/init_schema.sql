@@ -552,8 +552,6 @@ CREATE TABLE ai_sessions (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	scope_key VARBINARY(32) NOT NULL COMMENT 'Partition of one tenant in the configured session store.',
 	session_key VARBINARY(128) NOT NULL COMMENT 'Exact session identity.',
-	owner_principal_id VARBINARY(128) NOT NULL COMMENT 'Principal that owns the session.',
-	agent_id VARBINARY(128) NOT NULL COMMENT 'Agent named by the session.',
 	status VARCHAR(8) NOT NULL COMMENT 'Session lifecycle status.',
 	revision BIGINT NOT NULL COMMENT 'Compare-and-swap revision of the session.',
 	active_turn_id VARBINARY(128) COMMENT 'Accepted turn occupying the session.',

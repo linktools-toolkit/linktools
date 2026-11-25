@@ -302,7 +302,18 @@ async def _open_local_runtime(
         AssetCapability, ExecutionCapability, FileSystemCapability, MemoryCapability,
         ShellCapability, StepPersistenceCapability, TraceCapability,
     )
+    from linktools.ai.core import PrincipalKind, ResourceKind, TenantAuthorizationPolicy
     from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+    class LocalWorkspaceAuthorization(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource) -> None:
+            if (
+                resource.kind is ResourceKind.SESSION
+                and resource.owner_principal_id is None
+                and principal.kind != PrincipalKind.LOCAL_TRUSTED.value
+            ):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await super().authorize(principal, action, resource)
 
     features = RuntimeFeatures("workspace")
     features.model("default", model)
@@ -316,6 +327,7 @@ async def _open_local_runtime(
     metrics = await _local_metrics(workspace)
     async with Runtime.open(
         "default", storage=_local_runtime_storage(workspace), features=features, metrics=metrics,
+        authorization=LocalWorkspaceAuthorization(),
     ) as runtime:
         source = runtime.features
         assert source is not None

@@ -27,7 +27,7 @@ async def store(tmp_path):
         async with engine.begin() as connection:
             await connection.run_sync(metadata.create_all)
         turns = SqlSessionTurns(create_sql_storage_context(engine), metadata, namespace="test", tenant_id="a")
-        await turns.create("chat", owner_principal_id="actor", agent_id="qa", config={})
+        await turns.create("chat", config={})
         yield engine, metadata, turns
     finally:
         await engine.dispose()
@@ -230,5 +230,5 @@ async def test_runtime_uses_its_conversation_route_for_new_turn_storage(tmp_path
         assert runner is not None
         turns = runtime._state.session_turns
         assert turns is not None
-        await turns.create("chat", owner_principal_id="actor", agent_id="qa", config={})
-        assert (await turns.get_session("chat"))["owner_principal_id"] == b"actor"
+        await turns.create("chat", config={})
+        assert (await turns.get_session("chat"))["session_key"] == b"chat"

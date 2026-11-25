@@ -162,8 +162,8 @@ class _RegenerableTurnRunner:
         return self._instruction_resolver
 
     async def create_session(
-        self, session_id: str, agent_id: str, *, principal: Principal, tenant_id: str,
-        authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
+        self, session_id: str, *, principal: Principal, tenant_id: str,
+        authorization: AuthorizationPolicy,
         metadata: Mapping[str, JsonValue], request_key: str | None = None, cwd: str | None = None,
     ) -> dict[str, JsonValue]:
         if principal.tenant_id != tenant_id:
@@ -171,34 +171,34 @@ class _RegenerableTurnRunner:
         if any(key.startswith("linktools.ai.") for key in metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         await authorization.authorize(principal, AuthorizationAction.SESSION_CREATE, ResourceRef(
-            ResourceKind.SESSION, session_id, tenant_id, principal.principal_id,
+            ResourceKind.SESSION, session_id, tenant_id,
         ))
-        self._executor.require_regenerable(await resolver.resolve_agent(agent_id))
         cwd = await self.canonicalize_cwd(cwd)
         config: JsonValue = {"metadata": dict(metadata), "create_request_key": request_key, "cwd": cwd}
         try:
-            await self._store.create(session_id, owner_principal_id=principal.principal_id, agent_id=agent_id, config=config)
+            await self._store.create(session_id, config=config)
         except IntegrityError:
+            await authorization.authorize(
+                principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, session_id, tenant_id),
+            )
             existing = await self._store.get_session(session_id)
             if (
                 request_key is None or existing is None
-                or existing["owner_principal_id"] != principal.principal_id.encode("utf-8")
-                or existing["agent_id"] != agent_id.encode("utf-8")
                 or existing["config_json"] != config
             ):
                 raise AIError(ErrorCode.SESSION_CONFLICT) from None
             return {
-                "session_id": session_id, "agent_id": agent_id, "revision": existing["revision"],
+                "session_id": session_id, "revision": existing["revision"],
                 "metadata": dict(metadata), "state": existing["status"], "cwd": cwd,
                 "active_turn_id": None if existing["active_turn_id"] is None else existing["active_turn_id"].decode("utf-8"),
             }
         return {
-            "session_id": session_id, "agent_id": agent_id, "revision": 0, "metadata": dict(metadata),
+            "session_id": session_id, "revision": 0, "metadata": dict(metadata),
             "state": "open", "active_turn_id": None, "cwd": cwd,
         }
 
     async def start_session(
-        self, session_id: str, *, principal: Principal, namespace: str, tenant_id: str,
+        self, session_id: str, *, agent_id: str, principal: Principal, namespace: str, tenant_id: str,
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
         request_key: str, prompt: str, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
     ) -> str:
@@ -210,7 +210,7 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await authorization.authorize(
             principal, AuthorizationAction.SESSION_READ,
-            ResourceRef(ResourceKind.SESSION, session_id, tenant_id, session["owner_principal_id"].decode("utf-8")),
+            ResourceRef(ResourceKind.SESSION, session_id, tenant_id),
         )
         if session["status"] != "open":
             raise AIError(ErrorCode.SESSION_CONFLICT)
@@ -220,14 +220,15 @@ class _RegenerableTurnRunner:
             if prior is None:
                 return None
             identity = prior["turn_id"].decode("utf-8")
+            request = prior["request_json"]
             await authorization.authorize(
                 principal, AuthorizationAction.EXECUTION_RUN,
-                ResourceRef(ResourceKind.EXECUTION, identity, tenant_id),
+                ResourceRef(ResourceKind.EXECUTION, identity, tenant_id, request["principal"]["principal_id"]),
             )
-            request = prior["request_json"]
             if (
                 request["prompt"] != prompt or request["principal"] != asdict(principal)
                 or request["thinking"] != thinking
+                or AgentBindingContract.from_payload(request["binding"]).agent_spec.id != agent_id
             ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return identity
@@ -241,7 +242,6 @@ class _RegenerableTurnRunner:
         await authorization.authorize(
             principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id),
         )
-        agent_id = session["agent_id"].decode("utf-8")
         binding = await resolver.resolve_agent(agent_id)
         config = session["config_json"]
         cwd = config.get("cwd")
@@ -272,9 +272,8 @@ class _RegenerableTurnRunner:
         session = await self._store.get_session(key.session_id)
         if session is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        owner = session["owner_principal_id"].decode("utf-8")
         await authorization.authorize(
-            principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id, owner),
+            principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id),
         )
         turn = await self._store.get_turn(key)
         if turn is None:
@@ -309,7 +308,7 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             await authorization.authorize(
                 principal, AuthorizationAction.SESSION_READ,
-                ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id, session["owner_principal_id"].decode("utf-8")),
+                ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id),
             )
             if session["active_turn_id"] != key.turn_id.encode("utf-8"):
                 return False

@@ -137,6 +137,7 @@ function setDisabled() {
       $(id).disabled ||= busy || state.actionsPending.has(`session:${state.selectedSession}:${action}`);
   }
   $('planning').closest('label').hidden=ordinary;
+  $('new-agent').disabled=readonly || (ordinary && (!state.session || state.session.status!=='OPEN'));
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
   ['retry','fork-run','end-stopped'].forEach(id => $(id).disabled=readonly || !state.execution || ending);
@@ -252,8 +253,9 @@ async function loadList(more=false) {
     if(!more)state.listSessionReads.clear();
     payload.items.forEach(item=>state.listSessionReads.set(item.session_id,sessionReadGeneration));
   }
-  state.listCursor=payload.next_cursor; $('list-more').hidden=!state.listCursor; $('list-scope').hidden=!payload.recent_only;
-  $('list-scope').textContent='Showing recent sessions in read-only mode';
+  state.listCursor=payload.next_cursor; $('list-more').hidden=!state.listCursor;
+  $('list-scope').hidden=!payload.recent_only && !payload.scope_required;
+  $('list-scope').textContent=payload.scope_required?'Open a conversation by ID; this host does not list workspace sessions.':'Showing recent sessions in read-only mode';
   renderList();
 }
 function setListFilterAvailability() {
@@ -292,8 +294,13 @@ function renderList() {
     node.append(element('span','list-title',session ? item.metadata?.title || short(id) : short(id)));
     const sub=element('span','list-subtitle');
     sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':(item.active_turn_id || item.active_execution_id) || !terminal(item.status) && !session ? 'running':''}`));
-    sub.append(element('span','',session ? `${(item.active_turn_id || item.active_execution_id)?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}` : `${item.status} · ${item.agent_id || 'task'} · ${short(id)}`));
-    node.title=`${item.status} · ${item.agent_id || 'task'} · ${id}`;
+    const running=Boolean(item.active_turn_id || item.active_execution_id);
+    const label=session && state.config?.turn_sessions
+      ? (running?'Running':item.status==='CLOSED'?'Closed':short(id))
+      : session ? `${running?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}`
+      : `${item.status} · ${item.agent_id || 'task'} · ${short(id)}`;
+    sub.append(element('span','',label));
+    node.title=[item.status,item.agent_id,id].filter(Boolean).join(' · ');
     node.append(sub); $('list').append(node);
   });
   if(focus)[...$('list').children].find(node=>node.dataset.listKey===focus)?.focus({preventScroll:true});
@@ -775,7 +782,11 @@ function acceptSession(payload) {
 function renderSessionHeader() {
   if(!state.session)return;
   $('conversation-title').textContent=state.session.metadata?.title || 'Conversation';
-  $('conversation-meta').textContent=`${state.session.agent_id}${state.session.status==='CLOSED'?' · CLOSED':''}${state.session.history_quality!=='complete'?' · history '+state.session.history_quality:''}`;
+  $('conversation-meta').textContent=[
+    state.config?.turn_sessions ? state.session.cwd : state.session.agent_id,
+    state.session.status==='CLOSED'?'CLOSED':null,
+    state.session.history_quality && state.session.history_quality!=='complete'?'history '+state.session.history_quality:null,
+  ].filter(Boolean).join(' · ');
   $('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
 }
 const thinkingLevels=['low','medium','high','xhigh','max'];
@@ -2146,7 +2157,10 @@ async function sendMessage(event) {
   $('send').disabled=true;notice('');
   try {
     // Rejected admission is terminal for its key; another explicit send is a new attempt.
-    const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:!state.config?.turn_sessions && $('planning').checked,thinking:readThinking()}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
+    const options={prompt:promptValue,thinking:readThinking()};
+    if(state.config?.turn_sessions)options.agent_id=$('new-agent').value || 'default';
+    else options.planning=$('planning').checked;
+    const result=await mutate(sessionURL(sessionId,"messages"),options,{newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
     if(generation!==state.generation){const draft=state.drafts.get(sessionId);if(draft?.prompt===promptValue)draft.prompt='';if(state.selectedSession===sessionId && $('prompt').value===promptValue)$('prompt').value='';return;}
     if($('prompt').value===promptValue)$('prompt').value='';
     if(state.config?.turn_sessions){
@@ -2181,13 +2195,16 @@ async function sendMessage(event) {
 }
 function openNew() {
   if(!state.config || state.config.read_only)return;
-  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-agent').focus();
+  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();
+  (state.config.turn_sessions?$('create-session'):$('new-agent')).focus();
 }
 async function createSession(event) {
   event.preventDefault();const button=$('create-session');button.disabled=true;
   const sessionId=$('new-dialog').dataset.sessionId,generation=state.generation,noticeRevision=state.noticeRevision;
   try {
-    const session=await mutate('/api/sessions',{session_id:sessionId,title:$('new-title').value,agent_id:$('new-agent').value,cwd:$('new-cwd').value || null});
+    const options={session_id:sessionId,title:$('new-title').value,cwd:$('new-cwd').value || null};
+    if(!state.config.turn_sessions)options.agent_id=$('new-agent').value || 'default';
+    const session=await mutate('/api/sessions',options);
     if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation){$('new-dialog').close();state.conversationMode='chat';state.focusComposerSession=session.session_id;setView('sessions',false);navigate(session.session_id,null);}
     await loadList();
   } catch(error){if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation && noticeRevision===state.noticeRevision)showError(error);}
@@ -2373,7 +2390,14 @@ async function bootstrap() {
   state.config=await api('/api/config');$('workspace-label').textContent=state.config.workspace || 'Local Runtime';
   state.config.capabilities.filter(item=>item.kind==='agent').forEach(item=>{const option=element('option','',item.id);option.value=item.id;$('new-agent').append(option);});
   state.config.metric_names.forEach(name=>{const option=element('option','',name.replace('linktools.',''));option.value=name;$('metric-names').append(option);});
-  if(state.config.turn_sessions) $('planning').checked=false;
+  if(state.config.turn_sessions){
+    $('planning').checked=false;
+    if(!$('new-agent').options.length){
+      const option=element('option','','default');option.value='default';$('new-agent').append(option);
+    }
+    if([...$('new-agent').options].some(option=>option.value==='default'))$('new-agent').value='default';
+    document.querySelector('.composer-settings').prepend($('agent-picker'));
+  }
   if(state.config.read_only){connection('Read-only');notice('Read-only. Configure a model at startup to send messages.');}
   setDisabled();await loadList();await fromHash();
 }

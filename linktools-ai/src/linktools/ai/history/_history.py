@@ -9,7 +9,7 @@ import json
 import math
 import time
 import heapq
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -376,23 +376,37 @@ class History:
 
     async def turn_sessions(
         self, *, principal: Principal, cursor: str | None = None, limit: int = 100,
+        session_ids: Sequence[str] | None = None, local_workspace: bool = False,
     ) -> dict[str, JsonValue]:
-        """List SQL sessions visible to the principal."""
-        return await self._require_ordinary_sessions().sessions(principal=principal, cursor=cursor, limit=limit)
+        """List explicitly scoped SQL sessions, or use the trusted local console boundary."""
+        return await self._require_ordinary_sessions().sessions(
+            principal=principal, cursor=cursor, limit=limit, session_ids=session_ids, local_workspace=local_workspace,
+        )
 
-    async def turn_session_state(self, session_id: str, *, principal: Principal) -> dict[str, JsonValue]:
+    async def turn_session_state(
+        self, session_id: str, *, principal: Principal, local_workspace: bool = False,
+    ) -> dict[str, JsonValue]:
         """Read the authorized current session and its occupant without reading history."""
-        return await self._require_ordinary_sessions().session_state(session_id, principal=principal)
+        return await self._require_ordinary_sessions().session_state(
+            session_id, principal=principal, local_workspace=local_workspace,
+        )
 
     async def turn_session(
         self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
+        local_workspace: bool = False,
     ) -> dict[str, JsonValue]:
         """Read an authorized page of committed turns, newest page first."""
-        return await self._require_ordinary_sessions().session(session_id, principal=principal, cursor=cursor, limit=limit)
+        return await self._require_ordinary_sessions().session(
+            session_id, principal=principal, cursor=cursor, limit=limit, local_workspace=local_workspace,
+        )
 
-    async def turn_result(self, session_id: str, turn_id: str, *, principal: Principal) -> dict[str, JsonValue]:
+    async def turn_result(
+        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool = False,
+    ) -> dict[str, JsonValue]:
         """Read the requested turn by its own identity and authorized session."""
-        return await self._require_ordinary_sessions().turn_result(session_id, turn_id, principal=principal)
+        return await self._require_ordinary_sessions().turn_result(
+            session_id, turn_id, principal=principal, local_workspace=local_workspace,
+        )
 
     async def read_model_interactions(
         self, execution_id: str, *, principal: Principal, identities: tuple[tuple[int, int], ...],
@@ -1805,7 +1819,7 @@ async def _open_runtime_history(
                                    else pending_coordination.read_session_execution),
         pending_execution=None if pending_coordination is None else pending_coordination.read_execution,
         conversation=selected_state.conversation,
-        session_turn_reader=selected_state.session_turn_reader,
+        session_turn_reader=selected_state.session_turn_reader if authorization is not None else None,
         session_transcript_store=selected_state.run_store.conversation_persistence,
         cache=(selected_state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
             selected_state.plan.route(domain).retention is StorageRetentionMode.DURABLE

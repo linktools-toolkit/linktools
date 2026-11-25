@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -68,8 +69,6 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         SESSION_TABLE, metadata, sql_id_column(),
         key("scope_key", 32, "Partition of one tenant in the configured session store."),
         key("session_key", TURN_SESSION_MAX_BYTES, "Exact session identity."),
-        key("owner_principal_id", 128, "Principal that owns the session."),
-        key("agent_id", 128, "Agent named by the session."),
         Column("status", String(8), nullable=False, comment="Session lifecycle status."),
         Column("revision", BigInteger, nullable=False, comment="Compare-and-swap revision of the session."),
         key("active_turn_id", TURN_EXECUTION_MAX_BYTES, "Accepted turn occupying the session.", nullable=True),
@@ -169,13 +168,15 @@ class SqlSessionTurnReader:
             return tuple((await connection.execute(statement)).mappings())
 
     async def session_page(
-        self, *, owner_principal_id: str, before: int | None, limit: int,
+        self, *, session_ids: Sequence[str] | None, before: int | None, limit: int,
     ) -> tuple[RowMapping, ...]:
         columns = self._sessions.c
-        where = columns.scope_key == self._scope
-        statement = self._sessions.select().where(
-            where, columns.owner_principal_id == self._key(owner_principal_id, 128),
-        )
+        statement = self._sessions.select().where(columns.scope_key == self._scope)
+        if session_ids is not None:
+            if not session_ids:
+                return ()
+            keys = tuple(self._key(identity, TURN_SESSION_MAX_BYTES) for identity in session_ids)
+            statement = statement.where(columns.session_key.in_(keys))
         if before is not None:
             statement = statement.where(columns.id < before)
         async with self._context.engine.connect() as connection:
@@ -252,35 +253,34 @@ class SqlSessionTurns(SqlSessionTurnReader):
         super().__init__(context, metadata, namespace=namespace, tenant_id=tenant_id)
         self._now = sql_epoch_seconds()
 
-    async def create(self, session_id: str, *, owner_principal_id: str, agent_id: str, config: JsonValue) -> None:
+    async def create(self, session_id: str, *, config: JsonValue) -> None:
         async def write(connection: AsyncSession) -> None:
             await connection.execute(self._sessions.insert().values(
-                **self._session_values(session_id), owner_principal_id=self._key(owner_principal_id, 128),
-                agent_id=self._key(agent_id, 128), status="open", revision=0, last_turn_no=0, config_json=config,
+                **self._session_values(session_id), status="open", revision=0, last_turn_no=0, config_json=config,
             ))
 
         await self._context.run_mutation(write, domain="session.create")
 
     async def update_session(
-        self, session_id: str, *, owner_principal_id: str, expected_revision: int, config: JsonValue,
+        self, session_id: str, *, expected_revision: int, config: JsonValue,
     ) -> bool:
-        """Replace authorized session configuration without changing a running turn's admission."""
+        """Replace inactive session configuration at the caller’s authorized revision."""
         async def write(connection: AsyncSession) -> bool:
             result = await connection.execute(self._sessions.update().filter_by(
-                **self._session_values(session_id), owner_principal_id=self._key(owner_principal_id, 128),
-                status="open", revision=expected_revision,
+                **self._session_values(session_id),
+                status="open", revision=expected_revision, active_turn_id=None,
             ).values(config_json=config, revision=expected_revision + 1))
             return result.rowcount == 1
 
         return await self._context.run_mutation(write, domain="session.update")
 
     async def close_session(
-        self, session_id: str, *, owner_principal_id: str, expected_revision: int,
+        self, session_id: str, *, expected_revision: int,
     ) -> bool:
         """Close an unoccupied session atomically so a concurrent admission cannot win as well."""
         async def write(connection: AsyncSession) -> bool:
             result = await connection.execute(self._sessions.update().filter_by(
-                **self._session_values(session_id), owner_principal_id=self._key(owner_principal_id, 128),
+                **self._session_values(session_id),
                 status="open", revision=expected_revision, active_turn_id=None,
             ).values(status="closed", revision=expected_revision + 1))
             return result.rowcount == 1
