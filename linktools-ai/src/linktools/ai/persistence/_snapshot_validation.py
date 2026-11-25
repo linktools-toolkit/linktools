@@ -56,6 +56,7 @@ from .contracts import (
 )
 from ._step_message_content import NativeMessageRoot
 from ._step_store import SqlStepStore
+from ._task_events import _task_event_head
 from ._task_summary import _TaskSummary
 from ._plan import PersistenceDomain
 from ._repository_common import (
@@ -905,7 +906,7 @@ def _validate_facts(
     for fact in facts:
         if previous_stream is None or fact.stream_key > previous_stream:
             if previous_owner is not None and previous_fact is not None:
-                _validate_fact_high_water(previous_owner, previous_sequence, previous_fact)
+                _validate_fact_high_water(previous_owner, previous_sequence, previous_fact, records[previous_fact.owner_key])
             if fact.sequence != 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             previous_stream = fact.stream_key
@@ -955,9 +956,11 @@ def _validate_facts(
         fact_owners.add(fact.owner_key)
 
     if previous_owner is not None and previous_fact is not None:
-        _validate_fact_high_water(previous_owner, previous_sequence, previous_fact)
+        _validate_fact_high_water(previous_owner, previous_sequence, previous_fact, records[previous_fact.owner_key])
 
     for owner_key, owner in values.items():
+        if isinstance(owner, TaskGraphView) and owner_key not in fact_owners:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(owner, ExecutionRecord) and owner_key not in fact_owners and owner.event_seq != 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(owner, TranscriptHeadRecord):
@@ -967,7 +970,9 @@ def _validate_facts(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _validate_fact_high_water(owner: object, sequence: int, fact: StoredFact) -> None:
+def _validate_fact_high_water(owner: object, sequence: int, fact: StoredFact, record: StoredRecord) -> None:
+    if isinstance(owner, TaskGraphView) and _task_event_head(record) != sequence:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if isinstance(owner, ExecutionRecord) and owner.event_seq != sequence:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if isinstance(owner, TranscriptHeadRecord):
@@ -1093,7 +1098,7 @@ def _canonical_sequences(
         owner = values.get(fact.owner_key)
         if owner is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if isinstance(owner, ExecutionRecord) or fact.kind == "transcript_pending_part":
+        if isinstance(owner, (ExecutionRecord, TaskGraphView)) or fact.kind == "transcript_pending_part":
             continue
         relation, value = _fact_storage_identity(domain, fact, owner)
         key = stream_key(

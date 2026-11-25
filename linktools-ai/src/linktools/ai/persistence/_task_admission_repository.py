@@ -21,6 +21,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..task import (
+    TaskEventType,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphSubmission,
@@ -52,10 +53,11 @@ from .state import (
     operation_key,
 )
 from ._task_events import (
-    _TaskEventState,
+    _TaskEventDraft,
     _append_task_events,
-    _append_task_state_events,
+    _task_event_head,
     _task_graph_event_drafts,
+    _with_task_event_head,
 )
 from ._task_summary import _TaskSummary
 from ._task_state import (
@@ -926,16 +928,19 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     state=node_view.status.value,
                 )
             )
-        records[0] = _TaskSummary.build(tuple(node_views), graph.nodes).attach(records[0])
+        records[0] = _with_task_event_head(
+            _TaskSummary.build(tuple(node_views), graph.nodes).attach(records[0]), 1,
+        )
         await transaction.insert_records(tuple(records))
-        await _append_task_state_events(
+        await _append_task_events(
             transaction,
             namespace=self._namespace,
             tenant_id=self._tenant_id,
             domain=self._domain.value,
+            graph_id=graph.graph_id,
             graph_key=self._graph_key(graph.graph_id),
-            before=None,
-            after=_TaskEventState(view, tuple(node_views)),
+            drafts=(_TaskEventDraft(TaskEventType.GRAPH_ADMITTED, view.status),),
+            previous_sequence=0,
         )
         return view
 
@@ -1098,6 +1103,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         ):
             return view
         summary = _TaskSummary.read(graph_record)
+        previous_sequence = _task_event_head(graph_record)
+        drafts = _task_graph_event_drafts(graph_view, view)
         guarded = await transaction.guard_record(
             self._graph_key(view.graph_id),
             expected_storage_revision=graph_record.storage_revision,
@@ -1116,7 +1123,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             replacement = projected_record(self, graph_record, replace(graph_view, status=view.status))
             await replace_checked(
                 transaction,
-                replacement if summary is None else summary.attach(replacement),
+                _with_task_event_head(summary.attach(replacement), previous_sequence + len(drafts)),
                 graph_record.storage_revision,
             )
         await _append_task_events(
@@ -1126,8 +1133,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             domain=self._domain.value,
             graph_id=view.graph_id,
             graph_key=self._graph_key(view.graph_id),
-            drafts=_task_graph_event_drafts(graph_view, view),
-            owner_guarded=True,
+            drafts=drafts,
+            previous_sequence=previous_sequence,
         )
         return view
 
