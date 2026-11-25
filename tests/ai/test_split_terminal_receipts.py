@@ -187,8 +187,9 @@ async def test_split_cold_stop_requires_exact_source_owner(tmp_path: Path, monke
             assert registered is not None
             assert registered.registration_id == ("old" if ordering == "registration-first" else None)
             if ordering == "stop-first":
-                with pytest.raises(ValueError, match="single-shot"):
+                with pytest.raises(AIError) as conflict:
                     await owner.commit_step(prepared, key=key, generation=1)
+                assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
                 assert await owner._read_pin(owner._identity(key, 1)) == source
         finally:
             await native.close()

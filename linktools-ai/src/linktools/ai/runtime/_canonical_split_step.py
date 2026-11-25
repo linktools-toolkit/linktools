@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from ..core import deterministic_id
 from ..errors import AIError, ErrorCode
-from ..persistence.runs import PreparedArchive
+from ..persistence.runs import PreparedArchive, StepRunAlreadyRegistered
 from ..persistence.state import SqlStateTransaction
 from ..persistence.turns import SplitStepPin, SplitStepSourceObservation, SqlSplitStepSource
 
@@ -84,7 +84,10 @@ class _CanonicalSplitStep:
                 raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
             if run is None:
                 await self.guard(transaction, key, generation=generation)
-            receipt = await self._step_store.write_prepared_step(transaction, prepared)
+            try:
+                receipt = await self._step_store.write_prepared_step(transaction, prepared)
+            except StepRunAlreadyRegistered as error:
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
             if run is not None and not await transaction.run_sql(
                 self._context, lambda db: self._source.adopt(db, **identity),
             ):

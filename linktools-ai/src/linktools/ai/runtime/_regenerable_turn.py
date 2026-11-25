@@ -968,10 +968,18 @@ class _RegenerableTurnRunner:
                     accepted.set_exception(error)
                 else:
                     self._gap(key)
+                    cause = error.__cause__ or error
+                    frame = cause.__traceback__
+                    while frame is not None and frame.tb_next is not None:
+                        frame = frame.tb_next
+                    location = None if frame is None else (
+                        frame.tb_frame.f_globals.get("__name__"),
+                        frame.tb_frame.f_code.co_name, frame.tb_lineno,
+                    )
                     _logger.error(
-                        "Regenerable turn producer stopped: turn=%s code=%s error=%s",
+                        "Regenerable turn producer stopped: turn=%s code=%s error=%s cause=%s at=%s",
                         key.turn_id, error.code.value if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR.value,
-                        type(error).__name__,
+                        type(error).__name__, type(cause).__name__, location,
                     )
 
         self._spawn_owned(produce, name="linktools-regenerable-turn")

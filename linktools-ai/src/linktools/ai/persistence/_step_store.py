@@ -135,6 +135,10 @@ class StepWriteReceipt:
 
 
 
+class StepRunAlreadyRegistered(ValueError):
+    """An immutable native run registration already owns this identity."""
+
+
 class SqlStepStore:
     """Persist upstream records in a fixed namespace and tenant partition.
 
@@ -348,7 +352,7 @@ class SqlStepStore:
                                 raise ValueError("native terminal source outcome is corrupt")
                             source = self._with_terminal(source, terminal)
                     return source
-            raise ValueError(
+            raise StepRunAlreadyRegistered(
                 f"run_id {record.run_id!r} is already in the store; run_id is single-shot"
             )
         return _RunFields.from_row(values, engine=self._context.engine)
@@ -994,12 +998,12 @@ class SqlStepStore:
         if not self.backup_supported:
             raise ValueError("native backup cannot include an external effect ledger")
         batches = []
+        excluded = {"id", "updated_at", "created_at", *SPLIT_SOURCE_COLUMNS}
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
             if name == "runs" and not paired_split:
                 await require_no_unpaired_split_pins(reader, self._context, table, self._store_key)
-            columns = tuple(column for column in table.columns
-                            if column.name not in {"id", "updated_at", "created_at"} | SPLIT_SOURCE_COLUMNS)
+            columns = tuple(column for column in table.columns if column.name not in excluded)
             rows = []
             cursor = 0
             while True:
