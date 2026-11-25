@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import asdict, dataclass
 
 from linktools.core import environ
-from typing import TYPE_CHECKING
+from threading import BoundedSemaphore
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy.exc import IntegrityError
 
@@ -42,7 +43,8 @@ _TURN_BYTES = 64 * 1024
 _CONTEXT_BYTES = 1024 * 1024
 _TERMINAL_RESERVE = 1024
 _LEASE_SECONDS = 60
-_MAX_CONCURRENT_TURNS = 4
+_TURN_SLOTS = BoundedSemaphore(4)
+_T = TypeVar("_T", bool, None)
 _logger = environ.get_logger(__name__)
 
 
@@ -370,8 +372,6 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
-        if len(self._tasks) >= _MAX_CONCURRENT_TURNS:
-            raise AIError(ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED)
 
         async def recover() -> bool:
             session = await self._store.get_session(key.session_id)
@@ -483,16 +483,33 @@ class _RegenerableTurnRunner:
             )
             return True
 
-        task = asyncio.create_task(recover(), name="linktools-recover-regenerable-turn")
+        task = self._spawn_owned(recover, name="linktools-recover-regenerable-turn")
+        return await asyncio.shield(task)
+
+    def _spawn_owned(
+        self, operation: Callable[[], Coroutine[Any, Any, _T]], *, name: str,
+    ) -> asyncio.Task[_T]:
+        # A Runtime may be one of several (even on distinct event loops).
+        # Reserve before reading input bodies/context, never wait in a queue.
+        if not _TURN_SLOTS.acquire(blocking=False):
+            raise AIError(ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED)
+        coroutine = operation()
+        try:
+            task = asyncio.create_task(coroutine, name=name)
+        except BaseException:
+            coroutine.close()
+            _TURN_SLOTS.release()
+            raise
         self._tasks.add(task)
 
-        def consume(completed: asyncio.Task[bool]) -> None:
-            self._tasks.discard(completed)
-            if not completed.cancelled():
-                completed.exception()
+        def completed(owned: asyncio.Task[_T]) -> None:
+            self._tasks.discard(owned)
+            _TURN_SLOTS.release()
+            if not owned.cancelled():
+                owned.exception()
 
-        task.add_done_callback(consume)
-        return await asyncio.shield(task)
+        task.add_done_callback(completed)
+        return task
 
     async def start(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
@@ -503,8 +520,6 @@ class _RegenerableTurnRunner:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
-        if len(self._tasks) >= _MAX_CONCURRENT_TURNS:
-            raise AIError(ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED)
 
         accepted: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
 
@@ -532,9 +547,7 @@ class _RegenerableTurnRunner:
                     self._gap(key)
                     _logger.error("Regenerable turn producer stopped: turn=%s error=%s", key.turn_id, type(error).__name__)
 
-        task = asyncio.create_task(produce(), name="linktools-regenerable-turn")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._spawn_owned(produce, name="linktools-regenerable-turn")
         try:
             return await asyncio.shield(accepted)
         except asyncio.CancelledError:
