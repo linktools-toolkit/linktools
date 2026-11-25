@@ -395,6 +395,7 @@ class RuntimeSessions(Generic[AppT]):
         self, session_id: str, prompt: str, *, agent_id: str, principal: Principal,
         idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
         session_context: SessionContext = "all",
+        output: "type[BaseModel] | None" = None,
     ) -> str:
         runner, runtime = self._require_turn_sessions()
         resolver = runtime._binding_resolver
@@ -410,7 +411,7 @@ class RuntimeSessions(Generic[AppT]):
             session_id, agent_id=agent_id, prompt=prompt, principal=principal, namespace=runtime.namespace,
             tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
             resolver=resolver, request_key=idempotency_key, limits=PromptLimits(),
-            event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking), files=files,
+            event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking), files=files, output=output,
             session_context=normalize_session_context(session_context),
         )
 

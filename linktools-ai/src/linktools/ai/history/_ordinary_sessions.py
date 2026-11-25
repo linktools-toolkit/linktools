@@ -18,6 +18,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import StoredUserInput
+from ..model.messages import CANONICAL_OUTPUT_TOOL_NAME, canonical_structured_output
 from ..persistence.codec import decode_domain
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
 from ._session_timeline import _project_turn_tool_process, _timeline_items
@@ -61,17 +62,20 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
     process: list[JsonValue] = []
     if state == "succeeded":
         messages = row["messages"]
-        if not messages or not isinstance(messages[-1], ModelResponse) or messages[-1].text is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        output = {"text": messages[-1].text}
+        if "output_ref" in result:
+            output = canonical_structured_output(messages, result["output_ref"])
+        else:
+            if not messages or not isinstance(messages[-1], ModelResponse) or messages[-1].text is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            output = {"text": messages[-1].text}
         items = [
             asdict(replace(item, content=None) if item.item_kind == "tool_call" else item)
             for item in _timeline_items(messages)
-            if item.item_kind != "tool_result"
+            if item.item_kind != "tool_result" and item.tool_name != CANONICAL_OUTPUT_TOOL_NAME
         ]
         process = [
             asdict(replace(item, error_message=None))
-            for item in _project_turn_tool_process(messages)
+            for item in _project_turn_tool_process(messages) if item.tool_name != CANONICAL_OUTPUT_TOOL_NAME
         ]
     stored_input = row["stored_input"]
     attachments = [] if stored_input is None else [

@@ -14,6 +14,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
+from ..model.messages import canonical_structured_output, canonical_structured_output_reference
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..model.ordinary_transcript import decode_ordinary_transcript, encode_ordinary_transcript
@@ -34,10 +35,10 @@ def encode_regenerable_turn(
 def prepare_native_turn_transcript(
     prompt: str | Sequence[UserContent], history: Sequence[ModelMessage],
     messages: Sequence[ModelMessage], output: JsonValue, *,
-    instructions: tuple[str, ...], system_prompt: str,
+    instructions: tuple[str, ...], system_prompt: str, structured: bool = False,
 ) -> tuple[tuple[ModelMessage, ...], tuple[ModelMessage, ...], tuple[tuple[int, int | None], ...]]:
     """Use typed placeholders so immutable native messages are valid model values."""
-    delta = _canonical_delta(prompt, history, messages, output)
+    delta = _canonical_delta(prompt, history, messages, output, structured=structured)
     static_instructions = "\n".join(instructions)
     omit_instructions = len(static_instructions.encode("utf-8")) >= 128
     omit_system = len(system_prompt.encode("utf-8")) >= 128
@@ -64,13 +65,13 @@ def prepare_native_turn_transcript(
 
 def _canonical_delta(
     prompt: str | Sequence[UserContent], history: Sequence[ModelMessage],
-    messages: Sequence[ModelMessage], output: JsonValue,
+    messages: Sequence[ModelMessage], output: JsonValue, *, structured: bool = False,
 ) -> tuple[ModelMessage, ...]:
     prefix = len(history)
     if tuple(messages[:prefix]) != tuple(history):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable run replaced its context")
     suffix = tuple(messages[prefix:])
-    if not suffix or reply_from_turn(suffix) != output:
+    if not suffix or reply_from_turn(suffix, structured=structured) != output:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Terminal output cannot be projected from the transcript")
     return (_substitute_input(suffix[0], prompt, ""), *suffix[1:])
 
@@ -92,7 +93,9 @@ def restore_turn_prompt(
     return (_substitute_input(messages[0], "", restored), *messages[1:])
 
 
-def reply_from_turn(messages: Sequence[ModelMessage]) -> JsonValue:
+def reply_from_turn(messages: Sequence[ModelMessage], *, structured: bool = False) -> JsonValue:
+    if structured:
+        return canonical_structured_output(messages, canonical_structured_output_reference(messages))
     response = messages[-1] if messages else None
     if not isinstance(response, ModelResponse) or response.text is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no final text")

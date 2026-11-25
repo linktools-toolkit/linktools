@@ -321,7 +321,10 @@ class SqlSessionTurnReader:
     @staticmethod
     def _transcript_manifest(result) -> tuple[NativeMessageRoot, tuple[tuple[int, int | None], ...]]:
         try:
-            if not isinstance(result, Mapping) or result.keys() != {"transcript", "binding_refs"}:
+            if not isinstance(result, Mapping) or not (
+                result.keys() == {"transcript", "binding_refs"}
+                or result.keys() == {"transcript", "binding_refs", "output_ref"}
+            ):
                 raise ValueError("invalid session transcript manifest")
             root = NativeMessageRoot.from_json(result["transcript"])
             refs = result["binding_refs"]
@@ -449,7 +452,12 @@ class SqlSessionTurnReader:
 
         columns = self._turns.c
         agent_id = self._bindings.c.binding_json[("agent_spec", "id")].as_string().label("agent_id")
-        statement = select(columns.turn_id, columns.request_json, agent_id).select_from(self._bound_turns()).where(
+        binding = self._bindings.c.binding_json
+        statement = select(
+            columns.turn_id, columns.request_json, agent_id,
+            binding["output_mode"].as_string().label("output_mode"),
+            binding["output_schema"].label("output_schema"),
+        ).select_from(self._bound_turns()).where(
             columns.scope_key == self._scope,
             columns.session_key == self._key(session_id, TURN_SESSION_MAX_BYTES),
             columns.request_key == self._key(request_key, TURN_REQUEST_MAX_BYTES),
@@ -764,6 +772,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         self, key: SessionTurnKey, *, generation: int, turn_no: int, state: TerminalState,
         result: JsonValue = None, transcript: "Sequence[ModelMessage] | None" = None,
         binding_refs: tuple[tuple[int, int | None], ...] = (),
+        output_ref: tuple[int, int] | None = None,
     ) -> bool:
         """Finalize and release using the same lock order as acceptance."""
         class FenceLost(AIError):
@@ -787,7 +796,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
             prepared = PreparedArchive()
             root = await native.prepare_archived_messages(transcript, prepared)
             result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
-        elif transcript is not None or binding_refs:
+            if output_ref is not None:
+                result["output_ref"] = list(output_ref)
+        elif transcript is not None or binding_refs or output_ref is not None:
             raise ValueError("an unsuccessful session turn cannot publish a transcript")
 
         async def write(connection: AsyncSession) -> bool:

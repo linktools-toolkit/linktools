@@ -24,7 +24,7 @@ from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.workspaces import WorkspaceBackend
 from pydantic_ai import Agent as PydanticAgent
-from pydantic_ai import TextOutput
+from pydantic_ai import TextOutput, ToolOutput
 from pydantic_ai.capabilities import (
     AbstractCapability,
     WrapperCapability,
@@ -153,7 +153,7 @@ from ._output_preview import OutputPreview
 from ._tool_metrics import (
     ToolMetricsCapability,
 )
-from ..model.messages import rehydrate_deferred_tool_results, tool_error_message, tool_return_content_digest
+from ..model.messages import CANONICAL_OUTPUT_TOOL_NAME, rehydrate_deferred_tool_results, tool_error_message, tool_return_content_digest
 from ..persistence.contracts import LoadedContextMessage, LoadedModelContext
 from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 
@@ -389,8 +389,7 @@ class AgentExecutor:
     def require_regenerable(self, binding: AgentBinding, *, canonical_step: bool = False) -> None:
         compiled = binding.compiled_agent
         policy = _runtime_feature_policy(compiled.runtime_contributions)
-        if (binding.output_binding.mode != "text"
-                or compiled.selected_capabilities or compiled.skill_definitions
+        if (compiled.selected_capabilities or compiled.skill_definitions
                 or compiled.mcp_servers or compiled.selected_subagents
                 or policy.restart_checkpoints != canonical_step or policy.durable_trace or policy.memory_scope is not None
                 or policy.tool_responses is not None):
@@ -1408,6 +1407,8 @@ async def _materialize_agent(
     business_output_type: object
     if scope.binding.output_binding.mode == "text":
         business_output_type = TextOutput(_assistant_text_output)
+    elif scope.regenerable or scope.canonical_step is not None:
+        business_output_type = ToolOutput(scope.binding.output_type, name=CANONICAL_OUTPUT_TOOL_NAME)
     else:
         business_output_type = scope.binding.output_type
     output_type: object = [business_output_type, DeferredToolRequests]

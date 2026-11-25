@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
     BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
     ModelRequestAttempt, ModelResponse, NativeToolReturnPart,
-    SpeechPart, SystemPromptPart, TextContent, ToolReturn, ToolReturnPart, UserContent, UserPromptPart,
+    SpeechPart, SystemPromptPart, TextContent, ToolCallPart, ToolReturn, ToolReturnPart, UserContent, UserPromptPart,
 )
 
 try:
@@ -33,7 +33,7 @@ try:
 except ImportError:
     ModelSettingsDeltaPart = None
 
-from ..core import JsonValue, canonical_json_bytes
+from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ._input import model_input_content as _model_input_content
 from ._referenced_content import ReferencedContent, ReferencedInputOrigin
@@ -46,6 +46,49 @@ from ._tool_return_codec import decode_tool_return_content, encode_tool_return_c
 THINKING_ELAPSED_MS_METADATA_KEY = "linktools.ai.thinking_elapsed_ms"
 TOOL_ARGUMENT_PREVIEWS_METADATA_KEY = "linktools.ai.tool_argument_previews"
 TOOL_ELAPSED_MS_METADATA_KEY = "linktools.ai.tool_elapsed_ms"
+
+CANONICAL_OUTPUT_TOOL_NAME = "linktools_final_output"
+
+
+def canonical_structured_output_reference(messages: Sequence[ModelMessage]) -> tuple[int, int]:
+    """Locate the dedicated output call in the last model response."""
+    response_index = next((position for position in range(len(messages) - 1, -1, -1)
+                           if isinstance(messages[position], ModelResponse)), -1)
+    if response_index < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    parts = [position for position, part in enumerate(messages[response_index].parts)
+             if isinstance(part, ToolCallPart) and part.tool_name == CANONICAL_OUTPUT_TOOL_NAME]
+    if len(parts) != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return response_index, parts[0]
+
+
+def canonical_structured_output(
+    messages: Sequence[ModelMessage], ref: Sequence[int],
+) -> dict[str, JsonValue]:
+    """Restore validated JSON from its immutable SDK output occurrence, not business tool args."""
+    if (not isinstance(ref, (tuple, list)) or len(ref) != 2
+            or any(type(value) is not int or value < 0 for value in ref)
+            or tuple(ref) != canonical_structured_output_reference(messages)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    index, part_index = ref
+    part = messages[index].parts[part_index]
+    acknowledged = sum(
+        isinstance(returned, ToolReturnPart)
+        and returned.tool_name == CANONICAL_OUTPUT_TOOL_NAME and returned.tool_call_id == part.tool_call_id
+        for request in messages[index + 1:] if isinstance(request, ModelRequest)
+        for returned in request.parts
+    )
+    if acknowledged != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        parsed = normalize_json_value(part.args_as_dict())
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(parsed, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return parsed
+
 
 _MESSAGE_VERSION = 1
 _HOST_CONTENT = "linktools-content"
@@ -866,7 +909,7 @@ def tool_error_message(part: ToolReturnPart) -> str | None:
     return None
 
 
-__all__ = ['THINKING_ELAPSED_MS_METADATA_KEY', 'TOOL_ARGUMENT_PREVIEWS_METADATA_KEY', 'TOOL_ELAPSED_MS_METADATA_KEY', 'bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_error_message', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
+__all__ = ['CANONICAL_OUTPUT_TOOL_NAME', 'canonical_structured_output', 'canonical_structured_output_reference', 'THINKING_ELAPSED_MS_METADATA_KEY', 'TOOL_ARGUMENT_PREVIEWS_METADATA_KEY', 'TOOL_ELAPSED_MS_METADATA_KEY', 'bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_error_message', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 

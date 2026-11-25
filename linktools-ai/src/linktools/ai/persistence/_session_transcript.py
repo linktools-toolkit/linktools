@@ -20,12 +20,19 @@ SESSION_TURN_TABLE = "ai_session_turns"
 
 
 def decode_session_transcript_root(result: object) -> NativeMessageRoot:
-    if not isinstance(result, dict) or set(result) != {"transcript", "binding_refs"}:
+    if not isinstance(result, dict) or result.keys() not in (
+        {"transcript", "binding_refs"}, {"transcript", "binding_refs", "output_ref"},
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session transcript reference")
     try:
         root = NativeMessageRoot.from_json(result["transcript"])
     except (TypeError, ValueError, AIError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session transcript reference") from error
+    if "output_ref" in result:
+        ref = result["output_ref"]
+        if (not isinstance(ref, list) or len(ref) != 2
+                or any(type(index) is not int or index < 0 for index in ref) or ref[0] >= root.count):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session output reference")
     refs = result["binding_refs"]
     if not isinstance(refs, list) or any(
         not isinstance(ref, list) or len(ref) != 2

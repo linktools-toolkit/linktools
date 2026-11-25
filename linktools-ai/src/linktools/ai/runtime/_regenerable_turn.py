@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy.exc import IntegrityError
 
-from ..agent import AgentBindingContract
+from ..agent import AgentBindingContract, bind_output
 from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
@@ -37,6 +37,7 @@ from ._repository_instructions import (
 from ._tool_boundary import is_instruction_file_read
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
     from pydantic_ai.messages import ModelMessage, UserContent
 
     from ..agent import AgentBinding
@@ -341,7 +342,7 @@ class _RegenerableTurnRunner:
         self, session_id: str, *, agent_id: str, principal: Principal, namespace: str, tenant_id: str,
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
         request_key: str, prompt: str, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
-        files: Sequence[str] = (), session_context: SessionContext = "all",
+        files: Sequence[str] = (), session_context: SessionContext = "all", output: type[BaseModel] | None = None,
     ) -> str:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
@@ -361,6 +362,7 @@ class _RegenerableTurnRunner:
         )
 
         files = normalize_input_files(files)
+        output_binding = bind_output(output)
 
         async def replay() -> str | None:
             prior = await self._store.find_request(session_id, request_key)
@@ -382,6 +384,8 @@ class _RegenerableTurnRunner:
                 or request["thinking"] != thinking or prior_files != normalized_files
                 or request.get("session_context", "all") != session_context
                 or prior["agent_id"] != agent_id
+                or prior["output_mode"] != output_binding.mode
+                or prior["output_schema"] != output_binding.schema_definition
             ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return identity
@@ -396,7 +400,7 @@ class _RegenerableTurnRunner:
             principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id),
         )
         files = await self._input_materializer.canonicalize_files(files) if files else ()
-        binding = await resolver.resolve_agent(agent_id)
+        binding = await resolver.resolve_agent(agent_id, output=output_binding)
         config = session["config_json"]
         cwd = config.get("cwd")
         context = AgentContext(
@@ -1035,14 +1039,17 @@ class _RegenerableTurnRunner:
         process: Mapping[str, ToolProcessItem] | None = None,
     ) -> bool:
         """Execute after durable admission and publish only if this producer still owns the turn."""
-        from ..model.messages import encode_model_messages
+        from ..model.messages import canonical_structured_output_reference, encode_model_messages
 
+        structured = binding.output_binding.mode == "structured"
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
         try:
             if turn.completed_checkpoint:
                 if turn.continuation is None:
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                messages, output = turn.continuation, reply_from_turn(turn.continuation)
+                messages = turn.continuation
+                output = reply_from_turn(messages, structured=structured)
+                binding.output_binding.validate_payload(output)
             else:
                 repository_boundary = self._step_instruction_boundary(turn, binding)
                 outcome = await self._executor.execute_regenerable(
@@ -1088,10 +1095,13 @@ class _RegenerableTurnRunner:
             frozen_spec = binding.binding_contract.agent_spec
             context_messages, transcript, binding_refs = prepare_native_turn_transcript(
                 model_prompt, turn.history, messages, output,
-                instructions=frozen_spec.instructions, system_prompt=frozen_spec.system_prompt,
+                instructions=frozen_spec.instructions, system_prompt=frozen_spec.system_prompt, structured=structured,
             )
             # Charge actual encoded message bytes and binding ref positions.
+            output_ref = canonical_structured_output_reference(transcript) if structured else None
             encoded_body = len(encode_model_messages(transcript))
+            if output_ref is not None:
+                encoded_body += len(canonical_json_bytes({"output_ref": list(output_ref)}))
             encoded_refs = len(canonical_json_bytes([list(item) for item in binding_refs])) if binding_refs else 0
             if encoded_body + encoded_refs > turn.terminal_bytes:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
@@ -1109,7 +1119,7 @@ class _RegenerableTurnRunner:
             return committed
         committed = await self._store.finish(
             turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded",
-            transcript=transcript, binding_refs=binding_refs,
+            transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
         )
         if committed:
             activity = None

@@ -52,7 +52,7 @@ from ._ordinary_snapshot import (
 )
 from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
-from ..model.messages import decode_model_message_payloads
+from ..model.messages import canonical_structured_output, decode_model_message_payloads
 from ..model.attachments import read_attachment_payload, attachment_payload_objects
 from ._archive_closure import (
     ArchiveClosure,
@@ -71,6 +71,7 @@ from .captures import (
 )
 from ._capability_marker import has_capability_partition_marker
 from ._plan import PersistenceDomain
+from ._session_transcript import decode_session_transcript_root
 from .state import (
     STREAM_KEY_MAX_BYTES,
     validate_stream_key,
@@ -1388,6 +1389,13 @@ async def restore_snapshot(
         native_entries[entry["group_id"]] = entry
     ordinary_roots = tuple(ordinary_transcript_roots(ordinary_sessions)) if ordinary_sessions is not None else ()
     ordinary_group_ids = {root.group_id for root in ordinary_roots}
+    structured_turns: dict[str, list[tuple[NativeMessageRoot, list[int]]]] = {}
+    if ordinary_sessions is not None:
+        for row in ordinary_sessions["turns"]:
+            if row["state"] == "succeeded" and "output_ref" in row["result_json"]:
+                result = row["result_json"]
+                root = decode_session_transcript_root(result)
+                structured_turns.setdefault(root.group_id, []).append((root, result["output_ref"]))
     if len(ordinary_group_ids) > 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for transcript_root in ordinary_roots:
@@ -1498,6 +1506,15 @@ async def restore_snapshot(
                 checkpoint_payloads[(row["store_key"], row["sha256"])] = raw
         if group_id in native_checkpoints:
             _validate_native_checkpoint_payloads(native_checkpoints[group_id], closure, checkpoint_payloads)
+        for transcript_root, output_ref in structured_turns.get(group_id, ()):
+            try:
+                messages = decode_model_message_payloads(tuple(
+                    checkpoint_payloads[(transcript_root.store_key, identity)]
+                    for identity in closure.message_identities(transcript_root.store_key, transcript_root.slices)
+                ))
+                canonical_structured_output(messages, output_ref)
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     semantic_domains = {}
     binding_contents = {key: content for closure in archive_closures.values()
