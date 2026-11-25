@@ -6,6 +6,7 @@ from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import model_features
 
 import asyncio
+import multiprocessing
 from pathlib import Path
 
 import httpx
