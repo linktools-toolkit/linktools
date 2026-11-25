@@ -15,6 +15,8 @@ from pydantic_ai_harness.step_persistence import (
 )
 
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
+from ..core import deterministic_id
+from ..errors import AIError, ErrorCode
 from ..model.messages import native_checkpoint_messages
 from ..capability.steps import AtomicStepStore
 from ..persistence import MessageArchive, MessageSnapshot, SqlStepStore, StepWriteReceipt
@@ -22,6 +24,8 @@ from ..persistence.runs import NativeCheckpoint
 
 if TYPE_CHECKING:
     from ..persistence.runs import RuntimeAgentRunStore
+    from ..persistence.state import StateStore
+    from ..persistence.turns import SessionTurnKey, SqlSessionTurns
 
 
 class StepBoundaryCommitter(Protocol):
@@ -45,12 +49,105 @@ class RuntimeStepStore:
         self._tool_operations = tool_operations
         self._working_set = working_set
         self._commit_boundary = commit_boundary
+        self._canonical_turn_boundary = False
+        self._interrupted_checkpoint: str | None = None
+        self._resume_generation: int | None = None
+        self._resume_step_base = 0
+        self._resume_run: RunRecord | None = None
         self._native_boundary = native_boundary
         self._output_retries_used = output_retries_used
         self._message_archive = MessageArchive()
         self._checkpoint_messages: tuple[MessageSnapshot, MessageSnapshot] | None = None
         if native_boundary and isinstance(tool_operations, RuntimeToolOperationBridge):
             tool_operations.bind_native_step_store(store)
+
+    @classmethod
+    def for_canonical_turn(
+        cls, native: SqlStepStore, tool_operations: RuntimeToolOperationBridge, *,
+        turn_store: "SqlSessionTurns", state_store: "StateStore",
+        key: "SessionTurnKey", generation: int, run_id: str,
+        output_retries_used: Callable[[], int] | None = None,
+    ) -> "RuntimeStepStore":
+        """Publish native checkpoints under the canonical turn's existing source lease."""
+        group = state_store.storage_group
+        context = getattr(group, "context", None)
+        if context is None or native.storage_context.engine is not context.engine:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Step and turn require one SQL transaction")
+
+        async def guard(transaction):
+            await turn_store.guard_step_in_transaction(transaction, key, generation=generation)
+
+        async def commit(*, run=None, events=(), snapshot=None):
+            records = (() if run is None else (run,)) + tuple(events) + (() if snapshot is None else (snapshot,))
+            if not records:
+                return None
+            if any(record.run_id != run_id for record in records):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if store._resume_run is not None:
+                # AtomicStepPersistence emits a run_started draft for every SDK
+                # invocation. The existing native registration owns this turn.
+                run = None
+                events = tuple(store._resume_event(event) for event in events if event.kind != "run_started")
+                if snapshot is not None:
+                    snapshot = store._resume_snapshot(snapshot)
+                if not events and snapshot is None:
+                    return None
+            prepared = await native.prepare_step(run=run, events=events, snapshot=snapshot)
+
+            async def write(transaction):
+                return await native.write_prepared_step(transaction.transaction(state_store), prepared, turn_guard=guard)
+
+            receipt = await group.mutate((state_store,), write)
+            # A provisional write or unknown commit must never seed native
+            # receipt caches. Only the existing mutation may confirm it.
+            native.confirm_prepared_step(receipt)
+            if snapshot is not None and snapshot.state == "interrupted":
+                store._interrupted_checkpoint = snapshot.idempotency_key
+            return receipt
+
+        tool_operations.prepare_canonical_boundaries(
+            native, state_store=state_store, key=key, generation=generation, guard=guard,
+            prepare_event=lambda event: store._resume_event(event),
+        )
+        store = cls(native, tool_operations, commit_boundary=commit, native_boundary=True,
+                    output_retries_used=output_retries_used)
+        store._canonical_turn_boundary = True
+        return store
+
+    def require_interrupted_checkpoint(self) -> str:
+        """Return the exact confirmed checkpoint occurrence, never the latest query."""
+        if not self._canonical_turn_boundary or self._interrupted_checkpoint is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return self._interrupted_checkpoint
+
+    async def bind_canonical_resume(
+        self, snapshot: ContinuableSnapshot, *, key: "SessionTurnKey", generation: int,
+    ) -> None:
+        if (not self._canonical_turn_boundary or not isinstance(self._tool_operations, RuntimeToolOperationBridge)
+                or self._resume_run is not None or generation < 2
+                or snapshot.run_id != key.turn_id or snapshot.conversation_id != key.session_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        existing = await self._store.get_run(run_id=key.turn_id)
+        if existing is None or existing.conversation_id != key.session_id:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        self._resume_run = existing
+        self._resume_generation = generation
+        self._resume_step_base = snapshot.step_index
+        self._tool_operations.confirm_native_run(existing)
+
+    def _resume_event(self, event: StepEvent) -> StepEvent:
+        if self._resume_generation is None:
+            return event
+        return replace(event, step_index=event.step_index + self._resume_step_base,
+                       idempotency_key=deterministic_id("canonical-step-event", self._resume_generation,
+                                                        event.idempotency_key)
+                       if event.idempotency_key is not None else None)
+
+    def _resume_snapshot(self, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
+        return replace(snapshot, step_index=snapshot.step_index + self._resume_step_base,
+                       idempotency_key=deterministic_id("canonical-step-snapshot", self._resume_generation,
+                                                        snapshot.idempotency_key)
+                       if snapshot.idempotency_key is not None else None)
 
     @property
     def runtime_bound(self) -> bool:
@@ -73,7 +170,9 @@ class RuntimeStepStore:
                 for run_id in {record.run_id for record in (run, snapshot, *events) if record is not None}:
                     self._working_set.invalidate_step_run(run_id)
             raise
-        source = None if run is None else (self._store.run_from_receipt(receipt)
+        source = None if run is None else self._resume_run
+        if source is None and run is not None:
+            source = (self._store.run_from_receipt(receipt)
                   if isinstance(self._store, SqlStepStore) and isinstance(receipt, StepWriteReceipt)
                   else receipt if isinstance(receipt, RunRecord) else run)
         if source is not None and source.run_id != run.run_id:
@@ -111,6 +210,9 @@ class RuntimeStepStore:
         return run
 
     async def register_run(self, record: RunRecord) -> None:
+        if self._canonical_turn_boundary:
+            await self.commit_step(run=record)
+            return
         receipt = None
         try:
             if isinstance(self._store, SqlStepStore):
@@ -135,6 +237,9 @@ class RuntimeStepStore:
         )
 
     async def append_event(self, event: StepEvent) -> None:
+        if self._canonical_turn_boundary:
+            await self.commit_step(events=(event,))
+            return
         await self._store.append_event(event)
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
@@ -174,6 +279,9 @@ class RuntimeStepStore:
         return encode(snapshot, output_retries_used=retries)
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        if self._canonical_turn_boundary:
+            await self.commit_step(snapshot=snapshot)
+            return
         stored_snapshot = self._encode_snapshot(snapshot)
         try:
             await self._store.save_snapshot(stored_snapshot)

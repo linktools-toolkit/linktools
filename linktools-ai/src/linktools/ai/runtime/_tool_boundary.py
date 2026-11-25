@@ -42,7 +42,7 @@ from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
 from ..model.messages import bind_tool_return_attachments
 from ._harness import bind_tool_reference_origins
-from ._tool import ToolOperationBridge
+from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
     ToolMetricContext,
@@ -353,6 +353,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             )
             raise
         call = ToolCallPart(name, args=final_args, tool_call_id=call_id)
+        bridge = self._tool_operations
+        replay_safe = descriptor.effect_policy == "replay_safe"
         try:
             instruction_read = self._repository_boundary is not None and is_instruction_file_read(
                 name, final_args, path_fields,
@@ -371,6 +373,12 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 )
             if not instruction_read:
                 await self._authorize(name, descriptor, final_args, approved=ctx.tool_call_approved)
+        except (ApprovalRequired, CallDeferred):
+            if isinstance(bridge, RuntimeToolOperationBridge):
+                await bridge.defer_before_effect(
+                    call, final_args, replay_safe=replay_safe, capability_ref=descriptor.capability_ref,
+                )
+            raise
         except Exception as error:
             await self._record_pre_effect_error(
                 call,
@@ -378,8 +386,6 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 error,
             )
             raise
-        bridge = self._tool_operations
-        replay_safe = descriptor.effect_policy == "replay_safe"
         decision = None
         prior_call = bridge is not None and descriptor.effect_owner == "none" and bool(
             await bridge.existing_call_ids((call_id,))

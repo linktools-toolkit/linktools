@@ -231,9 +231,12 @@ async def compose_platform_capabilities(
                         lifecycle_observer_types=(AtomicStepPersistence, TraceCapability),
                     )
                     persistence.native_registration = registration
+            if isinstance(capability.store, RuntimeStepStore) and capability.store._canonical_turn_boundary:
+                capability.store._output_retries_used = persistence.checkpoint_output_retries_used
             return bind_step_persistence(
                 capability, run_id=agent_run_id, parent_run_id=parent_agent_run_id,
-                store=capability.store if tool_operations is None else RuntimeStepStore(
+                store=capability.store if tool_operations is None or isinstance(capability.store, RuntimeStepStore)
+                else RuntimeStepStore(
                     capability.store, tool_operations,
                     native_boundary=isinstance(capability, AtomicStepPersistence),
                     output_retries_used=persistence.checkpoint_output_retries_used,

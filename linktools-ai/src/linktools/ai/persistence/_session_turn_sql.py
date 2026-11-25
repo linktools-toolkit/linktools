@@ -5,17 +5,19 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from threading import RLock
-from typing import TYPE_CHECKING, Literal
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Literal, TypeVar
 from weakref import finalize
 
-from ..core import canonical_json_bytes, canonical_sha256, semantic_json_sha256, validate_idempotency_key
+from ..core import ImmutableJsonMapping, canonical_json_bytes, canonical_sha256, semantic_json_sha256, validate_idempotency_key
 from ..errors import AIError, ErrorCode
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
 from ..model.messages import decode_model_messages, encode_model_messages
+from ..spec import RepositoryInstructions
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
@@ -40,7 +42,11 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from ..core import JsonValue
+    from ..execution import PendingToolContinuation
+    from .state import StateStore
     from ..storage import SqlStorageContext
+    from ._step_store import SqlStepStore
+    from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 
 
 SESSION_TABLE = "ai_sessions"
@@ -133,6 +139,8 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         Column("lease_until", BigInteger, nullable=True, comment="Expiry in database-clock seconds since epoch."),
         key("binding_key", 32, "Frozen Agent binding in the same scope."),
         Column("request_json", JSON(), nullable=False, comment="Accepted principal and canonical request."),
+        Column("instruction_frontier_json", JSON(none_as_null=True), nullable=True,
+               comment="Additional repository instructions and their discovery barriers for this turn."),
         Column("result_json", JSON(none_as_null=True), nullable=True,
                comment="Canonical terminal output and continuation material."),
         *sql_audit_columns(),
@@ -149,6 +157,88 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
 class SessionTurnKey:
     session_id: str
     turn_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionInstructionFrontier:
+    """Frozen discovery evidence outside the immutable request and public history."""
+
+    overlay: RepositoryInstructions
+    barriers: Mapping[str, str]
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"overlay": self.overlay.to_payload(), "barriers": dict(self.barriers)}
+
+    @classmethod
+    def from_json(cls, value: object) -> SessionInstructionFrontier | None:
+        if value is None:
+            return None
+        try:
+            if not isinstance(value, Mapping) or value.keys() != {"overlay", "barriers"}:
+                raise ValueError("invalid instruction frontier")
+            overlay = RepositoryInstructions.from_payload(value["overlay"])
+            barriers = value["barriers"]
+            if (not overlay.documents or not isinstance(barriers, Mapping)
+                    or not 1 <= len(barriers) <= len(overlay.documents)
+                    or any(not isinstance(key, str) or not key or not isinstance(digest, str)
+                           or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)
+                           for key, digest in barriers.items())):
+                raise ValueError("invalid instruction discovery barriers")
+        except (TypeError, ValueError, AIError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return cls(overlay, MappingProxyType(dict(barriers)))
+
+
+_Receipt = TypeVar("_Receipt")
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalDeferredFrontier:
+    key: SessionTurnKey
+    generation: int
+    checkpoint_id: str
+    approval_operation_ids: tuple[str, ...]
+    external_operation_ids: tuple[str, ...]
+    operation_metadata: ImmutableJsonMapping
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "checkpoint_id": self.checkpoint_id,
+            "approval_operation_ids": list(self.approval_operation_ids),
+            "external_operation_ids": list(self.external_operation_ids),
+            "operation_metadata": dict(self.operation_metadata),
+        }
+
+    @classmethod
+    def from_json(cls, key: SessionTurnKey, generation: int, value: object) -> CanonicalDeferredFrontier:
+        from ..core import validate_resource_id
+
+        try:
+            if not isinstance(value, Mapping) or value.keys() != {
+                "checkpoint_id", "approval_operation_ids", "external_operation_ids", "operation_metadata",
+            } or not all(isinstance(value[name], list) for name in ("approval_operation_ids", "external_operation_ids")):
+                raise ValueError("invalid deferred frontier")
+            checkpoint = validate_resource_id(value["checkpoint_id"])
+            approvals = tuple(validate_resource_id(item) for item in value["approval_operation_ids"])
+            calls = tuple(validate_resource_id(item) for item in value["external_operation_ids"])
+            if not (approvals or calls) or len(set(approvals + calls)) != len(approvals + calls):
+                raise ValueError("invalid deferred operations")
+            metadata = value["operation_metadata"]
+            if (not isinstance(metadata, Mapping) or metadata.keys() != set(approvals + calls)
+                    or not all(isinstance(item, Mapping) for item in metadata.values())):
+                raise ValueError("invalid deferred operation metadata")
+            metadata = ImmutableJsonMapping(metadata)
+        except (KeyError, ValueError, TypeError, AIError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return cls(key, generation, checkpoint, approvals, calls, metadata)
+
+    def require_continuation(self, continuation: PendingToolContinuation) -> None:
+        if (
+            continuation.source_agent_run_id != self.key.turn_id
+            or tuple(item.operation_id for item in continuation.approvals) != self.approval_operation_ids
+            or tuple(item.operation_id for item in continuation.calls) != self.external_operation_ids
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 class SqlSessionTurnReader:
@@ -726,6 +816,145 @@ class SqlSessionTurns(SqlSessionTurnReader):
         except FenceLost:
             return False
 
+    async def get_waiting_turn(self, key: SessionTurnKey) -> CanonicalDeferredFrontier | None:
+        from sqlalchemy import and_, select
+
+        turns, sessions = self._turns.c, self._sessions.c
+        statement = select(turns.generation, turns.result_json).select_from(self._turns.join(
+            self._sessions, and_(
+                sessions.scope_key == turns.scope_key, sessions.session_key == turns.session_key,
+                sessions.active_turn_id == turns.turn_id,
+            ),
+        )).where(turns.state.in_(("waiting", "ready")), *(
+            turns[name] == value for name, value in self._turn_values(key).items()
+        ))
+        async with self._context.engine.connect() as connection:
+            row = (await connection.execute(statement)).mappings().one_or_none()
+        return None if row is None else CanonicalDeferredFrontier.from_json(key, row["generation"], row["result_json"])
+
+    async def publish_waiting_turn(
+        self, key: SessionTurnKey, *, generation: int, checkpoint_id: str,
+        continuation: PendingToolContinuation, receipt_store: StateStore,
+        publish_receipts: Callable[[], Awaitable[None]], max_bytes: int,
+    ) -> bool:
+        frontier = CanonicalDeferredFrontier.from_json(key, generation, {
+            "checkpoint_id": checkpoint_id,
+            "approval_operation_ids": [item.operation_id for item in continuation.approvals],
+            "external_operation_ids": [item.operation_id for item in continuation.calls],
+            "operation_metadata": {
+                item.operation_id: dict(item.metadata) for item in (*continuation.approvals, *continuation.calls)
+            },
+        })
+        frontier.require_continuation(continuation)
+        payload = frontier.to_json()
+        if len(canonical_json_bytes(payload)) > max_bytes:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+        if self._transcript_write_binding is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        turn_store = self._transcript_write_binding[0]
+        group = turn_store.storage_group
+        if receipt_store.storage_group is not group:
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        async def mutate(group_transaction) -> bool:
+            async def wait(connection: AsyncSession) -> bool:
+                changed = await connection.execute(self._turns.update().filter_by(
+                    **self._turn_values(key), generation=generation, state="accepted",
+                ).where(self._turns.c.lease_until > self._now).values(
+                    state="waiting", lease_until=None, result_json=payload,
+                ))
+                return changed.rowcount == 1
+
+            if not await group_transaction.transaction(turn_store).run_sql(self._context, wait):
+                return False
+            await publish_receipts()
+            return True
+
+        members = (turn_store,) if receipt_store is turn_store else (turn_store, receipt_store)
+        return await group.mutate(members, mutate)
+
+    async def settle_waiting_turn(
+        self, frontier: CanonicalDeferredFrontier, receipt_store: StateStore,
+        settle: Callable[[], Awaitable[_Receipt]], *,
+        is_ready: Callable[[], Awaitable[bool]] | None = None,
+    ) -> _Receipt:
+        """Serialize a decision/result with withdrawal and same-turn continuation."""
+        if self._transcript_write_binding is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        turn_store = self._transcript_write_binding[0]
+        group = turn_store.storage_group
+        if receipt_store.storage_group is not group:
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        async def mutate(group_transaction) -> _Receipt:
+            async def guard(connection: AsyncSession) -> bool:
+                columns = self._turns.c
+                held = await connection.execute(self._turns.update().filter_by(
+                    **self._turn_values(frontier.key), generation=frontier.generation,
+                ).where(columns.state.in_(("waiting", "ready"))).values(generation=columns.generation))
+                return held.rowcount == 1
+
+            owner = group_transaction.transaction(turn_store)
+            if not await owner.run_sql(self._context, guard):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            result = await settle()
+            if is_ready is not None and await is_ready():
+                async def mark_ready(connection: AsyncSession) -> None:
+                    await connection.execute(self._turns.update().filter_by(
+                        **self._turn_values(frontier.key), generation=frontier.generation, state="waiting",
+                    ).values(state="ready"))
+
+                await owner.run_sql(self._context, mark_ready)
+            return result
+
+        members = (turn_store,) if receipt_store is turn_store else (turn_store, receipt_store)
+        return await group.mutate(members, mutate)
+
+    async def guard_step_in_transaction(self, transaction, key: SessionTurnKey, *, generation: int) -> None:
+        """Fence Step publication in its existing same-group transaction.
+
+        Like terminal publication, this uses the database statement clock.
+        The exact generation and phase are locked by the guarded write until
+        commit. This does not grant permission to start an external effect.
+        """
+        from .state import SqlStateTransaction, active_state_scope
+
+        if self._transcript_write_binding is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        store, _, _ = self._transcript_write_binding
+        scope = active_state_scope()
+        if (scope is None or scope.group is not store.storage_group or not scope.writable
+                or not isinstance(transaction, SqlStateTransaction)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def guard(session: AsyncSession) -> None:
+            changed = await session.execute(self._turns.update().filter_by(
+                **self._turn_values(key), generation=generation, state="accepted",
+            ).where(self._turns.c.lease_until > self._now).values(
+                generation=self._turns.c.generation,
+            ))
+            if changed.rowcount != 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        await transaction.run_sql(self._context, guard)
+
+    async def append_instruction_frontier(
+        self, key: SessionTurnKey, *, generation: int, frontier: SessionInstructionFrontier, max_bytes: int,
+    ) -> None:
+        """Store a discovery from the live serialized producer before exposing it."""
+        payload = frontier.to_json()
+        if len(canonical_json_bytes(payload)) > max_bytes:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+
+        async def write(connection: AsyncSession) -> None:
+            changed = await connection.execute(self._turns.update().filter_by(
+                **self._turn_values(key), generation=generation, state="accepted",
+            ).where(self._turns.c.lease_until > self._now).values(instruction_frontier_json=payload))
+            if changed.rowcount != 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        await self._context.run_mutation(write, domain="session.instructions")
+
     async def request_cancel(self, key: SessionTurnKey) -> bool:
         async def write(connection: AsyncSession) -> bool:
             result = await connection.execute(self._turns.update().filter_by(
@@ -753,18 +982,96 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         return await self._context.run_mutation(write, domain="session.renew")
 
-    async def take_over(
-        self, key: SessionTurnKey, *, generation: int, lease_seconds: int, cancelling: bool = False,
+    async def _take_over(
+        self, session: AsyncSession, key: SessionTurnKey, *, generation: int,
+        lease_seconds: int, cancelling: bool,
     ) -> bool:
         if lease_seconds < 1:
             raise ValueError("the turn lease must be positive")
+        result = await session.execute(self._turns.update().filter_by(
+            **self._turn_values(key), generation=generation, state="cancelling" if cancelling else "accepted",
+        ).where(self._turns.c.lease_until <= self._now).values(
+            generation=generation + 1, lease_until=self._now + lease_seconds,
+        ))
+        return result.rowcount == 1
 
-        async def write(connection: AsyncSession) -> bool:
-            result = await connection.execute(self._turns.update().filter_by(
-                **self._turn_values(key), generation=generation, state="cancelling" if cancelling else "accepted",
-            ).where(self._turns.c.lease_until <= self._now).values(
-                generation=generation + 1, lease_until=self._now + lease_seconds,
-            ))
-            return result.rowcount == 1
+    async def take_over(
+        self, key: SessionTurnKey, *, generation: int, lease_seconds: int, cancelling: bool = False,
+    ) -> bool:
+        async def write(session: AsyncSession) -> bool:
+            return await self._take_over(session, key, generation=generation,
+                                         lease_seconds=lease_seconds, cancelling=cancelling)
 
         return await self._context.run_mutation(write, domain="session.recover")
+
+    def _require_checkpoint_store(self, step_store: SqlStepStore) -> None:
+        if self._transcript_write_binding is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        _store, _archive, native = self._transcript_write_binding
+        if (step_store.storage_context.engine is not self._context.engine
+                or step_store.store_key != native.store_key):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+
+    async def _capture_instruction_frontier(
+        self, session: AsyncSession, key: SessionTurnKey,
+    ) -> SessionInstructionFrontier | None:
+        from sqlalchemy import select
+
+        # The successful regrant UPDATE owns this row until the transaction
+        # commits. Capture after it, not from the earlier authorization read.
+        columns = self._turns.c
+        statement = select(columns.instruction_frontier_json).where(
+            *(columns[name] == value for name, value in self._turn_values(key).items()),
+        )
+        result = await session.execute(statement)
+        return SessionInstructionFrontier.from_json(result.scalar_one())
+
+    async def take_over_with_checkpoint(
+        self, key: SessionTurnKey, *, generation: int, lease_seconds: int, step_store: SqlStepStore,
+    ) -> tuple[bool, ContinuableSnapshot | None, SessionInstructionFrontier | None]:
+        """Regrant the canonical lease and freeze its stable native checkpoint frontier."""
+        self._require_checkpoint_store(step_store)
+
+        async def write(session: AsyncSession):
+            if not await self._take_over(session, key, generation=generation,
+                                         lease_seconds=lease_seconds, cancelling=False):
+                return False, None, None
+            checkpoint = await step_store.capture_turn_checkpoint(
+                session, run_id=key.turn_id, conversation_id=key.session_id,
+            )
+            instructions = await self._capture_instruction_frontier(session, key)
+            return True, checkpoint, instructions
+
+        acquired, checkpoint, instructions = await self._context.run_mutation(write, domain="session.recover")
+        return acquired, None if checkpoint is None else await checkpoint(), instructions
+
+
+    async def take_over_ready_checkpoint(
+        self, frontier: CanonicalDeferredFrontier, *, lease_seconds: int, step_store: SqlStepStore,
+    ) -> tuple[bool, ContinuableSnapshot | None, SessionInstructionFrontier | None]:
+        """Adopt a settled frontier exactly once, without another turn or owner."""
+        if lease_seconds < 1:
+            raise ValueError("the turn lease must be positive")
+        self._require_checkpoint_store(step_store)
+        key = frontier.key
+
+        async def write(session: AsyncSession):
+            # Only this generation can have installed the immutable frontier.
+            # The CAS serializes against ongoing receipt settlement/withdrawal.
+            acquired = await session.execute(self._turns.update().filter_by(
+                **self._turn_values(key), generation=frontier.generation, state="ready", lease_until=None,
+            ).values(
+                state="accepted", generation=frontier.generation + 1,
+                lease_until=self._now + lease_seconds, result_json=None,
+            ))
+            if acquired.rowcount != 1:
+                return None, None
+            checkpoint = await step_store.capture_turn_checkpoint(
+                session, run_id=key.turn_id, conversation_id=key.session_id, replay_key=frontier.checkpoint_id,
+            )
+            if checkpoint is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return checkpoint, await self._capture_instruction_frontier(session, key)
+
+        checkpoint, instructions = await self._context.run_mutation(write, domain="session.recover")
+        return (False, None, None) if checkpoint is None else (True, await checkpoint(), instructions)

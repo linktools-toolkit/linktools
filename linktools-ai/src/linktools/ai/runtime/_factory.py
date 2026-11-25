@@ -3,6 +3,7 @@
 """Runtime composition and local service graph construction."""
 
 import asyncio
+import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from copy import copy
@@ -833,6 +834,50 @@ async def _build_local_components(
             execution_id, allow_cancelled=True,
         )
         run_store.bind_pending_producer_guard(backend.require_pending_producer)
+        async def prepare_canonical_step(binding, key, generation):
+            from ..capability.steps import AtomicStepPersistence
+            from ..persistence import SqlStepStore
+            from ._step_store import RuntimeStepStore
+            from ._tool import RuntimeToolOperationBridge
+
+            policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
+            if not policy.restart_checkpoints:
+                return None
+            values = await prepare_runtime_capabilities(binding.compiled_agent)
+            steps = tuple(leaf for value in values for leaf in runtime_feature_leaves(value)
+                          if isinstance(leaf, StepPersistence))
+            if len(steps) != 1 or type(steps[0]) is not AtomicStepPersistence or type(steps[0].store) is not SqlStepStore:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical Step requires native SQL persistence")
+            tools = RuntimeToolOperationBridge(
+                state.checkpoint.tools, state.object_store(PersistenceDomain.CHECKPOINT),
+                namespace=namespace, tenant_id=tenant_id, execution_id=key.turn_id, agent_run_id=key.turn_id,
+                binding_digest=binding.binding_digest, owner=secrets.token_hex(16),
+                background_tasks=set(), fresh_execution=generation == 1,
+            )
+            store = RuntimeStepStore.for_canonical_turn(
+                steps[0].store, tools, turn_store=state.session_turns, state_store=state.conversation.sessions.state_store,
+                key=key, generation=generation, run_id=key.turn_id,
+            )
+            return replace(steps[0], store=store), tools
+
+        turn_runner = (
+            None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(
+                state.session_turns, executor, workspace=workspace,
+                # Borrow the existing workspace access; its original materializer owns teardown.
+                input_materializer=ExecutionInputMaterializer(
+                    input_materializer.access,
+                    replace(limits, max_binary_input_bytes=min(limits.max_binary_input_bytes, _CONTEXT_BYTES)),
+                    object_store=state.object_store(PersistenceDomain.EXECUTION),
+                    object_key_factory=object_key_factory,
+                ),
+                instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
+                prepare_step=prepare_canonical_step,
+            )
+        )
+        if turn_runner is not None:
+            from ._canonical_deferred_publication import bind_deferred_publication
+
+            bind_deferred_publication(turn_runner, state.session_turns, state.checkpoint)
         session = RuntimeSessionService(
             state.conversation,
             state.execution.executions,
@@ -840,19 +885,7 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
-            regenerable_turns=(
-                None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(
-                    state.session_turns, executor, workspace=workspace,
-                    # Borrow the existing workspace access; its original materializer owns teardown.
-                    input_materializer=ExecutionInputMaterializer(
-                        input_materializer.access,
-                        replace(limits, max_binary_input_bytes=min(limits.max_binary_input_bytes, _CONTEXT_BYTES)),
-                        object_store=state.object_store(PersistenceDomain.EXECUTION),
-                        object_key_factory=object_key_factory,
-                    ),
-                    instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
-                )
-            ),
+            regenerable_turns=turn_runner,
             enabled=session_execution_ready,
             current_policy=current_policy,
             cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
@@ -884,12 +917,33 @@ async def _build_local_components(
             prepare_pending_capture=prepare_pending_capture,
         )
         backend.bind_recovery_relaunch_guard(TaskRecoveryGuard(state, input_captures))
+        session_deferred = None
+        if turn_runner is not None:
+            from ._canonical_deferred_resume import canonical_deferred_commands
+
+            async def ignore_turn_emission(_event) -> None:
+                pass
+
+            async def resume_deferred(frontier, continuation, results) -> None:
+                await turn_runner.resume_deferred(
+                    frontier, continuation, results, namespace=namespace, tenant_id=tenant_id,
+                    app=app, authorization=authorization, resolver=binding_resolver, limits=limits,
+                    event_sink=ignore_turn_emission,
+                )
+
+            session_deferred = canonical_deferred_commands(
+                state.session_turns, state.checkpoint, authorization, namespace=namespace, tenant_id=tenant_id,
+                objects=state.object_store(PersistenceDomain.CHECKPOINT), read_payload=backend.read_deferred_payload,
+                resume=resume_deferred,
+            )
+
         approval = DefaultApprovalService(
             state.checkpoint.approvals,
             state.execution.executions,
             authorization,
             objects=state.object_store(PersistenceDomain.CHECKPOINT),
             continuation=backend,
+            session_deferred=session_deferred,
         )
         external = DefaultExternalService(
             state.checkpoint.external_calls,
@@ -898,6 +952,7 @@ async def _build_local_components(
             objects=state.object_store(PersistenceDomain.CHECKPOINT),
             object_key_factory=object_key_factory,
             continuation=backend,
+            session_deferred=session_deferred,
         )
         event = DefaultEventService(
             state.execution.executions,

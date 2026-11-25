@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -18,26 +19,37 @@ from sqlalchemy.exc import IntegrityError
 
 from ..agent import AgentBindingContract
 from ..capability import AgentContext
-from ..core import AuthorizationAction, ExecutionDeltaType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes
+from ..core import AuthorizationAction, ExecutionDeltaType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
+from ..persistence._session_turn_sql import SessionInstructionFrontier
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, decode_session_lineage
 from ..session import ToolProcessItem, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta
-from ._regenerable_transcript import prepare_native_turn_transcript, restore_turn_prompt
+from ._regenerable_transcript import prepare_native_turn_transcript, reply_from_turn, restore_turn_prompt
+from ._step_store import RuntimeStepStore
+from ._repository_instructions import (
+    _RepositoryInstructionApproval, _RepositoryInstructionBoundary,
+    _discover_repository_overlay, _instruction_paths, _merge_repository_instructions,
+)
+from ._tool_boundary import is_instruction_file_read
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, UserContent
 
     from ..agent import AgentBinding
+    from ..capability.steps import AtomicStepPersistence
+    from ._tool import RuntimeToolOperationBridge
     from ..core import AuthorizationPolicy, PromptLimits, ThinkingValue
     from ..inputs import ExecutionInputMaterializer
     from ..spec import RepositoryInstructionResolver
     from ..workspace import Workspace
     from ..persistence.turns import SqlSessionTurns
+    from ..persistence._session_turn_sql import CanonicalDeferredFrontier
+    from ..execution import PendingToolContinuation, PendingDeferredCall
     from ._agent_binding_resolver import _AgentBindingResolver
     from ._agent_executor import AgentEmission, AgentExecutor, EventSink
 
@@ -64,6 +76,13 @@ class _AdmittedTurn:
     model_prompt: Sequence[UserContent] | None = None
     attachments: Sequence[Mapping[str, JsonValue]] = ()
     stored_input: JsonValue = None
+    native_step: tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None = None
+    continuation: tuple[ModelMessage, ...] | None = None
+    deferred_results: DeferredToolResults | None = None
+    deferred_approvals: tuple[PendingDeferredCall, ...] = ()
+    instruction_frontier: SessionInstructionFrontier | None = None
+    completed_checkpoint: bool = False
+    output_retries_used: int = 0
 
 
 class _RegenerableTurnRunner:
@@ -73,6 +92,8 @@ class _RegenerableTurnRunner:
         input_materializer: ExecutionInputMaterializer,
         instruction_resolver: RepositoryInstructionResolver | None,
         instruction_resolver_for: Callable[[RepositoryInstructions], RepositoryInstructionResolver],
+        prepare_step: Callable[[AgentBinding, SessionTurnKey, int], Awaitable[
+            tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None]] | None = None,
     ) -> None:
         self._store = store
         self._executor = executor
@@ -81,6 +102,8 @@ class _RegenerableTurnRunner:
         self._workspace_access = input_materializer.access
         self._instruction_resolver = instruction_resolver
         self._instruction_resolver_for = instruction_resolver_for
+        self._prepare_step = prepare_step
+        self._publish_deferred = None
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
         self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
         self._closed = False
@@ -89,6 +112,9 @@ class _RegenerableTurnRunner:
         self._observed_revisions: dict[str, int] = {}
         self._cancel_notices: dict[SessionTurnKey, asyncio.Task[None]] = {}
         self._observed_cancellation: dict[str, str] = {}
+
+    def bind_deferred_publication(self, publish) -> None:
+        self._publish_deferred = publish
 
     def observe_lifecycle(self, callback: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
         """Offer only committed turn identifiers and revisions to a host carrier."""
@@ -418,12 +444,32 @@ class _RegenerableTurnRunner:
         self._notice_lifecycle(key, "cancelling", session["revision"])
         return True
 
+    async def resume_deferred(
+        self, frontier: CanonicalDeferredFrontier, continuation: PendingToolContinuation,
+        results: DeferredToolResults, **environment,
+    ) -> None:
+        frontier.require_continuation(continuation)
+        row = await self._store.get_turn_for_recovery(frontier.key)
+        if row is None or row["state"] != "ready" or row["generation"] != frontier.generation:
+            return
+        principal = Principal(**row["request_json"]["principal"])
+        await self.recover_session_turn(
+            frontier.key, principal=principal, ready=frontier, settled_results=results,
+            settled_continuation=continuation, **environment,
+        )
+
     async def recover_session_turn(
         self, key: SessionTurnKey, *, principal: Principal, namespace: str, tenant_id: str,
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
         limits: PromptLimits, event_sink: EventSink,
+        ready: CanonicalDeferredFrontier | None = None,
+        settled_results: DeferredToolResults | None = None,
+        settled_continuation: PendingToolContinuation | None = None,
     ) -> bool:
-        """Explicit recovery uses the admitted request and does not run on reads."""
+        """Explicit recovery or exact authorized decision resumes the admitted request."""
+        if ((ready is None) != (settled_results is None) or (ready is None) != (settled_continuation is None)
+                or ready is not None and ready.key != key):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if principal.tenant_id != tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if self._closed:
@@ -440,7 +486,12 @@ class _RegenerableTurnRunner:
             if session["active_turn_id"] != key.turn_id.encode("utf-8"):
                 return False
             row = await self._store.get_turn_for_recovery(key)
-            if row is None or row["state"] not in ("accepted", "cancelling"):
+            if row is None:
+                return False
+            if ready is None:
+                if row["state"] not in ("accepted", "cancelling"):
+                    return False
+            elif row["state"] != "ready" or row["generation"] != ready.generation:
                 return False
             request = row["request_json"]
             admitted = Principal(**request["principal"])
@@ -449,6 +500,8 @@ class _RegenerableTurnRunner:
                 ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, admitted.principal_id),
             )
             generation = row["generation"]
+            if ready is not None and admitted != principal:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             if row["state"] == "cancelling":
                 if not await self._store.take_over(
                     key, generation=generation, lease_seconds=_LEASE_SECONDS, cancelling=True,
@@ -506,7 +559,8 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted Agent binding is unavailable")
             contract = AgentBindingContract.from_payload(frozen_binding)
             binding = await resolver.restore(contract)
-            self._executor.require_regenerable(binding)
+            native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, generation + 1)
+            self._executor.require_regenerable(binding, canonical_step=native_step is not None)
             if "repository_instructions" not in request or "cwd" not in request:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "Turn has no admitted workspace evidence")
             cwd = request["cwd"]
@@ -524,15 +578,79 @@ class _RegenerableTurnRunner:
                 agent_id=binding.compiled_agent.spec.id,
             )
             model_prompt = await self._restore_prompt(prompt, stored)
-            if not await self._store.take_over(key, generation=generation, lease_seconds=_LEASE_SECONDS):
-                return False
+            continuation = deferred_results = None
+            completed_checkpoint = False
+            output_retries_used = 0
+            instruction_frontier = None
+            if native_step is None:
+                if ready is not None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                if not await self._store.take_over(key, generation=generation, lease_seconds=_LEASE_SECONDS):
+                    return False
+            else:
+                capability, tools = native_step
+                steps = capability.store
+                if not isinstance(steps, RuntimeStepStore):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                if ready is None:
+                    acquired, checkpoint, instruction_frontier = await self._store.take_over_with_checkpoint(
+                        key, generation=generation, lease_seconds=_LEASE_SECONDS, step_store=steps._store,
+                    )
+                else:
+                    acquired, checkpoint, instruction_frontier = await self._store.take_over_ready_checkpoint(
+                        ready, lease_seconds=_LEASE_SECONDS, step_store=steps._store,
+                    )
+                if not acquired:
+                    return False
+                if checkpoint is None:
+                    self._gap(key)
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                await steps.bind_canonical_resume(checkpoint, key=key, generation=generation + 1)
+                from ..model.messages import native_checkpoint_messages
+                from ..persistence.runs import NativeCheckpoint
+                checkpoint = NativeCheckpoint.decode(checkpoint)
+                output_retries_used = (checkpoint.output_retries_used if isinstance(checkpoint, NativeCheckpoint) else 0)
+                continuation = tuple(native_checkpoint_messages(checkpoint.messages, restore=True))
+                latest_response = next((i for i in range(len(continuation) - 1, -1, -1)
+                                        if isinstance(continuation[i], ModelResponse)), -1)
+                pending = {}
+                if latest_response >= 0:
+                    pending = {part.tool_call_id: part.tool_name for part in continuation[latest_response].parts
+                               if isinstance(part, ToolCallPart)}
+                    for message in continuation[latest_response + 1:]:
+                        if isinstance(message, ModelRequest):
+                            for part in message.parts:
+                                if isinstance(part, (ToolReturnPart, RetryPromptPart)):
+                                    pending.pop(part.tool_call_id, None)
+                if checkpoint.state != "complete" and not pending:
+                    self._gap(key)
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                if ready is None:
+                    deferred_results = await tools.resume_canonical_effects(pending)
+                else:
+                    if (checkpoint.state != "interrupted"
+                            or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
+                            or set(settled_results.approvals) & set(settled_results.calls)):
+                        self._gap(key)
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    for operation in (*settled_continuation.approvals, *settled_continuation.calls):
+                        if pending.get(operation.tool_call_id) != operation.tool_name:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    deferred_results = settled_results
+                if not pending and checkpoint.state == "complete":
+                    events = await steps.list_events(run_id=key.turn_id)
+                    completed_checkpoint = any(event.kind == "run_completed" for event in events)
             turn = _AdmittedTurn(
                 key, row["turn_no"], prompt, history,
                 _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding})),
                 session["revision"], repository_instructions, generation + 1,
                 model_prompt=None if isinstance(model_prompt, str) else model_prompt,
                 attachments=() if stored is None else stored_input_attachment_views(stored),
-                stored_input=request.get("input"),
+                stored_input=request.get("input"), native_step=native_step,
+                continuation=continuation, deferred_results=deferred_results,
+                deferred_approvals=() if settled_continuation is None else settled_continuation.approvals,
+                instruction_frontier=instruction_frontier,
+                completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
             )
             self._admitted(turn)
             try:
@@ -704,7 +822,8 @@ class _RegenerableTurnRunner:
         cwd: str | None = None, files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
-        self._executor.require_regenerable(binding)
+        native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, 1)
+        self._executor.require_regenerable(binding, canonical_step=native_step is not None)
         if await self.canonicalize_cwd(cwd) != cwd:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd"})
         instruction_resolver = self._resolver_for(binding)
@@ -771,6 +890,7 @@ class _RegenerableTurnRunner:
             [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
             repository_instructions, model_prompt=model_prompt, attachments=attachments,
             stored_input=request.get("input"),
+            native_step=native_step,
         )
 
     @staticmethod
@@ -791,6 +911,58 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Detached turn input is not multipart")
         return (*detached, prompt)
 
+    def _step_instruction_boundary(
+        self, turn: _AdmittedTurn, binding: AgentBinding,
+    ) -> _RepositoryInstructionBoundary | None:
+        if turn.native_step is None:
+            return None
+        resolver = self._resolver_for(binding)
+        initial = turn.repository_instructions
+        frontier = turn.instruction_frontier
+        overlay = None if frontier is None else frontier.overlay
+        barriers = {} if frontier is None else dict(frontier.barriers)
+        if overlay is not None:
+            if resolver is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            resolver.validate(_merge_repository_instructions(initial, overlay))
+
+        approved = {}
+        for item in turn.deferred_approvals:
+            provenance = item.metadata.get("linktools")
+            if not isinstance(provenance, Mapping):
+                continue
+            digest = provenance.get("repository_instruction_frontier")
+            if digest is not None:
+                if resolver is None or not isinstance(digest, str):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                approved[item.tool_call_id] = _RepositoryInstructionApproval(item.tool_name, digest)
+
+        if resolver is None:
+            return None
+
+        async def check(*, initial, overlay, tool_name, tool_call_id, arguments, path_fields):
+            paths = _instruction_paths(arguments, path_fields)
+            if not paths:
+                return overlay, False
+            instruction_read = is_instruction_file_read(tool_name, arguments, path_fields)
+            if tool_call_id in barriers:
+                if barriers[tool_call_id] != canonical_sha256(normalize_json_value(arguments)):
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                return overlay, not instruction_read
+            discovered = await _discover_repository_overlay(resolver, initial, overlay, paths)
+            if discovered is None:
+                return overlay, False
+            next_barriers = {**barriers, tool_call_id: canonical_sha256(normalize_json_value(arguments))}
+            await self._store.append_instruction_frontier(
+                turn.key, generation=turn.generation, max_bytes=turn.terminal_bytes,
+                frontier=SessionInstructionFrontier(discovered, next_barriers),
+            )
+            # Expose new instructions only after the fenced transaction commits.
+            barriers.update(next_barriers)
+            return discovered, not instruction_read
+
+        return _RepositoryInstructionBoundary(check, initial, overlay, approved_frontiers=approved)
+
     async def settle(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
@@ -801,14 +973,52 @@ class _RegenerableTurnRunner:
 
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
         try:
-            outcome = await self._executor.execute_regenerable(
-                binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
-                event_sink=event_sink, thinking=thinking, streamed_output_bytes=turn.terminal_bytes,
-                workspace=self._workspace, repository_instructions=turn.repository_instructions,
-            )
+            if turn.completed_checkpoint:
+                if turn.continuation is None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                messages, output = turn.continuation, reply_from_turn(turn.continuation)
+            else:
+                repository_boundary = self._step_instruction_boundary(turn, binding)
+                outcome = await self._executor.execute_regenerable(
+                    binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
+                    event_sink=event_sink, thinking=thinking, streamed_output_bytes=turn.terminal_bytes,
+                    workspace=self._workspace, repository_instructions=turn.repository_instructions,
+                    repository_instruction_boundary=repository_boundary,
+                    canonical_step=None if turn.native_step is None else turn.native_step[0],
+                    tool_operations=None if turn.native_step is None else turn.native_step[1],
+                    generation=turn.generation, continuation=turn.continuation,
+                    deferred_tool_results=turn.deferred_results, deferred_approvals=turn.deferred_approvals,
+                    output_retries_used=turn.output_retries_used,
+                )
+                if isinstance(outcome, DeferredToolRequests):
+                    if turn.native_step is None or self._publish_deferred is None:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    capability, tools = turn.native_step
+                    if not isinstance(capability.store, RuntimeStepStore):
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    checkpoint_id = capability.store.require_interrupted_checkpoint()
+                    if repository_boundary is not None:
+                        metadata = {key: dict(value) for key, value in outcome.metadata.items()}
+                        for call_id, digest in repository_boundary.approval_frontiers(outcome.approvals).items():
+                            item = metadata.setdefault(call_id, {})
+                            original = item.get("linktools")
+                            evidence = {"repository_instruction_frontier": digest}
+                            if isinstance(original, Mapping) and original.get("kind") == "workspace_approval":
+                                # Leaf receipt owns authorized arguments. Do not store a second copy.
+                                evidence["kind"] = "workspace_approval"
+                            elif original is not None:
+                                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+                            item["linktools"] = evidence
+                        outcome = replace(outcome, metadata=metadata)
+                    committed = await self._publish_deferred(turn, checkpoint_id, tools, outcome)
+                    if committed:
+                        self._gap(turn.key)
+                        self._notice_lifecycle(turn.key, "admitted", turn.revision)
+                    return committed
+                messages, output = outcome.messages, outcome.output
             frozen_spec = binding.binding_contract.agent_spec
             context_messages, transcript, binding_refs = prepare_native_turn_transcript(
-                model_prompt, turn.history, outcome.messages, outcome.output,
+                model_prompt, turn.history, messages, output,
                 instructions=frozen_spec.instructions, system_prompt=frozen_spec.system_prompt,
             )
             # Charge actual encoded message bytes and binding ref positions.
@@ -817,6 +1027,10 @@ class _RegenerableTurnRunner:
             if encoded_body + encoded_refs > turn.terminal_bytes:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         except Exception as error:
+            if (turn.native_step is not None and isinstance(error, AIError)
+                    and error.code in {ErrorCode.STORAGE_RECOVERY_REQUIRED, ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                                       ErrorCode.TOOL_EFFECT_UNKNOWN}):
+                raise
             code = error.code.value if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR.value
             committed = await self._store.finish(
                 turn.key, generation=turn.generation, turn_no=turn.number, state="failed", result={"error_code": code},
@@ -832,7 +1046,7 @@ class _RegenerableTurnRunner:
             activity = None
             if process:
                 items: list[JsonValue] = []
-                for message in outcome.messages[len(turn.history):]:
+                for message in messages[len(turn.history):]:
                     if not isinstance(message, ModelResponse):
                         continue
                     for part in message.parts:
@@ -842,6 +1056,6 @@ class _RegenerableTurnRunner:
                             items.append({"item_kind": "tool_call", "tool_call_id": part.tool_call_id})
                 activity = {"items": items, "process": [asdict(item) for item in process.values()]}
             self._terminal(
-                turn, "succeeded", output=outcome.output, messages=context_messages, activity=activity,
+                turn, "succeeded", output=output, messages=context_messages, activity=activity,
             )
         return committed

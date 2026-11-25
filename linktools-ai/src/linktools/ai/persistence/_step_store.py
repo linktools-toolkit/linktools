@@ -43,7 +43,7 @@ from ._payload import encode_payload_bytes, decode_payload_bytes
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, encode_model_messages
 from ._native_checkpoint import NativeCheckpoint
 from ._step_backup import NativeStepBackup
-from ._step_maintenance import StepContentCleanupResult, purge_step_content
+from ._step_maintenance import StepContentCleanupResult, canonical_checkpoint_prune_guard, purge_step_content
 from ._step_schema import build_step_sql_metadata
 from .state import SqlStateTransaction, SqlMutationObserver, StateStore, StateTransaction, SqlStateRowReader
 from ..steps import (
@@ -1473,6 +1473,7 @@ class SqlStepStore:
     async def write_prepared_step(
         self, transaction: StateTransaction, prepared: PreparedStep, *,
         confirmed: StepWriteReceipt | None = None,
+        turn_guard: Callable[[StateTransaction], Awaitable[None]] | None = None,
     ) -> StepWriteReceipt:
         """Join the existing same-engine transaction without opening another.
 
@@ -1490,6 +1491,8 @@ class SqlStepStore:
             encode_native_replay_key(None) if event.idempotency_key is None else key
             for event, key in zip(prepared.events, prepared.event_keys, strict=True)
         ))
+        if turn_guard is not None:
+            await turn_guard(transaction)
         return await transaction.run_sql(
             self._context, lambda session: self._write_prepared_step(
                 session, publication, confirmed=confirmed,
@@ -1700,6 +1703,47 @@ class SqlStepStore:
                 if len(cache) > self._max_cached_messages:
                     cache.popitem(last=False)
 
+    async def capture_turn_checkpoint(
+        self, session: "AsyncSession", *, run_id: str, conversation_id: str,
+        replay_key: str | None = None,
+    ) -> Callable[[], Awaitable[ContinuableSnapshot]] | None:
+        """Capture the exact retained checkpoint in the turn owner's transaction."""
+        from sqlalchemy import false, select
+
+        table = self._table("snapshots")
+        query = select(table).where(
+            *self._run_predicates(table, run_id),
+            table.c.conversation_id == conversation_id,
+            table.c.pruned == false(),
+        )
+        if replay_key is not None:
+            query = query.where(table.c.idempotency_key == encode_native_replay_key(replay_key))
+        row = (await session.execute(query.order_by(table.c.id.desc()).limit(1))).mappings().one_or_none()
+        if row is None:
+            return None
+        try:
+            sequence = self.snapshot_message_sequence(row)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        query = self._message_content.range_query((sequence,))
+        rows = () if query is None else (await session.execute(query.statement)).mappings().all()
+
+        async def hydrate() -> ContinuableSnapshot:
+            try:
+                readback, = await self._message_content.read_hydrated_ranges(
+                    (sequence,), rows,
+                    read_object=None if self._message_archive is None else self._message_archive.read_payload_object,
+                )
+                snapshot, raw = self._decode_snapshot(row, readback.payloads)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            integrity = hashlib.sha256(raw).hexdigest(), len(raw)
+            self._remember_message_proof(self._message_content.adopt_read(readback), integrity=integrity)
+            self._seed_snapshot_baseline(run_id, readback.root, integrity)
+            return snapshot
+
+        return hydrate
+
     async def latest_snapshot(
         self, *, run_id: str, include_interrupted: bool = False,
     ) -> ContinuableSnapshot | None:
@@ -1763,6 +1807,11 @@ class SqlStepStore:
         if last_complete is not None:
             complete_safe = or_(complete_safe, table.c.id < last_complete)
         conditions += (complete_safe,)
+        canonical_guard = ()
+        if self._message_archive is not None:
+            metadata = self._message_archive.store.storage_group.metadata
+            canonical_guard = (canonical_checkpoint_prune_guard(metadata, self._store_key, run_id),)
+            conditions += canonical_guard
         after = 0
         while True:
             retired = (await session.execute(select(table.c.id).where(
@@ -1772,7 +1821,7 @@ class SqlStepStore:
                 break
             ids = tuple(row.id for row in retired)
             await session.execute(table.update().where(
-                *self._run_predicates(table, run_id), table.c.id.in_(ids),
+                *self._run_predicates(table, run_id), table.c.id.in_(ids), *canonical_guard,
             ).values(pruned=True, messages="{}", sequence_root=None, updated_at=sql_audit_now()))
             after = retired[-1].id
             if len(retired) < 128:

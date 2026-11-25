@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from time import monotonic_ns
+from functools import partial
 from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
@@ -4783,11 +4784,12 @@ class LocalExecutionBackend:
                 if owner is not None:
                     await self._bind_native_boundary(owner, current, agent_run_id)
             repository_boundary = _RepositoryInstructionBoundary(
-                self._recovery_coordinator,
-                current,
+                partial(
+                    self._recovery_coordinator.check_repository_instructions,
+                    execution=current, producer_generation=producer_generation,
+                ),
                 initial_repository_instructions,
                 repository_overlay,
-                producer_generation=producer_generation,
                 approved_frontiers=(None if resume is None else resume.repository_instruction_approvals),
             )
             if current.producer_generation != producer_generation or current.producer_claim_id is None:

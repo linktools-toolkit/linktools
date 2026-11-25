@@ -46,7 +46,8 @@ from ..inputs import CanonicalUserInput
 from ._tool_boundary import is_instruction_file_read
 from ._repository_instructions import (
     _RepositoryInstructionApproval,
-    _merge_repository_instructions,
+    _discover_repository_overlay,
+    _instruction_paths,
     _repository_instruction_signature,
     _repository_instructions_contain,
     _validate_repository_instruction_frontier,
@@ -463,34 +464,12 @@ class _RecoveryCoordinator:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return persisted_overlay, not instruction_read
 
-        active = _merge_repository_instructions(initial, persisted_overlay)
-        excluded = frozenset(
-            document.source for document in (() if active is None else active.documents)
-        )
-        discovered: list[object] = []
-        discovered_sources = set(excluded)
-        for path in paths:
-            resolved = await resolver.resolve(
-                path,
-                exclude_sources=frozenset(discovered_sources),
-            )
-            for document in resolved.documents:
-                if document.source in discovered_sources:
-                    continue
-                discovered_sources.add(document.source)
-                discovered.append(document)
-        if not discovered:
+        next_overlay = await _discover_repository_overlay(resolver, initial, persisted_overlay, paths)
+        if next_overlay is None:
             return persisted_overlay, (
                 not instruction_read and _repository_instruction_signature(overlay)
                 != _repository_instruction_signature(persisted_overlay)
             )
-        new_documents = RepositoryInstructions(tuple(discovered))
-        next_overlay = _merge_repository_instructions(persisted_overlay, new_documents)
-        if next_overlay is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        cumulative = _merge_repository_instructions(initial, next_overlay)
-        assert cumulative is not None
-        resolver.validate(cumulative)
         barrier = RepositoryInstructionBarrier(
             current.recovery.agent_run_id,
             tool_call_id,
@@ -1444,24 +1423,3 @@ class _RecoveryCoordinator:
             if page.next_cursor is None:
                 return
             cursor = page.next_cursor
-
-
-def _instruction_paths(
-    arguments: Mapping[str, object],
-    path_fields: tuple[str, ...],
-) -> tuple[str, ...]:
-    paths: list[str] = []
-    for field in path_fields:
-        value = arguments.get(field)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            paths.append(value)
-            continue
-        if isinstance(value, (list, tuple)) and all(
-            isinstance(item, str) for item in value
-        ):
-            paths.extend(value)
-            continue
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return tuple(paths)

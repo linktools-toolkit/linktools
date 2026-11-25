@@ -3,9 +3,8 @@
 """Repository-instruction overlay and tool-boundary coordination."""
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import Capability
@@ -15,13 +14,10 @@ from ..capability import AgentContext
 from ..capability import ToolCallFailed, ToolCallRetry
 from ..core import PersistenceDomain, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..spec import RepositoryInstructions
+from ..spec import RepositoryInstructionDocument, RepositoryInstructionResolver, RepositoryInstructions
 from ._tool_boundary import RepositoryInstructionBoundary, is_instruction_file_read
 from ..inputs import RepositoryInstructionPayload
 from ..execution import ExecutionRecord
-
-if TYPE_CHECKING:
-    from ._recovery_coordinator import _RecoveryCoordinator
 
 _REPOSITORY_INSTRUCTION_RECONSIDER = (
     "This call was made before the current repository instructions were available. "
@@ -41,6 +37,49 @@ def _merge_repository_instructions(
     if any(document.source in initial_sources for document in overlay.documents):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return RepositoryInstructions((*initial.documents, *overlay.documents))
+
+
+def _instruction_paths(
+    arguments: Mapping[str, object],
+    path_fields: tuple[str, ...],
+) -> tuple[str, ...]:
+    paths: list[str] = []
+    for field in path_fields:
+        value = arguments.get(field)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            paths.append(value)
+            continue
+        if isinstance(value, (list, tuple)) and all(
+            isinstance(item, str) for item in value
+        ):
+            paths.extend(value)
+            continue
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return tuple(paths)
+
+async def _discover_repository_overlay(
+    resolver: RepositoryInstructionResolver,
+    initial: RepositoryInstructions | None,
+    overlay: RepositoryInstructions | None,
+    paths: tuple[str, ...],
+) -> RepositoryInstructions | None:
+    active = _merge_repository_instructions(initial, overlay)
+    sources = {document.source for document in (() if active is None else active.documents)}
+    discovered: list[RepositoryInstructionDocument] = []
+    for path in paths:
+        resolved = await resolver.resolve(path, exclude_sources=frozenset(sources))
+        for document in resolved.documents:
+            if document.source not in sources:
+                sources.add(document.source)
+                discovered.append(document)
+    if not discovered:
+        return None
+    next_overlay = _merge_repository_instructions(overlay, RepositoryInstructions(tuple(discovered)))
+    assert next_overlay is not None
+    resolver.validate(_merge_repository_instructions(initial, next_overlay))
+    return next_overlay
 
 
 def _repository_instruction_signature(
@@ -100,16 +139,12 @@ class _RepositoryInstructionApproval:
 class _RepositoryInstructionBoundary:
     def __init__(
         self,
-        runtime: "_RecoveryCoordinator",
-        execution: ExecutionRecord,
+        check_frontier: Callable[..., Awaitable[tuple[RepositoryInstructions | None, bool]]],
         initial: RepositoryInstructions | None,
         overlay: RepositoryInstructions | None,
-        producer_generation: int | None = None,
         approved_frontiers: Mapping[str, _RepositoryInstructionApproval] | None = None,
     ) -> None:
-        self._runtime = runtime
-        self._execution = execution
-        self._producer_generation = producer_generation
+        self._check_frontier = check_frontier
         self._initial = initial
         self._overlay = overlay
         self._has_initial = bool(initial is not None and initial.documents)
@@ -185,15 +220,13 @@ class _RepositoryInstructionBoundary:
             previous_signature = _repository_instruction_signature(self._overlay)
             try:
                 next_overlay, reconsider = (
-                    await self._runtime.check_repository_instructions(
-                        execution=self._execution,
+                    await self._check_frontier(
                         initial=self._initial,
                         overlay=self._overlay,
                         tool_name=tool_name,
                         tool_call_id=tool_call_id,
                         arguments=arguments,
                         path_fields=path_fields,
-                        producer_generation=self._producer_generation,
                     )
                 )
             except AIError as error:

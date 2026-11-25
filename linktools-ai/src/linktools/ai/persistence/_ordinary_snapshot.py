@@ -12,9 +12,12 @@ from typing import TYPE_CHECKING
 from ..core import Principal, RUNTIME_OBJECT_STORE_ID, canonical_json_bytes, semantic_json_sha256, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ._ordinary_lineage import decode_session_lineage, fork_segments
-from ._session_turn_sql import SESSION_BINDING_TABLE, SESSION_TABLE, SESSION_TURN_TABLE
+from ._session_turn_sql import (
+    SESSION_BINDING_TABLE, SESSION_TABLE, SESSION_TURN_TABLE, CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey,
+)
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
+from ..steps import NATIVE_STORE_KEY_MAX_BYTES, encode_native_replay_key
 from ._message_root import NativeMessageRoot
 from ._session_transcript import decode_session_transcript_root
 from ..storage import ObjectRef
@@ -33,16 +36,53 @@ _TURN_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "turn_id": TURN_EXECUTION
 _SESSION_FIELDS = (*_SESSION_BINARY, "status", "revision", "last_turn_no", "config_json", "lineage_json", *_AUDIT)
 _BINDING_FIELDS = ("binding_key", "binding_json", *_AUDIT)
 _TURN_FIELDS = (*_TURN_BINARY, "binding_key", "turn_no", "context_from", "context_through", "state", "generation",
-                "request_json", "result_json", *_AUDIT)
+                "request_json", "instruction_frontier_json", "result_json", *_AUDIT)
 _TABLES = (("bindings", SESSION_BINDING_TABLE, _BINDING_FIELDS, {}),
            ("sessions", SESSION_TABLE, _SESSION_FIELDS, _SESSION_BINARY),
            ("turns", SESSION_TURN_TABLE, _TURN_FIELDS, _TURN_BINARY))
-_ACTIVE = {"accepted", "cancelling"}
+_WAITING = {"waiting", "ready"}
+_ACTIVE = {"accepted", "cancelling", *_WAITING}
 _TERMINAL = {"succeeded", "failed", "cancelled"}
 
 
 def _invalid() -> AIError:
     return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid ordinary session snapshot")
+
+
+def has_waiting_turns(rows: Mapping[str, list[dict[str, object]]]) -> bool:
+    return any(row["state"] in _WAITING for row in rows["turns"])
+
+
+def require_waiting_checkpoints(rows, backups) -> str | None:
+    """Match each occupied paused turn to its exact retained Step occurrence."""
+    expected = set()
+    for row in rows["turns"]:
+        if row["state"] not in _WAITING:
+            continue
+        session_id, turn_id = (
+            value.decode("utf-8") if isinstance(value, bytes) else value
+            for value in (row["session_key"], row["turn_id"])
+        )
+        frontier = CanonicalDeferredFrontier.from_json(
+            SessionTurnKey(session_id, turn_id), row["generation"], row["result_json"],
+        )
+        expected.add((turn_id, session_id, encode_native_replay_key(frontier.checkpoint_id)))
+    if not expected:
+        return None
+    groups = []
+    for group_id, backup in backups.items():
+        retained = {
+            (row["run_id"], row["conversation_id"], row["idempotency_key"])
+            for row in backup.snapshots if not row["pruned"]
+        }
+        matching = expected & retained
+        if matching == expected:
+            groups.append(group_id)
+        elif matching:
+            raise _invalid()
+    if len(groups) != 1:
+        raise _invalid()
+    return groups[0]
 
 
 def ordinary_input_object_refs(
@@ -187,17 +227,32 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
                         + len(canonical_json_bytes(result)) > 64 * 1024):
                     raise _invalid()
                 try:
+                    frontier = row["instruction_frontier_json"]
+                    if frontier is not None:
+                        SessionInstructionFrontier.from_json(frontier)
+                        if len(canonical_json_bytes({**request, "binding": bindings[row["binding_key"]]})) + len(
+                            canonical_json_bytes(frontier)
+                        ) > 64 * 1024:
+                            raise _invalid()
                     principal = Principal(**request["principal"])
-                except (TypeError, ValueError, KeyError) as error:
+                except (TypeError, ValueError, KeyError, AIError) as error:
                     raise _invalid() from error
                 if principal.tenant_id != tenant_id:
                     raise _invalid()
                 if state in _ACTIVE:
-                    if (session_id in active or number != session_ids[session_id]["last_turn_no"] + 1
-                            or result is not None):
+                    if session_id in active or number != session_ids[session_id]["last_turn_no"] + 1:
                         raise _invalid()
+                    if state in _WAITING:
+                        CanonicalDeferredFrontier.from_json(
+                            SessionTurnKey(session_id.decode("utf-8"), turn_id.decode("utf-8")),
+                            row["generation"], result,
+                        )
+                        row["lease_until"] = None
+                    else:
+                        if result is not None:
+                            raise _invalid()
+                        row["lease_until"] = 0
                     active[session_id] = turn_id
-                    row["lease_until"] = 0
                 else:
                     published = positions.setdefault(session_id, set())
                     if number in published or number > session_ids[session_id]["last_turn_no"]:

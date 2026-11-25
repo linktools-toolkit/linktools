@@ -47,8 +47,8 @@ from ._turn_snapshot import (
 )
 from ._turn_sql_schema import RUNTIME_TURN_SCOPE
 from ._ordinary_snapshot import (
-    capture_ordinary_snapshot, decode_ordinary_snapshot, ordinary_input_object_refs,
-    ordinary_transcript_roots, rekey_ordinary_transcripts, restore_ordinary_snapshot,
+    capture_ordinary_snapshot, decode_ordinary_snapshot, has_waiting_turns, ordinary_input_object_refs,
+    ordinary_transcript_roots, rekey_ordinary_transcripts, require_waiting_checkpoints, restore_ordinary_snapshot,
 )
 from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
@@ -716,6 +716,7 @@ class RuntimeSnapshotOperations:
                 nonlocal native, ordinary_sessions
                 roots = []
                 event_references = []
+                waiting_owner = None
                 for domain, store in members:
                     if domain is PersistenceDomain.CONVERSATION and isinstance(store, SqlStateStore):
                         captured_ordinary = await capture_ordinary_snapshot(
@@ -724,6 +725,8 @@ class RuntimeSnapshotOperations:
                         )
                         if captured_ordinary["sessions"] or captured_ordinary["turns"]:
                             ordinary_sessions = captured_ordinary
+                            if has_waiting_turns(captured_ordinary):
+                                waiting_owner = store
                             roots.extend(ordinary_transcript_roots(captured_ordinary))
                     reader = _StateSnapshotReader(store,
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
@@ -786,6 +789,37 @@ class RuntimeSnapshotOperations:
                             for row in backup.runs:
                                 _retain_run_registration(run_registrations, _run_from_native_row(row))
                             roots.extend(backup.message_roots(source.group_id))
+                if waiting_owner is not None:
+                    from ._step_store import SqlStepStore
+
+                    checkpoint_store = self._resources.stores.get(PersistenceDomain.CHECKPOINT)
+                    resolver = self._resources.checkpoint_backup_source
+                    if (opened is None or resolver is None or checkpoint_store is None
+                            or checkpoint_store.storage_group is not waiting_owner.storage_group
+                            or PersistenceDomain.CHECKPOINT not in self._resources.durable_domains):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                    scope, _ = opened
+                    if scope not in native_checkpoints:
+                        store_key = SqlStepStore.scope_key(
+                            namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+                        )
+                        if native is None:
+                            native = await resolver(NativeStepSource(scope, store_key))
+                        if (native is None or not native.backup_supported or native.store_key != store_key
+                                or native.storage_context.engine is not waiting_owner.context.engine):
+                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+                        async def capture_waiting(tx: StateTransaction) -> NativeStepBackup:
+                            if not isinstance(tx, SqlStateRowReader):
+                                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                            return await native.capture_backup(tx, accept=capture_budget.accept, validate_messages=False)
+
+                        backup = await waiting_owner.read(capture_waiting)
+                        native_checkpoints[scope] = backup
+                        for row in backup.runs:
+                            _retain_run_registration(run_registrations, _run_from_native_row(row))
+                        roots.extend(backup.message_roots(scope))
+                    require_waiting_checkpoints(ordinary_sessions, {scope: native_checkpoints[scope]})
                 if event_references:
                     if opened is None or any(ref.group_id != opened[0] for ref in event_references):
                         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -1385,6 +1419,12 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         for message_root in backup.message_roots(group_id):
             native_closures[group_id].mark(message_root.store_key, message_root.slices)
+    waiting_checkpoint_group = (
+        require_waiting_checkpoints(ordinary_sessions, native_checkpoints)
+        if ordinary_sessions is not None else None
+    )
+    if waiting_checkpoint_group is not None and PersistenceDomain.CHECKPOINT.value not in raw_domains:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     object_bytes = 0
     expected_objects: set[tuple[str, str, str, int]] = set()
     if ordinary_sessions is not None:
@@ -1392,7 +1432,7 @@ async def restore_snapshot(
             (PersistenceDomain.EXECUTION.value, reference.key, reference.digest, reference.size)
             for reference in ordinary_input_object_refs(ordinary_sessions, namespace=namespace, tenant_id=tenant_id)
         )
-    required_checkpoint_groups: set[str] = set()
+    required_checkpoint_groups = {waiting_checkpoint_group} if waiting_checkpoint_group is not None else set()
     decoded_domains: dict[
         PersistenceDomain,
         tuple[
@@ -1710,6 +1750,11 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         execution_store = resources.stores.get(PersistenceDomain.EXECUTION)
         conversation_store = resources.stores.get(PersistenceDomain.CONVERSATION)
+        if waiting_checkpoint_group is not None:
+            checkpoint_store = resources.stores.get(PersistenceDomain.CHECKPOINT)
+            if (not isinstance(checkpoint_store, SqlStateStore)
+                    or checkpoint_store.storage_group is not conversation_store.storage_group):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         participants = (*resources.stores.values(), *(resources.capability_stores or {}).values())
         coowned = type(execution_store) is SqlStateStore and all(
             type(store) is SqlStateStore and store.storage_group is execution_store.storage_group
@@ -1785,8 +1830,11 @@ async def restore_snapshot(
             if domain is PersistenceDomain.CONVERSATION:
                 domain_native_roots += ordinary_roots
             event_groups = {ref.group_id for value in reference_values for ref in iter_native_event_references(value)}
-            domain_checkpoints = {key: backup for key, backup in native_checkpoints.items()
-                                  if native_entries[key]["domain"] == domain.value or key in event_groups}
+            domain_checkpoints = {
+                key: backup for key, backup in native_checkpoints.items()
+                if native_entries[key]["domain"] == domain.value or key in event_groups
+                or (domain is PersistenceDomain.CONVERSATION and key == waiting_checkpoint_group)
+            }
             domain_native_roots += tuple(root for group_id, backup in domain_checkpoints.items()
                                          for root in backup.message_roots(group_id))
             native_groups = {root.group_id for root in domain_native_roots} | set(domain_checkpoints)

@@ -557,6 +557,7 @@ CREATE TABLE ai_session_turns (
 	lease_until BIGINT COMMENT 'Expiry in database-clock seconds since epoch.',
 	binding_key VARBINARY(32) NOT NULL COMMENT 'Frozen Agent binding in the same scope.',
 	request_json JSON NOT NULL COMMENT 'Accepted principal and canonical request.',
+	instruction_frontier_json JSON COMMENT 'Additional repository instructions and their discovery barriers for this turn.',
 	result_json JSON COMMENT 'Canonical terminal output and continuation material.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,

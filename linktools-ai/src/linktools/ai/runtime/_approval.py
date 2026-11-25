@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Protocol
 
+from ._session_deferred import SessionDeferredCommands, SessionTurnKey
+
 from linktools.core import environ
 from ..core import (
     ApprovalDecision,
@@ -26,7 +28,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, StoredPayload
 from ..persistence.objects import read_runtime_object
 from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView
-from ..execution import ExecutionRecord, ExecutionRecoveryState
+from ..execution import ExecutionRecord, ExecutionRecoveryState, PendingToolContinuation
 from ..persistence.contracts import (
     deferred_resource_id,
     ApprovalRecord,
@@ -59,33 +61,34 @@ class DefaultApprovalService:
         *,
         objects: ObjectStore,
         continuation: _DeferredContinuation | None = None,
+        session_deferred: SessionDeferredCommands | None = None,
     ) -> None:
         self._approvals = approvals
         self._executions = executions
         self._authorization = authorization
         self._objects = objects
         self._continuation = continuation
+        self._session_deferred = session_deferred
 
     async def list(
         self,
-        execution_id: str,
+        execution_id: str | SessionTurnKey,
         *,
         principal: Principal,
     ) -> tuple[ApprovalView, ...]:
-        execution = await self._waiting_execution(
-            execution_id, principal=principal,
-            action=AuthorizationAction.APPROVAL_READ,
-        )
-        if execution is None or execution.recovery is None or execution.recovery.pending_tools is None:
+        _, pending = await self._waiting(execution_id, principal=principal, action=AuthorizationAction.APPROVAL_READ)
+        if pending is None:
             return ()
+        if isinstance(execution_id, SessionTurnKey):
+            execution_id = execution_id.turn_id
         views: list[ApprovalView] = []
-        for pending in execution.recovery.pending_tools.approvals:
+        for item in pending.approvals:
             approval_id = deferred_resource_id(
                 "approval-v1",
                 principal.tenant_id,
                 execution_id,
-                execution.recovery.pending_tools.source_agent_run_id,
-                pending.tool_call_id,
+                pending.source_agent_run_id,
+                item.tool_call_id,
             )
             record = await self._approvals.get(
                 approval_id,
@@ -93,31 +96,30 @@ class DefaultApprovalService:
             )
             if record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            arguments = await _decode_arguments(self._objects, pending.arguments_payload)
+            arguments = await _decode_arguments(self._objects, item.arguments_payload)
             views.append(
                 ApprovalView(
                     approval_id,
                     record.status,
-                    tool_name=pending.tool_name,
+                    tool_name=item.tool_name,
                     arguments=arguments,
-                    metadata=dict(pending.metadata),
+                    metadata=dict(item.metadata),
                 )
             )
         return tuple(views)
 
     async def decide(
         self,
-        execution_id: str,
+        execution_id: str | SessionTurnKey,
         request: ApprovalDecisionRequest,
     ) -> ApprovalDecisionResult:
-        execution = await self._waiting_execution(
-            execution_id, principal=request.principal,
-            action=AuthorizationAction.APPROVAL_DECIDE,
+        frontier, continuation = await self._waiting(
+            execution_id, principal=request.principal, action=AuthorizationAction.APPROVAL_DECIDE,
         )
+        if isinstance(execution_id, SessionTurnKey):
+            execution_id = execution_id.turn_id
         pending = _pending_approval(
-            execution,
-            request.approval_id,
-            tenant_id=request.principal.tenant_id,
+            continuation, execution_id, request.approval_id, tenant_id=request.principal.tenant_id,
         )
         if pending is None:
             raise AIError(ErrorCode.APPROVAL_CONFLICT)
@@ -129,37 +131,44 @@ class DefaultApprovalService:
             raise AIError(ErrorCode.APPROVAL_CONFLICT)
         decision_digest = _decision_digest(request)
         idempotency_key = request.idempotency_key
-        try:
-            updated = await self._approvals.decide(
-                request.approval_id,
-                tenant_id=request.principal.tenant_id,
-                expected_status=ApprovalStatus.PENDING,
-                idempotency_key=idempotency_key,
-                decision=request.decision,
-                principal_id=request.principal.principal_id,
-                decision_digest=decision_digest,
-                decided_at=datetime.now(timezone.utc),
-                decision_message=request.message,
-                resolution_metadata=request.metadata,
-            )
-        except AIError as error:
-            if error.code is not ErrorCode.APPROVAL_CONFLICT:
-                raise
-            updated = await self._approvals.get(
-                request.approval_id,
-                tenant_id=request.principal.tenant_id,
-            )
-            if not _is_exact_replay(
-                updated,
-                execution_id=execution_id,
-                idempotency_key=idempotency_key,
-                decision=request.decision,
-                principal_id=request.principal.principal_id,
-                decision_digest=decision_digest,
-                message=request.message,
-                metadata=request.metadata,
-            ):
-                raise
+        async def settle():
+            try:
+                updated = await self._approvals.decide(
+                    request.approval_id,
+                    tenant_id=request.principal.tenant_id,
+                    expected_status=ApprovalStatus.PENDING,
+                    idempotency_key=idempotency_key,
+                    decision=request.decision,
+                    principal_id=request.principal.principal_id,
+                    decision_digest=decision_digest,
+                    decided_at=datetime.now(timezone.utc),
+                    decision_message=request.message,
+                    resolution_metadata=request.metadata,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.APPROVAL_CONFLICT:
+                    raise
+                updated = await self._approvals.get(
+                    request.approval_id,
+                    tenant_id=request.principal.tenant_id,
+                )
+                if not _is_exact_replay(
+                    updated,
+                    execution_id=execution_id,
+                    idempotency_key=idempotency_key,
+                    decision=request.decision,
+                    principal_id=request.principal.principal_id,
+                    decision_digest=decision_digest,
+                    message=request.message,
+                    metadata=request.metadata,
+                ):
+                    raise
+            return updated
+
+        if frontier is None:
+            updated = await settle()
+        else:
+            updated = await self._session_deferred.settle(frontier, self._approvals.state_store, settle)
         if updated is None or updated.decision is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
@@ -168,13 +177,24 @@ class DefaultApprovalService:
             request.approval_id,
             updated.decision.value,
         )
-        if self._continuation is not None:
+        if frontier is not None:
+            await self._session_deferred.resume(frontier)
+        elif self._continuation is not None:
             await self._reconcile(execution_id, request.principal.tenant_id)
         return ApprovalDecisionResult(
             updated.approval_id,
             request.idempotency_key,
             updated.decision,
         )
+
+    async def _waiting(self, execution_id: str | SessionTurnKey, *, principal: Principal, action: AuthorizationAction):
+        if isinstance(execution_id, SessionTurnKey):
+            if self._session_deferred is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            current = await self._session_deferred.read(execution_id, principal=principal, action=action)
+            return (None, None) if current is None else current
+        execution = await self._waiting_execution(execution_id, principal=principal, action=action)
+        return None, None if execution is None else execution.recovery.pending_tools
 
     async def _waiting_execution(
         self,
@@ -223,19 +243,20 @@ class DefaultApprovalService:
 
 
 def _pending_approval(
-    execution: ExecutionRecord | None,
+    continuation: PendingToolContinuation | None,
+    execution_id: str,
     approval_id: str,
     *,
     tenant_id: str,
 ) -> PendingDeferredCall | None:
-    if execution is None or execution.recovery is None or execution.recovery.pending_tools is None:
+    if continuation is None:
         return None
-    for pending in execution.recovery.pending_tools.approvals:
+    for pending in continuation.approvals:
         candidate = deferred_resource_id(
             "approval-v1",
             tenant_id,
-            execution.execution_id,
-            execution.recovery.pending_tools.source_agent_run_id,
+            execution_id,
+            continuation.source_agent_run_id,
             pending.tool_call_id,
         )
         if candidate == approval_id:

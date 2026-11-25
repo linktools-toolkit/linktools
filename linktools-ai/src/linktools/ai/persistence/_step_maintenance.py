@@ -142,6 +142,71 @@ async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeM
     return tuple(roots)
 
 
+def _canonical_checkpoint_scope(metadata: "MetaData", store_key: bytes):
+    from ..steps import NATIVE_STORE_KEY_MAX_BYTES
+    from ._record_key import decode_key_components
+    from .state import state_store_key
+
+    turns = metadata.tables.get("ai_session_turns")
+    if turns is None:
+        return None, None
+    _, namespace, tenant_id = decode_key_components(store_key, NATIVE_STORE_KEY_MAX_BYTES)
+    return turns, state_store_key(namespace, tenant_id, "regenerable-session")
+
+
+def canonical_checkpoint_prune_guard(metadata: "MetaData", store_key: bytes, run_id: str):
+    """Pause freezes the bounded retained set; the exact checkpoint remains readable."""
+    from sqlalchemy import exists, true
+
+    turns, scope = _canonical_checkpoint_scope(metadata, store_key)
+    if turns is None:
+        return true()
+    return ~exists().where(
+        turns.c.scope_key == scope, turns.c.turn_id == run_id.encode("utf-8"),
+        turns.c.state.in_(("waiting", "ready")),
+    )
+
+
+async def _require_paused_checkpoints(
+    session: "AsyncSession", metadata: "MetaData", snapshots: "Table | None", store_key: bytes,
+) -> None:
+    """Fail before the offline sweep if any exact persisted pause root was lost."""
+    from sqlalchemy import false, select, tuple_
+    from ..steps import encode_native_replay_key
+    from ._session_turn_sql import CanonicalDeferredFrontier, SessionTurnKey
+
+    turns, scope = _canonical_checkpoint_scope(metadata, store_key)
+    if turns is None:
+        return
+    after = 0
+    while True:
+        rows = (await session.execute(select(
+            turns.c.id, turns.c.session_key, turns.c.turn_id, turns.c.generation, turns.c.result_json,
+        ).where(turns.c.scope_key == scope, turns.c.id > after,
+                turns.c.state.in_(("waiting", "ready"))).order_by(turns.c.id).limit(128))).mappings().all()
+        if not rows:
+            return
+        if snapshots is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected = []
+        for row in rows:
+            key = SessionTurnKey(row["session_key"].decode("utf-8"), row["turn_id"].decode("utf-8"))
+            frontier = CanonicalDeferredFrontier.from_json(key, row["generation"], row["result_json"])
+            expected.append((key.turn_id, key.session_id, encode_native_replay_key(frontier.checkpoint_id)))
+        snapshot_keys = tuple_(snapshots.c.run_id, snapshots.c.conversation_id, snapshots.c.idempotency_key)
+        observed = (await session.execute(select(
+            snapshots.c.run_id, snapshots.c.conversation_id, snapshots.c.idempotency_key,
+        ).where(
+            snapshots.c.store_locator == native_store_locator(store_key), snapshots.c.store_key == store_key,
+            snapshots.c.pruned == false(), snapshot_keys.in_(expected),
+        ))).all()
+        if set(observed) != set(expected):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if len(rows) < 128:
+            return
+        after = rows[-1]["id"]
+
+
 async def purge_step_content(
     context: "SqlStorageContext", metadata: "MetaData", store_key: bytes, *,
     group: StateStorageGroup | None = None,
@@ -200,6 +265,8 @@ async def purge_step_content(
                 ordinary_ranges.append(root.slices)
 
     async def mutate(session: "AsyncSession") -> StepContentCleanupResult:
+        if group is not None:
+            await _require_paused_checkpoints(session, group.metadata, snapshots, store_key)
         roots = [] if snapshots is None else (await session.execute(select(
             snapshots.c.store_key, snapshots.c.sequence_root, snapshots.c.messages, snapshots.c.pruned,
         ).where(snapshots.c.store_locator == locator, snapshots.c.store_key == store_key))).mappings().all()

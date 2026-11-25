@@ -229,6 +229,7 @@ class _AgentRunScope:
     mode: ExecutionMode = "run"
     planning: bool = False
     regenerable: bool = False
+    canonical_step: AtomicStepPersistence | None = None
     thinking: ThinkingValue = None
     parent_agent_run_id: str | None = None
     subagent_available: bool = False
@@ -385,16 +386,16 @@ class AgentExecutor:
             )
         return None
 
-    def require_regenerable(self, binding: AgentBinding) -> None:
+    def require_regenerable(self, binding: AgentBinding, *, canonical_step: bool = False) -> None:
         compiled = binding.compiled_agent
         policy = _runtime_feature_policy(compiled.runtime_contributions)
         if (binding.output_binding.mode != "text"
                 or compiled.selected_capabilities or compiled.skill_definitions
                 or compiled.mcp_servers or compiled.selected_subagents
-                or policy.restart_checkpoints or policy.durable_trace or policy.memory_scope is not None
+                or policy.restart_checkpoints != canonical_step or policy.durable_trace or policy.memory_scope is not None
                 or policy.tool_responses is not None):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
-        if compiled.selected_tools:
+        if compiled.selected_tools and not canonical_step:
             filesystems = tuple(item for item in policy.capabilities if type(item) is FileSystemCapability)
             if len(filesystems) != 1:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns require the native read-only tool surface")
@@ -422,32 +423,54 @@ class AgentExecutor:
         event_sink: EventSink,
         workspace: Workspace | None = None,
         repository_instructions: RepositoryInstructions | None = None,
+        repository_instruction_boundary: RepositoryInstructionBoundary | None = None,
         thinking: ThinkingValue = None,
         streamed_output_bytes: int = 64 * 1024,
-    ) -> AgentExecutionResult:
+        canonical_step: AtomicStepPersistence | None = None,
+        tool_operations: ToolOperationBridge | None = None,
+        generation: int = 1,
+        continuation: Sequence[ModelMessage] | None = None,
+        deferred_tool_results: DeferredToolResults | None = None,
+        deferred_approvals: tuple[PendingDeferredCall, ...] = (),
+        output_retries_used: int = 0,
+    ) -> AgentExecutionOutcome:
         """Run a plain turn with no durable recorder or execution handoff."""
         if context.session_id is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A regenerable turn requires a session")
         if streamed_output_bytes < 1:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, "No output capacity remains for this turn")
-        self.require_regenerable(binding)
+        if (canonical_step is None) != (tool_operations is None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self.require_regenerable(binding, canonical_step=canonical_step is not None)
         store = RuntimeAgentRunStore(
             StagingAgentRunStore(),
-            conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
+            conversation_archive=(InMemoryStepArchive(PersistenceDomain.CONVERSATION)
+                                  if canonical_step is None else None),
             execution_archive=None,
         )
+        if canonical_step is not None:
+            store.bind_execution_persistence(
+                context.execution_id, conversation=False, restart_checkpoints=True, durable_trace=False,
+            )
+        if continuation is not None and canonical_step is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        model_history = history if continuation is None else list(continuation)
         await store.initialize()
         try:
             outcome = await self.execute(_AgentRunScope(
                 binding=binding, context=context, workspace=workspace, limits=limits,
-                execution_cwd=None, user_prompt=prompt, history=history,
-                initial_context=LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history)),
+                execution_cwd=None, user_prompt=prompt if continuation is None else None, history=model_history,
+                initial_context=LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in model_history)),
                 agent_conversation_id=context.session_id, run_store=store,
-                agent_run_id=context.execution_id, agent_run_seq=1,
+                agent_run_id=context.execution_id, agent_run_seq=generation,
                 event_sink=event_sink, thinking=thinking, streamed_output_bytes=streamed_output_bytes,
-                repository_instructions=repository_instructions, regenerable=True, tool_effects="read_only",
+                repository_instructions=repository_instructions, regenerable=canonical_step is None,
+                repository_instruction_boundary=repository_instruction_boundary,
+                canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
+                output_retries_used=output_retries_used, deferred_approvals=deferred_approvals,
+                tool_effects="read_only" if canonical_step is None else "live",
             ))
-            if isinstance(outcome, DeferredToolRequests):
+            if isinstance(outcome, DeferredToolRequests) and canonical_step is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")
             return outcome
         finally:
@@ -799,7 +822,12 @@ class AgentExecutor:
                         agent_run_id=scope.agent_run_id,
                         next_model_request_seq=interaction_high_water + 1,
                     )
-                    if scope.regenerable:
+                    if scope.canonical_step is not None:
+                        runtime_capabilities = (*(
+                            capability for capability in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
+                            if type(capability) in (ExecutionCapability, FileSystemCapability)
+                        ), scope.canonical_step)
+                    elif scope.regenerable:
                         runtime_capabilities = tuple(
                             capability for capability in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
                             if type(capability) in (ExecutionCapability, FileSystemCapability, StepPersistenceCapability)
@@ -811,7 +839,7 @@ class AgentExecutor:
                         scope,
                         model=model,
                         skill_sources=skill_sources,
-                        current_agent=None if scope.regenerable else self._current_agent,
+                        current_agent=None if scope.regenerable or scope.canonical_step is not None else self._current_agent,
                         asset_sources=None if scope.regenerable else self._asset_sources,
                         deferred_pause_sink=record_deferred_step,
                         metrics=self._metrics,
@@ -867,7 +895,10 @@ class AgentExecutor:
                             _validate_deferred_requests(output)
                             return output
                         run = await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id)
-                        checkpoint = (await scope.run_store.checkpoint_persistence.reader.latest_snapshot(run_id=scope.agent_run_id)
+                        if scope.canonical_step is not None:
+                            checkpoint = await scope.canonical_step.store.latest_snapshot(run_id=scope.agent_run_id)
+                        else:
+                            checkpoint = (await scope.run_store.checkpoint_persistence.reader.latest_snapshot(run_id=scope.agent_run_id)
                                       if isinstance(scope.run_store, RuntimeAgentRunStore)
                                       and scope.run_store.execution_persistence(scope.agent_run_id)[1]
                                       else await scope.run_store.latest_checkpoint(agent_run_id=scope.agent_run_id))
