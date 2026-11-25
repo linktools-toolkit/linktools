@@ -258,6 +258,32 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         await self._context.run_mutation(write, domain="session.create")
 
+    async def update_session(
+        self, session_id: str, *, owner_principal_id: str, expected_revision: int, config: JsonValue,
+    ) -> bool:
+        """Replace authorized session configuration without changing a running turn's admission."""
+        async def write(connection: AsyncSession) -> bool:
+            result = await connection.execute(self._sessions.update().filter_by(
+                **self._session_values(session_id), owner_principal_id=self._key(owner_principal_id, 128),
+                status="open", revision=expected_revision,
+            ).values(config_json=config, revision=expected_revision + 1))
+            return result.rowcount == 1
+
+        return await self._context.run_mutation(write, domain="session.update")
+
+    async def close_session(
+        self, session_id: str, *, owner_principal_id: str, expected_revision: int,
+    ) -> bool:
+        """Close an unoccupied session atomically so a concurrent admission cannot win as well."""
+        async def write(connection: AsyncSession) -> bool:
+            result = await connection.execute(self._sessions.update().filter_by(
+                **self._session_values(session_id), owner_principal_id=self._key(owner_principal_id, 128),
+                status="open", revision=expected_revision, active_turn_id=None,
+            ).values(status="closed", revision=expected_revision + 1))
+            return result.rowcount == 1
+
+        return await self._context.run_mutation(write, domain="session.close")
+
     async def accept(
         self, key: SessionTurnKey, *, expected_revision: int, context_from: int, context_through: int,
         request_key: str, request: JsonValue, lease_seconds: int,
