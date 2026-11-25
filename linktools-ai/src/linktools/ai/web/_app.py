@@ -31,6 +31,7 @@ from ..execution import ExecutionTreeEvent, ListExecutionRequest, TaskModelProje
 from ..session import CreateSessionRequest, ListSessionRequest
 from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
+from ..runtime._turn_client import uses_turn_sessions
 from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 
 if TYPE_CHECKING:
@@ -378,7 +379,7 @@ class _Console:
         self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
         status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]],
         shutdown_event: asyncio.Event | None, session_notices: _SessionNoticeFeed | None,
-        local_workspace: bool, ordinary_turns: bool,
+        local_workspace: bool, native_sessions: bool,
     ) -> None:
         self.runtime = runtime
         self.history = runtime.history if runtime is not None else history
@@ -388,7 +389,7 @@ class _Console:
         self._shutdown_event = shutdown_event
         self._session_notices = session_notices
         self._local_workspace = local_workspace
-        self.turn_sessions = ordinary_turns
+        self.turn_sessions = native_sessions
         self._turn_subscribers = 0
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
@@ -1114,7 +1115,6 @@ def create_app(
     shutdown_event: asyncio.Event | None = None,
     session_notices: _SessionNoticeFeed | None = None,
     local_workspace: bool = False,
-    ordinary_turns: bool | None = None,
     turn_notice_transport: "TurnNoticeTransport | None" = None,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
@@ -1122,19 +1122,15 @@ def create_app(
     Set shutdown_event before draining HTTP connections to close live observers
     without shutting down their Runtime. With no Runtime, mutations and live watches are disabled. Historical reads
     remain available without model credentials. Only an explicitly trusted local workspace can list ordinary sessions.
-    ordinary_turns selects the conversation domain for the whole console. If omitted, use the configured domain.
+    The configured Conversation storage selects the implementation, not Runtime capabilities.
     An optional host-owned ordinary turn notice transport is attached during ASGI lifespan.
     Host/Origin headers are not
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
-    enabled = False
-    if ordinary_turns is not False:
-        enabled = runtime.sessions.supports_turn_sessions if runtime is not None else (
-            history is not None and history.has_turn_sessions
-        )
-        if ordinary_turns is True and not enabled:
-            raise ValueError("ordinary_turns requires ordinary turn support")
+    enabled = uses_turn_sessions(runtime) if runtime is not None else (
+        history is not None and history.has_turn_sessions
+    )
     lifespan = None
     if turn_notice_transport is not None:
         if runtime is None or not enabled:

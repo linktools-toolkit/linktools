@@ -3,6 +3,7 @@
 """Transport-only ACP adapter over the public Runtime."""
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
@@ -27,19 +28,20 @@ from .core import (
     ExecutionStatus,
     JsonValue,
     Principal,
+    PrincipalKind,
 )
 from .errors import AIError, ErrorCode
 from .execution import ExecutionTreeEvent
 from .session import ListSessionRequest
 from .runtime import Runtime
-from .session import project_tool_process_event
+from .runtime._turn_client import TurnObserver, uses_turn_sessions
+from .session import ToolProcessItem, project_tool_process_event
 from .workspace import Workspace
 
 if TYPE_CHECKING:
     from acp.schema import ResourceContentBlock
 
     from .execution import Execution
-    from .session import ToolProcessItem
 
 _logger = environ.get_logger("ai.acp")
 
@@ -61,7 +63,8 @@ class ACPAgent:
         self._workspace = workspace
         self._connection: ACPConnection | None = None
         self._initialized = False
-        self._prompts: dict[str, asyncio.Future[Execution | None]] = {}
+        self._prompts: dict[str, asyncio.Future[Execution | str | None]] = {}
+        self._local_workspace = principal.kind == PrincipalKind.LOCAL_TRUSTED.value
 
     def on_connect(self, connection: ACPConnection) -> None:
         if self._connection is not connection:
@@ -91,6 +94,11 @@ class ACPAgent:
         session_id = uuid4().hex
         try:
             logical_cwd = self._workspace_cwd(cwd)
+            if uses_turn_sessions(self._runtime):
+                await self._runtime.sessions.create_turn_session(
+                    session_id, principal=self._principal, cwd=logical_cwd,
+                )
+                return schema.NewSessionResponse(sessionId=session_id)
             session = await self._runtime.agents.get().create_session(
                 session_id, principal=self._principal, cwd=logical_cwd,
             )
@@ -101,6 +109,8 @@ class ACPAgent:
     async def load_session(self, cwd: str, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         acp, schema = _require_acp()
+        if uses_turn_sessions(self._runtime):
+            return await self._load_turn_session(cwd, session_id, acp, schema)
         connection = self._connection
         cursor = None
         pages = []
@@ -142,6 +152,39 @@ class ACPAgent:
                                 )
         return schema.LoadSessionResponse()
 
+    async def _load_turn_session(self, cwd: str, session_id: str, acp: ModuleType, schema: ModuleType) -> JsonValue:
+        connection = self._connection
+        cursor = None
+        pages = []
+        try:
+            logical_cwd = None if self._workspace is None else self._workspace_cwd(cwd)
+            while True:
+                detail = await self._runtime.history.turn_session(
+                    session_id, principal=self._principal, cursor=cursor, local_workspace=self._local_workspace,
+                )
+                if logical_cwd is not None and (detail["session"].get("cwd") or ".") != logical_cwd:
+                    raise acp.RequestError.invalid_params({"reason": "workspace_cwd_mismatch"})
+                page = detail["timeline"]
+                pages.append(page["items"])
+                cursor = page["next_cursor"]
+                if cursor is None or connection is None or connection is not self._connection:
+                    break
+        except AIError as error:
+            raise _acp_error(acp, error, session_id=session_id) from error
+        for turns in reversed(pages):
+            for turn in turns:
+                if connection is None or connection is not self._connection:
+                    break
+                if not turn["conversation_committed"]:
+                    continue
+                for text in _history_text(turn["user_input"]):
+                    await connection.session_update(session_id, schema.UserMessageChunk(
+                        content=schema.TextContentBlock(type="text", text=text), sessionUpdate="user_message_chunk",
+                    ))
+                for update in _turn_replay(schema, turn["turn_id"], turn):
+                    await connection.session_update(session_id, update)
+        return schema.LoadSessionResponse()
+
     async def list_sessions(
         self,
         cwd: "str | None" = None,
@@ -155,18 +198,27 @@ class ACPAgent:
             logical_cwd = None if cwd is None else self._workspace_cwd(cwd)
         except AIError:
             return schema.ListSessionsResponse(sessions=[])
-        page = await self._runtime.sessions.list(
-            ListSessionRequest(self._principal, cursor=cursor, limit=200),
-        )
+        if uses_turn_sessions(self._runtime):
+            page = await self._runtime.history.turn_sessions(
+                principal=self._principal, cursor=cursor, limit=64, local_workspace=self._local_workspace,
+            )
+            entries = ((item["session_id"], item.get("cwd")) for item in page["items"])
+            next_cursor = page["next_cursor"]
+        else:
+            page = await self._runtime.sessions.list(
+                ListSessionRequest(self._principal, cursor=cursor, limit=200),
+            )
+            entries = ((item.session_id, item.cwd) for item in page.items)
+            next_cursor = page.next_cursor
         sessions = []
-        for item in page.items:
-            directory = item.cwd if workspace is None else item.cwd or "."
+        for session_id, item_cwd in entries:
+            directory = item_cwd if workspace is None else item_cwd or "."
             if logical_cwd is None or directory == logical_cwd:
                 sessions.append(schema.SessionInfo(
-                    sessionId=item.session_id,
+                    sessionId=session_id,
                     cwd=(directory or "") if workspace is None else str(workspace.root / (directory or ".")),
                 ))
-        return schema.ListSessionsResponse(sessions=sessions, nextCursor=page.next_cursor)
+        return schema.ListSessionsResponse(sessions=sessions, nextCursor=next_cursor)
 
     async def resume_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
         return await self.load_session(cwd, session_id, **kwargs)
@@ -178,6 +230,17 @@ class ACPAgent:
 
         try:
             logical_cwd = self._workspace_cwd(cwd)
+            if uses_turn_sessions(self._runtime):
+                source = await self._turn_session_state(session_id)
+                if logical_cwd is not None and (source.get("cwd") or ".") != logical_cwd:
+                    raise acp.RequestError.invalid_params({"reason": "workspace_cwd_mismatch"})
+                target = uuid4().hex
+                if not await self._runtime.sessions.fork_turn_session(
+                    session_id, target, principal=self._principal,
+                    expected_revision=source["revision"], idempotency_key=uuid4().hex,
+                ):
+                    raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+                return schema.ForkSessionResponse(sessionId=target)
             source = await self._runtime.sessions.get(session_id, principal=self._principal)
             session = await self._runtime.sessions.fork(
                 source.agent_id, session_id,
@@ -186,6 +249,11 @@ class ACPAgent:
         except AIError as error:
             raise _acp_error(acp, error, session_id=session_id) from error
         return schema.ForkSessionResponse(sessionId=session.session_id)
+
+    async def _turn_session_state(self, session_id: str) -> dict[str, JsonValue]:
+        return await self._runtime.history.turn_session_state(
+            session_id, principal=self._principal, local_workspace=self._local_workspace,
+        )
 
     def _workspace_cwd(self, cwd: str) -> str:
         workspace = self._workspace
@@ -207,10 +275,20 @@ class ACPAgent:
 
     async def close_session(self, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
+        acp, schema = _require_acp()
         from .session import CloseSessionRequest
 
-        await self._runtime.sessions.close(session_id, CloseSessionRequest(self._principal, uuid4().hex))
+        if uses_turn_sessions(self._runtime):
+            try:
+                source = await self._turn_session_state(session_id)
+                if not await self._runtime.sessions.close_turn_session(
+                    session_id, principal=self._principal, expected_revision=source["revision"],
+                ):
+                    raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            except AIError as error:
+                raise _acp_error(acp, error, session_id=session_id) from error
+        else:
+            await self._runtime.sessions.close(session_id, CloseSessionRequest(self._principal, uuid4().hex))
         return schema.CloseSessionResponse()
 
     async def set_session_mode(self, session_id: str, mode_id: str, **kwargs: JsonValue) -> None:
@@ -245,7 +323,7 @@ class ACPAgent:
         if session_id in self._prompts:
             raise _acp_error(acp, AIError(ErrorCode.SESSION_BUSY), session_id=session_id)
         connection = self._connection
-        admitted: asyncio.Future[Execution | None] = asyncio.get_running_loop().create_future()
+        admitted: asyncio.Future[Execution | str | None] = asyncio.get_running_loop().create_future()
         self._prompts[session_id] = admitted
         execution_id = None
         request_id = uuid4().hex
@@ -265,21 +343,62 @@ class ACPAgent:
                     await connection.session_update(session_id, _acp_tool_update(schema, item.execution_id, process))
 
         try:
-            execution = await self._runtime.sessions.start(
-                session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
-            )
-            execution_id = execution.execution_id
-            admitted.set_result(execution)
-            outcome = await execution.wait(on_event=on_event, include_event_content=True)
-            result = outcome.result
-            if outcome.observation_error is not None:
-                _logger.warning(
-                    "ACP prompt observation incomplete: execution_id=%s code=%s",
-                    execution_id, outcome.observation_error.code.value,
+            if uses_turn_sessions(self._runtime):
+                with TurnObserver(
+                    self._runtime, session_id, self._principal, local_workspace=self._local_workspace,
+                ) as observer:
+                    execution_id = await self._runtime.sessions.start_turn(
+                        session_id, "".join(parts), agent_id="default",
+                        principal=self._principal, idempotency_key=request_id,
+                    )
+                    admitted.set_result(execution_id)
+                    sent_text = False
+                    async for frame in observer.events(execution_id):
+                        if frame["type"] == "terminal":
+                            break
+                        if connection is None or connection is not self._connection:
+                            continue
+                        if frame["type"] == "delta" and isinstance(text := frame.get("text"), str) and text:
+                            thinking = frame.get("delta_kind") == "thinking"
+                            sent_text |= not thinking
+                            await connection.session_update(session_id, _assistant_chunk(schema, text, thinking=thinking))
+                        elif frame["type"] == "tool" and isinstance(item := frame.get("item"), Mapping):
+                            if (process := ToolProcessItem.from_notice(item)) is not None:
+                                await connection.session_update(session_id, _acp_tool_update(schema, execution_id, process))
+                    status = ExecutionStatus(str(frame["state"]).upper())
+                    error_code = frame.get("error_code")
+                    output = frame.get("output")
+                    if (
+                        not sent_text and connection is not None and connection is self._connection
+                        and status is ExecutionStatus.SUCCEEDED and isinstance(output, Mapping)
+                        and isinstance(text := output.get("text"), str) and text
+                    ):
+                        await connection.session_update(session_id, _assistant_chunk(schema, text, thinking=False))
+                    if observer.incomplete and sent_text:
+                        # ACP text chunks are append-only; silently appending a
+                        # complete answer would duplicate a partial one.
+                        raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            else:
+                execution = await self._runtime.sessions.start(
+                    session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
                 )
-            if result.status is ExecutionStatus.FAILED:
+                execution_id = execution.execution_id
+                admitted.set_result(execution)
+                outcome = await execution.wait(on_event=on_event, include_event_content=True)
+                result = outcome.result
+                if outcome.observation_error is not None:
+                    _logger.warning(
+                        "ACP prompt observation incomplete: execution_id=%s code=%s",
+                        execution_id, outcome.observation_error.code.value,
+                    )
+                status, error_code = result.status, result.error_code if result.status is ExecutionStatus.FAILED else None
+            if status in (ExecutionStatus.WAITING_DEFERRED, ExecutionStatus.WAITING_RETRY):
+                raise AIError(ErrorCode.EXECUTION_NOT_READY)
+            if status is ExecutionStatus.RECOVERY_REQUIRED:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            if status is ExecutionStatus.FAILED:
                 try:
-                    code = ErrorCode(result.error_code)
+                    code = ErrorCode(error_code)
                 except (TypeError, ValueError):
                     code = ErrorCode.EXECUTION_FAILED
                 raise AIError(code)
@@ -291,7 +410,7 @@ class ACPAgent:
                 del self._prompts[session_id]
             if not admitted.done():
                 admitted.set_result(None)
-        stop_reason = "cancelled" if result.status is ExecutionStatus.CANCELLED else "end_turn"
+        stop_reason = "cancelled" if status is ExecutionStatus.CANCELLED else "end_turn"
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
@@ -303,10 +422,14 @@ class ACPAgent:
         execution = await asyncio.shield(admitted)
         if execution is None or self._prompts.get(session_id) is not admitted:
             return
+        execution_id = execution if isinstance(execution, str) else execution.execution_id
         try:
-            await execution.cancel()
+            if isinstance(execution, str):
+                await self._runtime.sessions.cancel_turn(session_id, execution_id, principal=self._principal)
+            else:
+                await execution.cancel()
         except AIError as error:
-            raise _acp_error(acp, error, session_id=session_id, execution_id=execution.execution_id) from error
+            raise _acp_error(acp, error, session_id=session_id, execution_id=execution_id) from error
 
     async def ext_method(self, method: str, params: "dict[str, JsonValue]") -> None:
         acp, _ = _require_acp()
@@ -409,6 +532,19 @@ def _history_text(value: JsonValue) -> tuple[str, ...]:
         if value.get("kind") == "items" and isinstance(items := value.get("items"), list):
             return tuple(text for item in items for text in _history_text(item))
     return ()
+
+
+def _turn_replay(schema: ModuleType, turn_id: str, turn: Mapping[str, JsonValue]):
+    process = {
+        tool.key: tool for item in turn["process"]
+        if (tool := ToolProcessItem.from_notice(item)) is not None
+    }
+    for item in turn["items"]:
+        kind, content = item["item_kind"], item.get("content")
+        if kind in ("assistant", "thinking") and isinstance(content, str) and content:
+            yield _assistant_chunk(schema, content, thinking=kind == "thinking")
+        elif kind == "tool_call" and (tool := process.pop(f"tool:{item['tool_call_id']}", None)) is not None:
+            yield _acp_tool_update(schema, turn_id, tool, replay=True)
 
 
 def _assistant_chunk(schema: ModuleType, text: str, *, thinking: bool) -> JsonValue:

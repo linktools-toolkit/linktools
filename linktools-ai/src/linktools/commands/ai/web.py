@@ -24,10 +24,6 @@ class Command(BaseCommand):
         add_local_runtime_arguments(parser)
         parser.add_argument("--port", type=int, default=8765, help="loopback HTTP port (default: 8765)")
         parser.add_argument("--open", action="store_true", help="open the console in your browser")
-        parser.add_argument(
-            "--ordinary", action="store_true",
-            help="use low-I/O conversations without tools, memory, restart checkpoints or trace",
-        )
 
     def run(self, args: Namespace) -> int:
         try:
@@ -58,7 +54,7 @@ class Command(BaseCommand):
                 app = create_app(
                     runtime=local.runtime, metrics=local.metrics,
                     status=local.status, capabilities=local.capabilities, shutdown_event=shutdown_event,
-                    session_notices=notices, local_workspace=True, ordinary_turns=args.ordinary,
+                    session_notices=notices, local_workspace=True,
                 )
                 url = f"http://127.0.0.1:{args.port}"
                 self.logger.info("AI Web console: %s", url)
@@ -84,7 +80,7 @@ class Command(BaseCommand):
             # letting the base CLI translate a replayed KeyboardInterrupt.
             return 128 + signal.SIGINT if server.interrupted else 0
 
-        return run_local(args, serve, ordinary=args.ordinary)
+        return run_local(args, serve)
 
 
 command = Command()

@@ -5,8 +5,9 @@
 from argparse import BooleanOptionalAction, Namespace
 from typing import TYPE_CHECKING
 
+from linktools.ai.runtime._turn_client import uses_turn_sessions
 from linktools.cli import BaseCommand
-from ._common import add_local_runtime_arguments, run_local
+from ._common import add_local_runtime_arguments, local_turn_notices, run_local
 from ._output import emit_result
 
 if TYPE_CHECKING:
@@ -29,7 +30,13 @@ class Command(BaseCommand):
 
     def run(self, args: Namespace) -> int:
         async def execute(local: "LocalRuntime") -> int:
-            return await emit_result(local.runtime, args.prompt, "default", args.json, args.planning, args.thinking)
+            async def run_prompt() -> int:
+                return await emit_result(local.runtime, args.prompt, "default", args.json, args.planning, args.thinking)
+
+            if not args.planning and uses_turn_sessions(local.runtime):
+                async with local_turn_notices(local):
+                    return await run_prompt()
+            return await run_prompt()
 
         return run_local(args, execute)
 

@@ -3,10 +3,11 @@
 # Cancellation cleanup for the interactive ai run command.
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from linktools.commands.ai._output import _cancel_interrupted_execution
+from linktools.commands.ai._output import _cancel_interrupted_execution, emit_result
 
 
 @pytest.mark.asyncio
@@ -84,3 +85,36 @@ async def test_ai_run_json_interrupt_cancels_owned_execution() -> None:
         await task
     assert cancelled.is_set()
     assert execution.wait_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_ai_run_native_json_returns_canonical_turn_without_readback(capsys) -> None:
+    import json
+
+    subscription = []
+
+    def subscribe(session_id, callback):
+        assert session_id == "default"
+        subscription.append(callback)
+        return subscription.clear
+
+    async def start_turn(session_id, prompt, **kwargs):
+        assert session_id == "default" and prompt == "hello" and kwargs["agent_id"] == "default"
+        subscription[0]({"type": "terminal", "turn_id": "canonical-turn", "state": "succeeded",
+                         "output": {"text": "answer"}})
+        return "canonical-turn"
+
+    runtime = SimpleNamespace(
+        default_principal=object(),
+        sessions=SimpleNamespace(
+            _uses_turn_sessions=True, create_turn_session=AsyncMock(), start_turn=start_turn,
+            observe_turn_session=subscribe,
+        ),
+        history=SimpleNamespace(turn_result=AsyncMock()),
+    )
+    assert await emit_result(runtime, "hello", "default", True, False, None) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert (result["execution_id"], result["status"], result["output"]) == ("canonical-turn", "SUCCEEDED", {"text": "answer"})
+    runtime.history.turn_result.assert_not_awaited()
+    assert subscription == []
