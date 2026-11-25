@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 
+from ..agent import AgentBindingContract
 from ..capability import AgentContext
-from ..core import AuthorizationAction, JsonValue, ResourceKind, ResourceRef, canonical_json_bytes
+from ..core import AuthorizationAction, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..persistence.turns import SessionTurnKey
 from ._regenerable_transcript import decode_regenerable_turn, encode_regenerable_turn
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage
 
     from ..agent import AgentBinding
-    from ..core import AuthorizationPolicy, Principal, PromptLimits, ThinkingValue
+    from ..core import AuthorizationPolicy, PromptLimits, ThinkingValue
     from ..persistence.turns import SqlSessionTurns
     from ._agent_binding_resolver import _AgentBindingResolver
     from ._agent_executor import AgentExecutor, EventSink
@@ -43,13 +44,14 @@ class _AdmittedTurn:
     prompt: str
     history: list[ModelMessage]
     terminal_bytes: int
+    generation: int = 1
 
 
 class _RegenerableTurnRunner:
     def __init__(self, store: SqlSessionTurns, executor: AgentExecutor) -> None:
         self._store = store
         self._executor = executor
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
         self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
         self._closed = False
 
@@ -147,6 +149,93 @@ class _RegenerableTurnRunner:
             producer.cancel()
         return True
 
+    async def recover_session_turn(
+        self, key: SessionTurnKey, *, principal: Principal, namespace: str, tenant_id: str,
+        app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
+        limits: PromptLimits, event_sink: EventSink,
+    ) -> bool:
+        """Explicit recovery uses the admitted request and does not run on reads."""
+        if principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if len(self._tasks) >= _MAX_CONCURRENT_TURNS:
+            raise AIError(ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED)
+
+        async def recover() -> bool:
+            session = await self._store.get_session(key.session_id)
+            if session is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await authorization.authorize(
+                principal, AuthorizationAction.SESSION_READ,
+                ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id, session["owner_principal_id"].decode("utf-8")),
+            )
+            if session["active_turn_id"] != key.turn_id.encode("utf-8"):
+                return False
+            row = await self._store.get_turn(key)
+            if row is None or row["state"] not in ("accepted", "cancelling"):
+                return False
+            request = row["request_json"]
+            admitted = Principal(**request["principal"])
+            await authorization.authorize(
+                principal, AuthorizationAction.EXECUTION_RECOVER,
+                ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, admitted.principal_id),
+            )
+            generation = row["generation"]
+            if row["state"] == "cancelling":
+                if not await self._store.take_over(
+                    key, generation=generation, lease_seconds=_LEASE_SECONDS, cancelling=True,
+                ):
+                    return False
+                return await self._store.finish(
+                    key, generation=generation + 1, turn_no=row["turn_no"], state="cancelled",
+                    result={"error_code": ErrorCode.EXECUTION_CANCELLED.value},
+                )
+
+            prompt = request["prompt"]
+            after = row["context_from"] - 1
+            through = row["context_through"]
+            if not 0 <= through - after <= 128:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted context range is invalid")
+            history: list[ModelMessage] = []
+            if through > after:
+                positions = await self._store.history(key.session_id, through=through, limit=128, after=after)
+                if len(positions) != through - after:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted context range is no longer available")
+                for position in positions:
+                    if position["state"] == "succeeded":
+                        history.extend(decode_regenerable_turn(
+                            position["request_json"]["prompt"], position["result_json"],
+                        ))
+            contract = AgentBindingContract.from_payload(request["binding"])
+            binding = await resolver.restore(contract)
+            self._executor.require_regenerable(binding)
+            context = AgentContext(
+                app, admitted, namespace, key.session_id, key.turn_id, request["session_metadata"],
+                agent_id=binding.compiled_agent.spec.id,
+            )
+            if not await self._store.take_over(key, generation=generation, lease_seconds=_LEASE_SECONDS):
+                return False
+            await self._settle_with_lease(
+                _AdmittedTurn(
+                    key, row["turn_no"], prompt, history,
+                    _TURN_BYTES - len(canonical_json_bytes(request)), generation=generation + 1,
+                ),
+                binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=request["thinking"],
+            )
+            return True
+
+        task = asyncio.create_task(recover(), name="linktools-recover-regenerable-turn")
+        self._tasks.add(task)
+
+        def consume(completed: asyncio.Task[bool]) -> None:
+            self._tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(consume)
+        return await asyncio.shield(task)
+
     async def start(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object],
@@ -217,7 +306,7 @@ class _RegenerableTurnRunner:
                 done, _ = await asyncio.wait((producer,), timeout=_LEASE_SECONDS / 3)
                 if done:
                     break
-                if not await self._store.renew(turn.key, generation=1, lease_seconds=_LEASE_SECONDS):
+                if not await self._store.renew(turn.key, generation=turn.generation, lease_seconds=_LEASE_SECONDS):
                     producer.cancel()
                     break
             outcome, = await asyncio.gather(producer, return_exceptions=True)
@@ -228,9 +317,9 @@ class _RegenerableTurnRunner:
             # The normal finish path has no post-commit read. When settlement
             # lost its fence, only a durable cancellation authorizes this branch.
             row = await self._store.get_turn(turn.key)
-            if row is not None and row["state"] == "cancelling" and row["generation"] == 1:
+            if row is not None and row["state"] == "cancelling" and row["generation"] == turn.generation:
                 await self._store.finish(
-                    turn.key, generation=1, turn_no=turn.number, state="cancelled",
+                    turn.key, generation=turn.generation, turn_no=turn.number, state="cancelled",
                     result={"error_code": ErrorCode.EXECUTION_CANCELLED.value},
                 )
         finally:
@@ -297,6 +386,6 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         except AIError as error:
             return await self._store.finish(
-                turn.key, generation=1, turn_no=turn.number, state="failed", result={"error_code": error.code.value},
+                turn.key, generation=turn.generation, turn_no=turn.number, state="failed", result={"error_code": error.code.value},
             )
-        return await self._store.finish(turn.key, generation=1, turn_no=turn.number, state="succeeded", result=result)
+        return await self._store.finish(turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded", result=result)
