@@ -540,6 +540,7 @@ class _SnapshotExportSource:
     native_payloads: Mapping[str, Mapping[tuple[bytes, str], bytes]] | None = None
     run_registrations: Mapping[str, RunRecord] | None = None
     ordinary_sessions: dict[str, list[dict[str, object]]] | None = None
+    ordinary_binding_archive: str | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return self.archive_object_stores[domain]
@@ -684,6 +685,7 @@ class RuntimeSnapshotOperations:
         run_registrations = {}
         native_payloads = {}
         ordinary_sessions = None
+        ordinary_binding_archive = None
         readers = {}
         groups = {}
         for domain in sorted(self._resources.durable_domains, key=lambda value: value.value):
@@ -714,7 +716,7 @@ class RuntimeSnapshotOperations:
                 await execution_bindings.initialize(create=False)
 
             async def capture_group(transaction: object) -> None:
-                nonlocal native, ordinary_sessions
+                nonlocal native, ordinary_sessions, ordinary_binding_archive
                 roots = []
                 event_references = []
                 waiting_owner = None
@@ -726,6 +728,10 @@ class RuntimeSnapshotOperations:
                         )
                         if captured_ordinary["sessions"] or captured_ordinary["turns"]:
                             ordinary_sessions = captured_ordinary
+                            if captured_ordinary["turns"]:
+                                if opened is None:
+                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                                ordinary_binding_archive = opened[0]
                             if has_waiting_turns(captured_ordinary):
                                 waiting_owner = store
                             roots.extend(ordinary_transcript_roots(captured_ordinary))
@@ -935,7 +941,7 @@ class RuntimeSnapshotOperations:
             readers=readers, archives=archives(), object_stores=self._resources.object_stores,
             native_rows=native_rows, native_checkpoints=native_checkpoints, native_projections=native_projections, native_payloads=native_payloads,
             run_registrations=run_registrations,
-            ordinary_sessions=ordinary_sessions,
+            ordinary_sessions=ordinary_sessions, ordinary_binding_archive=ordinary_binding_archive,
             archive_object_stores=(self._resources.archive_object_stores
                                   if self._resources.archive_object_stores is not None
                                   else self._resources.object_stores),
@@ -1186,6 +1192,11 @@ async def _export_snapshot(
     capture_state_closure(tuple(record for records in snapshot_records.values() for record in records),
         values=tuple(dict(fact.data) for facts in snapshot_facts.values() for fact in facts),
         namespace=source.namespace, tenant_id=source.tenant_id, require_bindings=True)
+    if source.ordinary_sessions is not None:
+        _mark_ordinary_bindings(
+            archive_closures, source.ordinary_binding_archive, source.ordinary_sessions,
+            namespace=source.namespace, tenant_id=source.tenant_id,
+        )
     archives = []
     for scope, closure in archive_closures.items():
         domain = archive_domains[scope]
@@ -1268,6 +1279,8 @@ async def _export_snapshot(
             name: [accept(row) for row in rows]
             for name, rows in source.ordinary_sessions.items()
         }
+    if source.ordinary_binding_archive is not None:
+        manifest["ordinary_binding_archive"] = source.ordinary_binding_archive
     for optional in ("native_messages", "native_checkpoints", "native_projections"):
         if not manifest[optional]:
             del manifest[optional]
@@ -1338,6 +1351,9 @@ async def restore_snapshot(
         not ordinary_sessions["sessions"] or PersistenceDomain.CONVERSATION.value not in manifest["domains"]
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    ordinary_binding_archive = manifest.get("ordinary_binding_archive")
+    if ordinary_sessions is None and "ordinary_binding_archive" in manifest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     run_registrations = _decode_run_registrations(manifest.get("run_registrations", []))
     raw_domains = manifest["domains"]
     raw_objects = manifest.get("objects", [])
@@ -1364,6 +1380,12 @@ async def restore_snapshot(
         entry_count += len(records)
     if entry_count > limits.max_entries:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    ordinary_bindings = (
+        _mark_ordinary_bindings(
+            archive_closures, ordinary_binding_archive, ordinary_sessions,
+            namespace=namespace, tenant_id=tenant_id,
+        ) if ordinary_sessions is not None else set()
+    )
     raw_native = manifest.get("native_messages", [])
     if not isinstance(raw_native, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1396,7 +1418,7 @@ async def restore_snapshot(
                 result = row["result_json"]
                 root = decode_session_transcript_root(result)
                 structured_turns.setdefault(root.group_id, []).append((root, result["output_ref"]))
-    if len(ordinary_group_ids) > 1:
+    if ordinary_group_ids and ordinary_group_ids != {ordinary_binding_archive}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for transcript_root in ordinary_roots:
         _validate_native_partition(transcript_root.store_key, namespace, tenant_id)
@@ -1714,6 +1736,7 @@ async def restore_snapshot(
                 expected_objects.add(nested_identity)
                 pending_objects.append(nested_identity)
 
+    ordinary_binding_payloads = {}
     for scope, closure in archive_closures.items():
         if not closure.has_roots or closure.unreachable_records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1732,6 +1755,26 @@ async def restore_snapshot(
                 return await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
             encoded = await _read_content_payload(content, resolve)
             _validate_archive_content(content, encoded)
+            if scope == ordinary_binding_archive and content.identity in ordinary_bindings:
+                from .codec import decode_agent_binding_content
+
+                raw = decode_payload_bytes(encoded, codec=content.compression,
+                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
+                ordinary_binding_payloads[content.identity] = decode_agent_binding_content(raw).to_payload()
+
+    if ordinary_sessions is not None:
+        from ._archive import archive_content_identity
+
+        for row in ordinary_sessions["turns"]:
+            identity = archive_content_identity("execution-binding", row["binding_key"].hex())
+            binding = ordinary_binding_payloads.get(identity)
+            if binding is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            request_size = len(canonical_json_bytes({**row["request_json"], "binding": binding}))
+            if (request_size + len(canonical_json_bytes(row["result_json"])) > 64 * 1024
+                    or row["instruction_frontier_json"] is not None
+                    and request_size + len(canonical_json_bytes(row["instruction_frontier_json"])) > 64 * 1024):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     for group_id, entry in native_entries.items():
         closure = native_closures[group_id]
@@ -1846,6 +1889,8 @@ async def restore_snapshot(
                                         for root in iter_native_message_roots(value))
             if domain is PersistenceDomain.CONVERSATION:
                 domain_native_roots += ordinary_roots
+                if ordinary_binding_archive is not None:
+                    referenced_scopes.add(ordinary_binding_archive)
             event_groups = {ref.group_id for value in reference_values for ref in iter_native_event_references(value)}
             domain_checkpoints = {
                 key: backup for key, backup in native_checkpoints.items()
@@ -2165,7 +2210,7 @@ def snapshot_manifest_usage(
                 entries += len(rows)
     if "ordinary_sessions" in manifest:
         ordinary = manifest["ordinary_sessions"]
-        if not isinstance(ordinary, Mapping) or set(ordinary) != {"bindings", "sessions", "turns"}:
+        if not isinstance(ordinary, Mapping) or set(ordinary) != {"sessions", "turns"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for rows in ordinary.values():
             if not isinstance(rows, list):
@@ -2635,6 +2680,31 @@ async def _insert_native_messages(
                 await index_nodes(store.context, session, partition,
                                   tuple(row for row in sequences if row["store_key"] == partition), partial_restore=True)
     await transaction.run_sql(store.context, insert)
+
+
+def _mark_ordinary_bindings(
+    closures: Mapping[str, ArchiveClosure], scope: object, rows: Mapping[str, list[dict[str, object]]],
+    *, namespace: str, tenant_id: str,
+) -> set[str]:
+    from ._archive import archive_content_identity
+
+    if not rows["turns"]:
+        if scope is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return set()
+    if not isinstance(scope, str) or scope not in closures:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    closure = closures[scope]
+    content_scope = archive_content_scope(namespace, tenant_id)
+    identities = set()
+    for row in rows["turns"]:
+        digest = row["binding_key"]
+        if isinstance(digest, bytes):
+            digest = digest.hex()
+        identities.add(archive_content_identity("execution-binding", digest))
+    for identity in identities:
+        closure.mark_content(scope, content_scope, identity)
+    return identities
 
 
 def _mark_archive_value(closures: Mapping[str, ArchiveClosure], value: object) -> None:

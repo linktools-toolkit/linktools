@@ -12,7 +12,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeVar
 from weakref import finalize
 
-from ..core import ImmutableJsonMapping, canonical_json_bytes, canonical_sha256, semantic_json_sha256, validate_idempotency_key
+from ..agent import AgentBindingContract
+from ..core import ImmutableJsonMapping, canonical_json_bytes, canonical_sha256, validate_idempotency_key
 from ..errors import AIError, ErrorCode
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
@@ -27,6 +28,8 @@ from ..storage import (
     sql_table_options,
     sql_unique,
 )
+from ._archive import ArchiveContentInput, PreparedArchive
+from .codec import decode_agent_binding_content, encode_agent_binding_content
 from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage, fork_segments, lineage_predicate
 from ._turn_sql_schema import (
     TURN_EXECUTION_MAX_BYTES,
@@ -50,7 +53,6 @@ if TYPE_CHECKING:
 
 
 SESSION_TABLE = "ai_sessions"
-SESSION_BINDING_TABLE = "ai_session_bindings"
 TerminalState = Literal["succeeded", "failed", "cancelled"]
 _CONTEXT_POSITIONS = 128
 _HISTORY_CACHE_BYTES = 16 * 1024 * 1024
@@ -91,7 +93,7 @@ class _ContextWindow:
 
 
 def build_session_turn_sql_metadata(metadata: MetaData) -> None:
-    from sqlalchemy import JSON, BigInteger, Column, PrimaryKeyConstraint, String, Table
+    from sqlalchemy import JSON, BigInteger, Column, String, Table
 
     def key(name: str, size: int, description: str, *, nullable: bool = False) -> Column:
         return Column(name, sql_binary_key(size), nullable=nullable, comment=description)
@@ -112,19 +114,6 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
     )
     sql_unique(session, "scope_key", "session_key")
     sql_audit_indexes(session)
-
-    bindings = Table(
-        SESSION_BINDING_TABLE, metadata,
-        key("scope_key", 32, "Partition of one tenant in the configured session store."),
-        key("binding_key", 32, "Content identity of the frozen compiled Agent binding."),
-        Column("binding_json", JSON(), nullable=False, comment="Immutable admitted Agent binding."),
-        *sql_audit_columns(),
-        PrimaryKeyConstraint("scope_key", "binding_key"),
-        comment="Shared frozen Agent bindings for regenerable conversation turns.",
-        **sql_table_options(),
-    )
-
-    sql_audit_indexes(bindings)
 
     turn = Table(
         SESSION_TURN_TABLE, metadata, sql_id_column(),
@@ -250,7 +239,6 @@ class SqlSessionTurnReader:
         self._scope = state_store_key(namespace, tenant_id, "regenerable-session")
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
-        self._bindings = metadata.tables[SESSION_BINDING_TABLE]
         self._transcript_source = None
         self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
         self._recent_budget = _ContextBudget()
@@ -266,7 +254,8 @@ class SqlSessionTurnReader:
         turn_store, archive_provider, capture = self._transcript_source
         group = turn_store.storage_group
         opened_archive = group.opened_archive or await group.open_archive(create=False)
-        archive_store = None if opened_archive is None else (await archive_provider()).store
+        content_archive = None if opened_archive is None else await archive_provider()
+        archive_store = None if content_archive is None else content_archive.store
         if archive_store is not None and archive_store.storage_group is not group:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
@@ -280,17 +269,22 @@ class SqlSessionTurnReader:
                 for row in rows[:body_limit] if row["state"] == "succeeded"
             ]
             if not manifests:
-                return rows, manifests, None
+                return rows, manifests, None, {}
             if archive_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             archive = group.transaction(archive_store)
             if not isinstance(archive, SqlStateRowReader):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             load = await capture(tuple(root for root, _ in manifests), transaction=archive)
-            return rows, manifests, load
+            binding_keys = tuple(dict.fromkeys(
+                row["binding_key"] for row in rows[:body_limit]
+                if not display and row["state"] == "succeeded" and row["result_json"]["binding_refs"]
+            ))
+            bindings = await self._read_binding_payloads(content_archive, binding_keys)
+            return rows, manifests, load, bindings
 
         members = (turn_store, archive_store) if archive_store not in (None, turn_store) else (turn_store,)
-        rows, manifests, load = await group.read_many(members, read)
+        rows, manifests, load, bindings = await group.read_many(members, read)
         loaded = iter(zip(manifests, () if load is None else await load(), strict=True))
         projected = []
         for position, row in enumerate(rows):
@@ -309,8 +303,9 @@ class SqlSessionTurnReader:
                 if len(parts) != 1:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 messages.append(parts[0])
-            if not display:
-                self._restore_binding_refs(messages, refs, row["instructions"], row["system_prompt"])
+            if not display and refs:
+                spec = bindings[row["binding_key"]]["agent_spec"]
+                self._restore_binding_refs(messages, refs, spec["instructions"], spec["system_prompt"])
             projected.append({**row, "messages": tuple(messages)})
         try:
             next(loaded, None)
@@ -396,19 +391,44 @@ class SqlSessionTurnReader:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().filter_by(**self._turn_values(key)))).mappings().one_or_none()
 
-    def _bound_turns(self, *, extra=None):
-        turns, bindings = self._turns.c, self._bindings.c
-        same_binding = (turns.scope_key == bindings.scope_key) & (turns.binding_key == bindings.binding_key)
-        return self._turns.outerjoin(self._bindings, same_binding if extra is None else same_binding & extra)
-
-    async def get_turn_for_recovery(self, key: SessionTurnKey) -> RowMapping | None:
-        from sqlalchemy import select
-
-        statement = select(self._turns, self._bindings.c.binding_json).select_from(self._bound_turns()).where(
-            *(self._turns.c[name] == value for name, value in self._turn_values(key).items()),
+    @staticmethod
+    async def _read_binding_payloads(archive, keys: tuple[bytes, ...]) -> dict[bytes, dict]:
+        if not keys:
+            return {}
+        raws = await archive.read_contents(
+            tuple("execution-binding:" + key.hex() for key in keys), codec="execution-binding",
         )
-        async with self._context.engine.connect() as connection:
-            return (await connection.execute(statement)).mappings().one_or_none()
+        return {
+            key: decode_agent_binding_content(raw).to_payload()
+            for key, raw in zip(keys, raws, strict=True)
+        }
+
+    async def _read_bound_turn(self, statement) -> Mapping[str, object] | None:
+        if self._transcript_source is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        turn_store, archive_provider, _ = self._transcript_source
+        group = turn_store.storage_group
+        opened_archive = group.opened_archive or await group.open_archive(create=False)
+        archive = None if opened_archive is None else await archive_provider()
+        members = (turn_store,) if archive is None else tuple(dict.fromkeys((turn_store, archive.store)))
+
+        async def read(snapshot):
+            owner = snapshot.transaction(turn_store)
+            if not isinstance(owner, SqlStateRowReader):
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            rows = await owner.read_sql_rows(self._context, statement)
+            if not rows:
+                return None
+            if archive is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            row, = rows
+            key = row["binding_key"]
+            return {**row, "binding_json": (await self._read_binding_payloads(archive, (key,)))[key]}
+
+        return await group.read_many(members, read)
+
+    async def get_turn_for_recovery(self, key: SessionTurnKey) -> Mapping[str, object] | None:
+        return await self._read_bound_turn(self._turns.select().filter_by(**self._turn_values(key)))
 
     def _history_view_select(self, *, observe_lease: bool = False):
         from sqlalchemy import select
@@ -447,23 +467,23 @@ class SqlSessionTurnReader:
         rows = await self._read_transcripts(statement, display=True)
         return rows[0] if rows else None
 
-    async def find_request(self, session_id: str, request_key: str) -> RowMapping | None:
+    async def find_request(self, session_id: str, request_key: str) -> Mapping[str, object] | None:
         from sqlalchemy import select
 
         columns = self._turns.c
-        agent_id = self._bindings.c.binding_json[("agent_spec", "id")].as_string().label("agent_id")
-        binding = self._bindings.c.binding_json
-        statement = select(
-            columns.turn_id, columns.request_json, agent_id,
-            binding["output_mode"].as_string().label("output_mode"),
-            binding["output_schema"].label("output_schema"),
-        ).select_from(self._bound_turns()).where(
+        row = await self._read_bound_turn(select(columns.turn_id, columns.request_json, columns.binding_key).where(
             columns.scope_key == self._scope,
             columns.session_key == self._key(session_id, TURN_SESSION_MAX_BYTES),
             columns.request_key == self._key(request_key, TURN_REQUEST_MAX_BYTES),
-        )
-        async with self._context.engine.connect() as connection:
-            return (await connection.execute(statement)).mappings().one_or_none()
+        ))
+        if row is None:
+            return None
+        binding = row["binding_json"]
+        return {
+            "turn_id": row["turn_id"], "request_json": row["request_json"],
+            "agent_id": binding["agent_spec"]["id"], "output_mode": binding["output_mode"],
+            "output_schema": binding["output_schema"],
+        }
 
     async def session_page(
         self, *, session_ids: Sequence[str] | None, before: int | None, limit: int,
@@ -539,18 +559,10 @@ class SqlSessionTurnReader:
         stored_input = type_coerce(
             case((succeeded, columns.request_json["input"])), columns.request_json.type,
         ).label("stored_input")
-        has_refs = columns.result_json["binding_refs"][0].as_string().is_not(None)
-        binding_json = self._bindings.c.binding_json
-        instructions = type_coerce(case((
-            has_refs, binding_json[("agent_spec", "instructions")],
-        )), binding_json.type).label("instructions")
-        system_prompt = case((
-            has_refs, binding_json[("agent_spec", "system_prompt")].as_string(),
-        )).label("system_prompt")
         reset = (columns.request_json["session_context"].as_string() == "current_turn").label("reset_context")
         statement = select(
-            columns.turn_no, columns.state, prompt, stored_input, result, instructions, system_prompt, reset,
-        ).select_from(self._bound_turns(extra=succeeded & has_refs)).where(
+            columns.turn_no, columns.state, prompt, stored_input, result, columns.binding_key, reset,
+        ).where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
                               after=after, through=through),
@@ -737,7 +749,20 @@ class SqlSessionTurns(SqlSessionTurnReader):
         session_key = self._session_values(key.session_id)
         turn_key = self._turn_values(key)
         encoded_request_key = self._key(request_key, TURN_REQUEST_MAX_BYTES)
-        binding_key = bytes.fromhex(semantic_json_sha256(binding))
+        content = ArchiveContentInput(
+            "execution-binding", encode_agent_binding_content(AgentBindingContract.from_payload(binding)),
+        )
+        binding_key = bytes.fromhex(content.digest)
+        prepared = None
+        if binding_key not in self._committed_bindings:
+            if self._transcript_write_binding is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            store, archive_provider, _ = self._transcript_write_binding
+            archive = await archive_provider(create=True)
+            if archive.store.storage_group is not store.storage_group:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            prepared = PreparedArchive()
+            await archive.prepare_agent_binding(content, prepared)
 
         async def write(connection: AsyncSession) -> bool:
             claim = await connection.execute(self._sessions.update().filter_by(
@@ -746,13 +771,6 @@ class SqlSessionTurns(SqlSessionTurnReader):
             ).values(active_turn_id=turn_key["turn_id"], revision=expected_revision + 1))
             if claim.rowcount != 1:
                 return False
-            if binding_key not in self._committed_bindings:
-                await self._context.dialect.upsert(
-                    connection, table=self._bindings,
-                    values={"scope_key": self._scope, "binding_key": binding_key, "binding_json": binding},
-                    set_values={"binding_key": self._bindings.c.binding_key},
-                    index_elements=("scope_key", "binding_key"),
-                )
             await connection.execute(self._turns.insert().values(
                 **turn_key, request_key=encoded_request_key, binding_key=binding_key, turn_no=context_through + 1,
                 context_from=context_from, context_through=context_through, state="accepted", generation=1,
@@ -760,7 +778,16 @@ class SqlSessionTurns(SqlSessionTurnReader):
             ))
             return True
 
-        accepted = await self._context.run_mutation(write, domain="session.accept")
+        if prepared is None:
+            accepted = await self._context.run_mutation(write, domain="session.accept")
+        else:
+            async def publish(transaction) -> bool:
+                if not await transaction.transaction(store).run_sql(self._context, write):
+                    return False
+                await archive.publish(transaction.transaction(archive.store), prepared)
+                return True
+
+            accepted = await store.storage_group.mutate(tuple(dict.fromkeys((store, archive.store))), publish)
         if accepted:
             self._committed_bindings[binding_key] = None
             self._committed_bindings.move_to_end(binding_key)
@@ -782,8 +809,6 @@ class SqlSessionTurns(SqlSessionTurnReader):
             raise ValueError("invalid terminal state")
         turn_key = self._turn_values(key)
         if state == "succeeded":
-            from ._archive import PreparedArchive
-
             if result is not None or not transcript:
                 raise ValueError("a successful session turn requires only its typed transcript")
             if self._transcript_write_binding is None:

@@ -6,17 +6,18 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+from linktools.ai.agent import AgentBindingContract, bind_output
+from linktools.ai.spec import AgentSpec
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._message_root import NativeMessageRoot
 from linktools.ai.persistence._session_turn_sql import (
-    SESSION_BINDING_TABLE,
     SESSION_TURN_TABLE,
     SessionTurnKey,
     SqlSessionTurns,
 )
 from linktools.ai.storage import create_sql_storage_context
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -39,7 +40,12 @@ async def store(tmp_path):
 
 
 _TRANSCRIPT = (ModelResponse(parts=[TextPart("two")]),)
-_BINDING = {"agent_spec": {"id": "test-agent", "instructions": ["frozen"]}}
+_MASKED_TRANSCRIPT = (ModelRequest(parts=[UserPromptPart("question")]), *_TRANSCRIPT)
+_BINDING = AgentBindingContract(
+    agent_spec=AgentSpec("test-agent", model="route", instructions=("frozen",)),
+    model_contract={"version": 1, "id": "route"},
+    selected=(), subagents=(), output_mode="text", output_schema=bind_output().schema_definition,
+).to_payload()
 
 
 async def accept(turns: SqlSessionTurns, turn: str, *, revision: int = 0, through: int = 0, request: str = "send") -> bool:
@@ -52,21 +58,25 @@ async def accept(turns: SqlSessionTurns, turn: str, *, revision: int = 0, throug
 @pytest.mark.asyncio
 async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(store):
     engine, metadata, turns = store
+    assert "ai_session_bindings" not in metadata.tables
     statements = []
+    binding_writes = []
     native_writes = []
     commits = []
 
     def on_sql(_conn, _cursor, statement, *_args):
         verb = statement.split()[0]
         if verb in ("SELECT", "INSERT", "UPDATE", "DELETE") and any(
-            table in statement for table in ("ai_sessions", "ai_session_turns", "ai_session_bindings")
+            table in statement for table in ("ai_sessions", "ai_session_turns")
         ):
             statements.append(verb)
+        if verb == "INSERT" and "ai_state_records" in statement:
+            binding_writes.append(statement)
         if verb == "INSERT" and any(table in statement for table in ("ai_messages", "ai_message_sequences")):
             native_writes.append(statement)
 
     def on_commit(_conn):
-        commits.append((len(statements), len(native_writes)))
+        commits.append((len(statements), len(binding_writes), len(native_writes)))
 
     event.listen(engine.sync_engine, "before_cursor_execute", on_sql)
     event.listen(engine.sync_engine, "commit", on_commit)
@@ -77,16 +87,18 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
         assert await turns.read_context_range("chat", after=0, through=0) == ()
         # History captures metadata and (when present) body ownership in one
         # read snapshot; separate its zero-write commit from the two mutations.
-        assert statements == ["SELECT", "SELECT"] and commits == [(2, 0)]
+        assert statements == ["SELECT", "SELECT"] and commits == [(2, 0, 0)]
         commits.clear()
         assert await accept(turns, key.turn_id)
         assert await turns.finish(key, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT)
-        assert statements == ["SELECT", "SELECT", "UPDATE", "INSERT", "INSERT", "UPDATE", "UPDATE"]
-        assert len(native_writes) == 2
-        assert commits == [(5, 0), (7, 2)]
+        assert statements == ["SELECT", "SELECT", "UPDATE", "INSERT", "UPDATE", "UPDATE"]
+        assert len(binding_writes) == 1 and len(native_writes) == 2
+        # Cold acceptance writes one immutable binding in its owner commit.
+        assert commits == [(4, 1, 0), (6, 1, 2)]
         assert await accept(turns, "second", revision=2, through=1, request="second")
-        assert statements[7:] == ["UPDATE", "INSERT"]
-        assert commits == [(5, 0), (7, 2), (9, 2)]
+        assert statements[6:] == ["UPDATE", "INSERT"]
+        # A committed binding proof makes the next same-binding send owner-only.
+        assert commits == [(4, 1, 0), (6, 1, 2), (8, 1, 2)]
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", on_sql)
         event.remove(engine.sync_engine, "commit", on_commit)
@@ -104,9 +116,14 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
     assert replay["turn_id"] == b"turn" and replay["agent_id"] == "test-agent"
     second = await turns.get_turn_for_recovery(SessionTurnKey("chat", "second"))
     assert second["binding_key"] == turn["binding_key"] and second["binding_json"] == _BINDING
+    _, archive_provider, _ = turns._transcript_source
+    archive = await archive_provider()
     async with engine.connect() as connection:
-        table = metadata.tables[SESSION_BINDING_TABLE]
-        assert len((await connection.execute(table.select())).all()) == 1
+        table = metadata.tables["ai_state_records"]
+        count = select(func.count()).select_from(table).where(
+            table.c.store_key == archive.store.store_key, table.c.kind == "archive_content",
+        )
+        assert (await connection.execute(count)).scalar_one() == 1
 
 
 @pytest.mark.asyncio
@@ -239,11 +256,13 @@ async def test_recent_context_reads_latest_positions_and_reuses_covered_history(
             assert await turns.request_cancel(key)
         assert await turns.finish(
             key, generation=1, turn_no=number, state="cancelled" if number == 130 else "succeeded",
-            transcript=None if number == 130 else _TRANSCRIPT,
+            transcript=None if number == 130 else _MASKED_TRANSCRIPT,
+            binding_refs=() if number == 130 else ((0, None),),
         )
 
     reads = []
     body_reads = []
+    binding_reads = []
 
     def capture(_connection, _cursor, statement, parameters, *_rest):
         if statement.lstrip().startswith(("SELECT", "WITH")):
@@ -251,21 +270,26 @@ async def test_recent_context_reads_latest_positions_and_reuses_covered_history(
                 reads.append(parameters)
             if "ai_message_sequences" in statement and "ai_messages" in statement:
                 body_reads.append(parameters)
+            if "ai_state_records" in statement:
+                binding_reads.append(parameters)
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
         at_129 = await turns.recent_context("chat", through=129)
         assert [turn.turn_no for turn in at_129] == list(range(2, 130))
-        assert (len(reads), len(body_reads)) == (1, 1)
+        assert all(turn.messages[0].instructions == "frozen" for turn in at_129)
+        # 128 turns and one shared frozen binding: one query per owner, body,
+        # and binding, not one binding query per historical turn.
+        assert (len(reads), len(body_reads), len(binding_reads)) == (1, 1, 1)
         warm = await turns.recent_context("chat", through=130)
-        assert (len(reads), len(body_reads)) == (2, 1)
+        assert (len(reads), len(body_reads), len(binding_reads)) == (2, 1, 1)
         assert await turns.recent_context("chat", through=130) == warm
-        assert (len(reads), len(body_reads)) == (2, 1)
+        assert (len(reads), len(body_reads), len(binding_reads)) == (2, 1, 1)
         fresh = SqlSessionTurns(create_sql_storage_context(engine), metadata, namespace="test", tenant_id="a")
         fresh.bind_transcript_reader(*turns._transcript_source)
         assert await fresh.recent_context("chat", through=130) == warm
         assert [turn.turn_no for turn in warm] == list(range(3, 130))
-        assert (len(reads), len(body_reads)) == (3, 2)
+        assert (len(reads), len(body_reads), len(binding_reads)) == (3, 2, 2)
         # Cancelled turn 130 advances the range without needing a body read.
         assert {value for value in reads[1] if type(value) is int and value > 128} == {129, 130}
     finally:
@@ -336,3 +360,4 @@ async def test_ordinary_snapshot_remaps_native_root_without_needing_step_checkpo
         assert restored_root.group_id != source_root.group_id
         assert restored_root.store_key == source_root.store_key and restored_root.slices == source_root.slices
         assert [part.content for message in restored["messages"] for part in message.parts] == ["two"]
+        assert (await turns.get_turn_for_recovery(key))["binding_json"] == _BINDING

@@ -9,11 +9,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..core import Principal, RUNTIME_OBJECT_STORE_ID, canonical_json_bytes, semantic_json_sha256, validate_resource_id
+from ..core import Principal, RUNTIME_OBJECT_STORE_ID, canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ._ordinary_lineage import decode_session_lineage, fork_segments
 from ._session_turn_sql import (
-    SESSION_BINDING_TABLE, SESSION_TABLE, SESSION_TURN_TABLE, CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey,
+    SESSION_TABLE, SESSION_TURN_TABLE, CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey,
 )
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
@@ -34,11 +34,9 @@ _SESSION_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "active_turn_id": TURN
 _TURN_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "turn_id": TURN_EXECUTION_MAX_BYTES,
                 "request_key": TURN_REQUEST_MAX_BYTES}
 _SESSION_FIELDS = (*_SESSION_BINARY, "status", "revision", "last_turn_no", "config_json", "lineage_json", *_AUDIT)
-_BINDING_FIELDS = ("binding_key", "binding_json", *_AUDIT)
 _TURN_FIELDS = (*_TURN_BINARY, "binding_key", "turn_no", "context_from", "context_through", "state", "generation",
                 "request_json", "instruction_frontier_json", "result_json", *_AUDIT)
-_TABLES = (("bindings", SESSION_BINDING_TABLE, _BINDING_FIELDS, {}),
-           ("sessions", SESSION_TABLE, _SESSION_FIELDS, _SESSION_BINARY),
+_TABLES = (("sessions", SESSION_TABLE, _SESSION_FIELDS, _SESSION_BINARY),
            ("turns", SESSION_TURN_TABLE, _TURN_FIELDS, _TURN_BINARY))
 _WAITING = {"waiting", "ready"}
 _ACTIVE = {"accepted", "cancelling", *_WAITING}
@@ -151,10 +149,9 @@ def _validate_text(value: object, width: int) -> str:
 
 def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list[dict[str, object]]]:
     """Validate and decode before opening the destination; exclude live lease values."""
-    if not isinstance(value, dict) or set(value) != {"bindings", "sessions", "turns"}:
+    if not isinstance(value, dict) or set(value) != {"sessions", "turns"}:
         raise _invalid()
-    decoded: dict[str, list[dict[str, object]]] = {"bindings": [], "sessions": [], "turns": []}
-    bindings: dict[bytes, dict[str, object]] = {}
+    decoded: dict[str, list[dict[str, object]]] = {"sessions": [], "turns": []}
     session_ids: dict[bytes, dict[str, object]] = {}
     turn_ids: set[bytes] = set()
     request_keys: set[tuple[bytes, bytes]] = set()
@@ -193,14 +190,6 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
                     row[key] = timestamp
             except (TypeError, ValueError, UnicodeError, AIError) as error:
                 raise _invalid() from error
-            if section == "bindings":
-                binding_key, payload = row["binding_key"], row["binding_json"]
-                if (binding_key in bindings or not isinstance(payload, dict)
-                        or semantic_json_sha256(payload) != binding_key.hex()):
-                    raise _invalid()
-                bindings[binding_key] = payload
-                decoded[section].append(row)
-                continue
             session_id = row["session_key"]
             if section == "sessions":
                 if (session_id in session_ids or row["status"] not in ("open", "closed")
@@ -222,15 +211,15 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
                         or type(row["context_through"]) is not int or row["context_through"] != number - 1
                         or not 0 <= number - row["context_from"] <= 128
                         or not isinstance(request, dict) or not isinstance(request.get("prompt"), str)
-                        or "binding" in request or row["binding_key"] not in bindings
-                        or len(canonical_json_bytes({**request, "binding": bindings[row["binding_key"]]}))
+                        or "binding" in request
+                        or len(canonical_json_bytes(request))
                         + len(canonical_json_bytes(result)) > 64 * 1024):
                     raise _invalid()
                 try:
                     frontier = row["instruction_frontier_json"]
                     if frontier is not None:
                         SessionInstructionFrontier.from_json(frontier)
-                        if len(canonical_json_bytes({**request, "binding": bindings[row["binding_key"]]})) + len(
+                        if len(canonical_json_bytes(request)) + len(
                             canonical_json_bytes(frontier)
                         ) > 64 * 1024:
                             raise _invalid()
@@ -318,8 +307,8 @@ async def capture_ordinary_snapshot(
         for section, table_name, fields, binary in _TABLES:
             table = metadata.tables[table_name]
             output: list[dict[str, object]] = []
-            ordering = table.c.binding_key if section == "bindings" else table.c.id
-            extra = () if section == "bindings" else (ordering,)
+            ordering = table.c.id
+            extra = (ordering,)
             after = None
             while True:
                 limit = page_size(16)

@@ -40,7 +40,8 @@ production DBA approval or a deployed migration.
 | --- | --- |
 | `ai_sessions` | Ordinary conversation lifecycle, occupancy and committed history position. The host owns business access policy; agent selection is per turn. |
 | `ai_session_turns` | Ordinary turn request, generation and terminal transcript. History reads the committed rows in sequence. |
-| `ai_session_bindings` | Immutable compiled bindings referenced by ordinary turns. |
+
+Session turns reference the existing content-addressed `execution-binding` archive. Compiled Agent bindings are shared within the same archive scope, not copied into turn rows.
 | `ai_state_records` | Generic domain control state; a same-group strict SessionRecord also owns its occupied execution and fencing generation. Archive records can own binary bodies. |
 | `ai_execution_records` | Strict execution lifecycle, exact request routes, coordination receipts, lease and content references. In split storage the Execution group also owns the strict session's occupied route. |
 | `ai_task_graphs` | Authoritative TaskGraph state and recovery ordering. |

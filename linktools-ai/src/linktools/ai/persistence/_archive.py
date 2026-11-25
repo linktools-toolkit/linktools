@@ -476,6 +476,14 @@ class ContentArchive:
                               prepared: PreparedArchive) -> tuple[str, ...]:
         return await self._prepare_content(self._content_inputs(values), prepared)
 
+    async def prepare_agent_binding(
+        self, value: ArchiveContentInput, prepared: PreparedArchive,
+    ) -> None:
+        """Stage exact canonical binding bytes for immutable same-transaction publication."""
+        if value.codec != "execution-binding":
+            raise _integrity()
+        await self._prepare_content((value,), prepared, existing={})
+
     async def ensure_content(self, values: Sequence[tuple[str, bytes] | ArchiveContentInput]) -> tuple[str, ...]:
         """Publish typed payloads by address; retain other immutable content contracts."""
         inputs = self._content_inputs(values)

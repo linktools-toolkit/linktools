@@ -274,6 +274,38 @@ async def purge_unreferenced_objects(
                     SqlStepStore.invalidate_context(group.context)
 
 
+async def _retain_ordinary_bindings(group, closure: ArchiveClosure) -> None:
+    """Retain the exact binding roots for all tenant partitions in this SQL group."""
+    from sqlalchemy import select
+    from ._archive import archive_scope_parts, decode_archive_scope
+    from ._session_transcript import SESSION_TURN_TABLE
+    from .state import state_store_key
+
+    table = group.metadata.tables.get(SESSION_TURN_TABLE)
+    if table is None:
+        return
+    scopes = {}
+    for _, content_scope, identity in closure.binding_contents():
+        if identity.startswith("execution-binding:"):
+            owner = archive_scope_parts(decode_archive_scope(content_scope))
+            scopes[state_store_key(*owner, "regenerable-session")] = content_scope
+    after = 0
+    async with group.context.sessions() as session:
+        await group.context.dialect.begin_consistent_read(session)
+        while True:
+            rows = (await session.execute(select(
+                table.c.id, table.c.scope_key, table.c.binding_key,
+            ).where(table.c.id > after).order_by(table.c.id).limit(128))).mappings().all()
+            for row in rows:
+                content_scope = scopes.get(row["scope_key"])
+                if content_scope is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                closure.mark_content(closure.scope_id, content_scope, "execution-binding:" + row["binding_key"].hex())
+            if len(rows) < 128:
+                return
+            after = rows[-1]["id"]
+
+
 async def _purge_unreferenced_objects(
     candidates: tuple[ObjectCandidate, ...], *, namespace: str, tenant_id: str,
     stores: Mapping[PersistenceDomain, StateStore],
@@ -332,6 +364,8 @@ async def _purge_unreferenced_objects(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             archive_closures[scope] = ArchiveClosure(scope, records)
             archive_stores[scope] = archive
+            if isinstance(group, SqlStateStorageGroup):
+                await _retain_ordinary_bindings(group, archive_closures[scope])
     for group, domain in groups.items():
         if not isinstance(group, SqlStateStorageGroup):
             continue
