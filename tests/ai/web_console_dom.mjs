@@ -308,6 +308,24 @@ if(process.argv[3]==='session-published-turn') {
   assert.equal(node('conversation').textContent.split('Canonical a-first').length,2);
   await node('cancel').click();
   assert.ok(calls.some(call=>call.method==='POST' && call.key==='/api/executions/a-next/cancel'));
+
+  const reader='a-reader', modelPath=`/api/executions/${reader}/models`;
+  await activate(reader);
+  await select('#session=a&execution='+reader);
+  await openOriginal(false);
+  await until('initial Original read',()=>calls.some(call=>call.key===modelPath));
+  await settle();
+  const readerReads=reads();
+  detailResponses.set(modelPath,{items:[{
+    execution_id:reader,agent_run_seq:1,model_request_seq:1,status:'SUCCEEDED',model:{},
+    content_included:true,request:{messages:[]},response:{parts:[{part_kind:'text',content:'Final Original'}]},
+  }],next_cursor:null});
+  complete(reader,3);
+  source.execution(reader,'snapshot',info(reader,'a'));
+  await until('visible Original loads the final request',()=>node('conversation').textContent.includes('Final Original'));
+  sessions.get('a').active_execution_id=null;sessions.get('a').revision++;source.snapshot();
+  await settle();
+  assert.equal(reads(),readerReads,'refreshing visible Original does not reread Chat History');
   process.exit(0);
 }
 if(process.argv[3]==='session-open-active') {

@@ -336,9 +336,6 @@ function watchSession(id, {restart=false}={}) {
     try {
       const snapshot=receive(frame);
       if(snapshot) {
-        if(terminal(snapshot.status) && state.turns.some(turn=>turn.execution_id===id && turn.conversation_committed)) {
-          connection('Complete');watch.execution=null;return;
-        }
         if(terminal(snapshot.status) || snapshot.status==='RECOVERY_REQUIRED') {
           connectionWatch.settling=terminal(snapshot.status);
           connectionWatch.paused=!connectionWatch.settling;
@@ -1765,18 +1762,18 @@ function reconcileCancellation(info, session, revision) {
   const occupied=session?.active_execution_id===info.execution_id;
   notice(`${outcome}${occupied?' Session release is not yet confirmed.':session?.active_execution_id?' Another execution now owns the session.':session?' Session released.':''}`,occupied?info.execution_id:null,revision);
 }
-async function refreshObservation(id, generation, snapshot=null) {
+async function refreshObservation(id, generation, snapshot=null, publishedTurn=false) {
   const sessionId=state.view!=='executions' && state.observedInfo?.session_id===state.selectedSession?state.selectedSession:null, sessionGeneration=state.generation,
     refreshGeneration=++state.refreshGeneration, readGeneration=++state.observationReadGeneration;
   const current=()=>generation===state.observationGeneration && id===state.observedExecution && refreshGeneration===state.refreshGeneration && readGeneration===state.observationReadGeneration;
   let info,payload;
   // An unchanged Chat cancellation snapshot already proves the terminal outcome.
   const useSnapshot=snapshot && snapshot===state.observedInfo
-    && (snapshot.status==='SUCCEEDED' || state.view==='sessions' && snapshot.status==='CANCELLED');
+    && (publishedTurn && terminal(snapshot.status) || snapshot.status==='SUCCEEDED' || state.view==='sessions' && snapshot.status==='CANCELLED');
   try {
     info=useSnapshot ? snapshot : await api(`/api/executions/${enc(id)}`);
     if(!current())return;
-    if(sessionId) {
+    if(sessionId && !publishedTurn) {
       const read=terminal(info.status)?{id}:null;
       if(read)terminalHistoryRead=read;
       try {payload=await readSession(sessionId,{executionId:id,active:!read});}
@@ -1799,7 +1796,7 @@ async function refreshObservation(id, generation, snapshot=null) {
   } else if(payload && sessionId===state.selectedSession)reconcileOlderTurn(payload,id);
   if(state.cancellationNoticeId===id && terminal(info.status)) {
     const noticeRevision=state.noticeRevision;
-    const session=info.session_id ? (payload && info.session_id===sessionId ? payload.session : (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session) : null;
+    const session=info.session_id ? (info.session_id===sessionId && (payload || publishedTurn) ? (payload?.session || state.session) : (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session) : null;
     if(!current())return;
     reconcileCancellation(info,session,noticeRevision);
   }
@@ -1879,7 +1876,7 @@ async function settleSessionExecution(watch, id, generation, snapshot=null) {
   const current=()=>sessionWatch===watch && watch.execution?.id===id && generation===state.observationGeneration && id===state.observedExecution;
   const revision=watch.revision,reconnect=watch.refresh.reconnect;
   try {
-    await refreshObservation(id,generation,snapshot);
+    await refreshObservation(id,generation,snapshot,watch.published?.id===id);
     if(!current())return;
     const status=state.observedInfo?.status;
     if(terminal(status)){connection('Complete');watch.execution=null;}
