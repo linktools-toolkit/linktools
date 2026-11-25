@@ -3126,16 +3126,28 @@ class LocalExecutionBackend:
             async def finish_handoff(execution: ExecutionRecord) -> ExecutionRecord:
                 await self._validate_committed_handoff(checkpoint)
                 if execution.session_id is not None:
-                    if execution.conversation and execution.status is not ExecutionStatus.SUCCEEDED:
-                        await self._runtime_commands.finish_conversation_turn(execution, execution.result)
-                    else:
-                        await self._conversation.sessions.release_execution(
-                            execution.session_id,
-                            tenant_id=self._tenant_id,
-                            execution_id=execution.execution_id,
-                            history_unavailable=execution.invalidates_session_history,
-                            require_turn_commit=execution.conversation,
-                        )
+                    try:
+                        if execution.conversation and execution.status is not ExecutionStatus.SUCCEEDED:
+                            await self._runtime_commands.finish_conversation_turn(execution, execution.result)
+                        else:
+                            await self._conversation.sessions.release_execution(
+                                execution.session_id,
+                                tenant_id=self._tenant_id,
+                                execution_id=execution.execution_id,
+                                history_unavailable=execution.invalidates_session_history,
+                                require_turn_commit=execution.conversation,
+                            )
+                    except AIError as error:
+                        if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                            raise
+                        # Execution is already durable here. An unconfirmed
+                        # Conversation must keep the handoff PREPARED, not turn
+                        # this into a retry of the Execution terminal write.
+                        raise AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details={"phase": "split_conversation_unconfirmed",
+                                          "execution_id": execution.execution_id},
+                        ) from error
                 completed = await self._complete_handoff(execution)
                 self._publish_terminal_event(
                     execution.execution_id,
