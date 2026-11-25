@@ -42,7 +42,7 @@ async def _delete_session(state):
 
 
 @pytest.mark.parametrize("entry", ("loaded", "lazy", "direct"))
-@pytest.mark.parametrize("method", ("start", "run", "plan"))
+@pytest.mark.parametrize("method", ("start", "run"))
 async def test_session_start_preparation_reads_one_authorized_snapshot_per_call(tmp_path, monkeypatch, entry, method):
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
         async with Runtime.open(persistence=state, features=_features(_answer), metrics=None) as runtime:
@@ -82,6 +82,78 @@ async def test_session_start_preparation_reads_one_authorized_snapshot_per_call(
                 assert len(selects) == (2 if entry == "loaded" else 1)
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+
+@pytest.mark.parametrize("bound_agent", (False, True), ids=("agent-id", "bound-agent"))
+async def test_canonical_sql_planning_reads_one_authorized_snapshot(tmp_path, bound_agent):
+    from linktools.ai.persistence.turns import SessionTurnKey
+    from linktools.ai.runtime.turn_clients import TurnObserver
+
+    reads = []
+    selects = []
+    active = ContextVar("canonical_planning_admission", default=False)
+
+    class Policy(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            await super().authorize(principal, action, resource)
+            if active.get() and action is AuthorizationAction.SESSION_READ:
+                reads.append((principal, resource.id))
+
+    def capture(_connection, _cursor, statement, *_args):
+        sql = statement.lstrip().upper()
+        if active.get() and sql.startswith("SELECT") and "AI_SESSIONS" in sql:
+            selects.append(statement)
+
+    storage = PersistenceStorage.from_root(tmp_path)
+    async with Persistence.open("session-start-preparation", storage=storage) as state:
+        async with Runtime.open(
+            persistence=state, features=_features(_answer), metrics=None, authorization=Policy(),
+        ) as runtime:
+            principal = runtime.default_principal
+            await runtime.sessions.create_turn_session("session", principal=principal)
+            agent = runtime.agents.get() if bound_agent else "default"
+            engine = state.conversation.sessions.state_store.storage_group.context.engine
+            event.listen(engine.sync_engine, "before_cursor_execute", capture)
+            try:
+                with TurnObserver(runtime, "session", principal, local_workspace=True) as observer:
+                    token = active.set(True)
+                    try:
+                        turn_id = await runtime.sessions.start_turn(
+                            "session", "question", agent=agent, principal=principal,
+                            idempotency_key="request", planning=True,
+                        )
+                    finally:
+                        active.reset(token)
+                    async with asyncio.timeout(5):
+                        async for frame in observer.events(turn_id):
+                            if frame["type"] == "terminal":
+                                break
+                assert frame["type"] == "terminal"
+                assert frame["turn_id"] == turn_id and frame["state"] == "succeeded"
+                assert frame["output"] == {"text": "answer"}
+                assert reads == [(principal, "session")]
+                assert len(selects) == 1
+                row = await state.session_turns.get_turn(SessionTurnKey("session", turn_id))
+                assert row["request_json"]["planning"] is True
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+
+@pytest.mark.parametrize("entry", ("loaded", "lazy", "direct"))
+async def test_non_sql_bound_session_planning_retains_execution_result(entry):
+    async with Persistence.open("session-start-preparation", storage=PersistenceStorage.in_memory()) as state:
+        async with Runtime.open(persistence=state, features=_features(_answer), metrics=None) as runtime:
+            await runtime.agents.get().create_session("session")
+            kwargs = {"idempotency_key": "request"}
+            if entry == "loaded":
+                target = await runtime.sessions.get("session", principal=runtime.default_principal)
+            elif entry == "lazy":
+                target = runtime.agents.get().session("session")
+            else:
+                target = runtime.agents.get()
+                kwargs["session_id"] = "session"
+            result = await target.plan("question", **kwargs)
+            assert result.result.output == {"text": "answer"}
 
 
 @pytest.mark.parametrize("entry", ("missing-lazy", "deleted-loaded"))
