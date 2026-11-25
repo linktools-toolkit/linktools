@@ -89,6 +89,7 @@ from ..capability import (
     validate_tool_metadata,
     ExecutionCapability,
     FileSystemCapability,
+    MemoryCapability,
     ShellCapability,
     StepPersistenceCapability,
     tool_effect_policy_from_metadata,
@@ -278,6 +279,7 @@ class AgentExecutor:
         metrics: MetricRecorder | None = None,
         workspace_factory: Callable[..., WorkspaceBackend] | None = None,
         tool_responses: ToolResponseFixture | None = None,
+        canonical_memory_store: Callable[[str, str, str], MemoryStore] | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
@@ -289,6 +291,7 @@ class AgentExecutor:
         self._metrics = metrics
         self._workspace_factory = workspace_factory
         self._tool_responses = tool_responses
+        self._canonical_memory_store = canonical_memory_store
 
     async def capture_preload_skills(self, binding: AgentBinding) -> tuple[Mapping[str, JsonValue], ...]:
         """Capture preload roots inside the admitted Agent's configured scope.
@@ -389,9 +392,11 @@ class AgentExecutor:
     def require_regenerable(self, binding: AgentBinding, *, canonical_step: bool = False) -> None:
         compiled = binding.compiled_agent
         policy = _runtime_feature_policy(compiled.runtime_contributions)
+        if policy.memory_scope is not None and (not canonical_step or self._canonical_memory_store is None):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical memory requires a coowned Step store")
         if (compiled.selected_capabilities or compiled.skill_definitions
                 or compiled.mcp_servers or compiled.selected_subagents
-                or policy.restart_checkpoints != canonical_step or policy.durable_trace or policy.memory_scope is not None
+                or policy.restart_checkpoints != canonical_step or policy.durable_trace
                 or policy.tool_responses is not None):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
         if compiled.selected_tools and not canonical_step:
@@ -454,6 +459,17 @@ class AgentExecutor:
         if continuation is not None and canonical_step is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         model_history = history if continuation is None else list(continuation)
+        memory_store = None
+        memory_names = MemoryCapability.select_tools(tuple(
+            tool.id for tool in binding.compiled_agent.selected_tools
+            if tool_class_from_metadata(_bound_tool_metadata(tool)) == "memory"
+        ))
+        memory_scope = _runtime_feature_policy(binding.compiled_agent.runtime_contributions).memory_scope
+        if memory_scope is not None and memory_names:
+            if self._canonical_memory_store is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            memory_store = self._canonical_memory_store(context.principal.tenant_id, context.execution_id, memory_scope)
+            context = replace(context, memory_scope=memory_scope)
         await store.initialize()
         try:
             outcome = await self.execute(_AgentRunScope(
@@ -468,6 +484,7 @@ class AgentExecutor:
                 canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
                 output_retries_used=output_retries_used, deferred_approvals=deferred_approvals,
                 tool_effects="read_only" if canonical_step is None else "live",
+                memory_store=memory_store, memory_tool_names=memory_names if memory_store is not None else (),
             ))
             if isinstance(outcome, DeferredToolRequests) and canonical_step is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")

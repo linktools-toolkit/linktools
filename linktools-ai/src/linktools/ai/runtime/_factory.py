@@ -638,6 +638,31 @@ async def _build_local_components(
             await run_store.release_execution_staging(execution_id)
         return released
 
+    def build_memory_store(
+        memory_tenant: str,
+        execution_id: str,
+        memory_scope: str,
+    ) -> MemoryStore:
+        if memory_store_factory is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        route = state.plan.route(PersistenceDomain.MEMORY)
+        transient = route.retention is StorageRetentionMode.TRANSIENT
+        store = (
+            state.working_object_store(
+                PersistenceDomain.MEMORY,
+                owner_scope=f"execution:{execution_id}",
+            )
+            if transient
+            else state.object_store(PersistenceDomain.MEMORY)
+        )
+        return memory_store_factory(
+            memory_tenant,
+            execution_id,
+            memory_scope,
+            store,
+            transient,
+        )
+
     try:
         if not state.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -716,6 +741,16 @@ async def _build_local_components(
             child_observer=execution_tree_broker,
             restore_binding=binding_resolver.restore,
         )
+        memory_group = state.conversation.sessions.state_store.storage_group
+        canonical_memory_store = (
+            build_memory_store
+            if state.session_turns is not None
+            and memory_store_factory is not None
+            and state.plan.route(PersistenceDomain.MEMORY).retention is StorageRetentionMode.DURABLE
+            and state.memory.records.state_store.storage_group is memory_group
+            and state.memory.operations.state_store.storage_group is memory_group
+            else None
+        )
         executor = AgentExecutor(
             skill_sources,
             current_agent=current_agent,
@@ -725,34 +760,10 @@ async def _build_local_components(
             metrics=metric_buffer,
             workspace_factory=workspace_factory,
             tool_responses=tool_responses,
+            canonical_memory_store=canonical_memory_store,
         )
     except BaseException:
         raise
-
-    def build_memory_store(
-        memory_tenant: str,
-        execution_id: str,
-        memory_scope: str,
-    ) -> MemoryStore:
-        if memory_store_factory is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        route = state.plan.route(PersistenceDomain.MEMORY)
-        transient = route.retention is StorageRetentionMode.TRANSIENT
-        store = (
-            state.working_object_store(
-                PersistenceDomain.MEMORY,
-                owner_scope=f"execution:{execution_id}",
-            )
-            if transient
-            else state.object_store(PersistenceDomain.MEMORY)
-        )
-        return memory_store_factory(
-            memory_tenant,
-            execution_id,
-            memory_scope,
-            store,
-            transient,
-        )
 
     session: RuntimeSessionService | None = None
     coordinator: _RuntimeCloseCoordinator | None = None

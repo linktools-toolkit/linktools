@@ -179,9 +179,11 @@ function setDisabled() {
     $('cancel').hidden=readonly || !turn;$('cancel').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
     $('cancel').setAttribute('aria-label','Stop current turn');
     if(turn && sessionWatch?.ready){
-      const waiting=state.turns.some(row=>row.turn_id===turn && row.status==='WAITING_DEFERRED');
+      const status=state.turns.find(row=>row.turn_id===turn)?.status;
       $('current-status').hidden=false;
-      $('current-status').textContent=waiting?'Waiting for approval or tool results':'Turn in progress';
+      $('current-status').classList.toggle('error',status==='RECOVERY_REQUIRED');
+      $('current-status').textContent=status==='RECOVERY_REQUIRED'?'Recovery required'
+        :status==='WAITING_DEFERRED'?'Waiting for approval or tool results':'Turn in progress';
     }
   } else {$('open-recovery').hidden=false;$('inspector-toggle').hidden=false;}
 
@@ -378,7 +380,8 @@ function ordinaryTurnNode(turn, previous=null) {
   node.append(answers);
   if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
   if(turn.status!=='SUCCEEDED')node.append(element('div','turn-heading',
-    turn.status==='WAITING_DEFERRED'?'Waiting for approval or tool results':turn.status));
+    turn.status==='RECOVERY_REQUIRED'?'Recovery required'
+      :turn.status==='WAITING_DEFERRED'?'Waiting for approval or tool results':turn.status));
   return node;
 }
 function patchOrdinaryTurn(turn) {
@@ -458,20 +461,24 @@ function watchOrdinarySession(id) {
   sessionWatch=watch;
   const current=()=>sessionWatch===watch && state.selectedSession===id;
   const activeTurn=()=>state.session?.session_id===id ? state.session.active_turn_id : watch.snapshot?.active_turn_id;
-  watch.readActive=()=>{
+  watch.readActive=({refresh=false}={})=>{
     const turnId=activeTurn();
-    if(!turnId || watch.activeRead?.id===turnId || state.turns.some(row=>row.turn_id===turnId))return;
+    const prior=state.turns.find(row=>row.turn_id===turnId);
+    if(!turnId || watch.activeRead?.id===turnId || prior?.conversation_committed || (prior && !refresh))return;
     const lost=watch.lostRead?.id===turnId ? watch.lostRead : null;
-    const read={id:turnId,frames:[],units:0,generation:lost?.generation || 0,overflow:Boolean(lost)};
+    const read={id:turnId,frames:[],units:0,generation:lost?.generation || prior?.liveGeneration || 0,
+      overflow:Boolean(lost),priorGeneration:prior?.liveGeneration,priorStatus:prior?.status};
     watch.activeRead=read;
     void api(sessionURL(id,'',{turn_id:turnId})).then(turn=>{
       if(!current() || watch.activeRead!==read || activeTurn()!==turnId
         || state.turns.some(row=>row.turn_id===turnId && row.conversation_committed))return;
       const row=state.turns.find(item=>item.turn_id===turnId);
+      if(prior && (row?.liveGeneration!==read.priorGeneration || row?.status!==read.priorStatus))return;
       patchOrdinaryTurn(!row && !turn.conversation_committed && read.overflow
         ? {...turn,liveGeneration:read.generation,liveParts:[],previewGap:read.generation} : turn);
       if(!turn.conversation_committed){
         for(const frame of read.frames || [])applyPreview(frame);
+        setDisabled();
         const waiting=read.waiting;
         const shown=state.turns.find(item=>item.turn_id===turnId);
         if(waiting && shown && (shown.liveGeneration || 0)<=waiting.generation
@@ -573,7 +580,7 @@ function watchOrdinarySession(id) {
         watch.lostRead=discarded?.overflow ? {id:discarded.id,generation:discarded.generation} : null;
         watch.activeRead=null;watch.phaseRead=null;
       }
-      watch.readActive();
+      watch.readActive({refresh:reconnected});
       if(watch.committedThrough!==null && watch.snapshot?.last_turn_no>watch.committedThrough)
         void catchUpOrdinary(watch,watch.snapshot.last_turn_no).catch(showError);
       return;
