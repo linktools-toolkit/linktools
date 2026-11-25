@@ -168,10 +168,14 @@ async def purge_unreferenced_captures(
         return CaptureCleanupResult(tuple(deleted), tuple(missing), tuple(retained), tuple(blocked))
 
 
+_ORDINARY_ATTACHMENT_SCAN_PAGE = 32
+_ORDINARY_ATTACHMENT_SCAN_ROWS = 1024
+
+
 async def _ordinary_input_object_keys(
     store: SqlStateStore, *, namespace: str, tenant_id: str, candidates: set[str],
 ) -> set[str]:
-    """Read only typed admitted inputs, scoped to this Conversation owner."""
+    """Find typed references; retain every unproven candidate when the scan budget is exhausted."""
     from sqlalchemy import select
 
     from ..execution import StoredUserInput
@@ -190,12 +194,12 @@ async def _ordinary_input_object_keys(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         protected: set[str] = set()
         after = 0
-        while protected != candidates:
+        for _ in range(_ORDINARY_ATTACHMENT_SCAN_ROWS // _ORDINARY_ATTACHMENT_SCAN_PAGE):
             rows = await transaction.read_sql_rows(
                 store.context,
                 select(columns.id, input_value.label("input")).where(
-                    columns.scope_key == scope, columns.id > after, input_value.as_string().is_not(None),
-                ).order_by(columns.id).limit(32),
+                    columns.scope_key == scope, columns.id > after,
+                ).order_by(columns.id).limit(_ORDINARY_ATTACHMENT_SCAN_PAGE),
             )
             for row in rows:
                 if row["input"] is None:
@@ -207,10 +211,12 @@ async def _ordinary_input_object_keys(
                         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                     if reference.key in candidates:
                         protected.add(reference.key)
-            if len(rows) < 32:
-                break
+            if protected == candidates or len(rows) < _ORDINARY_ATTACHMENT_SCAN_PAGE:
+                return protected
             after = rows[-1]["id"]
-        return protected
+        # Reaching the budget is not evidence that unobserved rows have no
+        # references. Keep them until a separately bounded inventory is available.
+        return candidates
 
     return await store.read(scan)
 

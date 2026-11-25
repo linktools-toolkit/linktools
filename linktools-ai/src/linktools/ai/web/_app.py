@@ -54,6 +54,9 @@ _HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
 }
+_JSON_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+# Transport bound, not the Runtime's canonical turn limit. Allow JSON escaping and the HTTP envelope.
+_TURN_JSON_REQUEST_MAX_BYTES = 512 * 1024
 _TURN_SSE_LIMIT = 128
 _TURN_SSE_BUFFER = 256 * 1024
 
@@ -270,14 +273,17 @@ def _content(request: Request, field: str = "include_content") -> bool:
     return value == "true"
 
 
-async def _body(request: Request) -> dict[str, object]:
+async def _body(request: Request, *, ordinary_turn: bool = False) -> dict[str, object]:
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
         raise ValueError("application/json is required")
+    maximum = _TURN_JSON_REQUEST_MAX_BYTES if ordinary_turn else _JSON_REQUEST_MAX_BYTES
+    if ordinary_turn and int(request.headers.get("content-length", "0")) > maximum:
+        raise ValueError("request exceeds JSON body limit")
     data = bytearray()
     async for chunk in request.stream():
+        if len(chunk) > maximum - len(data):
+            raise ValueError("request exceeds JSON body limit")
         data.extend(chunk)
-        if len(data) > 8 * 1024 * 1024:
-            raise ValueError("request exceeds 8 MiB")
     payload = json.loads(data)
     if not isinstance(payload, dict):
         raise ValueError("request must be an object")
@@ -406,7 +412,7 @@ class _Console:
             request.state.phase = "session.create" if request.method == "POST" else "session.list"
         if request.method == "POST":
             runtime = self.require_runtime()
-            payload = await _body(request)
+            payload = await _body(request, ordinary_turn=self.turn_sessions)
             request.state.operation_id = _text(payload, "request_id")
             if self.turn_sessions:
                 cwd = payload.get("cwd")
@@ -493,7 +499,7 @@ class _Console:
             request.state.phase = "session.get"
         runtime = self.require_runtime()
         session_id = _text(request.query_params, "session_id")
-        payload = await _body(request)
+        payload = await _body(request, ordinary_turn=self.turn_sessions)
         request_id = _text(payload, "request_id")
         action = request.path_params["action"]
         request.state.operation_id = request_id
