@@ -7,6 +7,7 @@ from ._runtime_test_helpers import model_features
 
 import asyncio
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import httpx
@@ -33,6 +34,13 @@ _HEADERS = {"X-LinkTools-Console": "1"}
 
 def client(app: object) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765")
+
+
+
+def _no_published_turn(*_args, **_kwargs):
+    async def read():
+        return None
+    return nullcontext(read)
 
 
 @pytest.mark.asyncio
@@ -97,7 +105,7 @@ async def test_session_release_does_not_wait_for_stalled_chat_observer() -> None
 
     runtime = SimpleNamespace(
         history=None, default_principal=Principal("runtime", "default"),
-        sessions=SimpleNamespace(watch=session_watch), executions=SimpleNamespace(get=execution_get),
+        sessions=SimpleNamespace(watch=session_watch, capture_published_turn=_no_published_turn), executions=SimpleNamespace(get=execution_get),
         events=SimpleNamespace(has_local_producer=lambda execution_id: execution_id == "first"),
     )
     async with client(create_app(runtime=runtime)) as http:
@@ -156,7 +164,7 @@ async def test_session_disconnect_joins_observer_that_finishes_during_cancellati
     runtime = SimpleNamespace(
         history=SimpleNamespace(inspect_execution=inspect_execution),
         default_principal=Principal("runtime", "default"),
-        sessions=SimpleNamespace(watch=session_watch), executions=SimpleNamespace(get=execution_get),
+        sessions=SimpleNamespace(watch=session_watch, capture_published_turn=_no_published_turn), executions=SimpleNamespace(get=execution_get),
         events=SimpleNamespace(has_local_producer=lambda _: True),
     )
     app = create_app(runtime=runtime, shutdown_event=asyncio.Event())
@@ -1227,7 +1235,7 @@ async def test_chat_transport_uses_public_tool_progress_and_excludes_native_cont
         await closed.wait()
 
     runtime = SimpleNamespace(history=History(), default_principal=principal,
-                              sessions=SimpleNamespace(watch=watch_session),
+                              sessions=SimpleNamespace(watch=watch_session, capture_published_turn=_no_published_turn),
                               events=SimpleNamespace(has_local_producer=lambda _identity: True),
                               executions=SimpleNamespace(get=get_execution))
     app = create_app(runtime=runtime)
@@ -1347,6 +1355,7 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
     observed = []
     compact = []
     terminal = []
+    publications = []
     thinking_durations: dict[tuple[int, ...], int] = {}
     completed_attempts: set[tuple[int, ...]] = set()
     cursor = None
@@ -1424,6 +1433,9 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                             if "text" in payload:
                                 kind = "THINKING" if event_name == "thinking" else "TEXT"
                                 record_delta(f"ASSISTANT_{kind}_DELTA", payload["text"])
+                            continue
+                        if event_name == "session_turn":
+                            publications.append(payload["turn"])
                             continue
                         if event_name != "execution":
                             assert event_name == "message", payload
@@ -1509,6 +1521,7 @@ async def test_local_chat_streams_sdk_thinking_and_answer_before_completion(
                 assert finished.json()["timeline"]["next_cursor"] is None
                 saved, = finished.json()["timeline"]["items"]
                 assert saved["execution_id"] == execution_id and saved["conversation_committed"]
+                assert publications == [saved]
                 assert signature not in finished.text
                 saved_thinking, = (item for item in saved["items"] if item["item_kind"] == "thinking")
                 assert list(thinking_durations.values()) == [saved_thinking["elapsed_ms"]]

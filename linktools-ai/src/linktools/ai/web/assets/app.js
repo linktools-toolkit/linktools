@@ -309,7 +309,7 @@ function watchSession(id, {restart=false}={}) {
   const source=new EventSource(sessionURL(id,'events',{view:'chat'}));
   const watch={id,source,ready:false,snapshot:prior?.snapshot || null,revision:prior?.revision ?? null,
     externalOwner:prior?.externalOwner ?? null,releasedExecution:prior?.releasedExecution ?? null,
-    execution:null,externalProcess:prior?.externalProcess || new Map(),refresh:prior?.refresh || {attempt:null,failed:false,reconnect:0}};
+    execution:null,published:null,externalProcess:prior?.externalProcess || new Map(),refresh:prior?.refresh || {attempt:null,failed:false,reconnect:0}};
   if(prior)watch.refresh.reconnect++;
   sessionWatch=watch;
   const current=()=>sessionWatch===watch && state.selectedSession===id && !watch.failed;
@@ -336,6 +336,9 @@ function watchSession(id, {restart=false}={}) {
     try {
       const snapshot=receive(frame);
       if(snapshot) {
+        if(terminal(snapshot.status) && state.turns.some(turn=>turn.execution_id===id && turn.conversation_committed)) {
+          connection('Complete');watch.execution=null;return;
+        }
         if(terminal(snapshot.status) || snapshot.status==='RECOVERY_REQUIRED') {
           connectionWatch.settling=terminal(snapshot.status);
           connectionWatch.paused=!connectionWatch.settling;
@@ -352,6 +355,18 @@ function watchSession(id, {restart=false}={}) {
     }
   };
   source.addEventListener('execution',receiveFrame);
+  source.addEventListener('session_turn',event=>{
+    if(!current() || !watch.ready)return;
+    let value;
+    try{value=JSON.parse(event.data);}catch{return;}
+    const turn=value?.turn;
+    if(!turn?.execution_id || !turn.conversation_committed || !Number.isSafeInteger(value.revision))return;
+    if(watch.snapshot?.active_execution_id===turn.execution_id)
+      watch.published={id:turn.execution_id,revision:value.revision};
+    const payload={session:{session_id:id},timeline:{items:[turn]}};
+    reconcileOlderTurn(payload,turn.execution_id);
+    settleReleasedTurn(payload,turn.execution_id,current);
+  });
   for(const delta of ['text','thinking'])source.addEventListener(delta,message=>receiveFrame(message,delta));
   source.addEventListener('session_process',event=>{
     if(!current() || !watch.ready)return;
@@ -409,8 +424,11 @@ function watchSession(id, {restart=false}={}) {
     const releasedTurn=previousExternal && previousExternal!==value.active_execution_id ? previousExternal
       : replacedLocal || (reconnected && watch.refresh.failed ? watch.refresh.releasedTurn : null);
     if(releasedTurn)watch.refresh.releasedTurn=releasedTurn;
-    if(state.session && releasedTurn)refreshSessionTimeline(watch,value.active_execution_id,releasedTurn);
-    else if(state.session && !value.active_execution_id && !streamWillRefresh && !watch.execution?.settling && (!watch.refresh.releasedTurn || watch.refresh.failed)
+    const confirmedRelease=!reconnected && previousOwner && previousOwner!==value.active_execution_id
+      && watch.published?.id===previousOwner && watch.published.revision===value.revision;
+    if(previousOwner!==value.active_execution_id)watch.published=null;
+    if(state.session && releasedTurn && !confirmedRelease)refreshSessionTimeline(watch,value.active_execution_id,releasedTurn);
+    else if(!confirmedRelease && state.session && !value.active_execution_id && !streamWillRefresh && !watch.execution?.settling && (!watch.refresh.releasedTurn || watch.refresh.failed)
       && (reconnected && watch.refresh.failed || Number.isSafeInteger(timelineRevision) && value.revision>timelineRevision))refreshSessionTimeline(watch,null,previousOwner || null);
     if(!releasedTurn && state.session && value.active_execution_id
       && (reconnected || value.revision!==previousRevision || value.active_execution_id!==previousOwner))

@@ -6,7 +6,7 @@ import asyncio
 import base64
 import json
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from contextlib import aclosing, nullcontext, suppress
+from contextlib import ExitStack, aclosing, nullcontext, suppress
 from dataclasses import asdict, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -143,6 +143,7 @@ _CHAT_DELTA_EVENTS = {"ASSISTANT_TEXT_DELTA": "text", "ASSISTANT_THINKING_DELTA"
 _CHAT_PART_POSITION = ("agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index")
 
 _ExecutionFrame = tuple[str, dict[str, object], str | None]
+_MAX_CHAT_TURN_FRAME_BYTES = 256 * 1024
 
 
 def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
@@ -440,7 +441,7 @@ class _Console:
         if environ.debug:
             request.state.phase = "session.get"
         runtime = self.require_runtime()
-        session = await runtime.sessions.get(_text(request.query_params, "session_id"), principal=self.principal)
+        session_id = _text(request.query_params, "session_id")
         payload = await _body(request)
         request_id = _text(payload, "request_id")
         action = request.path_params["action"]
@@ -448,11 +449,13 @@ class _Console:
         if environ.debug:
             request.state.phase = f"session.{action}"
         if action == "messages":
-            execution = await session.start(
-                _text(payload, "prompt"), files=payload.get("files", ()), idempotency_key=request_id,
+            execution = await runtime.sessions.start(
+                session_id, _text(payload, "prompt"), principal=self.principal,
+                files=payload.get("files", ()), idempotency_key=request_id,
                 planning=payload.get("planning", False), thinking=payload.get("thinking"),
             )
             return _json({"execution_id": execution.execution_id}, 202)
+        session = await runtime.sessions.get(session_id, principal=self.principal)
         if action == "close":
             return _json(await session.close(idempotency_key=request_id))
         if action == "fork":
@@ -521,6 +524,23 @@ class _Console:
             last_active = last_local = watching = None
             ended_while_started = False
             occupancy: dict[str, object] | None = None
+            publication = ExitStack()
+            read_publication = None
+
+            async def committed_turn_frame() -> str | None:
+                nonlocal read_publication
+                if read_publication is None:
+                    return None
+                captured = await read_publication()
+                if captured is None:
+                    return None
+                read_publication = None
+                publication.close()
+                turn, = _chat_timeline(Page((captured.turn,), None)).items
+                frame = _sse_frame("session_turn", {
+                    "turn": _wire(turn), "revision": captured.session_revision,
+                })
+                return frame if len(frame.encode("utf-8")) <= _MAX_CHAT_TURN_FRAME_BYTES else None
 
             def finish_retiring(task: asyncio.Task) -> None:
                 retiring.discard(task)
@@ -528,7 +548,9 @@ class _Console:
                     task.exception()
 
             def stop_execution() -> None:
-                nonlocal producer, frame_task, watching
+                nonlocal producer, frame_task, watching, read_publication
+                publication.close()
+                read_publication = None
                 for task in (producer, frame_task):
                     if task is not None:
                         retiring.add(task)
@@ -556,6 +578,9 @@ class _Console:
                                 data.pop("cursor", None)
                             if event == "snapshot":
                                 ended_while_started = isinstance(data, Mapping) and data.get("status") == "STARTED"
+                                committed = await committed_turn_frame()
+                                if committed is not None:
+                                    yield committed
                             event_id = None if cursor is None else json.dumps((watching, cursor), separators=(",", ":"))
                             if event in ("text", "thinking"):
                                 yield _sse_frame(event, data, event_id)
@@ -596,8 +621,14 @@ class _Console:
                         authorized_execution = None
                     last_active, last_local = active, local_execution
                     if watching is not None and (active != watching or not local_execution):
+                        committed = await committed_turn_frame()
+                        if committed is not None:
+                            yield committed
                         stop_execution()
                     if chat and local_execution and active != watching:
+                        read_publication = publication.enter_context(runtime.sessions.capture_published_turn(
+                            identity, active, principal=self.principal,
+                        ))
                         watching = active
                         ended_while_started = False
                         execution_frames = asyncio.Queue(maxsize=1)
@@ -616,6 +647,7 @@ class _Console:
                 _debug_error(request, error)
                 yield _sse_frame("session_error", {"error_code": error.code.value})
             finally:
+                publication.close()
                 if unsubscribe is not None:
                     unsubscribe()
                 tasks = tuple(task for task in (state_task, tool_task, frame_task, producer) if task is not None)

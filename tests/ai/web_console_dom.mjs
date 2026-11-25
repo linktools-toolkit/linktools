@@ -272,6 +272,44 @@ if(process.argv[3]==='snapshot-tail') {
   console.log('Successful SSE tail reuses metadata; transport/reconnect and observation errors reread authority');
   process.exit(0);
 }
+if(process.argv[3]==='session-published-turn') {
+  await select('#session=a&execution=a-run');
+  await until('session ready',()=>!node('send').disabled);
+  const source=sessionSources.at(-1);
+  const reads=()=>calls.filter(call=>call.method==='GET' && call.key==='/api/sessions/a').length;
+  const activate=async id=>{
+    executions.set(id,{...info(id,'a'),status:'STARTED',terminal_at:null});
+    streamBlocks.set(id,{});
+    sessions.get('a').active_execution_id=id;source.snapshot();
+    await until('local observer attached',()=>streamBlocks.get(id).controller && node('send').disabled);
+    await settle();
+  };
+  const complete=(id,seq)=>{
+    const turn={...timeline('a').items[0],execution_id:id,created_at:`2026-01-0${seq}T00:00:00Z`,
+      user_input:`Question ${id}`,items:[{item_kind:'assistant',content:`Canonical ${id}`}]};
+    source.listeners.get('session_turn')({data:JSON.stringify({turn,revision:sessions.get('a').revision+1})});
+  };
+  await activate('a-first');
+  const before=reads();
+  complete('a-first',2);
+  assert.equal(node('send').disabled,true,'a published turn cannot release the session');
+  source.execution('a-first','snapshot',info('a-first','a'));
+  sessions.get('a').active_execution_id=null;sessions.get('a').revision++;source.snapshot();
+  await until('session released',()=>!node('send').disabled);
+  await settle();assert.equal(reads(),before,'normal local completion has no History readback');
+  assert.equal(node('conversation').textContent.split('Canonical a-first').length,2);
+
+  await activate('a-next');
+  const nextReads=reads();
+  complete('a-first',2);
+  await settle();
+  assert.equal(reads(),nextReads,'late duplicate cannot refresh the newer execution');
+  assert.equal(node('send').disabled,true);
+  assert.equal(node('conversation').textContent.split('Canonical a-first').length,2);
+  await node('cancel').click();
+  assert.ok(calls.some(call=>call.method==='POST' && call.key==='/api/executions/a-next/cancel'));
+  process.exit(0);
+}
 if(process.argv[3]==='session-open-active') {
   const active='a-hydrating',pendingTurn={...timeline('a').items[0],execution_id:active,status:'STARTED',
     user_input:'Question from the other tab',conversation_committed:false,items:[]};

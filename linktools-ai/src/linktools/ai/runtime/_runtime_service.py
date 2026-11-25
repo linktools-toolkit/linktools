@@ -44,6 +44,7 @@ from ..errors import AIError, ErrorCode
 
 
 if TYPE_CHECKING:
+    from ..core import ThinkingValue
     from ..inputs import InputCaptures
     from ..history import History
     from ..asset import AssetStoreReader
@@ -616,7 +617,8 @@ class Runtime(Generic[AppT]):
     async def _start_existing_session(
         self, session_id: str, user_prompt: UserPromptInput, *, principal: Principal,
         idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
-        correlation: Mapping[str, object] | None = None,
+        correlation: Mapping[str, object] | None = None, files: Sequence[str] = (),
+        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
     ) -> "Execution[AppT]":
         from ..core import validate_idempotency_key
         from ..model import validate_user_input
@@ -629,8 +631,8 @@ class Runtime(Generic[AppT]):
 
         async def start(agent_id, resume):
             return await self._get_agent(agent_id).execution_port.start(
-                prompt, files=(), output=output, principal=principal, session_id=session_id,
-                idempotency_key=key, mode="run", planning=None, thinking=None,
+                prompt, files=files, output=output, principal=principal, session_id=session_id,
+                idempotency_key=key, mode="run", planning=planning, thinking=thinking,
                 correlation=correlation, _resume=resume)
 
         with sql_observation_scope("runtime.session.start"):

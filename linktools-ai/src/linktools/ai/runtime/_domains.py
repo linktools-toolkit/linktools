@@ -16,7 +16,8 @@ from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, Approva
 from ..session import CloseSessionRequest, CreateSessionRequest, ForkSessionRequest, ListSessionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, UpdateSessionRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
+    from ..core import ThinkingValue
     from ..model import UserPromptInput
     from pydantic import BaseModel
     from ._agent import Agent, Session
@@ -274,11 +275,13 @@ class RuntimeSessions(Generic[AppT]):
     async def start(
         self, session_id: str, user_prompt: "UserPromptInput", *, principal: Principal,
         idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
-        correlation: "Mapping[str, object] | None" = None,
+        correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
+        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
     ) -> "Execution[AppT]":
         """Start a turn on an existing authorized session using its current Agent."""
         return await self._start_session(session_id, user_prompt, principal=principal,
-            idempotency_key=idempotency_key, output=output, correlation=correlation)
+            idempotency_key=idempotency_key, output=output, correlation=correlation,
+            files=files, planning=planning, thinking=thinking)
 
     async def inspect(self, session_id: str, *, principal: Principal) -> SessionView:
         """Read current session state without constructing a bound handle."""
