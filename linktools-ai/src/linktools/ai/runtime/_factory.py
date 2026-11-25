@@ -109,7 +109,7 @@ from ..execution import CancelExecutionRequest, ExecutionHistoryReader
 from ..session import SessionHistoryReader
 from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
-from ..persistence.graph_turns import graph_task_repository
+from ..persistence.commands import graph_task_repository
 from ..persistence.repositories import BudgetRepositoryImpl, ExecutionRepositoryImpl
 from ..persistence.runs import RuntimeAgentRunStore
 from ..persistence.runs import StagingAgentRunStore, StateStepArchive

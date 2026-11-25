@@ -40,11 +40,4 @@ class GraphCancelOwner:
         return self.operation.tenant_id
 
 
-def graph_task_repository(repository: object) -> "TaskRepositoryImpl | None":
-    """Select the native grouped Task adapter, not an arbitrary implementation."""
-    from ._task_repository import TaskRepositoryImpl
-
-    return repository if type(repository) is TaskRepositoryImpl else None
-
-
-__all__ = ["GraphCancelOwner", "GraphDeferredWait", "graph_task_repository"]
+__all__ = ["GraphCancelOwner", "GraphDeferredWait"]
