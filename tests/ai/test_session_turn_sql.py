@@ -121,6 +121,43 @@ async def test_takeover_fences_old_writer_and_cancel_precedes_success(store):
 
 
 @pytest.mark.asyncio
+async def test_reopened_store_recovers_expired_cancellation_once(store):
+    engine, metadata, turns = store
+    key = SessionTurnKey("chat", "turn")
+    assert await accept(turns, key.turn_id)
+    assert await turns.request_cancel(key)
+    async with engine.begin() as connection:
+        await connection.execute(metadata.tables[SESSION_TURN_TABLE].update().values(lease_until=0))
+    await engine.dispose()
+
+    restarted_engine = create_async_engine(engine.url)
+    try:
+        restarted = SqlSessionTurns(
+            create_sql_storage_context(restarted_engine), metadata, namespace="test", tenant_id="a",
+        )
+        pending = await restarted.get_turn(key)
+        assert (pending["state"], pending["generation"]) == ("cancelling", 1)
+        assert not await restarted.take_over(key, generation=1, lease_seconds=60)
+        assert not await restarted.renew(key, generation=1, lease_seconds=60)
+
+        outcomes = await asyncio.gather(*(
+            restarted.take_over(key, generation=1, lease_seconds=60, cancelling=True) for _ in range(2)
+        ))
+        assert outcomes.count(True) == 1
+        assert not await restarted.finish(key, generation=1, turn_no=1, state="cancelled", result=None)
+        assert (await restarted.get_session("chat"))["active_turn_id"] == b"turn"
+        assert await restarted.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
+        assert not await restarted.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
+
+        visible, = await restarted.history("chat", through=1, limit=2)
+        assert (visible["turn_id"], visible["state"], visible["result_json"]) == (b"turn", "cancelled", None)
+        assert await restarted.history("chat", through=1, limit=2, only_success=True) == ()
+        assert await accept(restarted, "next", revision=2, through=1, request="new")
+    finally:
+        await restarted_engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_partition_and_session_must_match_exact_turn(store):
     engine, metadata, turns = store
     assert await accept(turns, "turn")
