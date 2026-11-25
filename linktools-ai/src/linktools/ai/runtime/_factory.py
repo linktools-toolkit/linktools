@@ -92,6 +92,7 @@ from ._persistence_configuration import validate_persistence_capabilities, capab
 from ..capability import TraceCapability
 from ..history import History
 from ..core import token_seed
+from ._regenerable_turn import _RegenerableTurnRunner
 from ._session import RuntimeSessionService
 from ._subagent import SubagentDispatcher
 from ..history import TransientExecutionHistoryStore
@@ -837,7 +838,9 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
-            session_turns=state.session_turns,
+            regenerable_turns=(
+                None if state.session_turns is None else _RegenerableTurnRunner(state.session_turns, executor)
+            ),
             enabled=session_execution_ready,
             current_policy=current_policy,
             cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if all(

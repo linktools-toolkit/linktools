@@ -379,6 +379,15 @@ class AgentExecutor:
             )
         return None
 
+    def require_regenerable(self, binding: AgentBinding) -> None:
+        compiled = binding.compiled_agent
+        policy = _runtime_feature_policy(compiled.runtime_contributions)
+        if (binding.output_binding.mode != "text"
+                or compiled.selected_tools or compiled.mcp_servers or compiled.selected_subagents
+                or policy.restart_checkpoints or policy.durable_trace or policy.memory_scope is not None
+                or policy.tool_responses is not None):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
+
     async def execute_regenerable(
         self,
         *,
@@ -393,15 +402,11 @@ class AgentExecutor:
         streamed_output_bytes: int = 64 * 1024,
     ) -> AgentExecutionResult:
         """Run a plain turn with no durable recorder or execution handoff."""
+        if context.session_id is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A regenerable turn requires a session")
         if streamed_output_bytes < 1:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, "No output capacity remains for this turn")
-        compiled = binding.compiled_agent
-        policy = _runtime_feature_policy(compiled.runtime_contributions)
-        if (context.session_id is None or binding.output_binding.mode != "text"
-                or compiled.selected_tools or compiled.mcp_servers or compiled.selected_subagents
-                or policy.restart_checkpoints or policy.durable_trace or policy.memory_scope is not None
-                or policy.tool_responses is not None):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
+        self.require_regenerable(binding)
         store = RuntimeAgentRunStore(
             StagingAgentRunStore(),
             conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
