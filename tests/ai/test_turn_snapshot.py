@@ -107,3 +107,88 @@ def test_sql_turn_snapshot_rejects_missing_active_owner():
         with pytest.raises(AIError) as exc:
             decode_turn_snapshot((value,), namespace=_SCOPE.namespace, tenant_id=_SCOPE.tenant_id, store_key=b"state")
         assert exc.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.fixture
+def standalone_snapshot_row():
+    from datetime import datetime, timezone
+
+    from linktools.ai.persistence._turn_sql import ACTIVE_REQUEST, STANDALONE
+    from linktools.ai.persistence.state import record_key
+
+    key = b"a" * 64
+    token = b"b" * 32
+    return {
+        "session_kind": STANDALONE, "session_key": key, "execution_id": b"standalone",
+        "route_kind": ACTIVE_REQUEST, "route_key": key, "retired_request_key": None,
+        "standalone_idle": False, "control_id": 12, "request_digest": "c" * 64,
+        "owner_id": b"d" * 32, "lease_fence": 3, "cancel_requested": False,
+        "receipt_id": token, "receipt_kind": "claim", "lease_token": token,
+        "lease_expires_at": datetime(2026, 11, 25, tzinfo=timezone.utc), "authority_revision": 4,
+        "execution_key": record_key(_SCOPE.namespace, _SCOPE.tenant_id, "execution", "execution", ("standalone",)),
+    }
+
+
+@pytest.mark.parametrize("parked", (False, True))
+def test_standalone_snapshot_anchors_preserve_only_authoritative_fields(standalone_snapshot_row, parked):
+    from linktools.ai.persistence._turn_snapshot import turn_snapshot_record
+    from linktools.ai.persistence._turn_sql_schema import TURN_ADMISSION_TABLE
+
+    row = standalone_snapshot_row
+    if parked:
+        row.update(standalone_idle=True, control_id=None, receipt_kind="release", receipt_id=b"e" * 32,
+                   lease_token=None, lease_expires_at=None, authority_revision=None, execution_key=None)
+    identity = {"namespace": _SCOPE.namespace, "tenant_id": _SCOPE.tenant_id}
+    record = turn_snapshot_record(TURN_ADMISSION_TABLE, row, **identity)
+    assert record.data["standalone_idle"] is parked
+    assert "control_id" not in record.data
+    assert record.state == ("PARKED" if parked else "ACTIVE")
+    slots, (admission,) = decode_turn_snapshot((record,), **identity)
+    assert not slots
+    for field in ("standalone_idle", "session_key", "execution_id", "route_kind", "route_key",
+                  "lease_fence", "receipt_kind", "receipt_id"):
+        assert admission[field] == row[field]
+    if parked:
+        assert record.lease_owner is None and record.lease_expires_at is None
+        assert "_standalone_authority" not in admission
+    else:
+        assert admission["_standalone_authority"] == {
+            "token": row["lease_token"], "expiry": row["lease_expires_at"], "revision": row["authority_revision"],
+        }
+
+
+def test_standalone_snapshot_rejects_wrong_control_identity_fence_and_receipt(standalone_snapshot_row):
+    from linktools.ai.persistence._turn_snapshot import turn_snapshot_record
+    from linktools.ai.persistence._turn_sql_schema import TURN_ADMISSION_TABLE
+
+    identity = {"namespace": _SCOPE.namespace, "tenant_id": _SCOPE.tenant_id}
+    row = standalone_snapshot_row
+    record = turn_snapshot_record(TURN_ADMISSION_TABLE, row, **identity)
+    for corrupt in (replace(record, lease_fence=record.lease_fence + 1),
+                    replace(record, data={**record.data, "receipt_id": "e" * 32})):
+        with pytest.raises(AIError) as caught:
+            decode_turn_snapshot((corrupt,), **identity)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    with pytest.raises(AIError) as caught:
+        turn_snapshot_record(TURN_ADMISSION_TABLE, {**row, "execution_key": b"wrong"}, **identity)
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_standalone_snapshot_legacy_admission_still_requires_its_slot(standalone_snapshot_row):
+    from linktools.ai.persistence._turn_snapshot import turn_snapshot_record
+    from linktools.ai.persistence._turn_sql_schema import TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
+
+    identity = {"namespace": _SCOPE.namespace, "tenant_id": _SCOPE.tenant_id}
+    row = {**standalone_snapshot_row, "standalone_idle": None}
+    admission = turn_snapshot_record(TURN_ADMISSION_TABLE, row, **identity)
+    assert admission.data["coowned"] is True and "standalone_idle" not in admission.data
+    assert admission.lease_owner is None
+    slot = turn_snapshot_record(TURN_SLOT_TABLE, {
+        **row, "active_execution_id": row["execution_id"], "revision": row["authority_revision"],
+    }, **identity)
+    (slot_row,), (admission_row,) = decode_turn_snapshot((slot, admission), **identity)
+    assert slot_row["active_execution_id"] == row["execution_id"]
+    assert admission_row["standalone_idle"] is None and admission_row["_coowned"] is True
+    with pytest.raises(AIError) as caught:
+        decode_turn_snapshot((admission,), **identity)
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

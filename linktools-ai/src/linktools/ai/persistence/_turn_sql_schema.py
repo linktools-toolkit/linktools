@@ -57,6 +57,7 @@ def build_turn_sql_metadata(metadata: "MetaData") -> None:
         Column("receipt_kind", String(8), nullable=False, comment="Latest source mutation operation."),
         Column("control_id", BigInteger, nullable=True,
                comment="Local row address of the execution authority; rebuilt on restore."),
+        Column("standalone_idle", Boolean, nullable=True, comment="NULL for slot-backed or archived admissions, FALSE for an active slotless standalone turn, TRUE for its retained receipt."),
         *sql_audit_columns(),
         comment="Source turn admission and its latest operation receipt, retained after release.",
         **sql_table_options(),

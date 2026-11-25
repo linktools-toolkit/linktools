@@ -231,6 +231,16 @@ class _StateSnapshotReader:
                         control.c.turn_slot_kind == table.c.session_kind, control.c.turn_slot_key == table.c.session_key,
                         control.c.turn_fence == table.c.lease_fence,
                     )))
+                else:
+                    control = store.storage_group.metadata.tables["ai_execution_records"]
+                    statement = statement.add_columns(
+                        control.c.key.label("execution_key"), control.c.turn_token.label("lease_token"),
+                        control.c.turn_expiry.label("lease_expires_at"), control.c.turn_revision.label("authority_revision"),
+                    ).select_from(table.outerjoin(control, and_(
+                        table.c.standalone_idle.is_(False), control.c.id == table.c.control_id,
+                        control.c.store_key == table.c.store_key, control.c.turn_slot_kind == table.c.session_kind,
+                        control.c.turn_slot_key == table.c.session_key, control.c.turn_fence == table.c.lease_fence,
+                    )))
                 statement = statement.where(table.c.store_key == store.store_key, table.c.id > after
                                             ).order_by(table.c.id).limit(limit)
 
@@ -1855,25 +1865,36 @@ async def restore_snapshot(
                         scope = TurnScopeIdentity(resources.namespace, resources.tenant_id, RUNTIME_TURN_SCOPE)
                         for admission in admissions:
                             admission["control_id"] = None
-                            if not admission.pop("_coowned", False):
+                            anchor = admission.pop("_standalone_authority", None)
+                            if anchor is None and not admission.pop("_coowned", False):
                                 continue
                             address = admission["session_kind"], admission["session_key"]
-                            slot = slot_by_key[address]
+                            if anchor is None:
+                                slot = slot_by_key[address]
+                                token, expiry = slot["lease_token"], slot["lease_expires_at"]
+                                revision = {}
+                            else:
+                                token, expiry = anchor["token"], min(anchor["expiry"], expired_at)
+                                revision = {"turn_revision": anchor["revision"]}
                             authority = ExecutionAuthority(scope, admission["execution_id"].decode("utf-8"),
                                                            turn_session_identity(*address),
-                                                           slot["lease_token"].decode("ascii"), admission["lease_fence"])
+                                                           token.decode("ascii"), admission["lease_fence"])
                             identity = (control.c.store_key == store.store_key, control.c.key == authority.key)
                             owner = (await session.execute(select(control.c.id, control.c.turn_token).where(*identity))).one_or_none()
-                            expiry = slot["lease_expires_at"]
                             if owner is None:
-                                result = await session.execute(control.insert().values(authority.shell_values(store_key=store.store_key, expiry=expiry)))
+                                result = await session.execute(control.insert().values(
+                                    **authority.shell_values(store_key=store.store_key, expiry=expiry), **revision,
+                                ))
                                 (admission["control_id"],) = result.inserted_primary_key
                             elif owner.turn_token is None:
-                                await session.execute(update(control).where(*identity).values(**authority.authority_values(), turn_expiry=expiry))
+                                await session.execute(update(control).where(*identity).values(
+                                    **authority.authority_values(), turn_expiry=expiry, **revision,
+                                ))
                                 admission["control_id"] = owner.id
                             else:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            slot.update(lease_token=None, lease_expires_at=None)
+                            if anchor is None:
+                                slot.update(lease_token=None, lease_expires_at=None)
 
                         for name, rows in ((TURN_SLOT_TABLE, slots), (TURN_ADMISSION_TABLE, admissions)):
                             if rows:

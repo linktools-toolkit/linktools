@@ -116,6 +116,7 @@ CREATE TABLE ai_turn_admissions (
 	receipt_id VARBINARY(32) NOT NULL COMMENT 'Latest source mutation receipt identifier.',
 	receipt_kind VARCHAR(8) NOT NULL COMMENT 'Latest source mutation operation.',
 	control_id BIGINT COMMENT 'Local row address of the execution authority; rebuilt on restore.',
+	standalone_idle BOOL COMMENT 'NULL for slot-backed or archived admissions, FALSE for an active slotless standalone turn, TRUE for its retained receipt.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
