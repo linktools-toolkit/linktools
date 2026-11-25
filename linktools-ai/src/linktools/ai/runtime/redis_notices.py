@@ -18,6 +18,7 @@ _logger = environ.get_logger(__name__)
 _GAP = '{"type":"gap"}'
 _GAP_HINT = object()
 _MAX_NOTICE_BYTES = 2048
+_PUBLISH_TIMEOUT_SECONDS = 3.0
 
 
 class _PubSub(Protocol):
@@ -109,9 +110,9 @@ class RedisTurnNoticeTransport:
             try:
                 if self._loss:
                     self._loss = False
-                    await self._client.publish(channel, _GAP)
+                    await self._publish(channel, _GAP)
                 if pending is not None:
-                    await self._client.publish(channel, pending)
+                    await self._publish(channel, pending)
                     pending = None
             except Exception as error:
                 # The status of the last publish is unknown; don't replay it.
@@ -119,6 +120,12 @@ class RedisTurnNoticeTransport:
                 self._loss = True
                 _logger.warning("Redis turn notice publish failed: %s", type(error).__name__)
                 await asyncio.sleep(1)
+
+    async def _publish(self, channel: str, payload: str) -> None:
+        # Callers may supply a pool without a socket timeout. A stalled
+        # publication must not pin the only sender indefinitely.
+        async with asyncio.timeout(_PUBLISH_TIMEOUT_SECONDS):
+            await self._client.publish(channel, payload)
 
     async def _receive(
         self, channel: str, scope: TurnNoticeScope, ready: asyncio.Event,
