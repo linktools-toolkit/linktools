@@ -7,6 +7,8 @@ import json
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+from ..errors import AIError, ErrorCode
+
 if TYPE_CHECKING:
     from ..core import JsonValue, Principal
     from ._runtime_service import Runtime
@@ -36,6 +38,7 @@ class TurnObserver:
         self._bytes = 0
         self._turn_id: str | None = None
         self._terminal: dict[str, "JsonValue"] | None = None
+        self._stopped: dict[str, "JsonValue"] | None = None
         self.incomplete = False
 
     def __enter__(self) -> "TurnObserver":
@@ -57,6 +60,9 @@ class TurnObserver:
         if not self._preview and kind in ("delta", "tool", "preview_reset"):
             return
         terminal = kind in ("terminal", "waiting")
+        stopped = kind == "gap" and frame.get("phase") == "producer_stopped"
+        if stopped:
+            self._stopped = frame
         if terminal:
             self._terminal = frame
         elif self.incomplete and kind not in ("gap", "tool"):
@@ -102,6 +108,12 @@ class TurnObserver:
                 if isinstance(status, str) and status in _END_STATES:
                     yield {**result, "type": "terminal", "state": status.lower()}
                     return
+                stopped = self._stopped
+                if (stopped is not None and stopped.get("turn_id") == turn_id
+                        and type(stopped.get("generation")) is int
+                        and stopped["generation"] == result.get("generation")
+                        and status in ("PENDING_START", "CANCELLING")):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             elif kind == "preview_reset":
                 self.incomplete = True
                 yield frame

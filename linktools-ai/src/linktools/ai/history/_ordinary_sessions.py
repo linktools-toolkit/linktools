@@ -319,4 +319,4 @@ class _OrdinarySessionHistory:
         row = await self._store.get_history_turn(SessionTurnKey(session_id, turn_id), lineage=lineage)
         if row is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        return _turn_view(row)
+        return {**_turn_view(row), "generation": row["generation"]}

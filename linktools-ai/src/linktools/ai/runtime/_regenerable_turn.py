@@ -264,6 +264,14 @@ class _RegenerableTurnRunner:
             **({"phase": "cancelling"} if cancelling else {}),
         })
 
+    def _producer_stopped(self, turn: _AdmittedTurn) -> None:
+        # Local evidence only: the transport may not report this phase and
+        # the existing lease remains the sole durable write authority.
+        self._publish(turn.key.session_id, {
+            "type": "gap", "phase": "producer_stopped", "turn_id": turn.key.turn_id,
+            "generation": turn.generation,
+        })
+
     def _admitted(self, turn: _AdmittedTurn) -> None:
         self._publish(turn.key.session_id, {
             "type": "admitted", "turn_id": turn.key.turn_id, "turn_no": turn.number,
@@ -896,9 +904,7 @@ class _RegenerableTurnRunner:
                     turn, binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=request["thinking"],
                 )
             except Exception:
-                # Recovery already changed the producer generation; the
-                # browser must not keep waiting on that generation silently.
-                self._gap(key)
+                self._producer_stopped(turn)
                 raise
             return True
 
@@ -967,7 +973,7 @@ class _RegenerableTurnRunner:
                 if not accepted.done():
                     accepted.set_exception(error)
                 else:
-                    self._gap(key)
+                    self._producer_stopped(turn)
                     cause = error.__cause__ or error
                     frame = cause.__traceback__
                     while frame is not None and frame.tb_next is not None:
