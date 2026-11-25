@@ -58,6 +58,7 @@ class _AdmittedTurn:
     generation: int = 1
     model_prompt: Sequence[UserContent] | None = None
     attachments: Sequence[Mapping[str, JsonValue]] = ()
+    stored_input: JsonValue = None
 
 
 class _RegenerableTurnRunner:
@@ -147,7 +148,15 @@ class _RegenerableTurnRunner:
         })
         self._notice_lifecycle(turn.key, "admitted", turn.revision)
 
-    def _terminal(self, turn: _AdmittedTurn, state: str, *, output: JsonValue = None, error_code: str | None = None) -> None:
+    def _terminal(
+        self, turn: _AdmittedTurn, state: str, *, output: JsonValue = None,
+        result: JsonValue = None, error_code: str | None = None,
+    ) -> None:
+        succeeded = state == "succeeded"
+        self._store.note_terminal_context(
+            turn.key, turn_no=turn.number, prompt=turn.prompt if succeeded else None,
+            stored_input=turn.stored_input if succeeded else None, result=result, succeeded=succeeded,
+        )
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
             "generation": turn.generation, "revision": turn.revision + 1,
@@ -466,6 +475,7 @@ class _RegenerableTurnRunner:
                 _TURN_BYTES - len(canonical_json_bytes(request)), session["revision"], repository_instructions, generation + 1,
                 model_prompt=None if isinstance(model_prompt, str) else model_prompt,
                 attachments=() if stored is None else stored_input_attachment_views(stored),
+                stored_input=request.get("input"),
             )
             self._admitted(turn)
             await self._settle_with_lease(
@@ -668,6 +678,7 @@ class _RegenerableTurnRunner:
             key, through + 1, prompt,
             [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
             repository_instructions, model_prompt=model_prompt, attachments=attachments,
+            stored_input=request.get("input"),
         )
 
     @staticmethod
@@ -716,5 +727,5 @@ class _RegenerableTurnRunner:
             turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded", result=result,
         )
         if committed:
-            self._terminal(turn, "succeeded", output=outcome.output)
+            self._terminal(turn, "succeeded", output=outcome.output, result=result)
         return committed
