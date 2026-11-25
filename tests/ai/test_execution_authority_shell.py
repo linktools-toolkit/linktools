@@ -72,7 +72,7 @@ async def test_control_slot_claim_renew_release_uses_one_execution_authority(tmp
         repository = state.execution.executions
         store = repository.state_store
         scope = TurnScopeIdentity(namespace, tenant, "runtime-pending-turn")
-        coordination = StateTurnCoordination(store, namespace=namespace, tenant_id=tenant)
+        coordination = StateTurnCoordination(store, namespace=namespace, tenant_id=tenant, _runtime_sql=True)
         fields = dict(session_key="session:session", request_key="a" * 64, request_digest="b" * 64, execution_id="execution")
         claim = await coordination.claim_turn(scope, **fields, owner_id="a" * 32, lease_seconds=60)
         assert claim.lease.fence == 1
@@ -121,7 +121,7 @@ async def test_expired_sql_release_keeps_native_owner_and_receipt(tmp_path, monk
                                 storage=PersistenceStorage.sqlite(tmp_path / "expiry.db")) as state:
         store = state.execution.executions.state_store
         scope = TurnScopeIdentity(namespace, tenant, "runtime-pending-turn")
-        coordination = StateTurnCoordination(store, namespace=namespace, tenant_id=tenant)
+        coordination = StateTurnCoordination(store, namespace=namespace, tenant_id=tenant, _runtime_sql=True)
         fields = dict(session_key="session:session", request_key="a" * 64, request_digest="b" * 64, execution_id="execution")
         claim = await coordination.claim_turn(scope, **fields, owner_id="a" * 32, lease_seconds=60)
         engine = store.storage_group.context.engine

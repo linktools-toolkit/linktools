@@ -67,7 +67,8 @@ class SplitSessionTurnTransactions:
             table.c.turn_session_owner_id.is_(None), table.c.turn_receipt.is_not(None), exact,
         )
 
-    def parse_receipt(self, row):
+    @staticmethod
+    def parse_receipt(row, *, scope, decode_time):
         from hashlib import sha256
         from collections.abc import Mapping
         from ..errors import AIError, ErrorCode
@@ -75,6 +76,7 @@ class SplitSessionTurnTransactions:
         from ._record_owner import EXECUTION_SHELL_KIND
         from ._turn_sql import SqlTurnObservation, SqlTurnProof, turn_hex, turn_session_identity
         from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES
+        from .state import record_key
 
         try:
             key = row["key"]
@@ -84,7 +86,8 @@ class SplitSessionTurnTransactions:
             receipt, token = row["turn_receipt"], row["turn_token"]
             fence, revision = row["turn_fence"], row["turn_revision"]
             active = token is not None
-            if (key != self._execution_key(execution_id) or row["key_locator"] != sha256(key).hexdigest()
+            expected_key = record_key(scope.namespace, scope.tenant_id, "execution", "execution", (execution_id,))
+            if (key != expected_key or row["key_locator"] != sha256(key).hexdigest()
                     or row["kind"] not in ("execution", EXECUTION_SHELL_KIND)
                     or row["turn_occupied_route"] not in (None, slot)
                     or active and (type(token) is not bytes or row["turn_occupied_route"] != slot)
@@ -106,8 +109,8 @@ class SplitSessionTurnTransactions:
                 return proof, None
             proof.validate_live_token(token)
             return proof, SqlTurnObservation(
-                proof, revision, self._dialect.decode_database_time(row["turn_expiry"])
-                <= self._dialect.decode_database_time(row["observed_at"]),
+                proof, revision, decode_time(row["turn_expiry"])
+                <= decode_time(row["observed_at"]),
             )
         except (KeyError, AttributeError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -137,7 +140,7 @@ class SplitSessionTurnTransactions:
 
             source = SqlTurnRows(self._tx._metadata, self._store, self._scope, coowned=True)
             return row, *source.parse_standalone_control_receipt(row, decode_time=self._dialect.decode_database_time)
-        return row, *self.parse_receipt(row)
+        return row, *self.parse_receipt(row, scope=self._scope, decode_time=self._dialect.decode_database_time)
 
     async def _deadline(self, *, live):
         from sqlalchemy import func
@@ -204,12 +207,15 @@ class SplitSessionTurnTransactions:
         if row["replay_id"] is not None:
             if row["replay_turn_slot_kind"] != SESSION:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            replayed, observation = self.parse_receipt({col.name: row["replay_" + col.name] for col in replay.c})
+            replayed, observation = self.parse_receipt(
+                {col.name: row["replay_" + col.name] for col in replay.c},
+                scope=self._scope, decode_time=self._dialect.decode_database_time,
+            )
             if (replayed.session_key, replayed.request_digest) != (session_key, request_digest):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if observation is not None and not observation.expired:
                 return replayed.coordination(self._scope)
-        previous, observation = (None, None) if row["id"] is None else self.parse_receipt(row)
+        previous, observation = (None, None) if row["id"] is None else self.parse_receipt(row, scope=self._scope, decode_time=self._dialect.decode_database_time)
         if observation is not None and not observation.expired:
             return None
         if previous is not None and previous.request_key == request_key and previous.request_digest != request_digest:

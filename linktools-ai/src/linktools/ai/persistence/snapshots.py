@@ -264,7 +264,9 @@ class _StateSnapshotReader:
                 for row in page:
                     split = row["turn_slot_kind"] == SESSION and row["turn_session_owner_id"] is None
                     if split:
-                        proof, _ = SplitSessionTurnTransactions(transaction, turn_scope).parse_receipt(row)
+                        proof, _ = SplitSessionTurnTransactions.parse_receipt(
+                            row, scope=turn_scope, decode_time=_utc,
+                        )
                     elif row["turn_slot_kind"] == SESSION:
                         if conversation is None:
                             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Native session receipt requires the shared Conversation group")
@@ -1690,7 +1692,7 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         execution_store = resources.stores.get(PersistenceDomain.EXECUTION)
         conversation_store = resources.stores.get(PersistenceDomain.CONVERSATION)
-        participants = (*resources.stores.values(), *resources.capability_stores.values())
+        participants = (*resources.stores.values(), *(resources.capability_stores or {}).values())
         coowned = type(execution_store) is SqlStateStore and all(
             type(store) is SqlStateStore and store.storage_group is execution_store.storage_group
             for store in participants

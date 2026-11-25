@@ -1381,9 +1381,10 @@ class _SqlTransaction:
                 # reclaiming its occupancy would orphan unpublished side effects.
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         _, logical = turn_session_address(session_key)
-        occupancy = StrictSessionOccupancy(session_store, record_key(
+        session_record_key = record_key(
             scope.namespace, scope.tenant_id, "conversation", "session", (logical.decode("utf-8"),),
-        ))
+        )
+        occupancy = StrictSessionOccupancy(session_store, session_record_key)
         try:
             if existing is not None:
                 current_token = current_row["turn_token"].decode("ascii")
@@ -1416,6 +1417,9 @@ class _SqlTransaction:
                 deadline = _initial_turn_deadline(dialect, insertion.expiry)
                 await self.insert_execution_shell(authority, expiry=deadline, receipt_values=insertion.receipt_values)
             else:
+                # The typed occupancy CAS already holds this SessionRecord row.
+                # Admit its history facts against the same revision without another guard write.
+                session_tx._guarded_record_revisions[session_record_key] = row["target_revision"]
                 control_id = await publish(insertion)
                 if type(control_id) is not int or control_id <= 0 or insertion.control_id != control_id:
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)

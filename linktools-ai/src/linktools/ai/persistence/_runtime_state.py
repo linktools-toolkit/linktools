@@ -458,7 +458,7 @@ class Persistence:
                         execution_store,
                         namespace=namespace, tenant_id=tenant_id,
                         read_only=read_only, require_ready=self._require_ready,
-                        _coowned=coowned,
+                        _coowned=coowned, _runtime_sql=sql_authority,
                         _native_session_store=materialized.stores[PersistenceDomain.CONVERSATION] if coowned else None,
                     )
                     self._coordination_backend = authority

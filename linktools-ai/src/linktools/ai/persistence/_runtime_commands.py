@@ -111,7 +111,7 @@ from ._step_archive import (
     StateStepArchive,
 )
 from ._repository_common import operation_identity_matches, validate_recovery_operation
-from .state import Observed, GroupRecordReader, StateGroupTransaction, StateStore, StateTransaction
+from .state import Observed, GroupRecordReader, StateGroupTransaction, StateStore, StateTransaction, StoredRecord
 
 _logger = environ.get_logger("ai.runtime.state.commands")
 
@@ -1482,6 +1482,18 @@ class StateCommands:
             observed=observed, turn=turns[0] if turns else None,
         )
 
+    @staticmethod
+    async def _guard_strict_session_fact_owner(transaction: StateTransaction, session_record: StoredRecord) -> None:
+        from ._sql import _SqlTransaction
+
+        if not isinstance(transaction, _SqlTransaction):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        guarded = await transaction.guard_record_revision(
+            session_record.key, expected_storage_revision=session_record.storage_revision,
+        )
+        if guarded is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
     async def commit_start_checkpoint(
         self,
         claim: ExecutionStartClaim,
@@ -1516,7 +1528,7 @@ class StateCommands:
                     session_transaction = group.transaction(self._conversation.state_store)
                     if strict_turn_fence is not None:
                         # Same read boundary as the legacy SessionRecord read.
-                        _, session, occupancy = await self._conversation.read_strict_turn_session_in_transaction(
+                        session_record, session, occupancy = await self._conversation.read_strict_turn_session_in_transaction(
                             session_transaction, session_id, tenant_id=self._tenant_id,
                             execution_store=self._execution.state_store,
                         )
@@ -1531,6 +1543,7 @@ class StateCommands:
                         await strict_turn_fence.guard(claim.execution_id)
                         started = await self._execution.claim_start_in_transaction(transaction, claim)
                         if session.active_execution_id is None:
+                            await self._guard_strict_session_fact_owner(session_transaction, session_record)
                             await self._conversation.publish_strict_turn_in_transaction(
                                 session_transaction, session, claim.execution_id, admitted_turn=admitted_turn,
                             )
@@ -3010,10 +3023,18 @@ class StateCommands:
         async def mutate(group: StateGroupTransaction) -> ExecutionRecord:
             nonlocal resolved, rejected
             if expected_session is not None:
-                session = await self._conversation.get_in_transaction(
-                    group.transaction(self._conversation.state_store),
-                    expected_session.session_id, tenant_id=self._tenant_id,
-                )
+                session_transaction = group.transaction(self._conversation.state_store)
+                if strict_session_request_key is not None:
+                    session_record, session, occupancy = await self._conversation.read_strict_turn_session_in_transaction(
+                        session_transaction, expected_session.session_id, tenant_id=self._tenant_id,
+                        execution_store=self._execution.state_store,
+                    )
+                    if occupancy.execution_id != initial.execution_id or occupancy.fence != authority.fence:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                else:
+                    session = await self._conversation.get_in_transaction(
+                        session_transaction, expected_session.session_id, tenant_id=self._tenant_id,
+                    )
                 if session != expected_session:
                     rejected = True
                     raise AIError(ErrorCode.SESSION_BUSY)
@@ -3032,8 +3053,9 @@ class StateCommands:
                 started = await self._execution.claim_start_in_transaction(
                     group.transaction(self._execution.state_store), claim,
                 )
+                await self._guard_strict_session_fact_owner(session_transaction, session_record)
                 await self._conversation.publish_strict_turn_in_transaction(
-                    group.transaction(self._conversation.state_store), session,
+                    session_transaction, session,
                     initial.execution_id, admitted_turn=None,
                 )
             else:

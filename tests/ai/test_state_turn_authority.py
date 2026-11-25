@@ -70,7 +70,10 @@ class _RuntimeFixtureAuthority(StateTurnCoordination):
 
 
 def _backend(store):
-    return _RuntimeFixtureAuthority(store, namespace="turn-authority", tenant_id="tenant")
+    from linktools.ai.persistence._sql import SqlStateStore
+
+    return _RuntimeFixtureAuthority(store, namespace="turn-authority", tenant_id="tenant",
+                                    _runtime_sql=type(store) is SqlStateStore)
 
 
 async def _authority_records(store, *, namespace="turn-authority", tenant_id="tenant"):
@@ -999,7 +1002,7 @@ async def test_pending_turn_uses_local_scope_with_maximum_namespace_and_compound
             store = await store.storage_group._open_partition(state_store_key(namespace, tenant, "execution"))
             request_key = _request(request_key)
             session_key = "request:" + request_key
-        authority = StateTurnCoordination(store, namespace=namespace, tenant_id=tenant)
+        authority = StateTurnCoordination(store, namespace=namespace, tenant_id=tenant, _runtime_sql=(backend == "sql"))
         coordinator = PendingTurnCoordination(None, authority, namespace=namespace, tenant_id=tenant)
         lifetime = coordinator.enter(session_key=session_key, request_key=request_key,
                                      request_digest=_request("digest") if backend == "sql" else "digest",

@@ -207,14 +207,14 @@ class StateTurnCoordination:
     def __init__(
         self, store: StateStore, *, namespace: str, tenant_id: str,
         read_only: bool = False, require_ready: Callable[[], None] | None = None,
-        _coowned: bool = False, _native_session_store: SqlStateStore | None = None,
+        _coowned: bool = False, _native_session_store: SqlStateStore | None = None, _runtime_sql: bool = False,
     ) -> None:
         from ._turn_sql_schema import RUNTIME_TURN_SCOPE
 
         self._read_only = read_only
         self._require_ready = require_ready
         self._store = store
-        self._runtime_sql = (type(store) is SqlStateStore and
+        self._runtime_sql = ((_runtime_sql or _coowned) and type(store) is SqlStateStore and
                              store.store_key == state_store_key(namespace, tenant_id, "execution"))
         if _coowned and not self._runtime_sql:
             raise ValueError("coowned Runtime receipts require the SQL Execution partition")

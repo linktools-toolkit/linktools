@@ -29,7 +29,7 @@ _SCOPE = TurnScopeIdentity("namespace", "tenant", RUNTIME_TURN_SCOPE)
 
 async def _bind(store):
     store = await store.storage_group._open_partition(state_store_key(_SCOPE.namespace, _SCOPE.tenant_id, "execution"))
-    return store, StateTurnCoordination(store, namespace=_SCOPE.namespace, tenant_id=_SCOPE.tenant_id)
+    return store, StateTurnCoordination(store, namespace=_SCOPE.namespace, tenant_id=_SCOPE.tenant_id, _runtime_sql=True)
 
 
 async def _claim(authority, slot, request, execution, *, owner=None, seconds=60):
@@ -40,7 +40,9 @@ async def _claim(authority, slot, request, execution, *, owner=None, seconds=60)
 
 
 async def _receipt(store, execution):
-    return await store.read(lambda tx: SplitSessionTurnTransactions(tx, _SCOPE).read(route="execution", identity=execution))
+    return await store.read(lambda _: SplitSessionTurnTransactions(store._turn_transaction(), _SCOPE).read(
+        route="execution", identity=execution,
+    ))
 
 
 def test_mysql57_turn_identity_indexes_fit_exact_binary_keys() -> None:
@@ -200,7 +202,7 @@ async def test_live_replay_and_busy_do_not_write_or_consume_the_new_request(tmp_
     async with _open_store("sql", tmp_path) as store:
         store = await store.storage_group._open_partition(state_store_key(scope.namespace, scope.tenant_id, "execution"))
         store.bind_runtime_turn_scope(scope)
-        authority = StateTurnCoordination(store, namespace=scope.namespace, tenant_id=scope.tenant_id)
+        authority = StateTurnCoordination(store, namespace=scope.namespace, tenant_id=scope.tenant_id, _runtime_sql=True)
 
         async def claim(session, request, execution):
             return await authority.claim_turn(

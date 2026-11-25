@@ -55,7 +55,7 @@ def _receipt(proof, *, session):
 async def _session(state, identity, *, active=None, fence=0, split=False):
     now = datetime.now(timezone.utc)
     await state.conversation.sessions.create(
-        SessionRecord(identity, "owner", SessionStatus.OPEN, 0, None, {}, now, now, None, None, "agent", tenant_id=_SCOPE.tenant_id)
+        SessionRecord(identity, "owner", SessionStatus.OPEN, 0, None, {}, now, now, None, None, "agent")
     )
     store = state.snapshot_resources().stores[PersistenceDomain.CONVERSATION]
     table = store.storage_group.metadata.tables["ai_state_records"]
