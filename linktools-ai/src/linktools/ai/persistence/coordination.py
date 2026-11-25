@@ -218,7 +218,7 @@ class PendingTurnCoordination:
         Publication neither confirms ownership nor promises cache retention.
         Readers confirm authority after reading these generation-scoped bytes.
         """
-        if type(request_identity_version) is not int or request_identity_version not in (1, 2):
+        if request_identity_version != 2:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if coordination.lease is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -272,14 +272,9 @@ class PendingTurnCoordination:
         current = await self._read_request(request_key, tenant_id=tenant_id)
         return None if current is None else current[0]
 
-    async def read_request_identity_version(self, request_key: str, *, tenant_id: str) -> int | None:
-        """Read the live owner's projection version without inferring absence from a lost view."""
-        current = await self._read_request(request_key, tenant_id=tenant_id)
-        return None if current is None else current[2]
-
     async def _read_request(
         self, request_key: str, *, tenant_id: str,
-    ) -> tuple[ExecutionRecord, TurnCoordination, int] | None:
+    ) -> tuple[ExecutionRecord, TurnCoordination] | None:
         if tenant_id != self._tenant_id:
             return None
         if not isinstance(self._backend, TurnAdmissionReader):
@@ -314,7 +309,7 @@ class PendingTurnCoordination:
             return receipt, None
         if pending is None or not self._same_generation(confirmed, owner):
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        return None, pending[0]
+        return None, pending
 
     async def read_session_owner(
         self, session_id: str, *, tenant_id: str,
@@ -351,7 +346,7 @@ class PendingTurnCoordination:
         current = await self._read_execution(execution_id)
         if current is None:
             return None
-        record, coordination, _ = current
+        record, coordination = current
         if (record.agent_run_seq != 1 or record.producer_generation < 1
                 or record.producer_claim_id is None
                 or record.producer_claim_id != coordination.owner_id):
@@ -401,7 +396,7 @@ class PendingTurnCoordination:
                 return None
             if cache_error is not None:
                 raise cache_error
-            record = None if pending is None else pending[0]
+            record = pending
         else:
             current = await self._read_execution(pointer["execution_id"], owner_id=pointer["owner_id"])
             record = None if current is None else current[0]
@@ -409,7 +404,7 @@ class PendingTurnCoordination:
 
     async def _read_execution(
         self, execution_id: str, *, owner_id: str | None = None,
-    ) -> tuple[ExecutionRecord, TurnCoordination, int] | None:
+    ) -> tuple[ExecutionRecord, TurnCoordination] | None:
         current = await self._backend.read_turn(self._scope, execution_id)
         if (
             current is None or current.execution_id != execution_id
@@ -422,12 +417,11 @@ class PendingTurnCoordination:
         confirmed = await self._backend.read_turn(self._scope, execution_id)
         if confirmed is None or not self._same_generation(confirmed, current):
             return None
-        record, identity_version = pending
-        return record, confirmed, identity_version
+        return pending, confirmed
 
     async def _read_pending_bytes(
         self, current: TurnCoordination, *, fence: int | None = None,
-    ) -> tuple[ExecutionRecord, int] | None:
+    ) -> ExecutionRecord | None:
         if self._cache is None:
             return None
         content = await self._cache.get(self._record_key(current))
@@ -443,8 +437,7 @@ class PendingTurnCoordination:
                 or (fence is not None and (type(envelope.get("fence")) is not int or envelope["fence"] != fence))
             ):
                 return None
-            identity_version = envelope.get("request_identity_version", 1)
-            if type(identity_version) is not int or identity_version not in (1, 2):
+            if envelope.get("request_identity_version") != 2:
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             record = decode_domain(envelope.get("record"), ExecutionRecord)
             if (
@@ -456,7 +449,7 @@ class PendingTurnCoordination:
                 return None
         except (AIError, TypeError, ValueError):
             return None
-        return record, identity_version
+        return record
 
     async def cancel(self, execution_id: str, *, tenant_id: str) -> bool:
         if tenant_id != self._tenant_id:

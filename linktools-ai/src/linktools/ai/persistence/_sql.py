@@ -36,6 +36,7 @@ from ._content_reference_projection import (
 from ._record_owner import EXECUTION_SHELL_KIND, RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
+from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES
 from .state import state_content_members
 from .state import (
     FactQuery,

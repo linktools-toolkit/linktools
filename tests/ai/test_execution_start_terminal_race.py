@@ -79,6 +79,7 @@ async def test_start_replay_refreshes_only_a_mixed_terminal_view(
             if corruption == "request":
                 return replace(record, request_digest="0" * 64)
             if corruption == "identity_version":
+                # A mixed terminal read cannot change the canonical request encoding.
                 return replace(record, request_identity_version=1)
             return record
 

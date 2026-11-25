@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
@@ -25,7 +25,8 @@ from linktools.ai.persistence._repository_common import domain_data
 from linktools.ai.persistence.codec import _decode_enveloped_domain, decode_envelope, encode_envelope
 from linktools.ai.persistence.contracts import ApprovalRecord, ExternalCallRecord, ExecutionEventRecord
 from linktools.ai.persistence.state import record_key
-from linktools.ai.runtime._execution import DefaultExecutionService, ExecutionStartIdentity
+from linktools.ai.persistence.coordination import read_admission_request
+from linktools.ai.runtime._execution import ExecutionStartIdentity
 from linktools.ai.storage import StoredPayload
 
 from .test_runtime_persistence_evidence import _execution
@@ -129,16 +130,13 @@ def test_raw_execution_keys_are_hidden_in_claims_and_event_repr() -> None:
 @pytest.mark.asyncio
 async def test_remote_turn_lookup_compacts_scope_and_key_without_delimiter_collisions() -> None:
     repository = SimpleNamespace(get=AsyncMock(return_value=None))
-    coordination = SimpleNamespace(supports_pending_views=True, supports_request_lookup=True,
-        read_request_identity_version=AsyncMock(return_value=2))
-    service = object.__new__(DefaultExecutionService)
-    service._state = SimpleNamespace(idempotency=repository)
-    service._runtime_bridge = SimpleNamespace(pending_turns=SimpleNamespace(
-        peek_request=Mock(return_value=None), coordination=coordination))
+    coordination = SimpleNamespace(
+        _tenant_id="tenant", _state_authority=None, _read_request=AsyncMock(return_value=None),
+    )
     pairs = (("a:b", "c"), ("a", "b:c"), ("s" * 128, KEY))
     for scope, key in pairs:
-        assert await service._request_identity(scope, key, tenant_id="tenant", include_remote=True) == (2, None)
-    requests = [call.args[0] for call in coordination.read_request_identity_version.call_args_list]
+        assert await read_admission_request(repository, coordination, scope=scope, key=key, tenant_id="tenant") == (None, None)
+    requests = [call.args[0] for call in coordination._read_request.call_args_list]
     assert requests == [canonical_sha256(list(pair)) for pair in pairs]
     assert len(set(requests)) == len(pairs)
     assert all(len(key) <= 385 and len("request:" + key) <= 393 for key in requests)
