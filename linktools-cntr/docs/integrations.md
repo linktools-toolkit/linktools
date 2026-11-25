@@ -393,6 +393,7 @@ requires a configured root and does not prefix an empty root, `_`, or
 The built-in HTTPS configuration requires a DNS root such as `example.com`
 even when wildcard routing is off. Nginx validates that input before the
 certificate build. HTTP route placeholders are not certificate names.
+Container templates continue to read the shared `NGINX_ROOT_DOMAIN` field.
 Consumers that need the configured DNS root (rather than a site's routing
 name or URL) use `Nginx.root_domain(config)`. It raises a configuration error
 if the DNS root is unavailable unless an explicit `default` is provided.

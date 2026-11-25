@@ -1,5 +1,5 @@
 totp:
-  issuer: {{ container.root_domain | tojson }}
+  issuer: {{ (NGINX_ROOT_DOMAIN ~ '') | tojson }}
   period: 30
   skew: 1
   algorithm: sha1

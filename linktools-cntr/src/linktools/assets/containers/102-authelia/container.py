@@ -158,14 +158,10 @@ class Container(BaseContainer):
         return tuple(sorted(redirects))
 
     @cached_property
-    def root_domain(self) -> str:
-        return Nginx.root_domain(self.config)
-
-    @cached_property
     def acl_config(self) -> str:
+        root = Nginx.root_domain(self.config)
         policy = "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor"
         rules = list(self.acl_rules)
-        root = self.root_domain
         rules.append({
             "domain": [root, "*." + root],
             "subject": ["group:admin", "group:admins", "group:super-admin"],
