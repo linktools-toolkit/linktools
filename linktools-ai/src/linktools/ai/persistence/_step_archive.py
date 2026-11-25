@@ -2967,8 +2967,8 @@ class StateStepArchive(AgentRunStore):
             self.remember_run_registration(source)
             from ._official_step_reader import OfficialStepReader
             run = OfficialStepReader.project_run(source)
-        await self._sync_projection_in_transaction(
-            transaction, run, events=events, checkpoints=(),
+        await StateStepArchive._sync_projection_in_transaction(
+            self, transaction, run, events=events, checkpoints=(),
             canonical_turn=(turns, key, generation),
         )
         return run
@@ -3003,8 +3003,8 @@ class StateStepArchive(AgentRunStore):
             self.remember_run_registration(source)
             from ._official_step_reader import OfficialStepReader
             run = OfficialStepReader.project_run(source)
-        await self._sync_projection_in_transaction(
-            transaction, run, events=events, checkpoints=(), canonical_terminal=True,
+        await StateStepArchive._sync_projection_in_transaction(
+            self, transaction, run, events=events, checkpoints=(), canonical_terminal=True,
         )
         return run
 

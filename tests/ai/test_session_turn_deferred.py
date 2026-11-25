@@ -9,7 +9,7 @@ from pydantic_ai.exceptions import ApprovalRequired, CallDeferred
 from pydantic_ai.messages import ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
 
 from linktools.ai.capability import AgentContext
-from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExternalCallStatus, TenantAuthorizationPolicy, ToolOperationStatus
+from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExternalCallStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest, ExternalCallSucceeded, ExternalSupplyRequest
 from linktools.ai.persistence.turns import SessionTurnKey
@@ -50,7 +50,7 @@ async def test_canonical_deferred_outcome_uses_original_turn_and_pending_leaf(
     database = tmp_path / "canonical-deferred.db"
     policy = _SessionAuthorization()
     async with _runtime(database, model, checked, authorization=policy) as (runtime, persistence, steps):
-        principal = runtime.default_principal
+        principal = Principal("deferred-operator", runtime.tenant_id)
         await runtime.sessions.create_turn_session("chat", principal=principal)
         turn_id = await runtime.sessions.start_turn(
             "chat", "question", agent="default", principal=principal, idempotency_key="original",
@@ -88,7 +88,7 @@ async def test_canonical_deferred_outcome_uses_original_turn_and_pending_leaf(
         await runtime.handoff()
 
     async with _runtime(database, model, checked, authorization=policy) as (runtime, persistence, _steps):
-        principal = runtime.default_principal
+        principal = Principal("deferred-operator", runtime.tenant_id)
         assert await persistence.session_turns.get_waiting_turn(key) == frontier
         if resolution == "denied":
             pending, = await runtime.approvals.list(key, principal=principal)
