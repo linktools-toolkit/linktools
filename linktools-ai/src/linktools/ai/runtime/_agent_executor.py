@@ -1271,7 +1271,7 @@ async def _materialize_agent(
             return capability.bind(
                 [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
                 backend=scope.workspace_backend, limits=scope.limits,
-                model_binding=compiled_agent.model, bounded_text_read=scope.regenerable,
+                model_binding=compiled_agent.model, bounded_previews=scope.regenerable,
                 wrap_toolset=wrap_workspace_toolset,
             )
         return capability
