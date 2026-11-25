@@ -11,7 +11,7 @@ from threading import RLock
 from typing import TYPE_CHECKING, Literal
 from weakref import finalize
 
-from ..core import canonical_json_bytes, canonical_sha256, validate_idempotency_key
+from ..core import canonical_json_bytes, canonical_sha256, semantic_json_sha256, validate_idempotency_key
 from ..errors import AIError, ErrorCode
 from ..model import ordinary_transcript_size
 from ..storage import (
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 SESSION_TABLE = "ai_sessions"
 SESSION_TURN_TABLE = "ai_session_turns"
+SESSION_BINDING_TABLE = "ai_session_bindings"
 TerminalState = Literal["succeeded", "failed", "cancelled"]
 _CONTEXT_POSITIONS = 128
 _HISTORY_CACHE_BYTES = 16 * 1024 * 1024
@@ -82,7 +83,7 @@ class _ContextWindow:
 
 
 def build_session_turn_sql_metadata(metadata: MetaData) -> None:
-    from sqlalchemy import JSON, BigInteger, Column, String, Table
+    from sqlalchemy import JSON, BigInteger, Column, PrimaryKeyConstraint, String, Table
 
     def key(name: str, size: int, description: str, *, nullable: bool = False) -> Column:
         return Column(name, sql_binary_key(size), nullable=nullable, comment=description)
@@ -104,6 +105,17 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
     sql_unique(session, "scope_key", "session_key")
     sql_audit_indexes(session)
 
+    Table(
+        SESSION_BINDING_TABLE, metadata,
+        key("scope_key", 32, "Partition of one tenant in the configured session store."),
+        key("binding_key", 32, "Content identity of the frozen compiled Agent binding."),
+        Column("binding_json", JSON(), nullable=False, comment="Immutable admitted Agent binding."),
+        *sql_audit_columns(),
+        PrimaryKeyConstraint("scope_key", "binding_key"),
+        comment="Shared frozen Agent bindings for regenerable conversation turns.",
+        **sql_table_options(),
+    )
+
     turn = Table(
         SESSION_TURN_TABLE, metadata, sql_id_column(),
         key("scope_key", 32, "Partition of one tenant in the configured session store."),
@@ -116,7 +128,8 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         Column("state", String(10), nullable=False, comment="Admission, cancellation or terminal state."),
         Column("generation", BigInteger, nullable=False, comment="Fencing generation of the accepted producer."),
         Column("lease_until", BigInteger, nullable=True, comment="Expiry in database-clock seconds since epoch."),
-        Column("request_json", JSON(), nullable=False, comment="Accepted principal, canonical request and frozen binding."),
+        key("binding_key", 32, "Frozen Agent binding in the same scope."),
+        Column("request_json", JSON(), nullable=False, comment="Accepted principal and canonical request."),
         Column("result_json", JSON(none_as_null=True), nullable=True,
                comment="Canonical terminal output and continuation material."),
         *sql_audit_columns(),
@@ -143,6 +156,7 @@ class SqlSessionTurnReader:
         self._scope = state_store_key(namespace, tenant_id, "regenerable-session")
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
+        self._bindings = metadata.tables[SESSION_BINDING_TABLE]
         self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
         self._recent_budget = _ContextBudget()
         self._recent_finalizer = finalize(self, _release_context_budget, self._recent_budget)
@@ -169,6 +183,20 @@ class SqlSessionTurnReader:
     async def get_turn(self, key: SessionTurnKey) -> RowMapping | None:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().filter_by(**self._turn_values(key)))).mappings().one_or_none()
+
+    def _bound_turns(self, *, extra=None):
+        turns, bindings = self._turns.c, self._bindings.c
+        same_binding = (turns.scope_key == bindings.scope_key) & (turns.binding_key == bindings.binding_key)
+        return self._turns.outerjoin(self._bindings, same_binding if extra is None else same_binding & extra)
+
+    async def get_turn_for_recovery(self, key: SessionTurnKey) -> RowMapping | None:
+        from sqlalchemy import select
+
+        statement = select(self._turns, self._bindings.c.binding_json).select_from(self._bound_turns()).where(
+            *(self._turns.c[name] == value for name, value in self._turn_values(key).items()),
+        )
+        async with self._context.engine.connect() as connection:
+            return (await connection.execute(statement)).mappings().one_or_none()
 
     def _history_view_select(self):
         from sqlalchemy import select
@@ -203,10 +231,17 @@ class SqlSessionTurnReader:
             return (await connection.execute(statement)).mappings().one_or_none()
 
     async def find_request(self, session_id: str, request_key: str) -> RowMapping | None:
+        from sqlalchemy import select
+
+        columns = self._turns.c
+        agent_id = self._bindings.c.binding_json[("agent_spec", "id")].as_string().label("agent_id")
+        statement = select(columns.turn_id, columns.request_json, agent_id).select_from(self._bound_turns()).where(
+            columns.scope_key == self._scope,
+            columns.session_key == self._key(session_id, TURN_SESSION_MAX_BYTES),
+            columns.request_key == self._key(request_key, TURN_REQUEST_MAX_BYTES),
+        )
         async with self._context.engine.connect() as connection:
-            return (await connection.execute(self._turns.select().filter_by(
-                **self._session_values(session_id), request_key=self._key(request_key, TURN_REQUEST_MAX_BYTES),
-            ))).mappings().one_or_none()
+            return (await connection.execute(statement)).mappings().one_or_none()
 
     async def history(
         self, session_id: str, *, through: int, limit: int, after: int = 0, only_success: bool = False,
@@ -296,17 +331,18 @@ class SqlSessionTurnReader:
         stored_input = type_coerce(
             case((succeeded, columns.request_json["input"])), columns.request_json.type,
         ).label("stored_input")
+        needs_instructions = columns.result_json["instructions_from_binding"].as_boolean().is_(True)
+        needs_system_prompt = columns.result_json["system_prompt_from_binding"].as_boolean().is_(True)
+        binding_json = self._bindings.c.binding_json
         instructions = type_coerce(case((
-            succeeded & columns.result_json["instructions_from_binding"].as_boolean().is_(True),
-            columns.request_json[("binding", "agent_spec", "instructions")],
-        )), columns.request_json.type).label("instructions")
+            needs_instructions, binding_json[("agent_spec", "instructions")],
+        )), binding_json.type).label("instructions")
         system_prompt = case((
-            succeeded & columns.result_json["system_prompt_from_binding"].as_boolean().is_(True),
-            columns.request_json[("binding", "agent_spec", "system_prompt")].as_string(),
+            needs_system_prompt, binding_json[("agent_spec", "system_prompt")].as_string(),
         )).label("system_prompt")
         statement = select(
             columns.turn_no, columns.state, prompt, stored_input, result, instructions, system_prompt,
-        ).where(
+        ).select_from(self._bound_turns(extra=succeeded & (needs_instructions | needs_system_prompt))).where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
                               after=after, through=through),
@@ -377,6 +413,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
     def __init__(self, context: SqlStorageContext, metadata: MetaData, *, namespace: str, tenant_id: str) -> None:
         super().__init__(context, metadata, namespace=namespace, tenant_id=tenant_id)
         self._now = sql_epoch_seconds()
+        self._committed_bindings: OrderedDict[bytes, None] = OrderedDict()
 
     def note_terminal_context(
         self, key: SessionTurnKey, *, turn_no: int, prompt: str | None, stored_input: JsonValue,
@@ -476,7 +513,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
     async def accept(
         self, key: SessionTurnKey, *, expected_revision: int, context_from: int, context_through: int,
-        request_key: str, request: JsonValue, lease_seconds: int,
+        request_key: str, request: JsonValue, binding: JsonValue, lease_seconds: int,
     ) -> bool:
         """Claim and record a turn atomically; a uniqueness failure rolls back the claim."""
         if lease_seconds < 1:
@@ -486,6 +523,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         session_key = self._session_values(key.session_id)
         turn_key = self._turn_values(key)
         encoded_request_key = self._key(request_key, TURN_REQUEST_MAX_BYTES)
+        binding_key = bytes.fromhex(semantic_json_sha256(binding))
 
         async def write(connection: AsyncSession) -> bool:
             claim = await connection.execute(self._sessions.update().filter_by(
@@ -494,14 +532,27 @@ class SqlSessionTurns(SqlSessionTurnReader):
             ).values(active_turn_id=turn_key["turn_id"], revision=expected_revision + 1))
             if claim.rowcount != 1:
                 return False
+            if binding_key not in self._committed_bindings:
+                await self._context.dialect.upsert(
+                    connection, table=self._bindings,
+                    values={"scope_key": self._scope, "binding_key": binding_key, "binding_json": binding},
+                    set_values={"binding_key": self._bindings.c.binding_key},
+                    index_elements=("scope_key", "binding_key"),
+                )
             await connection.execute(self._turns.insert().values(
-                **turn_key, request_key=encoded_request_key, turn_no=context_through + 1,
+                **turn_key, request_key=encoded_request_key, binding_key=binding_key, turn_no=context_through + 1,
                 context_from=context_from, context_through=context_through, state="accepted", generation=1,
                 lease_until=self._now + lease_seconds, request_json=request,
             ))
             return True
 
-        return await self._context.run_mutation(write, domain="session.accept")
+        accepted = await self._context.run_mutation(write, domain="session.accept")
+        if accepted:
+            self._committed_bindings[binding_key] = None
+            self._committed_bindings.move_to_end(binding_key)
+            if len(self._committed_bindings) > 128:
+                self._committed_bindings.popitem(last=False)
+        return accepted
 
     async def finish(
         self, key: SessionTurnKey, *, generation: int, turn_no: int, state: TerminalState, result: JsonValue,

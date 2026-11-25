@@ -7,6 +7,7 @@ import asyncio
 import pytest
 import pytest_asyncio
 from linktools.ai.persistence._session_turn_sql import (
+    SESSION_BINDING_TABLE,
     SESSION_TURN_TABLE,
     SessionTurnKey,
     SqlSessionTurns,
@@ -33,16 +34,19 @@ async def store(tmp_path):
         await engine.dispose()
 
 
+_BINDING = {"agent_spec": {"id": "test-agent", "instructions": ["frozen"]}}
+
+
 async def accept(turns: SqlSessionTurns, turn: str, *, revision: int = 0, through: int = 0, request: str = "send") -> bool:
     return await turns.accept(
         SessionTurnKey("chat", turn), expected_revision=revision, context_from=1, context_through=through,
-        request_key=request, request={"input": turn}, lease_seconds=60,
+        request_key=request, request={"input": turn}, binding=_BINDING, lease_seconds=60,
     )
 
 
 @pytest.mark.asyncio
 async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(store):
-    engine, _, turns = store
+    engine, metadata, turns = store
     statements = []
     commits = []
 
@@ -61,15 +65,24 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
     key = SessionTurnKey("chat", "turn")
     assert await accept(turns, key.turn_id)
     assert await turns.finish(key, generation=1, turn_no=1, state="succeeded", result={"answer": "two"})
-    assert statements == ["SELECT", "SELECT", "UPDATE", "INSERT", "UPDATE", "UPDATE"]
-    assert commits == [4, 6]
+    assert statements == ["SELECT", "SELECT", "UPDATE", "INSERT", "INSERT", "UPDATE", "UPDATE"]
+    assert commits == [5, 7]
+    assert await accept(turns, "second", revision=2, through=1, request="second")
+    assert statements[7:] == ["UPDATE", "INSERT"]
+    assert commits == [5, 7, 9]
 
     session = await turns.get_session("chat")
-    assert session["active_turn_id"] is None and session["last_turn_no"] == 1
+    assert session["active_turn_id"] == b"second" and session["last_turn_no"] == 1
     turn, = await turns.history("chat", through=1, limit=2)
     assert turn["request_json"] == {"input": "turn"}
     assert turn["result_json"] == {"answer": "two"}
-    assert (await turns.find_request("chat", "send"))["turn_id"] == b"turn"
+    replay = await turns.find_request("chat", "send")
+    assert replay["turn_id"] == b"turn" and replay["agent_id"] == "test-agent"
+    second = await turns.get_turn_for_recovery(SessionTurnKey("chat", "second"))
+    assert second["binding_key"] == turn["binding_key"] and second["binding_json"] == _BINDING
+    async with engine.connect() as connection:
+        table = metadata.tables[SESSION_BINDING_TABLE]
+        assert len((await connection.execute(table.select())).all()) == 1
 
 
 @pytest.mark.asyncio
@@ -178,7 +191,7 @@ async def test_admission_pins_selected_history_range_even_when_empty(store):
     key = SessionTurnKey("chat", "second")
     assert await turns.accept(
         key, expected_revision=2, context_from=2, context_through=1,
-        request_key="second", request={}, lease_seconds=60,
+        request_key="second", request={}, binding=_BINDING, lease_seconds=60,
     )
     admitted = await turns.get_turn(key)
     assert (admitted["context_from"], admitted["context_through"], admitted["turn_no"]) == (2, 1, 2)

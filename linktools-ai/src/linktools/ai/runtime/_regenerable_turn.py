@@ -312,7 +312,7 @@ class _RegenerableTurnRunner:
             if (
                 request["prompt"] != prompt or request["principal"] != asdict(principal)
                 or request["thinking"] != thinking or prior_files != normalized_files
-                or AgentBindingContract.from_payload(request["binding"]).agent_spec.id != agent_id
+                or prior["agent_id"] != agent_id
             ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return identity
@@ -395,7 +395,7 @@ class _RegenerableTurnRunner:
             )
             if session["active_turn_id"] != key.turn_id.encode("utf-8"):
                 return False
-            row = await self._store.get_turn(key)
+            row = await self._store.get_turn_for_recovery(key)
             if row is None or row["state"] not in ("accepted", "cancelling"):
                 return False
             request = row["request_json"]
@@ -459,7 +459,10 @@ class _RegenerableTurnRunner:
                 history.extend(decode_regenerable_turn(
                     restored, position.result, instructions=position.instructions, system_prompt=position.system_prompt,
                 ))
-            contract = AgentBindingContract.from_payload(request["binding"])
+            frozen_binding = row["binding_json"]
+            if frozen_binding is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted Agent binding is unavailable")
+            contract = AgentBindingContract.from_payload(frozen_binding)
             binding = await resolver.restore(contract)
             self._executor.require_regenerable(binding)
             if "repository_instructions" not in request or "cwd" not in request:
@@ -483,7 +486,8 @@ class _RegenerableTurnRunner:
                 return False
             turn = _AdmittedTurn(
                 key, row["turn_no"], prompt, history,
-                _TURN_BYTES - len(canonical_json_bytes(request)), session["revision"], repository_instructions, generation + 1,
+                _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding})),
+                session["revision"], repository_instructions, generation + 1,
                 model_prompt=None if isinstance(model_prompt, str) else model_prompt,
                 attachments=() if stored is None else stored_input_attachment_views(stored),
                 stored_input=request.get("input"),
@@ -648,10 +652,10 @@ class _RegenerableTurnRunner:
         if instruction_resolver is not None:
             repository_instructions = await instruction_resolver.resolve(cwd or ".")
             instruction_resolver.validate(repository_instructions)
-        request: JsonValue = {
+        frozen_binding = binding.binding_contract.to_payload()
+        request: dict[str, JsonValue] = {
             "prompt": prompt,
             "principal": asdict(context.principal),
-            "binding": binding.binding_contract.to_payload(),
             "thinking": thinking,
             "session_metadata": dict(context.session_metadata),
             "cwd": cwd,
@@ -676,7 +680,7 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "Attachment object storage is required")
             request["input"] = encode_domain(stored)
             attachments = stored_input_attachment_views(stored)
-        terminal_bytes = _TURN_BYTES - len(canonical_json_bytes(request))
+        terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding}))
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
@@ -701,7 +705,7 @@ class _RegenerableTurnRunner:
 
         if not await self._store.accept(
             key, expected_revision=revision, context_from=context_from, context_through=through,
-            request_key=request_key, request=request, lease_seconds=_LEASE_SECONDS,
+            request_key=request_key, request=request, binding=frozen_binding, lease_seconds=_LEASE_SECONDS,
         ):
             return None
         return _AdmittedTurn(

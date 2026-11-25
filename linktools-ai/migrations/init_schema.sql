@@ -566,6 +566,15 @@ CREATE TABLE ai_sessions (
 	UNIQUE INDEX uk_scope_key_session_key (scope_key, session_key)
 )ENGINE=InnoDB ROW_FORMAT=DYNAMIC COMMENT='Identity, configuration and publication head of a regenerable conversation.' CHARSET=utf8mb4 COLLATE utf8mb4_bin;
 
+CREATE TABLE ai_session_bindings (
+	scope_key VARBINARY(32) NOT NULL COMMENT 'Partition of one tenant in the configured session store.',
+	binding_key VARBINARY(32) NOT NULL COMMENT 'Content identity of the frozen compiled Agent binding.',
+	binding_json JSON NOT NULL COMMENT 'Immutable admitted Agent binding.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (scope_key, binding_key)
+)ENGINE=InnoDB ROW_FORMAT=DYNAMIC COMMENT='Shared frozen Agent bindings for regenerable conversation turns.' CHARSET=utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_session_turns (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	scope_key VARBINARY(32) NOT NULL COMMENT 'Partition of one tenant in the configured session store.',
@@ -578,7 +587,8 @@ CREATE TABLE ai_session_turns (
 	state VARCHAR(10) NOT NULL COMMENT 'Admission, cancellation or terminal state.',
 	generation BIGINT NOT NULL COMMENT 'Fencing generation of the accepted producer.',
 	lease_until BIGINT COMMENT 'Expiry in database-clock seconds since epoch.',
-	request_json JSON NOT NULL COMMENT 'Accepted principal, canonical request and frozen binding.',
+	binding_key VARBINARY(32) NOT NULL COMMENT 'Frozen Agent binding in the same scope.',
+	request_json JSON NOT NULL COMMENT 'Accepted principal and canonical request.',
 	result_json JSON COMMENT 'Canonical terminal output and continuation material.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,

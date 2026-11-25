@@ -1126,12 +1126,9 @@ async def _export_snapshot(
             if PersistenceDomain.EXECUTION not in source.object_stores:
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             await copy_reference(PersistenceDomain.EXECUTION, reference)
-    includes_lineage = source.ordinary_sessions is not None and any(
-        row["lineage_json"] is not None for row in source.ordinary_sessions["sessions"]
-    )
     manifest = {
         "kind": "runtime-storage-snapshot",
-        "format_version": 3 if includes_lineage else 2 if source.ordinary_sessions is not None else 1,
+        "format_version": 4 if source.ordinary_sessions is not None else 1,
         "namespace": source.namespace,
         "tenant_id": source.tenant_id,
         "domains": domains,
@@ -1148,9 +1145,7 @@ async def _export_snapshot(
     }
     if source.ordinary_sessions is not None:
         manifest["ordinary_sessions"] = {
-            name: [accept(row if includes_lineage or name != "sessions"
-                          else {key: value for key, value in row.items() if key != "lineage_json"})
-                   for row in rows]
+            name: [accept(row) for row in rows]
             for name, rows in source.ordinary_sessions.items()
         }
     for optional in ("native_messages", "native_checkpoints", "native_projections"):
@@ -1201,7 +1196,7 @@ async def restore_snapshot(
         or format_version < 1
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if format_version not in (1, 2, 3) or (format_version >= 2) != ("ordinary_sessions" in manifest):
+    if format_version not in (1, 4) or (format_version == 4) != ("ordinary_sessions" in manifest):
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if not isinstance(manifest.get("domains"), dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1217,9 +1212,7 @@ async def restore_snapshot(
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
     ordinary_sessions = (
-        decode_ordinary_snapshot(
-            manifest["ordinary_sessions"], tenant_id=tenant_id, include_lineage=format_version == 3,
-        ) if format_version >= 2 else None
+        decode_ordinary_snapshot(manifest["ordinary_sessions"], tenant_id=tenant_id) if format_version == 4 else None
     )
     if ordinary_sessions is not None and (
         not ordinary_sessions["sessions"] or PersistenceDomain.CONVERSATION.value not in manifest["domains"]
@@ -1961,7 +1954,7 @@ def snapshot_manifest_usage(
                 entries += len(rows)
     if "ordinary_sessions" in manifest:
         ordinary = manifest["ordinary_sessions"]
-        if not isinstance(ordinary, Mapping) or set(ordinary) != {"sessions", "turns"}:
+        if not isinstance(ordinary, Mapping) or set(ordinary) != {"bindings", "sessions", "turns"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for rows in ordinary.values():
             if not isinstance(rows, list):

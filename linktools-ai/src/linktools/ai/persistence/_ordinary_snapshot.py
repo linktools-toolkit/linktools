@@ -8,10 +8,10 @@ from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..core import Principal, RUNTIME_OBJECT_STORE_ID, canonical_json_bytes, validate_resource_id
+from ..core import Principal, RUNTIME_OBJECT_STORE_ID, canonical_json_bytes, semantic_json_sha256, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ._ordinary_lineage import decode_session_lineage, fork_segments
-from ._session_turn_sql import SESSION_TABLE, SESSION_TURN_TABLE
+from ._session_turn_sql import SESSION_BINDING_TABLE, SESSION_TABLE, SESSION_TURN_TABLE
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
 from ..model import decode_ordinary_transcript
@@ -29,9 +29,11 @@ _SESSION_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "active_turn_id": TURN
 _TURN_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "turn_id": TURN_EXECUTION_MAX_BYTES,
                 "request_key": TURN_REQUEST_MAX_BYTES}
 _SESSION_FIELDS = (*_SESSION_BINARY, "status", "revision", "last_turn_no", "config_json", "lineage_json", *_AUDIT)
-_TURN_FIELDS = (*_TURN_BINARY, "turn_no", "context_from", "context_through", "state", "generation",
+_BINDING_FIELDS = ("binding_key", "binding_json", *_AUDIT)
+_TURN_FIELDS = (*_TURN_BINARY, "binding_key", "turn_no", "context_from", "context_through", "state", "generation",
                 "request_json", "result_json", *_AUDIT)
-_TABLES = (("sessions", SESSION_TABLE, _SESSION_FIELDS, _SESSION_BINARY),
+_TABLES = (("bindings", SESSION_BINDING_TABLE, _BINDING_FIELDS, {}),
+           ("sessions", SESSION_TABLE, _SESSION_FIELDS, _SESSION_BINARY),
            ("turns", SESSION_TURN_TABLE, _TURN_FIELDS, _TURN_BINARY))
 _ACTIVE = {"accepted", "cancelling"}
 _TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -65,8 +67,11 @@ def _encode_row(row: Mapping[str, object], binary: Mapping[str, int]) -> dict[st
     for key in binary:
         if result[key] is not None:
             result[key] = result[key].decode("utf-8")
+    if "binding_key" in result:
+        result["binding_key"] = result["binding_key"].hex()
     for key in _AUDIT:
-        result[key] = _timestamp(result[key]).isoformat()
+        if key in result:
+            result[key] = _timestamp(result[key]).isoformat()
     return result
 
 
@@ -76,11 +81,12 @@ def _validate_text(value: object, width: int) -> str:
     return value
 
 
-def decode_ordinary_snapshot(value: object, *, tenant_id: str, include_lineage: bool = False) -> dict[str, list[dict[str, object]]]:
+def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list[dict[str, object]]]:
     """Validate and decode before opening the destination; exclude live lease values."""
-    if not isinstance(value, dict) or set(value) != {"sessions", "turns"}:
+    if not isinstance(value, dict) or set(value) != {"bindings", "sessions", "turns"}:
         raise _invalid()
-    decoded: dict[str, list[dict[str, object]]] = {"sessions": [], "turns": []}
+    decoded: dict[str, list[dict[str, object]]] = {"bindings": [], "sessions": [], "turns": []}
+    bindings: dict[bytes, dict[str, object]] = {}
     session_ids: dict[bytes, dict[str, object]] = {}
     turn_ids: set[bytes] = set()
     request_keys: set[tuple[bytes, bytes]] = set()
@@ -91,15 +97,18 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str, include_lineage: 
         if not isinstance(rows, list):
             raise _invalid()
         for wire in rows:
-            expected_fields = set(fields)
-            if section == "sessions" and not include_lineage:
-                expected_fields.remove("lineage_json")
-            if not isinstance(wire, dict) or wire.keys() != expected_fields:
+            if not isinstance(wire, dict) or wire.keys() != set(fields):
                 raise _invalid()
             row = dict(wire)
-            if section == "sessions":
-                row.setdefault("lineage_json", None)
             try:
+                if "binding_key" in row:
+                    text = row["binding_key"]
+                    if not isinstance(text, str) or len(text) != 64:
+                        raise _invalid()
+                    key = bytes.fromhex(text)
+                    if key.hex() != text:
+                        raise _invalid()
+                    row["binding_key"] = key
                 for key, width in binary.items():
                     if key == "active_turn_id" and row[key] is None:
                         continue
@@ -108,12 +117,22 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str, include_lineage: 
                         validate_resource_id(text)
                     row[key] = text.encode("utf-8")
                 for key in _AUDIT:
+                    if key not in row:
+                        continue
                     timestamp = datetime.fromisoformat(row[key])
                     if _timestamp(timestamp).isoformat() != row[key]:
                         raise _invalid()
                     row[key] = timestamp
             except (TypeError, ValueError, UnicodeError, AIError) as error:
                 raise _invalid() from error
+            if section == "bindings":
+                binding_key, payload = row["binding_key"], row["binding_json"]
+                if (binding_key in bindings or not isinstance(payload, dict)
+                        or semantic_json_sha256(payload) != binding_key.hex()):
+                    raise _invalid()
+                bindings[binding_key] = payload
+                decoded[section].append(row)
+                continue
             session_id = row["session_key"]
             if section == "sessions":
                 if (session_id in session_ids or row["status"] not in ("open", "closed")
@@ -135,8 +154,9 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str, include_lineage: 
                         or type(row["context_through"]) is not int or row["context_through"] != number - 1
                         or not 0 <= number - row["context_from"] <= 128
                         or not isinstance(request, dict) or not isinstance(request.get("prompt"), str)
-                        or not isinstance(request.get("binding"), dict)
-                        or len(canonical_json_bytes(request)) + len(canonical_json_bytes(result)) > 64 * 1024):
+                        or "binding" in request or row["binding_key"] not in bindings
+                        or len(canonical_json_bytes({**request, "binding": bindings[row["binding_key"]]}))
+                        + len(canonical_json_bytes(result)) > 64 * 1024):
                     raise _invalid()
                 try:
                     principal = Principal(**request["principal"])
@@ -158,7 +178,7 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str, include_lineage: 
                         if not isinstance(result, (dict, list)):
                             raise _invalid()
                         if isinstance(result, dict):
-                            spec = request["binding"].get("agent_spec")
+                            spec = bindings[row["binding_key"]].get("agent_spec")
                             if not isinstance(spec, dict):
                                 raise _invalid()
                             frozen = {}
@@ -235,12 +255,15 @@ async def capture_ordinary_snapshot(
         for section, table_name, fields, binary in _TABLES:
             table = metadata.tables[table_name]
             output: list[dict[str, object]] = []
-            after = 0
+            ordering = table.c.binding_key if section == "bindings" else table.c.id
+            extra = () if section == "bindings" else (ordering,)
+            after = None
             while True:
                 limit = page_size(16)
-                statement = select(table.c.id, *(table.c[name] for name in fields)).where(
-                    table.c.scope_key == scope, table.c.id > after,
-                ).order_by(table.c.id).limit(limit)
+                statement = select(*extra, *(table.c[name] for name in fields)).where(table.c.scope_key == scope)
+                if after is not None:
+                    statement = statement.where(ordering > after)
+                statement = statement.order_by(ordering).limit(limit)
                 rows = await transaction.read_sql_rows(store.context, statement)
                 for row in rows:
                     wire = _encode_row({key: row[key] for key in fields}, binary)
@@ -248,12 +271,12 @@ async def capture_ordinary_snapshot(
                     output.append(wire)
                 if len(rows) < limit:
                     break
-                after = rows[-1]["id"]
+                after = rows[-1][ordering.key]
             result[section] = output
         return result
 
     wire = await store.read(capture)
-    decode_ordinary_snapshot(wire, tenant_id=tenant_id, include_lineage=True)
+    decode_ordinary_snapshot(wire, tenant_id=tenant_id)
     return wire
 
 
