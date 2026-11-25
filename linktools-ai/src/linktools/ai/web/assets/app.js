@@ -380,42 +380,53 @@ function ordinaryOccupancy(watch, revision, turn, lastTurn) {
   if(state.session && revision>=state.session.revision)Object.assign(state.session,watch.snapshot);
 }
 async function catchUpOrdinary(watch) {
+  watch.needsCatchUp=true;
   if(watch.catchUp)return watch.catchUp;
   const current=()=>sessionWatch===watch && state.selectedSession===watch.id;
   const read=(async()=>{
-    // Keep a completed pre-gap watermark, not the highest received event:
-    // a terminal frame can overtake the history read during reconnection.
-    const after=watch.committedThrough;
-    const payload=await readSession(watch.id);
-    if(!current() || !acceptSession(payload))return;
-    const through=payload.session.last_turn_no;
-    let timeline=payload.timeline;
-    for(;;){
-      const items=timeline?.items || [];
-      for(const turn of items){
-        if((after===null || turn.turn_no>after)
-          && !state.turns.some(row=>row.turn_id===turn.turn_id && row.conversation_committed))patchOrdinaryTurn(turn);
-      }
-      if(after===null && !state.hasEarlierTurns){
-        state.turnCursor=timeline?.next_cursor || null;
-        $('turns-more').hidden=!state.turnCursor;
-      }
-      const cursor=timeline?.next_cursor;
-      if(after===null || !cursor || !items.length || items[0].turn_no<=after+1)break;
-      const earlier=await api(sessionURL(watch.id,'',{limit:'50',cursor}));
-      if(!current())return;
-      timeline=earlier.timeline;
+    while(current() && watch.needsCatchUp){
+      watch.needsCatchUp=false;
+      await readOrdinaryGap(watch,current);
     }
-    if(Number.isSafeInteger(through))watch.committedThrough=Math.max(watch.committedThrough ?? 0,through);
-    const active=state.session?.active_turn_id;
-    if(active && !state.turns.some(row=>row.turn_id===active)) {
-      const turn=await api(sessionURL(watch.id,'',{turn_id:active}));
-      if(current() && state.session?.active_turn_id===active)patchOrdinaryTurn(turn);
-    }
-    renderList();setDisabled();
   })();
   watch.catchUp=read;
   try {await read;} finally {if(watch.catchUp===read)watch.catchUp=null;}
+}
+async function readOrdinaryGap(watch,current) {
+  // Keep a completed pre-gap watermark, not the highest received event:
+  // a terminal frame can overtake the history read during reconnection.
+  const after=watch.committedThrough;
+  const payload=await readSession(watch.id);
+  if(!current())return;
+  // A newer read may already own occupancy. This authorized page still
+  // fills its range of committed history, regardless of read generation.
+  acceptSession(payload);
+  if(!payload.timeline)return;
+  const through=payload.session.last_turn_no;
+  let timeline=payload.timeline;
+  for(;;){
+    const items=timeline?.items || [];
+    for(const turn of items){
+      if((after===null || turn.turn_no>after)
+        && !state.turns.some(row=>row.turn_id===turn.turn_id && row.conversation_committed))patchOrdinaryTurn(turn);
+    }
+    if(after===null && !state.hasEarlierTurns){
+      state.turnCursor=timeline?.next_cursor || null;
+      $('turns-more').hidden=!state.turnCursor;
+    }
+    const cursor=timeline?.next_cursor;
+    if(after===null || !cursor || !items.length || items[0].turn_no<=after+1)break;
+    const earlier=await api(sessionURL(watch.id,'',{limit:'50',cursor}));
+    if(!current())return;
+    timeline=earlier.timeline;
+  }
+  if(Number.isSafeInteger(through))watch.committedThrough=Math.max(watch.committedThrough ?? 0,through);
+  const active=state.session?.active_turn_id;
+  if(active && !state.turns.some(row=>row.turn_id===active)) {
+    const turn=await api(sessionURL(watch.id,'',{turn_id:active}));
+    if(current() && state.session?.active_turn_id===active)patchOrdinaryTurn(turn);
+  }
+  renderList();setDisabled();
 }
 function watchOrdinarySession(id) {
   stopSessionWatch();
@@ -426,7 +437,11 @@ function watchOrdinarySession(id) {
   source.addEventListener('session_error',event=>{
     if(!current())return;
     source.close();watch.ready=false;setDisabled();
-    try {notice(JSON.parse(event.data).error_code);}catch {notice('Conversation unavailable');}
+    try {
+      const code=JSON.parse(event.data).error_code;
+      notice(code==='EXECUTION_CONCURRENCY_LIMIT_EXCEEDED'
+        ? 'Too many conversations are being watched. Close another conversation or try Refresh.' : code);
+    } catch {notice('Conversation unavailable');}
   });
   source.onerror=()=>{if(current()){watch.ready=false;setDisabled();}};
   source.addEventListener('turn',event=>{
@@ -2493,7 +2508,10 @@ $('chat-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');$('actio
 $('activity-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();return loadDetail().catch(showError);};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
-$('refresh').onclick=()=>{if(state.config?.turn_sessions && state.view==='sessions')return openSelection(state.selectedSession,null).then(()=>loadList()).catch(showError);if(state.view==='sessions' && state.selectedSession && !hasExecutionStream(state.observedExecution))watchSession(state.selectedSession,{restart:true});if(!state.cancellationNoticeId)notice('');return (async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
+$('refresh').onclick=()=>{if(state.config?.turn_sessions && state.view==='sessions'){
+    if(sessionWatch?.source.readyState===EventSource.CLOSED)stopSessionWatch();
+    return openSelection(state.selectedSession,null).then(()=>loadList()).catch(showError);
+  }if(state.view==='sessions' && state.selectedSession && !hasExecutionStream(state.observedExecution))watchSession(state.selectedSession,{restart:true});if(!state.cancellationNoticeId)notice('');return (async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
 let settingsRequest=null;
 $('settings').onclick=()=>{
   if(!settingsRequest)settingsRequest=api('/api/config').then(config=>{state.config=config;showSettings();}).catch(showError).finally(()=>{settingsRequest=null;});

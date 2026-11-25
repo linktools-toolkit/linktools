@@ -44,6 +44,7 @@ _CONTEXT_BYTES = 1024 * 1024
 _TERMINAL_RESERVE = 1024
 _LEASE_SECONDS = 60
 _TURN_SLOTS = BoundedSemaphore(4)
+_OBSERVER_SLOTS = BoundedSemaphore(128)
 _T = TypeVar("_T", bool, None)
 _logger = environ.get_logger(__name__)
 
@@ -122,11 +123,20 @@ class _RegenerableTurnRunner:
     def observe(self, session_id: str, callback: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
+        if not _OBSERVER_SLOTS.acquire(blocking=False):
+            raise AIError(ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED)
+
+        def listener(frame: dict[str, JsonValue]) -> None:
+            callback(frame)
+
         listeners = self._observers.setdefault(session_id, set())
-        listeners.add(callback)
+        listeners.add(listener)
 
         def close() -> None:
-            listeners.discard(callback)
+            if listener not in listeners:
+                return
+            listeners.remove(listener)
+            _OBSERVER_SLOTS.release()
             if not listeners and self._observers.get(session_id) is listeners:
                 self._observers.pop(session_id, None)
                 self._observed_revisions.pop(session_id, None)
@@ -562,13 +572,17 @@ class _RegenerableTurnRunner:
 
     async def close(self) -> None:
         self._closed = True
+        for listeners in self._observers.values():
+            count = len(listeners)
+            listeners.clear()
+            _OBSERVER_SLOTS.release(count)
+        self._observers.clear()
+        self._observed_revisions.clear()
         tasks = tuple(self._tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        self._observers.clear()
         self._lifecycle_observers.clear()
-        self._observed_revisions.clear()
 
     async def _settle_with_lease(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
