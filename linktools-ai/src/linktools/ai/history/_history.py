@@ -60,6 +60,8 @@ from ._service import DefaultExecutionHistoryService, _read_model_interaction_up
 from ..core import token_seed
 from ._transient import TransientExecutionHistoryStore
 from ._session_display_cache import SessionDisplayCache
+from ._ordinary_sessions import _OrdinarySessionHistory
+from ..persistence.turns import SqlSessionTurnReader
 from ..persistence.state import active_state_scope
 from ._session_timeline import (
     SessionTimelineTranscriptStore,
@@ -326,6 +328,7 @@ class History:
         pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
         pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
         cache: CacheBackend | None = None,
+        session_turn_reader: SqlSessionTurnReader | None = None,
     ) -> None:
         self._service = service
         self._subscriptions: set[_HistorySubscription] = set()
@@ -351,11 +354,45 @@ class History:
         self._pending_execution = pending_execution
         self._session_cursor_signer = (cursor_signer if namespace is None else
                                        HmacCursorSigner("session", token_seed(namespace)))
+        self._ordinary_sessions = (
+            None if session_turn_reader is None or authorization is None or self._session_cursor_signer is None
+            else _OrdinarySessionHistory(session_turn_reader, tenant_id, authorization, self._session_cursor_signer)
+        )
         self._display_cache = (
             None if conversation is None or executions is None or self._session_cursor_signer is None
             else SessionDisplayCache(conversation, executions, session_transcript_store,
                                      self._session_cursor_signer, cache, now=lambda: time.time())
         )
+
+    @property
+    def has_turn_sessions(self) -> bool:
+        """Whether this history reader can query ordinary SQL sessions."""
+        return self._ordinary_sessions is not None
+
+    def _require_ordinary_sessions(self) -> _OrdinarySessionHistory:
+        if self._closed or self._ordinary_sessions is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._ordinary_sessions
+
+    async def turn_sessions(
+        self, *, principal: Principal, cursor: str | None = None, limit: int = 100,
+    ) -> dict[str, JsonValue]:
+        """List SQL sessions visible to the principal."""
+        return await self._require_ordinary_sessions().sessions(principal=principal, cursor=cursor, limit=limit)
+
+    async def turn_session_state(self, session_id: str, *, principal: Principal) -> dict[str, JsonValue]:
+        """Read the authorized current session and its occupant without reading history."""
+        return await self._require_ordinary_sessions().session_state(session_id, principal=principal)
+
+    async def turn_session(
+        self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
+    ) -> dict[str, JsonValue]:
+        """Read an authorized page of committed turns, newest page first."""
+        return await self._require_ordinary_sessions().session(session_id, principal=principal, cursor=cursor, limit=limit)
+
+    async def turn_result(self, session_id: str, turn_id: str, *, principal: Principal) -> dict[str, JsonValue]:
+        """Read the requested turn by its own identity and authorized session."""
+        return await self._require_ordinary_sessions().turn_result(session_id, turn_id, principal=principal)
 
     async def read_model_interactions(
         self, execution_id: str, *, principal: Principal, identities: tuple[tuple[int, int], ...],
@@ -1768,6 +1805,7 @@ async def _open_runtime_history(
                                    else pending_coordination.read_session_execution),
         pending_execution=None if pending_coordination is None else pending_coordination.read_execution,
         conversation=selected_state.conversation,
+        session_turn_reader=selected_state.session_turn_reader,
         session_transcript_store=selected_state.run_store.conversation_persistence,
         cache=(selected_state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
             selected_state.plan.route(domain).retention is StorageRetentionMode.DURABLE

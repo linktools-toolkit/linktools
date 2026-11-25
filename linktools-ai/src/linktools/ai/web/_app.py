@@ -53,6 +53,9 @@ _HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
 }
+_TURN_SSE_LIMIT = 128
+_TURN_SSE_BUFFER = 256 * 1024
+
 _SSE_HEADERS = {
     **_HEADERS,
     "Cache-Control": _HEADERS["Cache-Control"] + ", no-transform",
@@ -360,6 +363,7 @@ class _Console:
         self.capabilities = tuple(capabilities)
         self._shutdown_event = shutdown_event
         self._session_notices = session_notices
+        self._turn_subscribers = 0
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
         )
@@ -374,11 +378,18 @@ class _Console:
             raise AIError(ErrorCode.EXECUTION_NOT_FOUND)
         return self.history
 
+    @property
+    def turn_sessions(self) -> bool:
+        if self.runtime is not None:
+            return self.runtime.sessions.supports_turn_sessions
+        return self.history is not None and self.history.has_turn_sessions
+
     async def config(self, request: Request) -> Response:
         return _json({
             **self.status,
             "runtime": self.runtime.status() if self.runtime is not None else None,
             "read_only": self.runtime is None,
+            "turn_sessions": self.turn_sessions,
             "capabilities": self.capabilities,
             "metric_names": _SUMMARY_METRICS,
         })
@@ -390,11 +401,22 @@ class _Console:
             runtime = self.require_runtime()
             payload = await _body(request)
             request.state.operation_id = _text(payload, "request_id")
+            if self.turn_sessions:
+                if payload.get("cwd"):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary conversations do not accept a working directory")
+                view = await runtime.sessions.create_turn_session(
+                    _text(payload, "session_id"), _text(payload, "agent_id", "default"),
+                    principal=self.principal, idempotency_key=request.state.operation_id,
+                    metadata={"title": _text(payload, "title", "New conversation")},
+                )
+                return _json(view, 201)
             view = await runtime.sessions.create_view(_text(payload, "agent_id", "default"), CreateSessionRequest(
                 self.principal, _text(payload, "session_id"), request.state.operation_id,
                 cwd=payload.get("cwd"), metadata={"title": _text(payload, "title", "New conversation")},
             ))
             return _json(view, 201)
+        if self.turn_sessions:
+            return _json(await self.require_history().turn_sessions(principal=self.principal, **_paging(request)))
         if self.runtime is not None:
             return _json(await self.runtime.sessions.list(ListSessionRequest(self.principal, **_paging(request))))
         # The read-only console lists the newest sessions by time, without pagination.
@@ -411,6 +433,18 @@ class _Console:
         include_timeline = request.query_params.get("include_timeline", "true")
         if include_timeline not in {"true", "false"}:
             raise ValueError("include_timeline must be true or false")
+        if self.turn_sessions:
+            if "execution_id" in request.query_params:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Identify the conversation turn with turn_id")
+            if "turn_id" in request.query_params:
+                turn = await history.turn_result(
+                    identity, _text(request.query_params, "turn_id"), principal=self.principal,
+                )
+                return _json(turn)
+            if include_timeline == "false":
+                session = await history.turn_session_state(identity, principal=self.principal)
+                return _json({"session": session, "timeline": None})
+            return _json(await history.turn_session(identity, principal=self.principal, **_paging(request)))
         if "execution_id" in request.query_params:
             execution_id = _text(request.query_params, "execution_id")
             turn_state = request.query_params.get("turn_state", "committed")
@@ -448,6 +482,20 @@ class _Console:
         request.state.operation_id = request_id
         if environ.debug:
             request.state.phase = f"session.{action}"
+        if self.turn_sessions:
+            if action == "messages":
+                if payload.get("planning") or payload.get("files"):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns accept text and thinking only")
+                turn_id = await runtime.sessions.start_turn(
+                    session_id, _text(payload, "prompt"), principal=self.principal,
+                    idempotency_key=request_id, thinking=payload.get("thinking"),
+                )
+                return _json({"turn_id": turn_id}, 202)
+            if action in {"cancel", "recover"}:
+                operation = runtime.sessions.cancel_turn if action == "cancel" else runtime.sessions.recover_turn
+                accepted = await operation(session_id, _text(payload, "turn_id"), principal=self.principal)
+                return _json({"accepted": accepted})
+            return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
         if action == "messages":
             execution = await runtime.sessions.start(
                 session_id, _text(payload, "prompt"), principal=self.principal,
@@ -468,9 +516,67 @@ class _Console:
             ))
         return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
 
+    def _turn_events(self, request: Request, identity: str, runtime: Runtime) -> Response:
+        async def stream() -> AsyncGenerator[str, None]:
+            if self._turn_subscribers >= _TURN_SSE_LIMIT:
+                yield _sse_frame("session_error", {"error_code": "EXECUTION_CONCURRENCY_LIMIT_EXCEEDED"})
+                return
+            self._turn_subscribers += 1
+            queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue(maxsize=_TURN_SSE_LIMIT)
+            buffered = 0
+            overflow = False
+            unsubscribe = None
+
+            def receive(value: Mapping[str, object]) -> None:
+                nonlocal buffered, overflow
+                if overflow:
+                    return
+                revision = value.get("revision")
+                frame = _sse_frame("turn", value, str(revision) if isinstance(revision, int) else None)
+                size = len(frame.encode("utf-8"))
+                if queue.full() or buffered + size > _TURN_SSE_BUFFER:
+                    overflow = True
+                    while not queue.empty():
+                        queue.get_nowait()
+                    buffered = 0
+                    queue.put_nowait(("", 0))
+                else:
+                    queue.put_nowait((frame, size))
+                    buffered += size
+
+            try:
+                # Subscribe before taking the authorized snapshot so an
+                # admission/commit racing the initial read cannot disappear.
+                unsubscribe = runtime.sessions.observe_turn_session(identity, receive)
+                snapshot = await self.require_history().turn_session_state(identity, principal=self.principal)
+                yield _sse_frame("turn", {"type": "snapshot", "session": snapshot}, str(snapshot["revision"]))
+                while True:
+                    try:
+                        async with asyncio.timeout(15):
+                            frame, size = await queue.get()
+                    except TimeoutError:
+                        yield ": heartbeat\n\n"
+                        continue
+                    buffered -= size
+                    if overflow:
+                        yield _sse_frame("turn", {"type": "gap"})
+                        return
+                    yield frame
+            except AIError as error:
+                _debug_error(request, error)
+                yield _sse_frame("session_error", {"error_code": error.code.value})
+            finally:
+                if unsubscribe is not None:
+                    unsubscribe()
+                self._turn_subscribers -= 1
+
+        return _SSEStream(stream(), self._shutdown_event)
+
     async def session_events(self, request: Request) -> Response:
         runtime = self.require_runtime()
         identity = _text(request.query_params, "session_id")
+        if self.turn_sessions:
+            return self._turn_events(request, identity, runtime)
         chat = request.query_params.get("view") == "chat"
         resume_id, resume_cursor = _session_execution_cursor(request.headers.get("last-event-id") if chat else None)
 

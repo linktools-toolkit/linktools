@@ -168,6 +168,29 @@ class SqlSessionTurnReader:
         async with self._context.engine.connect() as connection:
             return tuple((await connection.execute(statement)).mappings())
 
+    async def session_page(
+        self, *, owner_principal_id: str, before: int | None, limit: int,
+    ) -> tuple[RowMapping, ...]:
+        columns = self._sessions.c
+        where = columns.scope_key == self._scope
+        statement = self._sessions.select().where(
+            where, columns.owner_principal_id == self._key(owner_principal_id, 128),
+        )
+        if before is not None:
+            statement = statement.where(columns.id < before)
+        async with self._context.engine.connect() as connection:
+            return tuple((await connection.execute(statement.order_by(columns.id.desc()).limit(limit))).mappings())
+
+    async def turn_page(
+        self, session_id: str, *, through: int, limit: int,
+    ) -> tuple[RowMapping, ...]:
+        columns = self._turns.c
+        statement = self._turns.select().filter_by(**self._session_values(session_id)).where(
+            columns.turn_no <= through, columns.state.in_(("succeeded", "failed", "cancelled")),
+        ).order_by(columns.turn_no.desc()).limit(limit)
+        async with self._context.engine.connect() as connection:
+            return tuple((await connection.execute(statement)).mappings())
+
     async def recent_context(self, session_id: str, *, through: int) -> tuple[SessionContextTurn, ...]:
         """Read bounded candidates after the caller authorizes the current session head."""
         from sqlalchemy import select

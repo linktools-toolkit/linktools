@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 
 from linktools.core import environ
@@ -15,9 +16,10 @@ from sqlalchemy.exc import IntegrityError
 
 from ..agent import AgentBindingContract
 from ..capability import AgentContext
-from ..core import AuthorizationAction, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes
+from ..core import AuthorizationAction, ExecutionDeltaType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..persistence.turns import SessionTurnKey
+from ._agent_executor import LiveDelta
 from ._regenerable_transcript import decode_regenerable_turn, encode_regenerable_turn
 
 if TYPE_CHECKING:
@@ -27,7 +29,7 @@ if TYPE_CHECKING:
     from ..core import AuthorizationPolicy, PromptLimits, ThinkingValue
     from ..persistence.turns import SqlSessionTurns
     from ._agent_binding_resolver import _AgentBindingResolver
-    from ._agent_executor import AgentExecutor, EventSink
+    from ._agent_executor import AgentEmission, AgentExecutor, EventSink
 
 _TURN_BYTES = 64 * 1024
 _CONTEXT_BYTES = 1024 * 1024
@@ -44,6 +46,7 @@ class _AdmittedTurn:
     prompt: str
     history: list[ModelMessage]
     terminal_bytes: int
+    revision: int
     generation: int = 1
 
 
@@ -54,6 +57,75 @@ class _RegenerableTurnRunner:
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
         self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
         self._closed = False
+        self._observers: dict[str, set[Callable[[dict[str, JsonValue]], None]]] = {}
+
+    def observe(self, session_id: str, callback: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        listeners = self._observers.setdefault(session_id, set())
+        listeners.add(callback)
+
+        def close() -> None:
+            listeners.discard(callback)
+            if not listeners:
+                self._observers.pop(session_id, None)
+
+        return close
+
+    def _publish(self, session_id: str, frame: dict[str, JsonValue]) -> None:
+        for callback in tuple(self._observers.get(session_id, ())):
+            try:
+                callback(frame)
+            except Exception as error:
+                _logger.error("Session turn observer failed: %s", type(error).__name__)
+
+    def _admitted(self, turn: _AdmittedTurn) -> None:
+        self._publish(turn.key.session_id, {
+            "type": "admitted", "turn_id": turn.key.turn_id, "turn_no": turn.number,
+            "generation": turn.generation, "revision": turn.revision, "prompt": turn.prompt,
+        })
+
+    def _terminal(self, turn: _AdmittedTurn, state: str, *, output: JsonValue = None, error_code: str | None = None) -> None:
+        self._publish(turn.key.session_id, {
+            "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
+            "generation": turn.generation, "revision": turn.revision + 1,
+            "state": state, "prompt": turn.prompt, "output": output, "error_code": error_code,
+        })
+
+    async def create_session(
+        self, session_id: str, agent_id: str, *, principal: Principal, tenant_id: str,
+        authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
+        metadata: Mapping[str, JsonValue], request_key: str | None = None,
+    ) -> dict[str, JsonValue]:
+        if principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if any(key.startswith("linktools.ai.") for key in metadata):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        await authorization.authorize(principal, AuthorizationAction.SESSION_CREATE, ResourceRef(
+            ResourceKind.SESSION, session_id, tenant_id, principal.principal_id,
+        ))
+        self._executor.require_regenerable(await resolver.resolve_agent(agent_id))
+        config: JsonValue = {"metadata": dict(metadata), "create_request_key": request_key}
+        try:
+            await self._store.create(session_id, owner_principal_id=principal.principal_id, agent_id=agent_id, config=config)
+        except IntegrityError:
+            existing = await self._store.get_session(session_id)
+            if (
+                request_key is None or existing is None
+                or existing["owner_principal_id"] != principal.principal_id.encode("utf-8")
+                or existing["agent_id"] != agent_id.encode("utf-8")
+                or existing["config_json"] != config
+            ):
+                raise AIError(ErrorCode.SESSION_CONFLICT) from None
+            return {
+                "session_id": session_id, "agent_id": agent_id, "revision": existing["revision"],
+                "metadata": dict(metadata), "state": existing["status"],
+                "active_turn_id": None if existing["active_turn_id"] is None else existing["active_turn_id"].decode("utf-8"),
+            }
+        return {
+            "session_id": session_id, "agent_id": agent_id, "revision": 0, "metadata": dict(metadata),
+            "state": "open", "active_turn_id": None,
+        }
 
     async def start_session(
         self, session_id: str, *, principal: Principal, namespace: str, tenant_id: str,
@@ -187,10 +259,14 @@ class _RegenerableTurnRunner:
                     key, generation=generation, lease_seconds=_LEASE_SECONDS, cancelling=True,
                 ):
                     return False
-                return await self._store.finish(
-                    key, generation=generation + 1, turn_no=row["turn_no"], state="cancelled",
-                    result={"error_code": ErrorCode.EXECUTION_CANCELLED.value},
+                code = ErrorCode.EXECUTION_CANCELLED.value
+                finished = await self._store.finish(
+                    key, generation=generation + 1, turn_no=row["turn_no"], state="cancelled", result={"error_code": code},
                 )
+                if finished:
+                    turn = _AdmittedTurn(key, row["turn_no"], request["prompt"], [], 0, session["revision"], generation + 1)
+                    self._terminal(turn, "cancelled", error_code=code)
+                return finished
 
             prompt = request["prompt"]
             after = row["context_from"] - 1
@@ -216,12 +292,13 @@ class _RegenerableTurnRunner:
             )
             if not await self._store.take_over(key, generation=generation, lease_seconds=_LEASE_SECONDS):
                 return False
+            turn = _AdmittedTurn(
+                key, row["turn_no"], prompt, history,
+                _TURN_BYTES - len(canonical_json_bytes(request)), session["revision"], generation + 1,
+            )
+            self._admitted(turn)
             await self._settle_with_lease(
-                _AdmittedTurn(
-                    key, row["turn_no"], prompt, history,
-                    _TURN_BYTES - len(canonical_json_bytes(request)), generation=generation + 1,
-                ),
-                binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=request["thinking"],
+                turn, binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=request["thinking"],
             )
             return True
 
@@ -257,6 +334,7 @@ class _RegenerableTurnRunner:
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
+                    self._admitted(turn)
                     await self._settle_with_lease(
                         turn, binding=binding, context=context, limits=limits,
                         event_sink=event_sink, thinking=thinking,
@@ -292,13 +370,23 @@ class _RegenerableTurnRunner:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        self._observers.clear()
 
     async def _settle_with_lease(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
     ) -> None:
+        async def emit(emission: AgentEmission) -> None:
+            if isinstance(emission, LiveDelta) and emission.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
+                self._publish(turn.key.session_id, {
+                    "type": "delta", "turn_id": turn.key.turn_id, "turn_no": turn.number,
+                    "generation": turn.generation, "revision": turn.revision,
+                    "delta_kind": "text", "text": emission.content,
+                })
+            await event_sink(emission)
+
         producer = asyncio.create_task(self.settle(
-            turn, binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=thinking,
+            turn, binding=binding, context=context, limits=limits, event_sink=emit, thinking=thinking,
         ))
         self._producers[turn.key] = producer
         try:
@@ -318,10 +406,12 @@ class _RegenerableTurnRunner:
             # lost its fence, only a durable cancellation authorizes this branch.
             row = await self._store.get_turn(turn.key)
             if row is not None and row["state"] == "cancelling" and row["generation"] == turn.generation:
-                await self._store.finish(
+                code = ErrorCode.EXECUTION_CANCELLED.value
+                if await self._store.finish(
                     turn.key, generation=turn.generation, turn_no=turn.number, state="cancelled",
-                    result={"error_code": ErrorCode.EXECUTION_CANCELLED.value},
-                )
+                    result={"error_code": code},
+                ):
+                    self._terminal(turn, "cancelled", error_code=code)
         finally:
             self._producers.pop(turn.key, None)
             if not producer.done():
@@ -367,7 +457,7 @@ class _RegenerableTurnRunner:
             return None
         return _AdmittedTurn(
             key, through + 1, prompt,
-            [message for messages in reversed(history) for message in messages], terminal_bytes,
+            [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
         )
 
     async def settle(
@@ -384,8 +474,17 @@ class _RegenerableTurnRunner:
             result = encode_regenerable_turn(turn.prompt, turn.history, outcome.messages, outcome.output)
             if len(canonical_json_bytes(result)) > turn.terminal_bytes:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
-        except AIError as error:
-            return await self._store.finish(
-                turn.key, generation=turn.generation, turn_no=turn.number, state="failed", result={"error_code": error.code.value},
+        except Exception as error:
+            code = error.code.value if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR.value
+            committed = await self._store.finish(
+                turn.key, generation=turn.generation, turn_no=turn.number, state="failed", result={"error_code": code},
             )
-        return await self._store.finish(turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded", result=result)
+            if committed:
+                self._terminal(turn, "failed", error_code=code)
+            return committed
+        committed = await self._store.finish(
+            turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded", result=result,
+        )
+        if committed:
+            self._terminal(turn, "succeeded", output=outcome.output)
+        return committed

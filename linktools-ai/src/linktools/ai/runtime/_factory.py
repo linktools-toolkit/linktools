@@ -979,6 +979,7 @@ def _borrowed_runtime_history(
         executions=state.execution.executions,
         events=state.execution.events,
         sessions=state.conversation.sessions,
+        session_turn_reader=state.session_turn_reader,
         conversation=state.conversation,
         session_transcript_store=run_store.conversation_persistence,
         pending_session_execution=pending_session_execution,

@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
 from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn, SessionService
 from ..agent import AgentBindingContract
-from ..core import BudgetUsage, Principal
+from ..core import (
+    BudgetUsage, JsonValue, Principal, PromptLimits, normalize_thinking,
+    validate_agent_id, validate_idempotency_key, validate_resource_id,
+)
+from ..errors import AIError, ErrorCode
+from ..persistence.turns import SessionTurnKey
 from ..observe import WaitResult, RuntimeMetricsControl
 from ..inputs import CaptureInputRequest, ExecutionInputCaptureRef, InputCaptures
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
@@ -24,6 +29,8 @@ if TYPE_CHECKING:
     from ..execution import Execution
     from ..observe import MetricRecorderStatus, MetricFlushResult
     from ._runtime_service import Runtime
+    from ._regenerable_turn import _RegenerableTurnRunner
+    from ._agent_executor import AgentEmission
 
 AppT = TypeVar("AppT")
 
@@ -253,6 +260,10 @@ class RuntimeExecutions(Generic[AppT]):
             cutoffs=cutoffs,
         )
 
+async def _discard_turn_emission(_event: "AgentEmission") -> None:
+    pass
+
+
 class RuntimeSessions(Generic[AppT]):
     def __init__(
         self,
@@ -262,12 +273,96 @@ class RuntimeSessions(Generic[AppT]):
         start_session: Callable[..., Awaitable["Execution[AppT]"]],
         bind_session: Callable[[SessionView, Principal], "Session[AppT]"],
         ensure_open: Callable[[], None] = lambda: None,
+        turn_runner: "_RegenerableTurnRunner | None" = None,
+        runtime: "Runtime[AppT] | None" = None,
     ) -> None:
         self._start_session = start_session
         self._service = service
         self._get_session = get_session
         self._bind_session = bind_session
         self._ensure_open = ensure_open
+        self._turn_runner = turn_runner
+        self._runtime = runtime
+
+    @property
+    def supports_turn_sessions(self) -> bool:
+        return self._turn_runner is not None and self._runtime is not None
+
+    def _require_turn_sessions(self) -> "tuple[_RegenerableTurnRunner, Runtime[AppT]]":
+        self._ensure_open()
+        runner, runtime = self._turn_runner, self._runtime
+        if runner is None or runtime is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return runner, runtime
+
+    async def create_turn_session(
+        self, session_id: str, agent_id: str, *, principal: Principal,
+        metadata: "Mapping[str, JsonValue] | None" = None, idempotency_key: str | None = None,
+    ) -> dict[str, JsonValue]:
+        runner, runtime = self._require_turn_sessions()
+        resolver = runtime._binding_resolver
+        if resolver is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        validate_resource_id(session_id)
+        validate_agent_id(agent_id)
+        if idempotency_key is not None:
+            validate_idempotency_key(idempotency_key)
+        await self._service.require_available()
+        return await runner.create_session(
+            session_id, agent_id, principal=principal, tenant_id=runtime.tenant_id,
+            authorization=runtime._authorization, resolver=resolver,
+            metadata={} if metadata is None else metadata, request_key=idempotency_key,
+        )
+
+    async def start_turn(
+        self, session_id: str, prompt: str, *, principal: Principal,
+        idempotency_key: str, thinking: JsonValue = None,
+    ) -> str:
+        runner, runtime = self._require_turn_sessions()
+        resolver = runtime._binding_resolver
+        if resolver is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        validate_resource_id(session_id)
+        validate_idempotency_key(idempotency_key)
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A plain text prompt is required")
+        await self._service.require_available()
+        return await runner.start_session(
+            session_id, prompt=prompt, principal=principal, namespace=runtime.namespace,
+            tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
+            resolver=resolver, request_key=idempotency_key, limits=PromptLimits(),
+            event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking),
+        )
+
+    async def cancel_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
+        runner, runtime = self._require_turn_sessions()
+        validate_resource_id(session_id)
+        validate_resource_id(turn_id)
+        return await runner.cancel_session_turn(
+            SessionTurnKey(session_id, turn_id), principal=principal,
+            tenant_id=runtime.tenant_id, authorization=runtime._authorization,
+        )
+
+    async def recover_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
+        runner, runtime = self._require_turn_sessions()
+        resolver = runtime._binding_resolver
+        if resolver is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        validate_resource_id(session_id)
+        validate_resource_id(turn_id)
+        return await runner.recover_session_turn(
+            SessionTurnKey(session_id, turn_id), principal=principal, namespace=runtime.namespace,
+            tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
+            resolver=resolver, limits=PromptLimits(), event_sink=_discard_turn_emission,
+        )
+
+    def observe_turn_session(
+        self, session_id: str, callback: Callable[[dict[str, JsonValue]], None],
+    ) -> Callable[[], None]:
+        """Register a trusted host callback. Authorize before forwarding any frame."""
+        runner, _ = self._require_turn_sessions()
+        validate_resource_id(session_id)
+        return runner.observe(session_id, callback)
 
     async def get(self, session_id: str, *, principal: Principal | None = None) -> "Session[AppT]":
         return await self._get_session(session_id, principal)

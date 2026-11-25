@@ -128,7 +128,9 @@ function setDisabled() {
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
   ['send','planning','thinking','prompt'].forEach(id => $(id).disabled=readonly || !state.session || state.session.status === 'CLOSED' || !state.selectedSession);
   $('send').disabled ||= sessionSendBlocked();
-  ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
+  const ordinary=Boolean(state.config?.turn_sessions) && state.view==='sessions';
+  ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session || ordinary);
+  $('planning').closest('label').hidden=ordinary;
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
   ['retry','fork-run','end-stopped'].forEach(id => $(id).disabled=readonly || !state.execution || ending);
@@ -159,6 +161,17 @@ function setDisabled() {
   $('stop-run').disabled=ending;$('cancel').disabled=Boolean(active && state.actionsPending.has(`${active.execution_id}:end-stopped`));
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
   $('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);
+  const turn=ordinary ? state.session?.active_turn_id : null;
+  $('recover-turn').hidden=readonly || !turn;
+  $('recover-turn').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
+  if(ordinary){
+    $('open-recovery').hidden=true;$('inspector-toggle').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
+    $('fork-session').disabled=true;
+    $('cancel').hidden=readonly || !turn;$('cancel').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
+    $('cancel').setAttribute('aria-label','Stop current turn');
+    if(turn && sessionWatch?.ready){$('current-status').hidden=false;$('current-status').textContent='Turn in progress';}
+  } else {$('open-recovery').hidden=false;$('inspector-toggle').hidden=false;}
+
 }
 function renderPage() {
   const sessions=state.view==='sessions', executions=state.view==='executions', metrics=state.view==='metrics';
@@ -272,8 +285,8 @@ function renderList() {
     const node=button('',async () => navigate(session ? id:null,session ? null:id),`list-item${active?' active':''}`);node.dataset.listKey=`${state.view}:${id}`;
     node.append(element('span','list-title',session ? item.metadata?.title || short(id) : short(id)));
     const sub=element('span','list-subtitle');
-    sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':item.active_execution_id || !terminal(item.status) && !session ? 'running':''}`));
-    sub.append(element('span','',session ? `${item.active_execution_id?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}` : `${item.status} · ${item.agent_id || 'task'} · ${short(id)}`));
+    sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':(item.active_turn_id || item.active_execution_id) || !terminal(item.status) && !session ? 'running':''}`));
+    sub.append(element('span','',session ? `${(item.active_turn_id || item.active_execution_id)?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}` : `${item.status} · ${item.agent_id || 'task'} · ${short(id)}`));
     node.title=`${item.status} · ${item.agent_id || 'task'} · ${id}`;
     node.append(sub); $('list').append(node);
   });
@@ -290,15 +303,144 @@ let observationRead=null;
 let terminalHistoryRead=null;
 const sessionSubmissions=new Set();
 function sessionSendBlocked() {
-  return state.session?.status!=='OPEN' || sessionSubmissions.has(state.selectedSession) || Boolean(state.session?.active_execution_id)
+  return state.session?.status!=='OPEN' || sessionSubmissions.has(state.selectedSession) || Boolean(state.session?.active_turn_id || state.session?.active_execution_id)
     || !state.config?.read_only && (!sessionWatch || !sessionWatch.ready);
 }
 function stopSessionWatch() {
   sessionWatch?.source.close();sessionWatch=null;
 }
+function ordinaryStatus(value) {
+  return ({accepted:'PENDING_START',cancelling:'CANCELLING',open:'OPEN',closed:'CLOSED'})[value] || String(value || '').toUpperCase();
+}
+function ordinaryInput(prompt) {return {version:1,prompt,files:[],attachments:[]};}
+function ordinaryTurnNode(turn) {
+  const node=element('article','turn');node.dataset.turn=turn.turn_id;
+  node.append(userMessage(turn.user_input));
+  const answers=element('div','turn-saved-answers');
+  const items=turn.items?.length?turn.items:(turn.output?.text?[{item_kind:'assistant',content:turn.output.text}]:[]);
+  for(const item of items) {
+    if(item.item_kind==='assistant' && typeof item.content==='string')answers.append(markdownMessage(item.content));
+    if(item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) {
+      const thought=thinkingMessage('Thinking',item.content);showProcessElapsed(thought,item.elapsed_ms);answers.append(thought);
+    }
+  }
+  if(!turn.conversation_committed){
+    node.liveAnswer=element('div','message ordinary-live');answers.append(node.liveAnswer);
+    if(turn.liveText)node.liveAnswer.textContent=turn.liveText;
+    node.liveAnswer.hidden=!turn.liveText;
+    if(turn.liveThinking)answers.append(thinkingMessage('Thinking',turn.liveThinking));
+  }
+  node.append(answers);
+  if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
+  if(turn.status!=='SUCCEEDED')node.append(element('div','turn-heading',turn.status));
+  return node;
+}
+function patchOrdinaryTurn(turn) {
+  const index=state.turns.findIndex(row=>row.turn_id===turn.turn_id);
+  const before=index<0?null:state.turns[index];
+  if(before?.conversation_committed && !turn.conversation_committed)return;
+  if(index<0)state.turns.push(turn);else state.turns[index]={...before,...turn};
+  state.turns.sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity));
+  const container=$('conversation'), node=[...container.children].find(row=>row.dataset.turn===turn.turn_id);
+  const content=ordinaryTurnNode(state.turns.find(row=>row.turn_id===turn.turn_id));
+  const follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40;
+  if(node)node.replaceWith(content);
+  else {
+    container.querySelector(':scope > .empty')?.remove();
+    const current=state.turns.findIndex(value=>value.turn_id===turn.turn_id);
+    const next=new Set(state.turns.slice(current+1).map(value=>value.turn_id));
+    container.insertBefore(content,[...container.children].find(row=>next.has(row.dataset.turn)) || $('live') || null);
+  }
+  if(follows)container.scrollTop=container.scrollHeight;
+}
+function ordinaryOccupancy(watch, revision, turn, lastTurn) {
+  if(!Number.isSafeInteger(revision) || revision < (watch.snapshot?.revision ?? -1))return;
+  watch.snapshot={...watch.snapshot, revision, active_turn_id:turn};
+  if(Number.isSafeInteger(lastTurn))watch.snapshot.last_turn_no=lastTurn;
+  if(state.session && revision>=state.session.revision)Object.assign(state.session,watch.snapshot);
+}
+async function catchUpOrdinary(watch) {
+  if(watch.catchUp)return watch.catchUp;
+  const read=(async()=>{
+    const payload=await readSession(watch.id);
+    if(sessionWatch!==watch || state.selectedSession!==watch.id)return;
+    if(!acceptSession(payload))return;
+    for(const turn of payload.timeline?.items || []) {
+      if(!state.turns.some(row=>row.turn_id===turn.turn_id && row.conversation_committed))patchOrdinaryTurn(turn);
+    }
+    if(!state.hasEarlierTurns){
+      state.turnCursor=payload.timeline?.next_cursor || null;
+      $('turns-more').hidden=!state.turnCursor;
+    }
+    const active=state.session?.active_turn_id;
+    if(active && !state.turns.some(row=>row.turn_id===active)) {
+      const turn=await api(sessionURL(watch.id,'',{turn_id:active}));
+      if(sessionWatch===watch && state.selectedSession===watch.id && state.session?.active_turn_id===active)patchOrdinaryTurn(turn);
+    }
+    renderList();setDisabled();
+  })();
+  watch.catchUp=read;
+  try {await read;} finally {if(watch.catchUp===read)watch.catchUp=null;}
+}
+function watchOrdinarySession(id) {
+  stopSessionWatch();
+  const source=new EventSource(sessionURL(id,'events',{view:'chat'}));
+  const watch={id,source,ready:false,ordinary:true,snapshot:null,opened:false,catchUp:null};
+  sessionWatch=watch;
+  const current=()=>sessionWatch===watch && state.selectedSession===id;
+  source.addEventListener('session_error',event=>{
+    if(!current())return;
+    source.close();watch.ready=false;setDisabled();
+    try {notice(JSON.parse(event.data).error_code);}catch {notice('Conversation unavailable');}
+  });
+  source.onerror=()=>{if(current()){watch.ready=false;setDisabled();}};
+  source.addEventListener('turn',event=>{
+    if(!current())return;
+    let frame;try {frame=JSON.parse(event.data);}catch{return;}
+    if(frame.type==='snapshot'){
+      const reconnected=watch.opened;watch.opened=true;watch.ready=true;
+      const snapshot=frame.session;
+      if(snapshot && snapshot.revision >= (watch.snapshot?.revision ?? -1)){
+        watch.snapshot={...snapshot,status:ordinaryStatus(snapshot.status ?? snapshot.state)};
+        if(state.session && watch.snapshot.revision>=state.session.revision)Object.assign(state.session,watch.snapshot);
+      }
+      setDisabled();renderList();
+      if(reconnected || state.session && (snapshot?.active_turn_id || snapshot?.last_turn_no > (state.turns.filter(row=>row.conversation_committed).at(-1)?.turn_no || 0)))void catchUpOrdinary(watch).catch(showError);
+      return;
+    }
+    if(frame.type==='gap'){void catchUpOrdinary(watch).catch(showError);return;}
+    if(!frame.turn_id)return;
+    if(frame.type==='admitted'){
+      ordinaryOccupancy(watch,frame.revision,frame.turn_id);
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt),items:[],conversation_committed:false});
+    } else if(frame.type==='delta'){
+      const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
+      if(!turn || typeof frame.text!=='string' || frame.delta_kind!=='text')return;
+      if(turn.liveGeneration>frame.generation)return;
+      if(turn.liveGeneration!==frame.generation){turn.liveGeneration=frame.generation;turn.liveText='';}
+      turn.liveText=(turn.liveText || '')+frame.text;
+      if(!watch.paint)watch.paint=requestAnimationFrame(()=>{
+        watch.paint=null;
+        if(!current())return;
+        const active=state.session?.active_turn_id || watch.snapshot?.active_turn_id;
+        const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
+        const node=[...$('conversation').children].find(item=>item.dataset.turn===active);
+        if(node?.liveAnswer && row){node.liveAnswer.hidden=!row.liveText;node.liveAnswer.textContent=row.liveText || '';}
+      });
+      return;
+    } else if(frame.type==='terminal'){
+      ordinaryOccupancy(watch,frame.revision,null,frame.turn_no);
+      const items=frame.items || [];
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:ordinaryStatus(frame.status ?? frame.state),
+        user_input:ordinaryInput(frame.prompt),items,output:frame.output,error_code:frame.error_code,conversation_committed:true});
+    }
+    renderList();setDisabled();
+  });
+}
 function watchSession(id, {restart=false}={}) {
   if(state.config?.read_only || !id){stopSessionWatch();return;}
   if(sessionWatch?.id===id && !restart)return;
+  if(state.config?.turn_sessions){watchOrdinarySession(id);return;}
   const prior=sessionWatch?.id===id?sessionWatch:null;
   if(prior?.execution?.id===state.observedExecution) {
     // A new EventSource starts without the previous connection's Last-Event-ID.
@@ -586,6 +728,12 @@ function unavailableSelection(error) {
 function acceptSession(payload) {
   if(payload.session.session_id!==state.selectedSession || payload.readGeneration<state.sessionAppliedGeneration)return false;
   const watch=sessionWatch?.id===state.selectedSession?sessionWatch:null;
+  if(state.config?.turn_sessions){
+    const fresh={...payload.session,status:ordinaryStatus(payload.session.status ?? payload.session.state)};
+    state.session=watch?.snapshot?.revision>=fresh.revision?{...fresh,...watch.snapshot}:fresh;
+    state.sessionError=false;state.sessionAppliedGeneration=payload.readGeneration;
+    return true;
+  }
   const revision=payload.session.revision;
   if(watch && Number.isSafeInteger(revision) && (watch.revision===null || revision>watch.revision)) {
     // HTTP can observe another process's update before this process's stream.
@@ -636,6 +784,7 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
   state.nativeTimeline=null;
   if(!preserveObservation)state.session=null;
   state.sessionError=false;state.executionError=false; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
+  if(state.config?.turn_sessions && state.view==='sessions'){executionId=null;state.selectedExecution=null;state.conversationMode='chat';}
   const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;$('run-actions').open=false;
   closeSidebar();renderPage();
   if(!preserveInspector)showInspector(explicitExecution,explicitExecution && Boolean(sessionId || executionId));
@@ -648,10 +797,19 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
       const payload=await readSession(sessionId);
       if (generation!==state.generation) return;
       if(acceptSession(payload)){
-        state.turns=payload.timeline?.items || [];state.turnCursor=payload.timeline?.next_cursor || null;state.timelineError=payload.timeline_error || '';
-        reconcileLiveHistory(payload.timeline);
+        state.turns=state.config?.turn_sessions
+          ? mergePage(payload.timeline?.items || [],state.turns,item=>item.turn_id).sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity))
+          : payload.timeline?.items || [];
+        state.turnCursor=payload.timeline?.next_cursor || null;state.timelineError=payload.timeline_error || '';
+        if(!state.config?.turn_sessions)reconcileLiveHistory(payload.timeline);
       }
       else if(!state.session)return;
+      if(state.config?.turn_sessions){
+        renderSessionHeader();renderConversation();setDisabled();renderList();
+        if(sessionWatch?.ready && state.session?.active_turn_id)void catchUpOrdinary(sessionWatch).catch(showError);
+        if(focusComposer && generation===state.generation)$('prompt').focus();
+        return;
+      }
       if(sessionWatch?.ready && sessionWatch.refresh.releasedTurn)
         refreshSessionTimeline(sessionWatch,sessionWatch.snapshot.active_execution_id,sessionWatch.refresh.releasedTurn);
       else refreshActiveTurn(sessionWatch);
@@ -674,14 +832,14 @@ async function moreTurns() {
     const payload=await api(sessionURL(id,"",{limit:"50",cursor}));
     if(generation!==state.generation || id!==state.selectedSession)return;
     // Earlier pages supply history only; their session owner may predate live readback.
-    state.turns=mergePage(payload.timeline.items,state.turns,item=>item.execution_id);state.turnCursor=payload.timeline.next_cursor;state.hasEarlierTurns=true;
+    state.turns=mergePage(payload.timeline.items,state.turns,item=>item.turn_id || item.execution_id);state.turnCursor=payload.timeline.next_cursor;state.hasEarlierTurns=true;
     renderConversation({prepend:true});
   } catch(error) {
     if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
   } finally {state.actionsPending.delete(key);$('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);}
 }
 function renderTurnPickers() {
-  const options=state.turns.map((turn,index)=>({id:turn.execution_id,label:`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status} · ${short(turn.execution_id)}`}));
+  const options=state.turns.filter(turn=>turn.execution_id).map((turn,index)=>({id:turn.execution_id,label:`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status} · ${short(turn.execution_id)}`}));
   if(state.selectedExecution && !options.some(option=>option.id===state.selectedExecution))options.push({id:state.selectedExecution,label:`Execution ${short(state.selectedExecution)}`});
   const signature=json(options);
   for(const id of ['detail-turn','request-turn']) {
@@ -894,7 +1052,7 @@ function renderConversation({prepend=false}={}) {
   if(state.timelineError)container.append(element('p','empty',`${state.timelineError} · Inspect retained executions; loaded turns may be incomplete.`));
   if(original) {
     const section=element('section','model-requests');renderNativeTimeline(section,{conversation:true});container.append(section);renderTurnPickers();
-  } else state.turns.forEach(turn=>container.append(renderTurn(turn)));
+  } else state.turns.forEach(turn=>container.append(turn.turn_id?ordinaryTurnNode(turn):renderTurn(turn)));
   if (!state.turns.length && !state.timelineError && !original)container.append(element('p','empty',state.selectedSession ? 'Send a message to get started.':'Choose an execution to inspect.'));
   if(original){const preview=element('details','live-preview');preview.append(element('summary','','Live preview · not original response'),live);container.append(preview);}else container.append(live);
   renderLive(liveFocus);restoreRequestFocus(container,requestFocus);
@@ -1947,6 +2105,16 @@ async function watchExecution(id,generation) {
   }
   } finally {if(state.stream===controller){state.stream=null;if(current())renderLive();}}
 }
+async function ordinaryAction(action) {
+  const id=state.selectedSession,turn=state.session?.active_turn_id,key=`turn:${turn}`;
+  if(!id || !turn || state.actionsPending.has(key))return;
+  if(action==='recover' && !confirm('Recover this turn only after its previous producer has stopped. Continue?'))return;
+  state.actionsPending.add(key);setDisabled();
+  try {
+    const result=await mutate(sessionURL(id,action),{turn_id:turn});
+    if(state.selectedSession===id && !result.accepted)notice(action==='recover'?'Turn still owned or already complete.':'Turn not available to stop.');
+  } finally {state.actionsPending.delete(key);setDisabled();}
+}
 async function sendMessage(event) {
   event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,executionGeneration=state.executionGeneration,promptValue=$('prompt').value;
   if(!sessionId || !state.session || state.session.status!=='OPEN' || state.config?.read_only || !promptValue.trim() || sessionSendBlocked())return;
@@ -1954,9 +2122,16 @@ async function sendMessage(event) {
   $('send').disabled=true;notice('');
   try {
     // Rejected admission is terminal for its key; another explicit send is a new attempt.
-    const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:$('planning').checked,thinking:readThinking()}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
+    const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:!state.config?.turn_sessions && $('planning').checked,thinking:readThinking()}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
     if(generation!==state.generation){const draft=state.drafts.get(sessionId);if(draft?.prompt===promptValue)draft.prompt='';if(state.selectedSession===sessionId && $('prompt').value===promptValue)$('prompt').value='';return;}
     if($('prompt').value===promptValue)$('prompt').value='';
+    if(state.config?.turn_sessions){
+      if(!state.turns.some(turn=>turn.turn_id===result.turn_id)){
+        if(state.session && !state.session.active_turn_id)state.session.active_turn_id=result.turn_id;
+        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue),items:[],conversation_committed:false});
+      }
+      return;
+    }
     reconcileAdmissionWatch(sessionId,result.execution_id);
     // Keep the current page and draft; refresh only the admitted turn's projection.
     const payload=await readSession(sessionId,{executionId:result.execution_id,active:true});
@@ -1971,17 +2146,18 @@ async function sendMessage(event) {
   } catch(error){
     if(generation!==state.generation || sessionId!==state.selectedSession)return;
     unavailableSelection(error);
-    reconcileAdmissionWatch(sessionId);
+    if(!state.config?.turn_sessions)reconcileAdmissionWatch(sessionId);
     if(['SESSION_BUSY','SESSION_CONFLICT'].includes(error.code))error.message+='; this message was not started. Check the current execution, then send again when the session is available.';
     showError(error);
   } finally {
     sessionSubmissions.delete(sessionId);
-    if(generation===state.generation && sessionId===state.selectedSession && state.session)refreshActiveTurn(sessionWatch);
+    if(generation===state.generation && sessionId===state.selectedSession && state.session && !state.config?.turn_sessions)refreshActiveTurn(sessionWatch);
     setDisabled();
   }
 }
 function openNew() {
   if(!state.config || state.config.read_only)return;
+  $('new-cwd').closest('label').hidden=Boolean(state.config.turn_sessions);if(state.config.turn_sessions)$('new-cwd').value='';
   $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-agent').focus();
 }
 async function createSession(event) {
@@ -2164,6 +2340,7 @@ async function bootstrap() {
   state.config=await api('/api/config');$('workspace-label').textContent=state.config.workspace || 'Local Runtime';
   state.config.capabilities.filter(item=>item.kind==='agent').forEach(item=>{const option=element('option','',item.id);option.value=item.id;$('new-agent').append(option);});
   state.config.metric_names.forEach(name=>{const option=element('option','',name.replace('linktools.',''));option.value=name;$('metric-names').append(option);});
+  if(state.config.turn_sessions) $('planning').checked=false;
   if(state.config.read_only){connection('Read-only');notice('Read-only. Configure a model at startup to send messages.');}
   setDisabled();await loadList();await fromHash();
 }
@@ -2172,7 +2349,7 @@ async function fromHash() {
   const params=new URLSearchParams(location.hash.slice(1));
   const view=params.get('view') || (params.has('session')?'sessions':params.has('execution')?'executions':'sessions');
   setView(['sessions','executions','metrics'].includes(view)?view:'sessions',false);
-  if(state.view==='metrics')return;
+  if(state.view==='metrics'){stopSessionWatch();return;}
   if(state.view==='executions') {
     if(sessionWatch){stopSessionWatch();clearObservation();}
     const id=params.get('execution') || state.browserExecution;
@@ -2213,7 +2390,7 @@ $('chat-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');$('actio
 $('activity-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();return loadDetail().catch(showError);};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
-$('refresh').onclick=()=>{if(state.view==='sessions' && state.selectedSession && !hasExecutionStream(state.observedExecution))watchSession(state.selectedSession,{restart:true});if(!state.cancellationNoticeId)notice('');return (async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
+$('refresh').onclick=()=>{if(state.config?.turn_sessions && state.view==='sessions')return openSelection(state.selectedSession,null).then(()=>loadList()).catch(showError);if(state.view==='sessions' && state.selectedSession && !hasExecutionStream(state.observedExecution))watchSession(state.selectedSession,{restart:true});if(!state.cancellationNoticeId)notice('');return (async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
 let settingsRequest=null;
 $('settings').onclick=()=>{
   if(!settingsRequest)settingsRequest=api('/api/config').then(config=>{state.config=config;showSettings();}).catch(showError).finally(()=>{settingsRequest=null;});
@@ -2222,7 +2399,8 @@ $('settings').onclick=()=>{
 $('export').onclick=()=>{closeRunActions();return exportResult().catch(showError);};
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
 $('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
-$('cancel').onclick=()=>executionAction('cancel',{active:true}).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
+$('recover-turn').onclick=()=>ordinaryAction('recover').catch(showError);
+$('cancel').onclick=()=> (state.config?.turn_sessions && state.view==='sessions' ? ordinaryAction('cancel') : executionAction('cancel',{active:true})).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
 $('metrics-form').onsubmit=event=>loadMetrics(event).catch(showError);
 document.querySelectorAll('[data-view]').forEach(node=>node.onclick=()=>navigateView(node.dataset.view));
 $('detail-view').onchange=()=>{state.tab=$('detail-view').value;return loadDetail().catch(showError);};

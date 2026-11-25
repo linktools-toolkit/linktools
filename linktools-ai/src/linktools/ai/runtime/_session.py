@@ -165,6 +165,10 @@ class _SessionWatch:
 class RuntimeSessionService(SessionManager[ExecutionHandle]):
     """Enforce session ownership, Agent identity immutability, and revision CAS."""
 
+    @property
+    def regenerable_turns(self) -> "_RegenerableTurnRunner | None":
+        return self._regenerable_turns
+
     async def require_available(self) -> None:
         if self._current_policy is None:
             await super().require_available()
