@@ -11,13 +11,17 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from linktools.ai.capability import CapabilityContribution, StepPersistenceCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.persistence.contracts import deferred_resource_id
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.storage import StorageRoute
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed, model_features
-from ._session_tool_test_helpers import _split_sqlite_storage
+
+
+class _SessionPolicy(TenantAuthorizationPolicy):
+    """Explicit host policy for this fixture's session."""
 
 
 @pytest.mark.asyncio
@@ -49,9 +53,13 @@ async def test_split_declarative_approval_requires_a_trusted_resolution(tmp_path
     features.capability(StepPersistenceCapability())
     features.agent("default", model="default", allow_tools=("lookup",))
     features = model_features(_Models(_UsageFunctionModel(reply)), features)
-    async with Persistence.open(namespace, storage=_split_sqlite_storage(tmp_path / "state.db")) as state:
+    step = StorageRoute.sqlite(tmp_path / "step.db")
+    storage = PersistenceStorage(PersistencePlan(
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"), execution=step, checkpoint=step,
+    ))
+    async with Persistence.open(namespace, storage=storage) as state:
         async with Runtime.open(
-            persistence=state, features=features, authorization=TenantAuthorizationPolicy(principal.tenant_id),
+            persistence=state, features=features, authorization=_SessionPolicy(principal.tenant_id),
         ) as runtime:
             await runtime.sessions.create_turn_session("chat", principal=principal)
             frames: asyncio.Queue[dict] = asyncio.Queue()
