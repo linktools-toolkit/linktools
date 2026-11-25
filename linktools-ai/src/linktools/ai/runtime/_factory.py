@@ -839,7 +839,10 @@ async def _build_local_components(
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
             regenerable_turns=(
-                None if state.session_turns is None else _RegenerableTurnRunner(state.session_turns, executor)
+                None if state.session_turns is None else _RegenerableTurnRunner(
+                    state.session_turns, executor, workspace=workspace, workspace_access=input_materializer.access,
+                    instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
+                )
             ),
             enabled=session_execution_ready,
             current_policy=current_policy,

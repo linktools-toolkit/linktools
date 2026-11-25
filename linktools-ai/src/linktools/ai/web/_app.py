@@ -402,12 +402,13 @@ class _Console:
             payload = await _body(request)
             request.state.operation_id = _text(payload, "request_id")
             if self.turn_sessions:
-                if payload.get("cwd"):
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary conversations do not accept a working directory")
+                cwd = payload.get("cwd")
+                if cwd is not None and not isinstance(cwd, str):
+                    raise ValueError("cwd must be a workspace-relative string or null")
                 view = await runtime.sessions.create_turn_session(
                     _text(payload, "session_id"), _text(payload, "agent_id", "default"),
                     principal=self.principal, idempotency_key=request.state.operation_id,
-                    metadata={"title": _text(payload, "title", "New conversation")},
+                    metadata={"title": _text(payload, "title", "New conversation")}, cwd=cwd,
                 )
                 return _json(view, 201)
             view = await runtime.sessions.create_view(_text(payload, "agent_id", "default"), CreateSessionRequest(
@@ -502,10 +503,14 @@ class _Console:
                 receipt: dict[str, object] = {"session_id": session_id, "revision": revision + 1}
                 if action == "update":
                     metadata = payload.get("metadata")
-                    if not isinstance(metadata, dict) or payload.get("cwd") is not None:
-                        raise ValueError("Ordinary sessions accept metadata changes only")
+                    if not isinstance(metadata, dict):
+                        raise ValueError("metadata must be an object")
+                    cwd = payload.get("cwd")
+                    if cwd is not None and not isinstance(cwd, str):
+                        raise ValueError("cwd must be a workspace-relative string or null")
                     changed = await runtime.sessions.update_turn_session(
                         session_id, principal=self.principal, expected_revision=revision, metadata=metadata,
+                        cwd=cwd, replace_cwd="cwd" in payload,
                     )
                     receipt["metadata"] = metadata
                 else:

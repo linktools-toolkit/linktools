@@ -398,6 +398,7 @@ class AgentExecutor:
         limits: PromptLimits,
         event_sink: EventSink,
         workspace: Workspace | None = None,
+        repository_instructions: RepositoryInstructions | None = None,
         thinking: ThinkingValue = None,
         streamed_output_bytes: int = 64 * 1024,
     ) -> AgentExecutionResult:
@@ -421,6 +422,7 @@ class AgentExecutor:
                 agent_conversation_id=context.session_id, run_store=store,
                 agent_run_id=context.execution_id, agent_run_seq=1,
                 event_sink=event_sink, thinking=thinking, streamed_output_bytes=streamed_output_bytes,
+                repository_instructions=repository_instructions,
             ))
             if isinstance(outcome, DeferredToolRequests):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")

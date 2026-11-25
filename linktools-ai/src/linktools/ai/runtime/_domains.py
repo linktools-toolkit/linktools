@@ -298,6 +298,7 @@ class RuntimeSessions(Generic[AppT]):
     async def create_turn_session(
         self, session_id: str, agent_id: str, *, principal: Principal,
         metadata: "Mapping[str, JsonValue] | None" = None, idempotency_key: str | None = None,
+        cwd: str | None = None,
     ) -> dict[str, JsonValue]:
         runner, runtime = self._require_turn_sessions()
         resolver = runtime._binding_resolver
@@ -311,16 +312,16 @@ class RuntimeSessions(Generic[AppT]):
         return await runner.create_session(
             session_id, agent_id, principal=principal, tenant_id=runtime.tenant_id,
             authorization=runtime._authorization, resolver=resolver,
-            metadata={} if metadata is None else metadata, request_key=idempotency_key,
+            metadata={} if metadata is None else metadata, request_key=idempotency_key, cwd=cwd,
         )
 
     async def update_turn_session(
         self, session_id: str, *, principal: Principal, expected_revision: int,
-        metadata: "Mapping[str, JsonValue]",
+        metadata: "Mapping[str, JsonValue]", cwd: str | None = None, replace_cwd: bool = False,
     ) -> bool:
         return await self._mutate_turn_session(
             session_id, principal=principal, expected_revision=expected_revision,
-            action=AuthorizationAction.SESSION_UPDATE, metadata=metadata,
+            action=AuthorizationAction.SESSION_UPDATE, metadata=metadata, cwd=cwd, replace_cwd=replace_cwd,
         )
 
     async def close_turn_session(
@@ -334,8 +335,9 @@ class RuntimeSessions(Generic[AppT]):
     async def _mutate_turn_session(
         self, session_id: str, *, principal: Principal, expected_revision: int,
         action: AuthorizationAction, metadata: "Mapping[str, JsonValue] | None" = None,
+        cwd: str | None = None, replace_cwd: bool = False,
     ) -> bool:
-        _, runtime = self._require_turn_sessions()
+        runner, runtime = self._require_turn_sessions()
         validate_resource_id(session_id)
         if type(expected_revision) is not int or expected_revision < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -355,9 +357,11 @@ class RuntimeSessions(Generic[AppT]):
             return await store.close_session(
                 session_id, owner_principal_id=owner, expected_revision=expected_revision,
             )
+        config = {**row["config_json"], "metadata": dict(metadata or {})}
+        if replace_cwd:
+            config["cwd"] = await runner.canonicalize_cwd(cwd)
         return await store.update_session(
-            session_id, owner_principal_id=owner, expected_revision=expected_revision,
-            config={**row["config_json"], "metadata": dict(metadata or {})},
+            session_id, owner_principal_id=owner, expected_revision=expected_revision, config=config,
         )
 
     async def start_turn(

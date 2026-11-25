@@ -19,6 +19,7 @@ from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..persistence.turns import SessionTurnKey
+from ..spec import RepositoryInstructions
 from ._agent_executor import LiveDelta
 from ._regenerable_transcript import decode_regenerable_turn, encode_regenerable_turn
 
@@ -27,6 +28,9 @@ if TYPE_CHECKING:
 
     from ..agent import AgentBinding
     from ..core import AuthorizationPolicy, PromptLimits, ThinkingValue
+    from ..inputs import InputFileSource
+    from ..spec import RepositoryInstructionResolver
+    from ..workspace import Workspace
     from ..persistence.turns import SqlSessionTurns
     from ._agent_binding_resolver import _AgentBindingResolver
     from ._agent_executor import AgentEmission, AgentExecutor, EventSink
@@ -47,13 +51,24 @@ class _AdmittedTurn:
     history: list[ModelMessage]
     terminal_bytes: int
     revision: int
+    repository_instructions: RepositoryInstructions | None
     generation: int = 1
 
 
 class _RegenerableTurnRunner:
-    def __init__(self, store: SqlSessionTurns, executor: AgentExecutor) -> None:
+    def __init__(
+        self, store: SqlSessionTurns, executor: AgentExecutor, *,
+        workspace: Workspace | None,
+        workspace_access: InputFileSource | None,
+        instruction_resolver: RepositoryInstructionResolver | None,
+        instruction_resolver_for: Callable[[RepositoryInstructions], RepositoryInstructionResolver],
+    ) -> None:
         self._store = store
         self._executor = executor
+        self._workspace = workspace
+        self._workspace_access = workspace_access
+        self._instruction_resolver = instruction_resolver
+        self._instruction_resolver_for = instruction_resolver_for
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
         self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
         self._closed = False
@@ -129,10 +144,27 @@ class _RegenerableTurnRunner:
         })
         self._notice_lifecycle(turn.key, "terminal", turn.revision + 1)
 
+    async def canonicalize_cwd(self, cwd: str | None) -> str | None:
+        if cwd is None:
+            return None
+        if not isinstance(cwd, str):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd"})
+        if self._workspace_access is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd", "reason": "workspace_required"})
+        try:
+            return await self._workspace_access.canonicalize_path(cwd)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd"}) from error
+
+    def _resolver_for(self, binding: AgentBinding) -> RepositoryInstructionResolver | None:
+        if binding.repository_instructions is not None:
+            return self._instruction_resolver_for(binding.repository_instructions)
+        return self._instruction_resolver
+
     async def create_session(
         self, session_id: str, agent_id: str, *, principal: Principal, tenant_id: str,
         authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
-        metadata: Mapping[str, JsonValue], request_key: str | None = None,
+        metadata: Mapping[str, JsonValue], request_key: str | None = None, cwd: str | None = None,
     ) -> dict[str, JsonValue]:
         if principal.tenant_id != tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -142,7 +174,8 @@ class _RegenerableTurnRunner:
             ResourceKind.SESSION, session_id, tenant_id, principal.principal_id,
         ))
         self._executor.require_regenerable(await resolver.resolve_agent(agent_id))
-        config: JsonValue = {"metadata": dict(metadata), "create_request_key": request_key}
+        cwd = await self.canonicalize_cwd(cwd)
+        config: JsonValue = {"metadata": dict(metadata), "create_request_key": request_key, "cwd": cwd}
         try:
             await self._store.create(session_id, owner_principal_id=principal.principal_id, agent_id=agent_id, config=config)
         except IntegrityError:
@@ -156,12 +189,12 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.SESSION_CONFLICT) from None
             return {
                 "session_id": session_id, "agent_id": agent_id, "revision": existing["revision"],
-                "metadata": dict(metadata), "state": existing["status"],
+                "metadata": dict(metadata), "state": existing["status"], "cwd": cwd,
                 "active_turn_id": None if existing["active_turn_id"] is None else existing["active_turn_id"].decode("utf-8"),
             }
         return {
             "session_id": session_id, "agent_id": agent_id, "revision": 0, "metadata": dict(metadata),
-            "state": "open", "active_turn_id": None,
+            "state": "open", "active_turn_id": None, "cwd": cwd,
         }
 
     async def start_session(
@@ -211,8 +244,7 @@ class _RegenerableTurnRunner:
         agent_id = session["agent_id"].decode("utf-8")
         binding = await resolver.resolve_agent(agent_id)
         config = session["config_json"]
-        if config.get("cwd") is not None:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "This turn path has no workspace binding")
+        cwd = config.get("cwd")
         context = AgentContext(
             app, principal, namespace, session_id, key.turn_id, config.get("metadata", {}),
             agent_id=agent_id,
@@ -221,7 +253,7 @@ class _RegenerableTurnRunner:
             if await self.start(
                 key, revision=session["revision"], through=session["last_turn_no"],
                 request_key=request_key, prompt=prompt, binding=binding, context=context,
-                limits=limits, event_sink=event_sink, thinking=thinking,
+                limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd,
             ):
                 return key.turn_id
         except IntegrityError:
@@ -301,7 +333,9 @@ class _RegenerableTurnRunner:
                     key, generation=generation + 1, turn_no=row["turn_no"], state="cancelled", result={"error_code": code},
                 )
                 if finished:
-                    turn = _AdmittedTurn(key, row["turn_no"], request["prompt"], [], 0, session["revision"], generation + 1)
+                    turn = _AdmittedTurn(
+                        key, row["turn_no"], request["prompt"], [], 0, session["revision"], None, generation + 1,
+                    )
                     self._terminal(turn, "cancelled", error_code=code)
                 return finished
 
@@ -323,6 +357,18 @@ class _RegenerableTurnRunner:
             contract = AgentBindingContract.from_payload(request["binding"])
             binding = await resolver.restore(contract)
             self._executor.require_regenerable(binding)
+            if "repository_instructions" not in request or "cwd" not in request:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "Turn has no admitted workspace evidence")
+            cwd = request["cwd"]
+            if await self.canonicalize_cwd(cwd) != cwd:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "Admitted cwd is no longer canonical")
+            frozen = request["repository_instructions"]
+            repository_instructions = None if frozen is None else RepositoryInstructions.from_payload(frozen)
+            instruction_resolver = self._resolver_for(binding)
+            if repository_instructions is not None:
+                if instruction_resolver is None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted instruction policy is unavailable")
+                instruction_resolver.validate(repository_instructions)
             context = AgentContext(
                 app, admitted, namespace, key.session_id, key.turn_id, request["session_metadata"],
                 agent_id=binding.compiled_agent.spec.id,
@@ -331,7 +377,7 @@ class _RegenerableTurnRunner:
                 return False
             turn = _AdmittedTurn(
                 key, row["turn_no"], prompt, history,
-                _TURN_BYTES - len(canonical_json_bytes(request)), session["revision"], generation + 1,
+                _TURN_BYTES - len(canonical_json_bytes(request)), session["revision"], repository_instructions, generation + 1,
             )
             self._admitted(turn)
             await self._settle_with_lease(
@@ -353,7 +399,7 @@ class _RegenerableTurnRunner:
     async def start(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object],
-        limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
+        limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue, cwd: str | None = None,
     ) -> bool:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
@@ -367,7 +413,7 @@ class _RegenerableTurnRunner:
             try:
                 turn = await self.admit(
                     key, revision=revision, through=through, request_key=request_key,
-                    prompt=prompt, binding=binding, context=context, thinking=thinking,
+                    prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd,
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
@@ -464,15 +510,25 @@ class _RegenerableTurnRunner:
     async def admit(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
+        cwd: str | None = None,
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         self._executor.require_regenerable(binding)
+        if await self.canonicalize_cwd(cwd) != cwd:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd"})
+        instruction_resolver = self._resolver_for(binding)
+        repository_instructions = None
+        if instruction_resolver is not None:
+            repository_instructions = await instruction_resolver.resolve(cwd or ".")
+            instruction_resolver.validate(repository_instructions)
         request: JsonValue = {
             "prompt": prompt,
             "principal": asdict(context.principal),
             "binding": binding.binding_contract.to_payload(),
             "thinking": thinking,
             "session_metadata": dict(context.session_metadata),
+            "cwd": cwd,
+            "repository_instructions": None if repository_instructions is None else repository_instructions.to_payload(),
         }
         terminal_bytes = _TURN_BYTES - len(canonical_json_bytes(request))
         if terminal_bytes < _TERMINAL_RESERVE:
@@ -501,6 +557,7 @@ class _RegenerableTurnRunner:
         return _AdmittedTurn(
             key, through + 1, prompt,
             [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
+            repository_instructions,
         )
 
     async def settle(
@@ -513,6 +570,7 @@ class _RegenerableTurnRunner:
             outcome = await self._executor.execute_regenerable(
                 binding=binding, context=context, prompt=turn.prompt, history=turn.history, limits=limits,
                 event_sink=event_sink, thinking=thinking, streamed_output_bytes=turn.terminal_bytes,
+                workspace=self._workspace, repository_instructions=turn.repository_instructions,
             )
             result = encode_regenerable_turn(turn.prompt, turn.history, outcome.messages, outcome.output)
             if len(canonical_json_bytes(result)) > turn.terminal_bytes:

@@ -2181,7 +2181,6 @@ async function sendMessage(event) {
 }
 function openNew() {
   if(!state.config || state.config.read_only)return;
-  $('new-cwd').closest('label').hidden=Boolean(state.config.turn_sessions);if(state.config.turn_sessions)$('new-cwd').value='';
   $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-agent').focus();
 }
 async function createSession(event) {
