@@ -239,6 +239,22 @@ def _json(value: object, status: int = 200) -> JSONResponse:
     return JSONResponse(_wire(value), status_code=status, headers=_HEADERS)
 
 
+def _ordinary_turn_wire(turn: Mapping[str, object]) -> Mapping[str, object]:
+    """Keep one copy of the final text when the Web timeline already displays it."""
+    items, output = turn.get("items"), turn.get("output")
+    if not isinstance(items, list) or not isinstance(output, Mapping) or set(output) != {"text"}:
+        return turn
+    text = output["text"]
+    if not isinstance(text, str):
+        return turn
+    for item in reversed(items):
+        if isinstance(item, Mapping) and item.get("item_kind") == "assistant":
+            if item.get("content") == text:
+                return {key: value for key, value in turn.items() if key != "output"}
+            break
+    return turn
+
+
 def _text(payload: Mapping[str, object], key: str, default: str | None = None) -> str:
     value = payload.get(key, default)
     if not isinstance(value, str) or not value.strip():
@@ -454,15 +470,24 @@ class _Console:
                     identity, _text(request.query_params, "turn_id"), principal=self.principal,
                     local_workspace=self.local_turn_workspace,
                 )
-                return _json(turn)
+                return _json(_ordinary_turn_wire(turn))
             if include_timeline == "false":
                 session = await history.turn_session_state(
                     identity, principal=self.principal, local_workspace=self.local_turn_workspace,
                 )
                 return _json({"session": session, "timeline": None})
-            return _json(await history.turn_session(
+            page = await history.turn_session(
                 identity, principal=self.principal, local_workspace=self.local_turn_workspace, **_paging(request),
-            ))
+            )
+            timeline = page["timeline"]
+            if isinstance(timeline, Mapping) and isinstance(items := timeline.get("items"), list):
+                return _json({
+                    **page,
+                    "timeline": {**timeline, "items": [
+                        _ordinary_turn_wire(turn) if isinstance(turn, Mapping) else turn for turn in items
+                    ]},
+                })
+            return _json(page)
         if "execution_id" in request.query_params:
             execution_id = _text(request.query_params, "execution_id")
             turn_state = request.query_params.get("turn_state", "committed")
@@ -598,6 +623,8 @@ class _Console:
                             for item in attachments if isinstance(item, Mapping)
                         ],
                     }
+                if value.get("type") == "terminal":
+                    value = _ordinary_turn_wire(value)
                 frame = _sse_frame("turn", value, str(revision) if isinstance(revision, int) else None)
                 size = len(frame.encode("utf-8"))
                 if queue.full() or buffered + size > _TURN_SSE_BUFFER:
