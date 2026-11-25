@@ -17,7 +17,6 @@ from linktools.cli import CommandError
 from linktools.core import environ
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.turn_clients import TurnObserver, uses_turn_sessions
 from linktools.ai.session import ToolProcessItem
 
 if TYPE_CHECKING:
@@ -34,6 +33,8 @@ async def emit_result(
     thinking: bool | None,
 ) -> int:
     """Wait or stream an execution, cancelling owned work on interruption."""
+    from linktools.ai.runtime.turn_clients import uses_turn_sessions
+
     native = uses_turn_sessions(runtime)
     if native and not planning:
         return await _emit_session_result(runtime, prompt, session_id, as_json, thinking)
@@ -58,6 +59,8 @@ async def emit_result(
 async def _emit_session_result(
     runtime: "Runtime", prompt: str, session_id: str, as_json: bool, thinking: bool | None,
 ) -> int:
+    from linktools.ai.runtime.turn_clients import TurnObserver
+
     principal = runtime.default_principal
     try:
         await runtime.sessions.create_turn_session(

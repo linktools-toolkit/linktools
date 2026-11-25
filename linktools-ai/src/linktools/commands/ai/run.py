@@ -5,7 +5,6 @@
 from argparse import BooleanOptionalAction, Namespace
 from typing import TYPE_CHECKING
 
-from linktools.ai.runtime.turn_clients import uses_turn_sessions
 from linktools.cli import BaseCommand
 from ._common import add_local_runtime_arguments, local_turn_notices, run_local
 from ._output import emit_result
@@ -30,6 +29,8 @@ class Command(BaseCommand):
 
     def run(self, args: Namespace) -> int:
         async def execute(local: "LocalRuntime") -> int:
+            from linktools.ai.runtime.turn_clients import uses_turn_sessions
+
             async def run_prompt() -> int:
                 return await emit_result(local.runtime, args.prompt, "default", args.json, args.planning, args.thinking)
 

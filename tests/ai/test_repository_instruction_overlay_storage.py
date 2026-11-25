@@ -59,7 +59,12 @@ def _barrier(identity: str = "call") -> RepositoryInstructionBarrier:
 
 
 def _frontier(execution: ExecutionRecord, overlay: RepositoryInstructions) -> str:
-    boundary = _RepositoryInstructionBoundary(None, execution, None, overlay)
+    _validate_repository_instruction_frontier(execution, overlay)
+
+    async def check_frontier(**_kwargs):
+        pytest.fail("Rendering the committed approval frontier must not rediscover instructions")
+
+    boundary = _RepositoryInstructionBoundary(check_frontier, None, overlay)
     boundary.render_overlay()
     return boundary.approval_frontiers((ToolCallPart("read_file", {"path": "pkg/file.txt"}, "call"),))["call"]
 

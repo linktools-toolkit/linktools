@@ -197,6 +197,7 @@ async def test_approved_call_reaches_tool_after_instruction_check() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mismatch", (None, "call", "tool", "frontier", "unapproved", "approval_flag", "new_scope"))
 async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(mismatch) -> None:
+    from functools import partial
     from types import SimpleNamespace
 
     from pydantic_ai.exceptions import ApprovalRequired
@@ -219,7 +220,8 @@ async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(
     coordinator = Coordinator()
     execution = SimpleNamespace(execution_id="execution")
     initial = RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "root"),))
-    original = _RepositoryInstructionBoundary(coordinator, execution, initial, None)
+    check = partial(coordinator.check_repository_instructions, execution=execution)
+    original = _RepositoryInstructionBoundary(check, initial, None)
     original.render_overlay()  # The request producing this call observed the frontier.
     toolset = _boundary(FunctionToolset([_read_file]), "_read_file", original,
                         policy=ToolPermissionPolicy(default="ask"))
@@ -242,7 +244,7 @@ async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(
         assert original.approval_frontiers((call,))["call"] == frontier
     checked_before_resume = len(coordinator.checked)
     restored = _RepositoryInstructionBoundary(
-        coordinator, execution, initial, coordinator.overlay,
+        check, initial, coordinator.overlay,
         approved_frontiers={} if mismatch == "unapproved" else {"call": _RepositoryInstructionApproval(
             "_read_file", frontier,
         )},

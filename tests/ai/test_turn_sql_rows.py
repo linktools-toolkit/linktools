@@ -58,7 +58,7 @@ def test_mysql57_turn_identity_indexes_fit_exact_binary_keys() -> None:
         index, = [i for i in table.indexes if i.unique and tuple(i.columns.keys()) == ("store_key", route)]
         assert "UNIQUE INDEX" in str(CreateIndex(index).compile(dialect=mysql))
         assert column.type.dialect_impl(mysql).length == length
-        assert not hasattr(column.type.dialect_impl(mysql), "collation") and column.nullable
+        assert not hasattr(column.type.dialect_impl(mysql), "collation") and not column.nullable
 
 
 @pytest.mark.asyncio

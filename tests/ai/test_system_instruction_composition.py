@@ -4,6 +4,7 @@
 
 import asyncio
 from pathlib import Path
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -210,8 +211,10 @@ async def test_repository_partition_is_stable_and_fences_same_turn_siblings() ->
     )
     coordinator = _RefreshCoordinator()
     boundary = _RepositoryInstructionBoundary(
-        coordinator,  # type: ignore[arg-type]
-        SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
+        partial(
+            coordinator.check_repository_instructions,
+            execution=SimpleNamespace(execution_id="execution", tenant_id="tenant"),
+        ),
         initial,
         None,
     )
