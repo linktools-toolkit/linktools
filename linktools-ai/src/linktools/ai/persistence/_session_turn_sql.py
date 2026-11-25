@@ -661,7 +661,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         binding_refs: tuple[tuple[int, int | None], ...] = (),
     ) -> bool:
         """Finalize and release using the same lock order as acceptance."""
-        class FenceLost(Exception):
+        class FenceLost(AIError):
             pass
 
         if state not in ("succeeded", "failed", "cancelled"):
@@ -698,7 +698,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
                 state=state, lease_until=None, result_json=result,
             ))
             if finished.rowcount != 1:
-                raise FenceLost
+                raise FenceLost(ErrorCode.STORAGE_CONFLICT)
             return True
 
         try:

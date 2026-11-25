@@ -1356,12 +1356,12 @@ async def restore_snapshot(
     ordinary_group_ids = {root.group_id for root in ordinary_roots}
     if len(ordinary_group_ids) > 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for root in ordinary_roots:
-        _validate_native_partition(root.store_key, namespace, tenant_id)
-        closure = native_closures.get(root.group_id)
+    for transcript_root in ordinary_roots:
+        _validate_native_partition(transcript_root.store_key, namespace, tenant_id)
+        closure = native_closures.get(transcript_root.group_id)
         if closure is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        closure.mark(root.store_key, root.slices)
+        closure.mark(transcript_root.store_key, transcript_root.slices)
     raw_checkpoints = manifest.get("native_checkpoints", [])
     if not isinstance(raw_checkpoints, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

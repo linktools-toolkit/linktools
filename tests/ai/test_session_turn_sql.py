@@ -75,6 +75,10 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
         key = SessionTurnKey("chat", "turn")
         assert await turns.get_history_turn(key, lineage=()) is None
         assert await turns.read_context_range("chat", after=0, through=0) == ()
+        # History captures metadata and (when present) body ownership in one
+        # read snapshot; separate its zero-write commit from the two mutations.
+        assert statements == ["SELECT", "SELECT"] and commits == [(2, 0)]
+        commits.clear()
         assert await accept(turns, key.turn_id)
         assert await turns.finish(key, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT)
         assert statements == ["SELECT", "SELECT", "UPDATE", "INSERT", "INSERT", "UPDATE", "UPDATE"]
@@ -167,27 +171,29 @@ async def test_reopened_store_recovers_expired_cancellation_once(store):
 
     restarted_engine = create_async_engine(engine.url)
     try:
-        restarted = SqlSessionTurns(
-            create_sql_storage_context(restarted_engine), metadata, namespace="test", tenant_id="a",
-        )
-        pending = await restarted.get_turn(key)
-        assert (pending["state"], pending["generation"]) == ("cancelling", 1)
-        assert not await restarted.take_over(key, generation=1, lease_seconds=60)
-        assert not await restarted.renew(key, generation=1, lease_seconds=60)
+        async with Persistence.open(
+            "test", storage=PersistenceStorage.sql(restarted_engine), tenant_id="a",
+        ) as restarted_state:
+            restarted = restarted_state.session_turns
+            assert restarted is not None
+            pending = await restarted.get_turn(key)
+            assert (pending["state"], pending["generation"]) == ("cancelling", 1)
+            assert not await restarted.take_over(key, generation=1, lease_seconds=60)
+            assert not await restarted.renew(key, generation=1, lease_seconds=60)
 
-        outcomes = await asyncio.gather(*(
-            restarted.take_over(key, generation=1, lease_seconds=60, cancelling=True) for _ in range(2)
-        ))
-        assert outcomes.count(True) == 1
-        assert not await restarted.finish(key, generation=1, turn_no=1, state="cancelled", result=None)
-        assert (await restarted.get_session("chat"))["active_turn_id"] == b"turn"
-        assert await restarted.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
-        assert not await restarted.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
+            outcomes = await asyncio.gather(*(
+                restarted.take_over(key, generation=1, lease_seconds=60, cancelling=True) for _ in range(2)
+            ))
+            assert outcomes.count(True) == 1
+            assert not await restarted.finish(key, generation=1, turn_no=1, state="cancelled", result=None)
+            assert (await restarted.get_session("chat"))["active_turn_id"] == b"turn"
+            assert await restarted.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
+            assert not await restarted.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
 
-        visible = await restarted.get_history_turn(key, lineage=())
-        assert (visible["turn_id"], visible["state"], visible["result_json"]) == (b"turn", "cancelled", None)
-        assert await restarted.read_context_range("chat", after=0, through=1) == ()
-        assert await accept(restarted, "next", revision=2, through=1, request="new")
+            visible = await restarted.get_history_turn(key, lineage=())
+            assert (visible["turn_id"], visible["state"], visible["result_json"]) == (b"turn", "cancelled", None)
+            assert await restarted.read_context_range("chat", after=0, through=1) == ()
+            assert await accept(restarted, "next", revision=2, through=1, request="new")
     finally:
         await restarted_engine.dispose()
 
