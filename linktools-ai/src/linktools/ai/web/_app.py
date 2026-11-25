@@ -362,7 +362,7 @@ class _Console:
         self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
         status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]],
         shutdown_event: asyncio.Event | None, session_notices: _SessionNoticeFeed | None,
-        local_workspace: bool,
+        local_workspace: bool, ordinary_turns: bool,
     ) -> None:
         self.runtime = runtime
         self.history = runtime.history if runtime is not None else history
@@ -372,6 +372,7 @@ class _Console:
         self._shutdown_event = shutdown_event
         self._session_notices = session_notices
         self._local_workspace = local_workspace
+        self.turn_sessions = ordinary_turns
         self._turn_subscribers = 0
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
@@ -386,12 +387,6 @@ class _Console:
         if self.history is None:
             raise AIError(ErrorCode.EXECUTION_NOT_FOUND)
         return self.history
-
-    @property
-    def turn_sessions(self) -> bool:
-        if self.runtime is not None:
-            return self.runtime.sessions.supports_turn_sessions
-        return self.history is not None and self.history.has_turn_sessions
 
     @property
     def local_turn_workspace(self) -> bool:
@@ -1092,6 +1087,7 @@ def create_app(
     shutdown_event: asyncio.Event | None = None,
     session_notices: _SessionNoticeFeed | None = None,
     local_workspace: bool = False,
+    ordinary_turns: bool | None = None,
     turn_notice_transport: "TurnNoticeTransport | None" = None,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
@@ -1099,14 +1095,21 @@ def create_app(
     Set shutdown_event before draining HTTP connections to close live observers
     without shutting down their Runtime. With no Runtime, mutations and live watches are disabled. Historical reads
     remain available without model credentials. Only an explicitly trusted local workspace can list ordinary sessions.
-    An optional host-owned turn notice transport is attached during ASGI lifespan.
+    ordinary_turns selects the conversation domain for the whole console. If omitted, use the configured domain.
+    An optional host-owned ordinary turn notice transport is attached during ASGI lifespan.
     Host/Origin headers are not
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
+    available = runtime.sessions.supports_turn_sessions if runtime is not None else (
+        history is not None and history.has_turn_sessions
+    )
+    if ordinary_turns and not available:
+        raise ValueError("ordinary_turns requires ordinary turn support")
+    enabled = available if ordinary_turns is None else ordinary_turns
     lifespan = None
     if turn_notice_transport is not None:
-        if runtime is None or not runtime.sessions.supports_turn_sessions:
+        if runtime is None or not enabled:
             raise ValueError("turn_notice_transport requires a Runtime with ordinary turn sessions")
         bridge = runtime.sessions.bridge_turn_notices
 
@@ -1117,7 +1120,9 @@ def create_app(
 
         lifespan = turn_notice_lifespan
 
-    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices, local_workspace)
+    console = _Console(
+        runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices, local_workspace, enabled,
+    )
     app = Starlette(routes=[
         Route("/", _asset), Route("/assets/{name}", _asset),
         Route("/api/config", console.config),

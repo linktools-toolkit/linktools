@@ -26,6 +26,12 @@ as `ai-run`; memory is supplied by the Runtime capability. Prefer environment
 configuration for credentials rather than shell history. The console does not
 persist or edit model credentials.
 
+The default local console keeps the full tool-enabled execution profile.
+Use `ai-web --ordinary` to use the lower-I/O session store for plain text
+Agents, with a separate session list. This mode does not enable filesystem or
+shell tools, Memory, durable Trace or checkpoint-based tool recovery. An
+ineligible Agent is rejected rather than retried through the strict profile.
+
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file
 `.linktools/config.yaml`, shared by `ai-run`, `ai-acp`, and `ai-web`:

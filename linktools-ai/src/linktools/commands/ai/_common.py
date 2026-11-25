@@ -297,6 +297,7 @@ async def _open_local_runtime(
     *,
     model: "ModelBinding",
     status: "Mapping[str, object] | None" = None,
+    ordinary: bool = False,
 ) -> "AsyncIterator[LocalRuntime]":
     from linktools.ai.capability import (
         AssetCapability, ExecutionCapability, FileSystemCapability, MemoryCapability,
@@ -318,12 +319,14 @@ async def _open_local_runtime(
     features = RuntimeFeatures("workspace")
     features.model("default", model)
     features.capability(AssetCapability(_local_runtime_assets(workspace)))
-    features.capability(FileSystemCapability(workspace))
-    features.capability(ShellCapability())
-    features.capability(MemoryCapability())
+    if not ordinary:
+        features.capability(FileSystemCapability(workspace))
+        features.capability(ShellCapability())
+        features.capability(MemoryCapability())
     features.capability(ExecutionCapability(retain_history=True))
-    features.capability(StepPersistenceCapability())
-    features.capability(TraceCapability())
+    if not ordinary:
+        features.capability(StepPersistenceCapability())
+        features.capability(TraceCapability())
     metrics = await _local_metrics(workspace)
     async with Runtime.open(
         "default", storage=_local_runtime_storage(workspace), features=features, metrics=metrics,
@@ -344,7 +347,7 @@ async def _open_local_runtime(
 
 
 def run_local(
-    args: Namespace, execute: "Callable[[LocalRuntime], Awaitable[int]]",
+    args: Namespace, execute: "Callable[[LocalRuntime], Awaitable[int]]", *, ordinary: bool = False,
 ) -> int:
     """Run a command while owning its Runtime and local resource lifetime."""
     async def run() -> int:
@@ -352,7 +355,7 @@ def run_local(
         options = _ModelOptions.load(workspace, args)
         model = options.create_model_binding()
         async with _open_local_runtime(
-            workspace, model=model, status=options.status(model),
+            workspace, model=model, status=options.status(model), ordinary=ordinary,
         ) as local:
             return await execute(local)
 
