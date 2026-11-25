@@ -487,6 +487,8 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
 
     async def close_watches(self) -> None:
         self._watches_closed = True
+        if self._regenerable_turns is not None:
+            await self._regenerable_turns.close()
         for unsubscribe in tuple(self._change_subscriptions):
             unsubscribe()
         tasks = []
