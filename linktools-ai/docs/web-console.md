@@ -32,11 +32,34 @@ Agents, with a separate session list. This mode does not enable filesystem or
 shell tools, Memory, durable Trace or checkpoint-based tool recovery. An
 ineligible Agent is rejected rather than retried through the strict profile.
 
-An embedded ordinary Runtime may configure a workspace and explicitly select
-the native `list_files` and bounded single-file text `read_file` tools for an
-eligible Agent. The workspace policy must allow each tool. This does not enable
-file attachments returned by a tool, bulk reads, dynamically loaded skills or shell commands. The console shows only the tool status and its
-public preview, never the raw parameters or result.
+An embedded ordinary Runtime can enable the native read-only tools without adding
+a second tool configuration. Declare the Workspace through `FileSystemCapability`
+and select the tools by name on the ordinary Agent:
+
+```python
+from linktools.ai.capability import FileSystemCapability
+from linktools.ai.runtime import RuntimeFeatures
+
+features = RuntimeFeatures("workspace")
+features.model("default", model_binding)
+features.capability(FileSystemCapability(workspace))
+features.agent(
+    "review",
+    allow_tools=("list_files", "read_file"),
+    allow_skills=(),
+    allow_subagents=(),
+    allow_capabilities=(),
+)
+```
+
+Pass `features` and the host's explicit session authorization policy to
+`Runtime.open` with the ordinary SQL store. Send with `agent_id="review"`. Select
+both tools or only the one needed; `allow_tools=("*",)` also selects unsafe
+workspace tools and is not an ordinary Agent profile. The workspace policy must
+allow every selected tool. Ordinary `read_file` only returns a bounded,
+single-file text preview; it does not enable bulk reads, file attachments
+returned by a tool, dynamically loaded skills, or shell commands. The console
+shows the tool status and public preview, not raw parameters or results.
 
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file
