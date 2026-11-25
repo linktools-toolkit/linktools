@@ -42,6 +42,7 @@ from ..task import (
     TaskTerminalRecord,
 )
 from ._plan import PersistenceDomain
+from .graph_turns import GraphCancelOwner as _TaskGraphCancelOwner
 from .contracts import TaskPreparedInputRecord
 from .repositories import (
     RepositoryBase,
@@ -373,18 +374,6 @@ def _validate_expansion(
 
 
 
-
-
-@dataclass(frozen=True, slots=True)
-class _TaskGraphCancelOwner:
-    """An authorized cancel operation's exact target, never a runnable task lease."""
-
-    node_id: str
-    operation: OperationLedgerRecord
-
-    @property
-    def tenant_id(self) -> str:
-        return self.operation.tenant_id
 
 
 class TaskRepositoryImpl(RepositoryBase):

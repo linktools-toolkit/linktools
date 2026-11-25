@@ -34,13 +34,13 @@ from ._archive import archive_content_scope
 from ._record_key import decode_key_components, RECORD_KEY_MAX_BYTES
 from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
-                                 restore_native_text_payload, restore_native_user_input)
+                                 restore_native_text_payload)
 from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._step_schema import native_message_sql_tables
 from ._step_maintenance import inspect_native_message_tables, native_message_partitions
 from ._session_transcript import decode_session_input_reference, scan_ordinary_message_roots
 from ._capability_marker import has_capability_partition_marker
-from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
+from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope, restore_native_user_input,
                     execution_payload_slots, tool_payload_slots, native_user_input_reference,
                     native_text_reference, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference)
 from .captures import (

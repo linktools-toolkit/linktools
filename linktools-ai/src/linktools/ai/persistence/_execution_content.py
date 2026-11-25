@@ -12,7 +12,7 @@ from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ..execution import ExecutionRecord, ExecutionTimelineRecord, PendingToolContinuation, RecoveryTerminalHandoff, ResultRecord
-from ..model import StoredUserInput, capture_plain_text_input, plain_text_input_content
+from ..model import StoredUserInput, plain_text_input_content
 from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
 from ._archive_read import ContentReferenceReader
@@ -24,7 +24,7 @@ from ._step_store import SqlStepStore
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart, ToolCallPart
 from .codec import (decode_execution_terminal_details,  binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
-    pending_operation_reference, encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
+    pending_operation_reference, encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, restore_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import GroupRecordReader, StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
 from ._execution_policy_content import (POLICY_CODEC, policy_reference, policy_values, encode_policy, decode_policy, expand_policy, expand_policy_records)
@@ -186,21 +186,6 @@ def restore_native_text_payload(reference: NativeTextReference, raw: bytes) -> S
             value = part.content if reference.projection == "text" else {"text": part.content}
         return validate_native_text_payload(reference, StoredPayload.inline_json(value))
     except (TypeError, ValueError, KeyError, IndexError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def restore_native_user_input(reference: NativeUserInputReference, raw: bytes) -> StoredUserInput:
-    """Authenticate a canonical text or ordered-text capture from a fixed prompt."""
-    try:
-        messages = decode_model_messages(raw)
-        if (len(messages) != 1 or not isinstance(messages[0], ModelRequest)
-                or reference.part_index >= len(messages[0].parts)):
-            raise ValueError("native input source is not a request part")
-        part = messages[0].parts[reference.part_index]
-        if not isinstance(part, UserPromptPart):
-            raise ValueError("native input source is not ordinary prompt text")
-        return validate_native_user_input(reference, capture_plain_text_input(part.content))
-    except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
@@ -1026,5 +1011,5 @@ class ExecutionContent:
         return tuple(_map_payloads(record, expand) for record in records)
 
 
-__all__ = ["restore_native_user_input", "restore_native_text_payload", "expand_native_execution_content", "ExecutionContent", "expand_snapshot_execution_content", "expand_retained_execution_content", "snapshot_execution_content_size",
+__all__ = ["restore_native_text_payload", "expand_native_execution_content", "ExecutionContent", "expand_snapshot_execution_content", "expand_retained_execution_content", "snapshot_execution_content_size",
            ]

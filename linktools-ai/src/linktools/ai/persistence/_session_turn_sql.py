@@ -30,7 +30,7 @@ from ..storage import (
     sql_unique,
 )
 from ._archive import ArchiveContentInput, PreparedArchive
-from .codec import decode_agent_binding_content, encode_agent_binding_content
+from .codec import decode_agent_binding_content, encode_agent_binding_content, restore_native_user_input
 from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage, fork_segments, lineage_predicate
 from ._turn_sql_schema import (
     TURN_EXECUTION_MAX_BYTES,
@@ -368,7 +368,6 @@ class SqlSessionTurnReader:
         for position, row in enumerate(rows):
             if position in prompts:
                 from ..model import plain_text_input_content
-                from ._execution_content import restore_native_user_input
 
                 reference = prompts[position]
                 parts = bodies[reference.root]

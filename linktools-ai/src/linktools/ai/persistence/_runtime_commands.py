@@ -92,6 +92,7 @@ from .durability import (
     run_durable_commit,
 )
 from ._execution_commands import _execution_history_seal
+from .graph_turns import GraphDeferredWait as _GraphDeferredWait
 from ._execution_repositories import ExecutionRepositoryImpl, IdempotencyRepositoryImpl
 from .turns import SourceTurnWriteFence, StateTurnCoordination, _duration, _TurnGraphReadError
 from ._model_interaction_store import ModelInteractionStateStepArchive
@@ -183,19 +184,6 @@ if TYPE_CHECKING:
     from ..task._graph import TaskLease
 
     _GraphLaunch = tuple[SqlSessionTurns, SessionTurnKey, int, TaskRepositoryImpl, TaskLease]
-
-
-@dataclass(frozen=True, slots=True)
-class _GraphDeferredWait:
-    turns: "SqlSessionTurns"
-    key: "SessionTurnKey"
-    generation: int
-    step_store: "SqlStepStore"
-    step_conversation_id: str
-    checkpoint_id: str
-    task_repository: "TaskRepositoryImpl"
-    task_lease: "TaskLease | None"
-    max_bytes: int
 
 
 class _GroupedStartUnavailable(AIError):

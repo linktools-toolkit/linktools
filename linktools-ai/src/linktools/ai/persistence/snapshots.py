@@ -18,8 +18,8 @@ from ._native_tool_arguments import restore_native_tool_arguments_payload
 from ._native_tool_error import restore_native_tool_error_payload
 from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size,
-    expand_native_execution_content, restore_native_text_payload, restore_native_user_input)
-from .codec import (decode_envelope, execution_payload_slots, pending_operation_reference, native_text_reference, binding_reference,
+    expand_native_execution_content, restore_native_text_payload)
+from .codec import (decode_envelope, restore_native_user_input, execution_payload_slots, pending_operation_reference, native_text_reference, binding_reference,
     tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference, native_user_input_reference, native_tool_error_reference)
 
 from ..core import (

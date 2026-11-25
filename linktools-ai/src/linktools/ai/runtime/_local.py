@@ -128,7 +128,7 @@ from ..execution import ExecutionRequest
 from ._conversation_service import ConversationService
 from ..persistence import PersistenceDomain
 from ..persistence.commands import StateCommands
-from ..persistence._runtime_commands import _GraphDeferredWait
+from ..persistence.graph_turns import GraphCancelOwner, GraphDeferredWait
 from ..persistence.turns import ExecutionAuthority, SourceTurnRevoked, SourceTurnWriteFence
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
@@ -244,10 +244,9 @@ from ._repository_instructions import (
 if TYPE_CHECKING:
     from ..core import AuthorizationPolicy
     from ..persistence.turns import SessionTurnKey, SqlSessionTurns
-    from ..persistence._message_root import NativeMessageRoot
-    from ..persistence._task_repository import TaskRepositoryImpl
-    from ..task import TaskGraphAdmission, TaskNodeInvocation
-    from ..task._graph import TaskLease
+    from ..persistence import NativeMessageRoot
+    from ..persistence.contracts import TaskRepository
+    from ..task import TaskGraphAdmission, TaskLease, TaskNodeInvocation
     from ._regenerable_turn import _RegenerableTurnRunner
     from ._regenerable_turn import _AttachedGraphTurn
 
@@ -321,7 +320,7 @@ class _OwnedExecutionTurn:
     graph_step_alias: "tuple[str, NativeMessageRoot, Sequence[ModelMessage]] | None" = None
     graph_producer_stopped: "Callable[[_AttachedGraphTurn], None] | None" = None
     graph_terminal_confirmed: bool = False
-    graph_wait_owner: "tuple[TaskRepositoryImpl, TaskLease] | None" = None
+    graph_wait_owner: "tuple[TaskRepository, TaskLease] | None" = None
     graph_interrupted_step: tuple[SqlStepStore, str, str, str] | None = None
     graph_wait_confirmed: bool = False
 
@@ -1314,7 +1313,7 @@ class LocalExecutionBackend:
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
         grouped: _GroupedTurnStart | None = None, *, _existing_owner: bool = False,
-        _graph_claim: "tuple[_AttachedGraphTurn, SqlSessionTurns, Observed[ExecutionRecord], Callable[..., None], Callable[[_AttachedGraphTurn], None], TaskRepositoryImpl, TaskLease] | None" = None,
+        _graph_claim: "tuple[_AttachedGraphTurn, SqlSessionTurns, Observed[ExecutionRecord], Callable[..., None], Callable[[_AttachedGraphTurn], None], TaskRepository, TaskLease] | None" = None,
     ) -> ExecutionHandle:
         parent = self._parent_turn(reservation)
         admission = asyncio.get_running_loop().create_future()
@@ -1451,7 +1450,7 @@ class LocalExecutionBackend:
         admission: asyncio.Future[ExecutionHandle], parent: _OwnedExecutionTurn | None,
         entered: asyncio.Future[None] | None, grouped: _GroupedTurnStart | None,
         *, existing_owner: bool = False,
-        graph_claim: "tuple[_AttachedGraphTurn, SqlSessionTurns, Observed[ExecutionRecord], Callable[..., None], Callable[[_AttachedGraphTurn], None], TaskRepositoryImpl, TaskLease] | None" = None,
+        graph_claim: "tuple[_AttachedGraphTurn, SqlSessionTurns, Observed[ExecutionRecord], Callable[..., None], Callable[[_AttachedGraphTurn], None], TaskRepository, TaskLease] | None" = None,
     ) -> None:
         execution = reservation.execution
         identity = reservation.idempotency
@@ -2150,7 +2149,7 @@ class LocalExecutionBackend:
 
     async def _recover_undispatched_attached_graph(
         self, execution: ExecutionRecord, *, runner: "_RegenerableTurnRunner",
-        authorization: "AuthorizationPolicy", task_repository: "TaskRepositoryImpl",
+        authorization: "AuthorizationPolicy", task_repository: "TaskRepository",
         task_invocation: "TaskNodeInvocation", recovery_operation: OperationLedgerRecord,
         record_task_invocation: Callable[[str, "TaskNodeInvocation"], Awaitable[None]],
     ) -> ExecutionHandle | None:
@@ -2204,7 +2203,7 @@ class LocalExecutionBackend:
 
     async def _resume_ready_attached_graph(
         self, execution: ExecutionRecord, *, runner: "_RegenerableTurnRunner",
-        authorization: "AuthorizationPolicy", graph: _GraphDeferredWait,
+        authorization: "AuthorizationPolicy", graph: GraphDeferredWait,
         task_invocation: "TaskNodeInvocation", recovery_operation: OperationLedgerInput | None,
     ) -> ExecutionHandle | None:
         """Reacquire only the original READY Graph turn and its settled checkpoint."""
@@ -2329,7 +2328,7 @@ class LocalExecutionBackend:
         self, request: ExecutionRequest, reservation: ExecutionStartReservation, *,
         session_id: str, session_row: Mapping[str, object],
         runner: "_RegenerableTurnRunner", authorization: "AuthorizationPolicy",
-        task_repository: "TaskRepositoryImpl", task_admission: "TaskGraphAdmission",
+        task_repository: "TaskRepository", task_admission: "TaskGraphAdmission",
         task_invocation: "TaskNodeInvocation", dependency_hold_id: str | None,
         record_task_invocation: Callable[[str, "TaskNodeInvocation"], Awaitable[None]],
     ) -> ExecutionHandle:
@@ -2385,7 +2384,7 @@ class LocalExecutionBackend:
     async def _dispatch_attached_graph(
         self, request: ExecutionRequest, started: ExecutionRecord, identity: IdempotencyRecord,
         turn: "_AttachedGraphTurn", *, runner: "_RegenerableTurnRunner",
-        task_repository: "TaskRepositoryImpl", task_invocation: "TaskNodeInvocation",
+        task_repository: "TaskRepository", task_invocation: "TaskNodeInvocation",
         record_task_invocation: Callable[[str, "TaskNodeInvocation"], Awaitable[None]],
     ) -> ExecutionHandle:
         turns = runner._store
@@ -2428,7 +2427,7 @@ class LocalExecutionBackend:
         claimed: Observed[ExecutionRecord], turn: "_AttachedGraphTurn", turns: "SqlSessionTurns",
         *, principal: Principal, terminal_notice: Callable[..., None],
         producer_stopped: "Callable[[_AttachedGraphTurn], None]",
-        task_repository: "TaskRepositoryImpl", task_lease: "TaskLease",
+        task_repository: "TaskRepository", task_lease: "TaskLease",
         resume: _DeferredResume | None = None,
         graph_resume_source: "tuple[NativeMessageRoot, str, int] | None" = None,
     ) -> ExecutionHandle:
@@ -3149,7 +3148,7 @@ class LocalExecutionBackend:
             if continuation.source_agent_run_id != run_id:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             task_repository, task_lease = owner.graph_wait_owner
-            graph_wait = _GraphDeferredWait(
+            graph_wait = GraphDeferredWait(
                 owner.graph_turns, owner.graph_turn.key, owner.graph_turn.generation, native,
                 conversation_id, checkpoint_id, task_repository, task_lease, owner.graph_turn.terminal_bytes,
             )
@@ -6354,14 +6353,13 @@ class LocalExecutionBackend:
 
     async def _settle_cold_graph_cancel(
         self, current: ExecutionRecord, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
-        generation: int, turn_no: int, task_repository: "TaskRepositoryImpl",
+        generation: int, turn_no: int, task_repository: "TaskRepository",
         node_id: str, operation: OperationLedgerRecord,
     ) -> ExecutionRecord:
         """Finish cold Stop from the existing Graph cancellation authority."""
-        from ..persistence._task_repository import _TaskGraphCancelOwner
         from ._regenerable_turn import _LEASE_SECONDS
 
-        owner = _TaskGraphCancelOwner(node_id, operation)
+        owner = GraphCancelOwner(node_id, operation)
         step = None
         if current.restart_checkpoints:
             self._require_attached_graph_step_source(current, turns)

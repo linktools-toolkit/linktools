@@ -109,6 +109,7 @@ from ..execution import CancelExecutionRequest, ExecutionHistoryReader
 from ..session import SessionHistoryReader
 from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
+from ..persistence.graph_turns import graph_task_repository
 from ..persistence.repositories import BudgetRepositoryImpl, ExecutionRepositoryImpl
 from ..persistence.runs import RuntimeAgentRunStore
 from ..persistence.runs import StagingAgentRunStore, StateStepArchive
@@ -1038,10 +1039,9 @@ async def _build_local_components(
             async def start_attached_graph(
                 request, reservation, session_id, session_row, task_admission, task_invocation, dependency_hold_id,
             ):
-                from ..persistence._task_repository import TaskRepositoryImpl
 
-                task_repository = state.task.tasks
-                if type(task_repository) is not TaskRepositoryImpl:
+                task_repository = graph_task_repository(state.task.tasks)
+                if task_repository is None:
                     raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
                 return await backend._start_attached_graph(
                     request, reservation, session_id=session_id, session_row=session_row, runner=turn_runner,
@@ -1097,7 +1097,6 @@ async def _build_local_components(
             execution._is_linked_graph_turn = is_linked_graph_turn
 
             async def settle_cold_graph_cancel(record, node_id, operation, principal) -> bool:
-                from ..persistence._task_repository import TaskRepositoryImpl
 
                 linked = await resolve_graph_cancel_link(record, principal)
                 if linked is None:
@@ -1110,8 +1109,8 @@ async def _build_local_components(
                 turn = await turns.get_turn(key)
                 if turn is None or turn["generation"] != generation or turn["state"] != "cancelling":
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                task_repository = state.task.tasks
-                if type(task_repository) is not TaskRepositoryImpl:
+                task_repository = graph_task_repository(state.task.tasks)
+                if task_repository is None:
                     raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
                 finished = await backend._settle_cold_graph_cancel(
                     record, turns=turns, key=key, generation=generation, turn_no=turn["turn_no"],
@@ -1129,15 +1128,14 @@ async def _build_local_components(
             execution._settle_cold_graph_cancel = settle_cold_graph_cancel
 
             async def recover_undispatched_graph_turn(record, invocation, operation, principal) -> bool:
-                from ..persistence._task_repository import TaskRepositoryImpl
 
                 linked = await resolve_graph_cancel_link(record, principal)
                 if linked is None:
                     return False
                 if turn_runner is None:
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-                task_repository = state.task.tasks
-                if type(task_repository) is not TaskRepositoryImpl:
+                task_repository = graph_task_repository(state.task.tasks)
+                if task_repository is None:
                     raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
                 handle = await backend._recover_undispatched_attached_graph(
                     record, runner=turn_runner, authorization=authorization, task_repository=task_repository,
@@ -1190,15 +1188,14 @@ async def _build_local_components(
         backend.bind_recovery_relaunch_guard(TaskRecoveryGuard(state, input_captures))
         if state.session_turns is not None:
             def graph_wait_proof(record, turns, key, generation, turn, lease):
-                from ..persistence._runtime_commands import _GraphDeferredWait
-                from ..persistence._step_store import SqlStepStore
-                from ..persistence._task_repository import TaskRepositoryImpl
+                from ..persistence.graph_turns import GraphDeferredWait
+                from ..persistence import SqlStepStore
                 from ._regenerable_turn import _TURN_BYTES
 
-                task_repository, step_store = state.task.tasks, run_store.step_store
-                if type(task_repository) is not TaskRepositoryImpl or type(step_store) is not SqlStepStore:
+                task_repository, step_store = graph_task_repository(state.task.tasks), run_store.step_store
+                if task_repository is None or type(step_store) is not SqlStepStore:
                     raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
-                return _GraphDeferredWait(
+                return GraphDeferredWait(
                     turns, key, generation, step_store,
                     agent_conversation_id(namespace=namespace, tenant_id=tenant_id, execution_id=record.execution_id),
                     turn["result_json"]["checkpoint_id"], task_repository, lease, _TURN_BYTES,
