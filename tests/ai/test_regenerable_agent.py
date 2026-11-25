@@ -75,3 +75,34 @@ async def test_model_stream_continues_committed_context_without_sql(tmp_path: Pa
             event.remove(Engine, "before_cursor_execute", capture)
     assert prompts == [["first"], ["first", "second"]]
     assert events and not sql
+
+
+@pytest.mark.asyncio
+async def test_stream_stops_before_forwarding_over_budget_output() -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.runtime._agent_executor import LiveDelta
+
+    events: list[AgentEmission] = []
+
+    async def stream(_messages, _info):
+        yield "你"
+        yield "好"
+        pytest.fail("the stream continued beyond its output budget")
+
+    async def emit(value: AgentEmission) -> None:
+        events.append(value)
+
+    features = RuntimeFeatures("plain")
+    features.agent("default", model="default", allow_tools=())
+    model_features(_Models(FunctionModel(stream_function=stream)), features)
+    async with Runtime.open("plain", storage=PersistenceStorage.in_memory(),
+                            features=features, metrics=None) as runtime:
+        binding = await runtime._binding_resolver.resolve_agent("default")
+        context = AgentContext(None, runtime.default_principal, "plain", "chat", "turn", {})
+        with pytest.raises(AIError) as error:
+            await AgentExecutor(SkillSourceRegistry()).execute_regenerable(
+                binding=binding, context=context, prompt="prompt", history=[],
+                limits=PromptLimits(), event_sink=emit, streamed_output_bytes=5,
+            )
+        assert error.value.code is ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE
+    assert [e.content for e in events if isinstance(e, LiveDelta) and e.content] == ["你"]

@@ -229,6 +229,7 @@ class _AgentRunScope:
     subagent_descriptions: Mapping[str, str | None] = field(default_factory=dict)
     subagent_delegate: SubagentDelegate | None = None
     event_sink: EventSink | None = None
+    streamed_output_bytes: int | None = None
     usage_sink: UsageSink | None = None
     tool_operations: ToolOperationBridge | None = None
     tool_response_ref: AssetVersionRef | None = None
@@ -389,8 +390,11 @@ class AgentExecutor:
         event_sink: EventSink,
         workspace: Workspace | None = None,
         thinking: ThinkingValue = None,
+        streamed_output_bytes: int = 64 * 1024,
     ) -> AgentExecutionResult:
         """Run a plain turn with no durable recorder or execution handoff."""
+        if streamed_output_bytes < 1:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, "No output capacity remains for this turn")
         compiled = binding.compiled_agent
         policy = _runtime_feature_policy(compiled.runtime_contributions)
         if (context.session_id is None or binding.output_binding.mode != "text"
@@ -411,7 +415,7 @@ class AgentExecutor:
                 initial_context=LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history)),
                 agent_conversation_id=context.session_id, run_store=store,
                 agent_run_id=context.execution_id, agent_run_seq=1,
-                event_sink=event_sink, thinking=thinking,
+                event_sink=event_sink, thinking=thinking, streamed_output_bytes=streamed_output_bytes,
             ))
             if isinstance(outcome, DeferredToolRequests):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")
@@ -1354,6 +1358,7 @@ async def _materialize_agent(
     capabilities.append(
         _event_stream_capability(
             scope.event_sink, run_recorder, scope.agent_run_seq, scope.tool_operations,
+            streamed_output_bytes=scope.streamed_output_bytes,
             output_preview=None if scope.parent_agent_run_id is not None or scope.context.parent_execution_id is not None else OutputPreview.from_binding(
                 scope.binding.output_binding,
                 runtime_policy.execution,
@@ -1425,11 +1430,15 @@ def _event_stream_capability(
     agent_run_seq: int,
     tool_operations: ToolOperationBridge | None = None,
     *, output_preview: OutputPreview | None = None,
+    streamed_output_bytes: int | None = None,
 ) -> ProcessEventStream[AgentContext[object]]:
+    remaining = streamed_output_bytes
+
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
+        nonlocal remaining
         preview = None if output_preview is None else output_preview.new_stream()
         preview_attempt: tuple[JsonValue, JsonValue] | None = None
         tool_started: dict[str, int] = {}
@@ -1441,6 +1450,10 @@ def _event_stream_capability(
                 started = tool_started.pop(event.part.tool_call_id, None)
                 tool_elapsed_ms = None if started is None else (monotonic_ns() - started) // 1_000_000
             emission = _map_event(event)
+            if remaining is not None and isinstance(emission, LiveDelta):
+                content = emission.content
+                if len(content) > remaining or (remaining := remaining - len(content.encode("utf-8"))) < 0:
+                    raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, "Generated content exceeds the turn output budget")
             if isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent)):
                 position["part_index"] = event.index
             if isinstance(event, (PartStartEvent, PartEndEvent)) and isinstance(event.part, ThinkingPart):
