@@ -175,7 +175,6 @@ function setDisabled() {
   $('recover-turn').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
   if(ordinary){
     $('open-recovery').hidden=true;$('inspector-toggle').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
-    $('fork-session').disabled=true;
     $('cancel').hidden=readonly || !turn;$('cancel').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
     $('cancel').setAttribute('aria-label','Stop current turn');
     if(turn && sessionWatch?.ready){$('current-status').hidden=false;$('current-status').textContent='Turn in progress';}
@@ -2235,7 +2234,7 @@ async function createSession(event) {
 async function sessionAction(action) {
   const id=state.selectedSession,generation=state.generation,noticeRevision=state.noticeRevision;if(!id || !state.session)return;
   const key=`session:${id}:${action}`,ordinary=Boolean(state.config?.turn_sessions);
-  if(state.actionsPending.has(key) || ordinary && (state.session.status!=='OPEN' || state.session.active_turn_id || sessionSubmissions.has(id)))return;
+  if(state.actionsPending.has(key) || ordinary && action!=='fork' && (state.session.status!=='OPEN' || state.session.active_turn_id || sessionSubmissions.has(id)))return;
   let payload=ordinary?{expected_revision:state.session.revision}:{};
   if(action==='close' && !confirm('Close this session? Its history will remain available.'))return;
   if(action==='fork'){
@@ -2256,7 +2255,7 @@ async function sessionAction(action) {
     if(!result)return;
     if(action==='fork')state.pendingForks.delete(id);
     if(generation!==state.generation || id!==state.selectedSession){await loadList();return;}
-    if(ordinary){
+    if(ordinary && action!=='fork'){
       if(result.revision>=state.session.revision){
         Object.assign(state.session,result);
         if(sessionWatch?.id===id && result.revision>=(sessionWatch.snapshot?.revision ?? -1))

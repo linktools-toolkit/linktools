@@ -514,10 +514,19 @@ class _Console:
                 operation = runtime.sessions.cancel_turn if action == "cancel" else runtime.sessions.recover_turn
                 accepted = await operation(session_id, _text(payload, "turn_id"), principal=self.principal)
                 return _json({"accepted": accepted})
-            if action in {"update", "close"}:
+            if action in {"update", "close", "fork"}:
                 revision = payload.get("expected_revision")
                 if type(revision) is not int or revision < 0:
                     raise ValueError("expected_revision must be a nonnegative integer")
+                if action == "fork":
+                    target_id = _text(payload, "new_session_id")
+                    created = await runtime.sessions.fork_turn_session(
+                        session_id, target_id, principal=self.principal,
+                        expected_revision=revision, idempotency_key=request_id,
+                    )
+                    if not created:
+                        raise AIError(ErrorCode.SESSION_CONFLICT, "The source conversation changed")
+                    return _json({"session_id": target_id}, 201)
                 receipt: dict[str, object] = {"session_id": session_id, "revision": revision + 1}
                 if action == "update":
                     metadata = payload.get("metadata")

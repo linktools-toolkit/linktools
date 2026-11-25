@@ -20,7 +20,7 @@ from ..inputs import stored_input_attachment_views
 from ..model import StoredUserInput
 from ..persistence.codec import decode_domain
 from ..model.messages import decode_model_messages
-from ..persistence.turns import SessionTurnKey, SqlSessionTurnReader
+from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
 from ._session_timeline import _timeline_items
 
 if TYPE_CHECKING:
@@ -115,6 +115,14 @@ class _OrdinarySessionHistory:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return row
 
+    async def _authorize_lineage(
+        self, row: RowMapping, principal: Principal,
+    ) -> tuple[SessionTurnSegment, ...]:
+        lineage = decode_session_lineage(row["lineage_json"])
+        for part in lineage:
+            await self._authorize_session(part.session_id, principal)
+        return lineage
+
     def _cursor_position(self, cursor: str | None, kind: str, digest: str) -> int | None:
         if cursor is None:
             return None
@@ -174,13 +182,14 @@ class _OrdinarySessionHistory:
     ) -> dict[str, JsonValue]:
         limit = validate_page_limit(limit)
         row = await self._session(session_id, principal, local_workspace=local_workspace)
+        lineage = await self._authorize_lineage(row, principal)
         kind = "ORDINARY_TURNS"
         digest = canonical_sha256({
             "principal": principal_identity_payload(principal), "session": session_id, "local_workspace": local_workspace,
         })
         before = self._cursor_position(cursor, kind, digest)
         through = row["last_turn_no"] if before is None else min(row["last_turn_no"], before - 1)
-        turns = () if through == 0 else await self._store.turn_page(session_id, through=through, limit=limit + 1)
+        turns = () if through == 0 else await self._store.turn_page(session_id, through=through, limit=limit + 1, lineage=lineage)
         next_cursor = self._next_cursor(turns[limit - 1]["turn_no"], kind, digest) if len(turns) > limit else None
         return {
             "session": _session_view(row),
@@ -190,9 +199,12 @@ class _OrdinarySessionHistory:
     async def turn_result(
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
     ) -> dict[str, JsonValue]:
-        await self._session(session_id, principal, local_workspace=local_workspace)
+        session = await self._session(session_id, principal, local_workspace=local_workspace)
         validate_resource_id(turn_id)
         row = await self._store.get_turn(SessionTurnKey(session_id, turn_id))
         if row is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            lineage = await self._authorize_lineage(session, principal)
+            row = await self._store.get_inherited_turn(SessionTurnKey(session_id, turn_id), lineage=lineage)
+            if row is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return _turn_view(row)

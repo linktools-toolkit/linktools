@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from ..core import canonical_json_bytes
+from ..core import canonical_json_bytes, canonical_sha256, validate_idempotency_key
 from ..errors import AIError, ErrorCode
 from ..storage import (
     sql_audit_columns,
@@ -20,6 +20,7 @@ from ..storage import (
     sql_table_options,
     sql_unique,
 )
+from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage, fork_segments, lineage_predicate
 from ._turn_sql_schema import (
     TURN_EXECUTION_MAX_BYTES,
     TURN_REQUEST_MAX_BYTES,
@@ -74,6 +75,7 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         key("active_turn_id", TURN_EXECUTION_MAX_BYTES, "Accepted turn occupying the session.", nullable=True),
         Column("last_turn_no", BigInteger, nullable=False, comment="Last finalized turn number."),
         Column("config_json", JSON(), nullable=False, comment="Session metadata, workspace path and instruction scopes."),
+        Column("lineage_json", JSON(), nullable=True, comment="Immutable referenced turn ranges for a fork."),
         *sql_audit_columns(),
         comment="Identity, configuration and publication head of a regenerable conversation.",
         **sql_table_options(),
@@ -146,6 +148,20 @@ class SqlSessionTurnReader:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().filter_by(**self._turn_values(key)))).mappings().one_or_none()
 
+    async def get_inherited_turn(
+        self, key: SessionTurnKey, *, lineage: tuple[SessionTurnSegment, ...],
+    ) -> RowMapping | None:
+        if not lineage:
+            return None
+        columns = self._turns.c
+        async with self._context.engine.connect() as connection:
+            return (await connection.execute(self._turns.select().where(
+                columns.scope_key == self._scope,
+                columns.turn_id == self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES),
+                columns.state.in_(("succeeded", "failed", "cancelled")),
+                lineage_predicate(columns, b"", lineage, after=0, through=lineage[-1].through),
+            ))).mappings().one_or_none()
+
     async def find_request(self, session_id: str, request_key: str) -> RowMapping | None:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().filter_by(
@@ -154,14 +170,17 @@ class SqlSessionTurnReader:
 
     async def history(
         self, session_id: str, *, through: int, limit: int, after: int = 0, only_success: bool = False,
+        lineage: tuple[SessionTurnSegment, ...] = (),
     ) -> tuple[RowMapping, ...]:
         from sqlalchemy import select
 
         if not 1 <= limit or not 0 <= after <= through:
             raise ValueError("invalid session turn history range")
         columns = self._turns.c
-        statement = select(self._turns).filter_by(**self._session_values(session_id)).where(
-            columns.turn_no > after, columns.turn_no <= through,
+        statement = select(self._turns).where(
+            columns.scope_key == self._scope,
+            lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
+                              after=after, through=through),
             columns.state.in_(("succeeded",) if only_success else ("succeeded", "failed", "cancelled")),
         ).order_by(columns.turn_no).limit(limit)
         async with self._context.engine.connect() as connection:
@@ -184,15 +203,21 @@ class SqlSessionTurnReader:
 
     async def turn_page(
         self, session_id: str, *, through: int, limit: int,
+        lineage: tuple[SessionTurnSegment, ...] = (),
     ) -> tuple[RowMapping, ...]:
         columns = self._turns.c
-        statement = self._turns.select().filter_by(**self._session_values(session_id)).where(
-            columns.turn_no <= through, columns.state.in_(("succeeded", "failed", "cancelled")),
+        statement = self._turns.select().where(
+            columns.scope_key == self._scope,
+            lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
+                              after=0, through=through),
+            columns.state.in_(("succeeded", "failed", "cancelled")),
         ).order_by(columns.turn_no.desc()).limit(limit)
         async with self._context.engine.connect() as connection:
             return tuple((await connection.execute(statement)).mappings())
 
-    async def recent_context(self, session_id: str, *, through: int) -> tuple[SessionContextTurn, ...]:
+    async def recent_context(
+        self, session_id: str, *, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
+    ) -> tuple[SessionContextTurn, ...]:
         """Read bounded candidates after the caller authorizes the current session head."""
         from sqlalchemy import case, select, type_coerce
 
@@ -217,10 +242,10 @@ class SqlSessionTurnReader:
         stored_input = type_coerce(
             case((succeeded, columns.request_json["input"])), columns.request_json.type,
         ).label("stored_input")
-        statement = select(columns.turn_no, columns.state, prompt, stored_input, result).filter_by(
-            **self._session_values(session_id),
-        ).where(
-            columns.turn_no > after, columns.turn_no <= through,
+        statement = select(columns.turn_no, columns.state, prompt, stored_input, result).where(
+            columns.scope_key == self._scope,
+            lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
+                              after=after, through=through),
             columns.state.in_(("succeeded", "failed", "cancelled")),
         ).order_by(columns.turn_no).limit(_CONTEXT_POSITIONS)
         async with self._context.engine.connect() as connection:
@@ -270,6 +295,45 @@ class SqlSessionTurns(SqlSessionTurnReader):
             ))
 
         await self._context.run_mutation(write, domain="session.create")
+
+    async def fork_session(
+        self, source_id: str, target_id: str, *, expected_revision: int, config: JsonValue, request_id: str,
+    ) -> bool:
+        """Freeze the source head with a CAS and insert one child session; never copy turns."""
+        validate_idempotency_key(request_id)
+        if source_id == target_id:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        source = self._session_values(source_id)
+        target = self._session_values(target_id)
+
+        async def write(connection: AsyncSession) -> bool:
+            existing = (await connection.execute(self._sessions.select().filter_by(**target))).mappings().one_or_none()
+            if existing is not None:
+                lineage = existing["lineage_json"]
+                if (lineage is not None and lineage["source"] == source_id and lineage["request_id"] == request_id
+                        and lineage["config_fingerprint"] == canonical_sha256(config)):
+                    return True
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            row = (await connection.execute(self._sessions.select().filter_by(
+                **source, revision=expected_revision,
+            ))).mappings().one_or_none()
+            if row is None:
+                return False
+            through = row["last_turn_no"]
+            segments = fork_segments(source_id, decode_session_lineage(row["lineage_json"]), through)
+            result = await connection.execute(self._sessions.update().filter_by(
+                **source, revision=expected_revision, last_turn_no=through,
+            ).values(revision=expected_revision + 1))
+            if result.rowcount != 1:
+                return False
+            await connection.execute(self._sessions.insert().values(
+                **target, status="open", revision=0, last_turn_no=through, config_json=config,
+                lineage_json={"source": source_id, "request_id": request_id, "config_fingerprint": canonical_sha256(config),
+                              "segments": [[part.session_id, part.after, part.through] for part in segments]},
+            ))
+            return True
+
+        return await self._context.run_mutation(write, domain="session.fork")
 
     async def update_session(
         self, session_id: str, *, expected_revision: int, config: JsonValue,

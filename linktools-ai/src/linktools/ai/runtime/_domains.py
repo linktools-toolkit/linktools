@@ -311,6 +311,23 @@ class RuntimeSessions(Generic[AppT]):
             metadata={} if metadata is None else metadata, request_key=idempotency_key, cwd=cwd,
         )
 
+    async def fork_turn_session(
+        self, source_id: str, target_id: str, *, principal: Principal,
+        expected_revision: int, idempotency_key: str,
+    ) -> bool:
+        """Create a session referencing the source's authorized committed prefix."""
+        runner, runtime = self._require_turn_sessions()
+        validate_resource_id(source_id)
+        validate_resource_id(target_id)
+        validate_idempotency_key(idempotency_key)
+        if source_id == target_id or type(expected_revision) is not int or expected_revision < 0:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        await self._service.require_available()
+        return await runner.fork_session(
+            source_id, target_id, principal=principal, tenant_id=runtime.tenant_id,
+            authorization=runtime._authorization, expected_revision=expected_revision, request_id=idempotency_key,
+        )
+
     async def update_turn_session(
         self, session_id: str, *, principal: Principal, expected_revision: int,
         metadata: "Mapping[str, JsonValue]", cwd: str | None = None, replace_cwd: bool = False,

@@ -21,7 +21,7 @@ from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
-from ..persistence.turns import SessionTurnKey
+from ..persistence.turns import SessionTurnKey, SessionTurnSegment, decode_session_lineage
 from ..spec import RepositoryInstructions
 from ._agent_executor import LiveDelta
 from ._regenerable_transcript import decode_regenerable_turn, encode_regenerable_turn
@@ -203,6 +203,44 @@ class _RegenerableTurnRunner:
             "state": "open", "active_turn_id": None, "cwd": cwd,
         }
 
+    @staticmethod
+    async def _authorize_lineage(
+        lineage: tuple[SessionTurnSegment, ...], *, principal: Principal, tenant_id: str,
+        authorization: AuthorizationPolicy,
+    ) -> None:
+        for segment in lineage:
+            await authorization.authorize(
+                principal, AuthorizationAction.SESSION_READ,
+                ResourceRef(ResourceKind.SESSION, segment.session_id, tenant_id),
+            )
+
+    async def fork_session(
+        self, source_id: str, target_id: str, *, principal: Principal, tenant_id: str,
+        authorization: AuthorizationPolicy, expected_revision: int, request_id: str,
+    ) -> bool:
+        if principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_READ,
+            ResourceRef(ResourceKind.SESSION, source_id, tenant_id),
+        )
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_CREATE,
+            ResourceRef(ResourceKind.SESSION, target_id, tenant_id),
+        )
+        source = await self._store.get_session(source_id)
+        if source is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorize_lineage(
+            decode_session_lineage(source["lineage_json"]), principal=principal,
+            tenant_id=tenant_id, authorization=authorization,
+        )
+        config = source["config_json"]
+        return await self._store.fork_session(
+            source_id, target_id, expected_revision=expected_revision, request_id=request_id,
+            config={"metadata": config.get("metadata", {}), "cwd": config.get("cwd")},
+        )
+
     async def start_session(
         self, session_id: str, *, agent_id: str, principal: Principal, namespace: str, tenant_id: str,
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
@@ -221,6 +259,10 @@ class _RegenerableTurnRunner:
         )
         if session["status"] != "open":
             raise AIError(ErrorCode.SESSION_CONFLICT)
+        lineage = decode_session_lineage(session["lineage_json"])
+        await self._authorize_lineage(
+            lineage, principal=principal, tenant_id=tenant_id, authorization=authorization,
+        )
 
         files = normalize_input_files(files)
 
@@ -268,7 +310,7 @@ class _RegenerableTurnRunner:
             if await self.start(
                 key, revision=session["revision"], through=session["last_turn_no"],
                 request_key=request_key, prompt=prompt, binding=binding, context=context,
-                limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd, files=files,
+                limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
             ):
                 return key.turn_id
         except IntegrityError:
@@ -355,6 +397,18 @@ class _RegenerableTurnRunner:
                     self._terminal(turn, "cancelled", error_code=code)
                 return finished
 
+            lineage = decode_session_lineage(session["lineage_json"])
+            await self._authorize_lineage(
+                lineage, principal=principal, tenant_id=tenant_id, authorization=authorization,
+            )
+            if lineage and admitted != principal:
+                await authorization.authorize(
+                    admitted, AuthorizationAction.SESSION_READ,
+                    ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id),
+                )
+                await self._authorize_lineage(
+                    lineage, principal=admitted, tenant_id=tenant_id, authorization=authorization,
+                )
             prompt = request["prompt"]
             after = row["context_from"] - 1
             through = row["context_through"]
@@ -366,7 +420,9 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
             history: list[ModelMessage] = []
             if through > after:
-                positions = await self._store.history(key.session_id, through=through, limit=128, after=after)
+                positions = await self._store.history(
+                    key.session_id, through=through, limit=128, after=after, lineage=lineage,
+                )
                 if len(positions) != through - after:
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted context range is no longer available")
                 for position in positions:
@@ -427,7 +483,7 @@ class _RegenerableTurnRunner:
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue, cwd: str | None = None,
-        files: Sequence[str] = (),
+        files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
     ) -> bool:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
@@ -441,7 +497,7 @@ class _RegenerableTurnRunner:
             try:
                 turn = await self.admit(
                     key, revision=revision, through=through, request_key=request_key,
-                    prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd, files=files,
+                    prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
@@ -538,7 +594,7 @@ class _RegenerableTurnRunner:
     async def admit(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
-        cwd: str | None = None, files: Sequence[str] = (),
+        cwd: str | None = None, files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         self._executor.require_regenerable(binding)
@@ -584,7 +640,7 @@ class _RegenerableTurnRunner:
         remaining = _CONTEXT_BYTES - input_size
         history: list[tuple[ModelMessage, ...]] = []
         context_from = through + 1
-        candidates = await self._store.recent_context(key.session_id, through=through)
+        candidates = await self._store.recent_context(key.session_id, through=through, lineage=lineage)
         for candidate in reversed(candidates):
             if not isinstance(candidate.request, dict) or not isinstance(candidate.request.get("prompt"), str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Missing admitted session input")

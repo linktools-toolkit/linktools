@@ -557,6 +557,7 @@ CREATE TABLE ai_sessions (
 	active_turn_id VARBINARY(128) COMMENT 'Accepted turn occupying the session.',
 	last_turn_no BIGINT NOT NULL COMMENT 'Last finalized turn number.',
 	config_json JSON NOT NULL COMMENT 'Session metadata, workspace path and instruction scopes.',
+	lineage_json JSON COMMENT 'Immutable referenced turn ranges for a fork.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),

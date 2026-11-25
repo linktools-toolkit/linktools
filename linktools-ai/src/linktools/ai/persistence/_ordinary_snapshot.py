@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from ..core import Principal, RUNTIME_OBJECT_STORE_ID, canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
+from ._ordinary_lineage import decode_session_lineage, fork_segments
 from ._session_turn_sql import SESSION_TABLE, SESSION_TURN_TABLE
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
@@ -26,7 +27,7 @@ _AUDIT = ("created_at", "updated_at")
 _SESSION_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "active_turn_id": TURN_EXECUTION_MAX_BYTES}
 _TURN_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "turn_id": TURN_EXECUTION_MAX_BYTES,
                 "request_key": TURN_REQUEST_MAX_BYTES}
-_SESSION_FIELDS = (*_SESSION_BINARY, "status", "revision", "last_turn_no", "config_json", *_AUDIT)
+_SESSION_FIELDS = (*_SESSION_BINARY, "status", "revision", "last_turn_no", "config_json", "lineage_json", *_AUDIT)
 _TURN_FIELDS = (*_TURN_BINARY, "turn_no", "context_from", "context_through", "state", "generation",
                 "request_json", "result_json", *_AUDIT)
 _TABLES = (("sessions", SESSION_TABLE, _SESSION_FIELDS, _SESSION_BINARY),
@@ -74,7 +75,7 @@ def _validate_text(value: object, width: int) -> str:
     return value
 
 
-def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list[dict[str, object]]]:
+def decode_ordinary_snapshot(value: object, *, tenant_id: str, include_lineage: bool = False) -> dict[str, list[dict[str, object]]]:
     """Validate and decode before opening the destination; exclude live lease values."""
     if not isinstance(value, dict) or set(value) != {"sessions", "turns"}:
         raise _invalid()
@@ -89,9 +90,14 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
         if not isinstance(rows, list):
             raise _invalid()
         for wire in rows:
-            if not isinstance(wire, dict) or wire.keys() != set(fields):
+            expected_fields = set(fields)
+            if section == "sessions" and not include_lineage:
+                expected_fields.remove("lineage_json")
+            if not isinstance(wire, dict) or wire.keys() != expected_fields:
                 raise _invalid()
             row = dict(wire)
+            if section == "sessions":
+                row.setdefault("lineage_json", None)
             try:
                 for key, width in binary.items():
                     if key == "active_turn_id" and row[key] is None:
@@ -156,9 +162,38 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
                 turn_ids.add(turn_id)
                 request_keys.add((session_id, request_key))
             decoded[section].append(row)
-    if any(row["active_turn_id"] != active.get(key) or row["last_turn_no"] != len(positions.get(key, ()))
-           for key, row in session_ids.items()):
-        raise _invalid()
+    lineages = {key: decode_session_lineage(row["lineage_json"]) for key, row in session_ids.items()}
+    parents: dict[bytes, bytes] = {}
+    for key, row in session_ids.items():
+        lineage = lineages[key]
+        inherited = lineage[-1].through if lineage else 0
+        head = row["last_turn_no"]
+        own = positions.get(key, ())
+        if (row["active_turn_id"] != active.get(key) or inherited > head
+                or head - inherited != len(own) or any(number <= inherited for number in own)):
+            raise _invalid()
+        if row["lineage_json"] is not None:
+            parent_id = row["lineage_json"]["source"]
+            parent_key = parent_id.encode("utf-8")
+            parent = session_ids.get(parent_key)
+            if parent is None or parent_key == key or inherited > parent["last_turn_no"]:
+                raise _invalid()
+            try:
+                if fork_segments(parent_id, lineages[parent_key], inherited) != lineage:
+                    raise _invalid()
+            except AIError as error:
+                raise _invalid() from error
+            parents[key] = parent_key
+    checked: set[bytes] = set()
+    for start in parents:
+        path: set[bytes] = set()
+        key = start
+        while key in parents and key not in checked:
+            if key in path:
+                raise _invalid()
+            path.add(key)
+            key = parents[key]
+        checked.update(path)
     return decoded
 
 
@@ -197,7 +232,7 @@ async def capture_ordinary_snapshot(
         return result
 
     wire = await store.read(capture)
-    decode_ordinary_snapshot(wire, tenant_id=tenant_id)
+    decode_ordinary_snapshot(wire, tenant_id=tenant_id, include_lineage=True)
     return wire
 
 
