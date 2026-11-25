@@ -495,6 +495,28 @@ class _Console:
                 operation = runtime.sessions.cancel_turn if action == "cancel" else runtime.sessions.recover_turn
                 accepted = await operation(session_id, _text(payload, "turn_id"), principal=self.principal)
                 return _json({"accepted": accepted})
+            if action in {"update", "close"}:
+                revision = payload.get("expected_revision")
+                if type(revision) is not int or revision < 0:
+                    raise ValueError("expected_revision must be a nonnegative integer")
+                receipt: dict[str, object] = {"session_id": session_id, "revision": revision + 1}
+                if action == "update":
+                    metadata = payload.get("metadata")
+                    if not isinstance(metadata, dict) or payload.get("cwd") is not None:
+                        raise ValueError("Ordinary sessions accept metadata changes only")
+                    changed = await runtime.sessions.update_turn_session(
+                        session_id, principal=self.principal, expected_revision=revision, metadata=metadata,
+                    )
+                    receipt["metadata"] = metadata
+                else:
+                    changed = await runtime.sessions.close_turn_session(
+                        session_id, principal=self.principal, expected_revision=revision,
+                    )
+                    receipt["status"] = "CLOSED"
+                    receipt["active_turn_id"] = None
+                if not changed:
+                    raise AIError(ErrorCode.SESSION_CONFLICT, "The conversation changed or has an active turn")
+                return _json(receipt)
             return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
         if action == "messages":
             execution = await runtime.sessions.start(

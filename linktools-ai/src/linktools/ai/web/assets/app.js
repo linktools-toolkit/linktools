@@ -129,7 +129,13 @@ function setDisabled() {
   ['send','planning','thinking','prompt'].forEach(id => $(id).disabled=readonly || !state.session || state.session.status === 'CLOSED' || !state.selectedSession);
   $('send').disabled ||= sessionSendBlocked();
   const ordinary=Boolean(state.config?.turn_sessions) && state.view==='sessions';
-  ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session || ordinary);
+  ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
+  if(ordinary){
+    const busy=state.session?.status!=='OPEN' || Boolean(state.session?.active_turn_id)
+      || sessionSubmissions.has(state.selectedSession);
+    for(const [id,action] of [['rename-session','update'],['close-session','close']])
+      $(id).disabled ||= busy || state.actionsPending.has(`session:${state.selectedSession}:${action}`);
+  }
   $('planning').closest('label').hidden=ordinary;
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
@@ -2190,9 +2196,9 @@ async function createSession(event) {
 }
 async function sessionAction(action) {
   const id=state.selectedSession,generation=state.generation,noticeRevision=state.noticeRevision;if(!id || !state.session)return;
-  const key=`session:${id}:${action}`;
-  if(state.actionsPending.has(key))return;
-  let payload={};
+  const key=`session:${id}:${action}`,ordinary=Boolean(state.config?.turn_sessions);
+  if(state.actionsPending.has(key) || ordinary && (state.session.status!=='OPEN' || state.session.active_turn_id || sessionSubmissions.has(id)))return;
+  let payload=ordinary?{expected_revision:state.session.revision}:{};
   if(action==='close' && !confirm('Close this session? Its history will remain available.'))return;
   if(action==='fork'){
     if(!state.pendingForks.has(id))state.pendingForks.set(id,crypto.randomUUID());
@@ -2200,17 +2206,27 @@ async function sessionAction(action) {
   }
   if(action==='update') {
     const title=prompt('Conversation title',state.session.metadata?.title || 'Conversation');if(!title?.trim())return;
-    payload={expected_revision:state.session.revision,metadata:{...state.session.metadata,title},cwd:state.session.cwd};
+    payload={expected_revision:state.session.revision,metadata:{...state.session.metadata,title}};
+    if(!ordinary)payload.cwd=state.session.cwd;
   }
   state.actionsPending.add(key);setDisabled();
   try {
-    const result=await mutate(sessionURL(id,action),payload).catch(error=>{
+    const result=await mutate(sessionURL(id,action),payload,ordinary?{newAttemptOn:['SESSION_CONFLICT']}:{}).catch(error=>{
       if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
       return null;
     });
     if(!result)return;
     if(action==='fork')state.pendingForks.delete(id);
     if(generation!==state.generation || id!==state.selectedSession){await loadList();return;}
+    if(ordinary){
+      if(result.revision>=state.session.revision){
+        Object.assign(state.session,result);
+        if(sessionWatch?.id===id && result.revision>=(sessionWatch.snapshot?.revision ?? -1))
+          sessionWatch.snapshot={...sessionWatch.snapshot,...result};
+        renderSessionHeader();renderList();
+      }
+      return;
+    }
     if(action==='fork')navigate(result.session_id,null);else await openSelection(id,state.selectedExecution,{preserveInspector:true});
     await loadList();
   } finally {state.actionsPending.delete(key);setDisabled();}
