@@ -737,6 +737,21 @@ class _PreparedSessionAdmission:
         return tuple(dict.fromkeys(members))
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedSessionTerminal:
+    write: Callable[[AsyncSession], Awaitable[bool]]
+    store: StateStore | None
+    transcript: tuple[ContentArchive, PreparedArchive, NativeMessageRoot] | None
+
+    @property
+    def stores(self) -> tuple[StateStore, ...]:
+        if self.store is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if self.transcript is None:
+            return (self.store,)
+        return tuple(dict.fromkeys((self.store, self.transcript[0].store)))
+
+
 class SqlSessionTurns(SqlSessionTurnReader):
     """Write authority for one tenant’s ordinary SQL sessions."""
 
@@ -955,21 +970,56 @@ class SqlSessionTurns(SqlSessionTurnReader):
         _publish_trace: tuple[tuple[StateStore, ...], Callable[[StateGroupTransaction], Awaitable[None]]] | None = None,
     ) -> bool:
         """Finalize and release using the same lock order as acceptance."""
+        prepared = await self._prepare_finish(
+            key, generation=generation, turn_no=turn_no, state=state, result=result,
+            transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
+        )
+        try:
+            if prepared.transcript is None and _publish_trace is None:
+                return await self._context.run_mutation(prepared.write, domain="session.finish")
+
+            trace_stores, publish_trace = ((), None) if _publish_trace is None else _publish_trace
+            stores = prepared.stores
+            group = stores[0].storage_group
+            if any(member.storage_group is not group for member in trace_stores):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+            async def publish(transaction: StateGroupTransaction) -> bool:
+                if not await self._finish_in_group(transaction, prepared):
+                    return False
+                if publish_trace is not None:
+                    # A Trace write failure rolls back both terminal and release.
+                    await publish_trace(transaction)
+                return True
+
+            return await group.mutate(tuple(dict.fromkeys((*stores, *trace_stores))), publish)
+        except _TerminalFenceLost:
+            return False
+
+    async def _prepare_finish(
+        self, key: SessionTurnKey, *, generation: int, turn_no: int, state: TerminalState,
+        result: JsonValue, transcript: Sequence[ModelMessage] | None,
+        binding_refs: tuple[tuple[int, int | None], ...], output_ref: tuple[int, int] | None,
+    ) -> _PreparedSessionTerminal:
+        """Prepare the caller's normalized suffix, without starting another mutation."""
         if state not in ("succeeded", "failed", "cancelled"):
             raise ValueError("invalid terminal state")
         turn_key = self._turn_values(key)
+        binding = self._transcript_write_binding
+        store = None if binding is None else binding[0]
+        body = None
         if state == "succeeded":
             if result is not None or not transcript:
                 raise ValueError("a successful session turn requires only its typed transcript")
-            if self._transcript_write_binding is None:
+            if binding is None:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            store, archive_provider, native = self._transcript_write_binding
+            store, archive_provider, native = binding
             archive = await archive_provider(create=True)
-            group = store.storage_group
-            if archive.store.storage_group is not group:
+            if archive.store.storage_group is not store.storage_group:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            prepared = PreparedArchive()
-            root = await native.prepare_archived_messages(transcript, prepared)
+            content = PreparedArchive()
+            root = await native.prepare_archived_messages(transcript, content)
+            body = (archive, content, root)
             result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
             if output_ref is not None:
                 result["output_ref"] = list(output_ref)
@@ -977,50 +1027,34 @@ class SqlSessionTurns(SqlSessionTurnReader):
             raise ValueError("an unsuccessful session turn cannot publish a transcript")
 
         async def write(connection: AsyncSession) -> bool:
-            return await self._finish_turn(
+            if not await self._finish_turn(
                 connection, key, generation=generation, turn_no=turn_no, state=state, result=result,
-            )
-
-        try:
-            if state != "succeeded" and _publish_trace is None:
-                return await self._context.run_mutation(write, domain="session.finish")
-
-            trace_stores, publish_trace = ((), None) if _publish_trace is None else _publish_trace
-            if state != "succeeded":
-                if self._transcript_write_binding is None:
-                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-                store = self._transcript_write_binding[0]
-                group = store.storage_group
-            if any(member.storage_group is not group for member in trace_stores):
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-            async def publish(transaction) -> bool:
+            ):
+                return False
+            if body is not None:
                 from ._native_content_index import stage_owner
 
-                async def write_owner(session: AsyncSession) -> bool:
-                    if not await write(session):
-                        return False
-                    if state == "succeeded":
-                        stage_owner(
-                            session, SESSION_TURN_TABLE, self._scope,
-                            (turn_key["session_key"], turn_key["turn_id"]), root,
-                        )
-                    return True
+                stage_owner(
+                    connection, SESSION_TURN_TABLE, self._scope,
+                    (turn_key["session_key"], turn_key["turn_id"]), body[2],
+                )
+            return True
 
-                if not await transaction.transaction(store).run_sql(self._context, write_owner):
-                    return False
-                if state == "succeeded":
-                    await archive.publish(transaction.transaction(archive.store), prepared)
-                if publish_trace is not None:
-                    # The exact turn CAS has already succeeded in this transaction.
-                    # A Trace write failure rolls back both terminal and release.
-                    await publish_trace(transaction)
-                return True
+        return _PreparedSessionTerminal(write, store, body)
 
-            stores = (store, archive.store) if state == "succeeded" else (store,)
-            return await group.mutate(tuple(dict.fromkeys((*stores, *trace_stores))), publish)
-        except _TerminalFenceLost:
+    async def _finish_in_group(
+        self, transaction: StateGroupTransaction, prepared: _PreparedSessionTerminal,
+    ) -> bool:
+        """Publish the exact terminal generation in the already enlisted group."""
+        store = prepared.store
+        if store is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if not await transaction.transaction(store).run_sql(self._context, prepared.write):
             return False
+        if prepared.transcript is not None:
+            archive, content, _ = prepared.transcript
+            await archive.publish(transaction.transaction(archive.store), content)
+        return True
 
     async def _finish_turn(
         self, connection: AsyncSession, key: SessionTurnKey, *, generation: int, turn_no: int,
