@@ -4,14 +4,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..core import Principal, canonical_json_bytes, validate_resource_id
+from ..core import Principal, RUNTIME_OBJECT_STORE_ID, canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ._session_turn_sql import SESSION_TABLE, SESSION_TURN_TABLE
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
+from ..model import StoredUserInput
+from ..storage import ObjectRef
+from .codec import decode_domain
+from .objects import ObjectKeyFactory
+from ._plan import PersistenceDomain
 from .state import SqlStateRowReader, SqlStateTransaction, StateTransaction, state_store_key
 
 if TYPE_CHECKING:
@@ -32,6 +37,21 @@ _TERMINAL = {"succeeded", "failed", "cancelled"}
 
 def _invalid() -> AIError:
     return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid ordinary session snapshot")
+
+
+def ordinary_input_object_refs(
+    rows: Mapping[str, list[dict[str, object]]], *, namespace: str, tenant_id: str,
+) -> Iterator[ObjectRef]:
+    keys = ObjectKeyFactory(namespace)
+    for row in rows["turns"]:
+        manifest = row["request_json"].get("input")
+        if manifest is None:
+            continue
+        for reference in decode_domain(manifest, StoredUserInput).payload.object_refs():
+            if (reference.store_id != RUNTIME_OBJECT_STORE_ID
+                    or reference.key != keys.key(PersistenceDomain.EXECUTION, tenant_id, reference.digest)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            yield reference
 
 
 def _timestamp(value: datetime) -> datetime:

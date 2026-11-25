@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 
 from linktools.core import environ
@@ -18,17 +18,20 @@ from ..agent import AgentBindingContract
 from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes
 from ..errors import AIError, ErrorCode
+from ..inputs import stored_input_attachment_views
+from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
+from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.turns import SessionTurnKey
 from ..spec import RepositoryInstructions
 from ._agent_executor import LiveDelta
 from ._regenerable_transcript import decode_regenerable_turn, encode_regenerable_turn
 
 if TYPE_CHECKING:
-    from pydantic_ai.messages import ModelMessage
+    from pydantic_ai.messages import ModelMessage, UserContent
 
     from ..agent import AgentBinding
     from ..core import AuthorizationPolicy, PromptLimits, ThinkingValue
-    from ..inputs import InputFileSource
+    from ..inputs import ExecutionInputMaterializer
     from ..spec import RepositoryInstructionResolver
     from ..workspace import Workspace
     from ..persistence.turns import SqlSessionTurns
@@ -53,20 +56,23 @@ class _AdmittedTurn:
     revision: int
     repository_instructions: RepositoryInstructions | None
     generation: int = 1
+    model_prompt: Sequence[UserContent] | None = None
+    attachments: Sequence[Mapping[str, JsonValue]] = ()
 
 
 class _RegenerableTurnRunner:
     def __init__(
         self, store: SqlSessionTurns, executor: AgentExecutor, *,
         workspace: Workspace | None,
-        workspace_access: InputFileSource | None,
+        input_materializer: ExecutionInputMaterializer,
         instruction_resolver: RepositoryInstructionResolver | None,
         instruction_resolver_for: Callable[[RepositoryInstructions], RepositoryInstructionResolver],
     ) -> None:
         self._store = store
         self._executor = executor
         self._workspace = workspace
-        self._workspace_access = workspace_access
+        self._input_materializer = input_materializer
+        self._workspace_access = input_materializer.access
         self._instruction_resolver = instruction_resolver
         self._instruction_resolver_for = instruction_resolver_for
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
@@ -132,7 +138,7 @@ class _RegenerableTurnRunner:
     def _admitted(self, turn: _AdmittedTurn) -> None:
         self._publish(turn.key.session_id, {
             "type": "admitted", "turn_id": turn.key.turn_id, "turn_no": turn.number,
-            "generation": turn.generation, "revision": turn.revision, "prompt": turn.prompt,
+            "generation": turn.generation, "revision": turn.revision, "prompt": turn.prompt, "attachments": list(turn.attachments),
         })
         self._notice_lifecycle(turn.key, "admitted", turn.revision)
 
@@ -140,7 +146,7 @@ class _RegenerableTurnRunner:
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
             "generation": turn.generation, "revision": turn.revision + 1,
-            "state": state, "prompt": turn.prompt, "output": output, "error_code": error_code,
+            "state": state, "prompt": turn.prompt, "attachments": list(turn.attachments), "output": output, "error_code": error_code,
         })
         self._notice_lifecycle(turn.key, "terminal", turn.revision + 1)
 
@@ -201,6 +207,7 @@ class _RegenerableTurnRunner:
         self, session_id: str, *, agent_id: str, principal: Principal, namespace: str, tenant_id: str,
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
         request_key: str, prompt: str, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
+        files: Sequence[str] = (),
     ) -> str:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
@@ -215,6 +222,8 @@ class _RegenerableTurnRunner:
         if session["status"] != "open":
             raise AIError(ErrorCode.SESSION_CONFLICT)
 
+        files = normalize_input_files(files)
+
         async def replay() -> str | None:
             prior = await self._store.find_request(session_id, request_key)
             if prior is None:
@@ -225,9 +234,14 @@ class _RegenerableTurnRunner:
                 principal, AuthorizationAction.EXECUTION_RUN,
                 ResourceRef(ResourceKind.EXECUTION, identity, tenant_id, request["principal"]["principal_id"]),
             )
+            normalized_files = await self._input_materializer.canonicalize_files(files) if files else ()
+            prior_input = self._stored_input(request)
+            prior_files = () if prior_input is None else tuple(
+                item["path"] for item in stored_input_attachment_views(prior_input)
+            )
             if (
                 request["prompt"] != prompt or request["principal"] != asdict(principal)
-                or request["thinking"] != thinking
+                or request["thinking"] != thinking or prior_files != normalized_files
                 or AgentBindingContract.from_payload(request["binding"]).agent_spec.id != agent_id
             ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -242,6 +256,7 @@ class _RegenerableTurnRunner:
         await authorization.authorize(
             principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id),
         )
+        files = await self._input_materializer.canonicalize_files(files) if files else ()
         binding = await resolver.resolve_agent(agent_id)
         config = session["config_json"]
         cwd = config.get("cwd")
@@ -253,7 +268,7 @@ class _RegenerableTurnRunner:
             if await self.start(
                 key, revision=session["revision"], through=session["last_turn_no"],
                 request_key=request_key, prompt=prompt, binding=binding, context=context,
-                limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd,
+                limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd, files=files,
             ):
                 return key.turn_id
         except IntegrityError:
@@ -332,8 +347,10 @@ class _RegenerableTurnRunner:
                     key, generation=generation + 1, turn_no=row["turn_no"], state="cancelled", result={"error_code": code},
                 )
                 if finished:
+                    stored = self._stored_input(request)
                     turn = _AdmittedTurn(
                         key, row["turn_no"], request["prompt"], [], 0, session["revision"], None, generation + 1,
+                        attachments=() if stored is None else stored_input_attachment_views(stored),
                     )
                     self._terminal(turn, "cancelled", error_code=code)
                 return finished
@@ -343,6 +360,10 @@ class _RegenerableTurnRunner:
             through = row["context_through"]
             if not 0 <= through - after <= 128:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted context range is invalid")
+            stored = self._stored_input(request)
+            remaining = _CONTEXT_BYTES - self._input_bytes(prompt, stored)
+            if remaining < 0:
+                raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
             history: list[ModelMessage] = []
             if through > after:
                 positions = await self._store.history(key.session_id, through=through, limit=128, after=after)
@@ -350,9 +371,13 @@ class _RegenerableTurnRunner:
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted context range is no longer available")
                 for position in positions:
                     if position["state"] == "succeeded":
-                        history.extend(decode_regenerable_turn(
-                            position["request_json"]["prompt"], position["result_json"],
-                        ))
+                        prior = position["request_json"]
+                        prior_input = self._stored_input(prior)
+                        remaining -= self._input_bytes(prior["prompt"], prior_input) + len(canonical_json_bytes(position["result_json"]))
+                        if remaining < 0:
+                            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+                        restored = await self._restore_prompt(prior["prompt"], prior_input)
+                        history.extend(decode_regenerable_turn(restored, position["result_json"]))
             contract = AgentBindingContract.from_payload(request["binding"])
             binding = await resolver.restore(contract)
             self._executor.require_regenerable(binding)
@@ -372,11 +397,14 @@ class _RegenerableTurnRunner:
                 app, admitted, namespace, key.session_id, key.turn_id, request["session_metadata"],
                 agent_id=binding.compiled_agent.spec.id,
             )
+            model_prompt = await self._restore_prompt(prompt, stored)
             if not await self._store.take_over(key, generation=generation, lease_seconds=_LEASE_SECONDS):
                 return False
             turn = _AdmittedTurn(
                 key, row["turn_no"], prompt, history,
                 _TURN_BYTES - len(canonical_json_bytes(request)), session["revision"], repository_instructions, generation + 1,
+                model_prompt=None if isinstance(model_prompt, str) else model_prompt,
+                attachments=() if stored is None else stored_input_attachment_views(stored),
             )
             self._admitted(turn)
             await self._settle_with_lease(
@@ -399,6 +427,7 @@ class _RegenerableTurnRunner:
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue, cwd: str | None = None,
+        files: Sequence[str] = (),
     ) -> bool:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
@@ -412,7 +441,7 @@ class _RegenerableTurnRunner:
             try:
                 turn = await self.admit(
                     key, revision=revision, through=through, request_key=request_key,
-                    prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd,
+                    prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd, files=files,
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
@@ -509,7 +538,7 @@ class _RegenerableTurnRunner:
     async def admit(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
-        cwd: str | None = None,
+        cwd: str | None = None, files: Sequence[str] = (),
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         self._executor.require_regenerable(binding)
@@ -529,11 +558,30 @@ class _RegenerableTurnRunner:
             "cwd": cwd,
             "repository_instructions": None if repository_instructions is None else repository_instructions.to_payload(),
         }
+        model_prompt = None
+        attachments = ()
+        input_size = len(prompt.encode("utf-8"))
+        if files:
+            materialized = await self._input_materializer.materialize(prompt, files)
+            validate_model_inputs(binding.compiled_agent.model, materialized)
+            # The materializer prepends attachment parts and retains the text as the last item.
+            # Store the text once, separately from replayable file parts.
+            model_prompt = tuple(materialized)
+            detached = MaterializedUserContent(model_prompt[:-1], {"attachments": materialized.view["attachments"]})
+            captured = self._input_materializer.capture(detached)
+            input_size += captured.payload.size
+            if input_size > _CONTEXT_BYTES:
+                raise AIError(ErrorCode.PROMPT_TOO_LARGE)
+            stored = await self._input_materializer.materialize_payload(captured, tenant_id=context.principal.tenant_id)
+            if not stored.payload.object_refs():
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "Attachment object storage is required")
+            request["input"] = encode_domain(stored)
+            attachments = stored_input_attachment_views(stored)
         terminal_bytes = _TURN_BYTES - len(canonical_json_bytes(request))
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
-        remaining = _CONTEXT_BYTES - len(prompt.encode("utf-8"))
+        remaining = _CONTEXT_BYTES - input_size
         history: list[tuple[ModelMessage, ...]] = []
         context_from = through + 1
         candidates = await self._store.recent_context(key.session_id, through=through)
@@ -541,10 +589,12 @@ class _RegenerableTurnRunner:
             if not isinstance(candidate.request, dict) or not isinstance(candidate.request.get("prompt"), str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Missing admitted session input")
             candidate_prompt = candidate.request["prompt"]
-            size = len(candidate_prompt.encode("utf-8")) + len(canonical_json_bytes(candidate.result))
+            stored = self._stored_input(candidate.request)
+            size = self._input_bytes(candidate_prompt, stored) + len(canonical_json_bytes(candidate.result))
             if size > remaining:
                 break
-            history.append(decode_regenerable_turn(candidate_prompt, candidate.result))
+            restored = await self._restore_prompt(candidate_prompt, stored)
+            history.append(decode_regenerable_turn(restored, candidate.result))
             remaining -= size
             context_from = candidate.turn_no
 
@@ -556,8 +606,26 @@ class _RegenerableTurnRunner:
         return _AdmittedTurn(
             key, through + 1, prompt,
             [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
-            repository_instructions,
+            repository_instructions, model_prompt=model_prompt, attachments=attachments,
         )
+
+    @staticmethod
+    def _stored_input(request: Mapping[str, JsonValue]) -> StoredUserInput | None:
+        return decode_domain(request["input"], StoredUserInput) if "input" in request else None
+
+    @staticmethod
+    def _input_bytes(prompt: str, stored: StoredUserInput | None) -> int:
+        return len(prompt.encode("utf-8")) + (0 if stored is None else stored.payload.size)
+
+    async def _restore_prompt(
+        self, prompt: str, stored: StoredUserInput | None,
+    ) -> str | Sequence[UserContent]:
+        if stored is None:
+            return prompt
+        detached = await self._input_materializer.restore(stored)
+        if isinstance(detached, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Detached turn input is not multipart")
+        return (*detached, prompt)
 
     async def settle(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
@@ -565,13 +633,14 @@ class _RegenerableTurnRunner:
     ) -> bool:
         """Execute after durable admission and publish only if this producer still owns the turn."""
         result: JsonValue
+        model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
         try:
             outcome = await self._executor.execute_regenerable(
-                binding=binding, context=context, prompt=turn.prompt, history=turn.history, limits=limits,
+                binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
                 event_sink=event_sink, thinking=thinking, streamed_output_bytes=turn.terminal_bytes,
                 workspace=self._workspace, repository_instructions=turn.repository_instructions,
             )
-            result = encode_regenerable_turn(turn.prompt, turn.history, outcome.messages, outcome.output)
+            result = encode_regenerable_turn(model_prompt, turn.history, outcome.messages, outcome.output)
             if len(canonical_json_bytes(result)) > turn.terminal_bytes:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         except Exception as error:

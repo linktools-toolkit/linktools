@@ -16,6 +16,9 @@ from ..core import (
     principal_identity_payload, validate_page_limit, validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
+from ..inputs import stored_input_attachment_views
+from ..model import StoredUserInput
+from ..persistence.codec import decode_domain
 from ..model.messages import decode_model_messages
 from ..persistence.turns import SessionTurnKey, SqlSessionTurnReader
 from ._session_timeline import _timeline_items
@@ -58,13 +61,19 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = {"text": messages[-1].text}
         items = [asdict(item) for item in _timeline_items(messages)]
+    request = row["request_json"]
+    stored_input = request.get("input")
+    attachments = [] if stored_input is None else [
+        {key: item.get(key) for key in ("attachment_id", "source", "media_type", "size", "position")}
+        for item in stored_input_attachment_views(decode_domain(stored_input, StoredUserInput))
+    ]
     return {
         "turn_id": row["turn_id"].decode("utf-8"),
         "turn_no": row["turn_no"],
         "status": _STATUS[state],
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
-        "user_input": {"version": 1, "prompt": row["request_json"]["prompt"], "files": [], "attachments": []},
+        "user_input": {"version": 1, "prompt": request["prompt"], "files": [], "attachments": attachments},
         "conversation_committed": state in ("succeeded", "failed", "cancelled"),
         "items": items,
         "process": [],

@@ -137,6 +137,8 @@ function setDisabled() {
       $(id).disabled ||= busy || state.actionsPending.has(`session:${state.selectedSession}:${action}`);
   }
   $('planning').closest('label').hidden=ordinary;
+  $('turn-file-options').hidden=!ordinary || readonly;
+  $('turn-files').disabled=readonly || !ordinary || state.session?.status!=='OPEN';
   $('new-agent').disabled=readonly || (ordinary && (!state.session || state.session.status!=='OPEN'));
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
@@ -325,10 +327,15 @@ function stopSessionWatch() {
 function ordinaryStatus(value) {
   return ({accepted:'PENDING_START',cancelling:'CANCELLING',open:'OPEN',closed:'CLOSED'})[value] || String(value || '').toUpperCase();
 }
-function ordinaryInput(prompt) {return {version:1,prompt,files:[],attachments:[]};}
+function ordinaryInput(prompt,attachments=[]) {
+  return {
+    version:1,prompt:typeof prompt==='string'?{kind:'text',text:prompt}:prompt,files:[],
+    attachments:attachments.map(item=>({...item,identifier:item.path || (item.source==='workspace'?'Workspace file':undefined)})),
+  };
+}
 function ordinaryTurnNode(turn) {
   const node=element('article','turn');node.dataset.turn=turn.turn_id;
-  node.append(userMessage(turn.user_input));
+  node.append(userMessage(ordinaryInput(turn.user_input?.prompt,turn.user_input?.attachments)));
   const answers=element('div','turn-saved-answers');
   const items=turn.items?.length?turn.items:(turn.output?.text?[{item_kind:'assistant',content:turn.output.text}]:[]);
   for(const item of items) {
@@ -440,7 +447,7 @@ function watchOrdinarySession(id) {
     if(!frame.turn_id)return;
     if(frame.type==='admitted'){
       ordinaryOccupancy(watch,frame.revision,frame.turn_id);
-      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt),items:[],conversation_committed:false});
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false});
     } else if(frame.type==='delta'){
       const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
       if(!turn || typeof frame.text!=='string' || frame.delta_kind!=='text')return;
@@ -461,7 +468,7 @@ function watchOrdinarySession(id) {
       if(frame.turn_no===(watch.committedThrough ?? 0)+1)watch.committedThrough=frame.turn_no;
       const items=frame.items || [];
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:ordinaryStatus(frame.status ?? frame.state),
-        user_input:ordinaryInput(frame.prompt),items,output:frame.output,error_code:frame.error_code,conversation_committed:true});
+        user_input:ordinaryInput(frame.prompt,frame.attachments),items,output:frame.output,error_code:frame.error_code,conversation_committed:true});
     }
     renderList();setDisabled();
   });
@@ -800,11 +807,11 @@ function renderThinking() {
 }
 function saveDraft() {
   if(!state.selectedSession)return;
-  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,planning:$('planning').checked,thinking:$('thinking').value});
+  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,planning:$('planning').checked,thinking:$('thinking').value,files:$('turn-files').value});
 }
 function restoreDraft(sessionId) {
   const draft=state.drafts.get(sessionId) || {prompt:'',planning:false,thinking:'0'};
-  $('prompt').value=draft.prompt;
+  $('prompt').value=draft.prompt;$('turn-files').value=draft.files || '';$('turn-file-options').open=Boolean(draft.files);
   $('planning').checked=draft.planning;$('thinking').value=draft.thinking ?? '0';renderThinking();
 }
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
@@ -2152,21 +2159,36 @@ async function ordinaryAction(action) {
 }
 async function sendMessage(event) {
   event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,executionGeneration=state.executionGeneration,promptValue=$('prompt').value;
+  const fileText=$('turn-files').value, files=fileText.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
   if(!sessionId || !state.session || state.session.status!=='OPEN' || state.config?.read_only || !promptValue.trim() || sessionSendBlocked())return;
   sessionSubmissions.add(sessionId);
   $('send').disabled=true;notice('');
   try {
     // Rejected admission is terminal for its key; another explicit send is a new attempt.
     const options={prompt:promptValue,thinking:readThinking()};
-    if(state.config?.turn_sessions)options.agent_id=$('new-agent').value || 'default';
-    else options.planning=$('planning').checked;
+    if(state.config?.turn_sessions){
+      options.agent_id=$('new-agent').value || 'default';
+      if(files.length)options.files=files;
+    } else options.planning=$('planning').checked;
     const result=await mutate(sessionURL(sessionId,"messages"),options,{newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
-    if(generation!==state.generation){const draft=state.drafts.get(sessionId);if(draft?.prompt===promptValue)draft.prompt='';if(state.selectedSession===sessionId && $('prompt').value===promptValue)$('prompt').value='';return;}
-    if($('prompt').value===promptValue)$('prompt').value='';
+    if(generation!==state.generation){
+      const draft=state.drafts.get(sessionId);
+      if(draft?.prompt===promptValue && (!state.config?.turn_sessions || (draft.files || '')===fileText)){
+        draft.prompt='';if(state.config?.turn_sessions)draft.files='';
+      }
+      if(state.selectedSession===sessionId && $('prompt').value===promptValue && (!state.config?.turn_sessions || $('turn-files').value===fileText)){
+        $('prompt').value='';if(state.config?.turn_sessions)$('turn-files').value='';
+      }
+      return;
+    }
+    if($('prompt').value===promptValue && (!state.config?.turn_sessions || $('turn-files').value===fileText)){
+      $('prompt').value='';
+      if(state.config?.turn_sessions){$('turn-files').value='';$('turn-file-options').open=false;}
+    }
     if(state.config?.turn_sessions){
       if(!state.turns.some(turn=>turn.turn_id===result.turn_id)){
         if(state.session && !state.session.active_turn_id)state.session.active_turn_id=result.turn_id;
-        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue),items:[],conversation_committed:false});
+        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue,files.map(path=>({path,source:'workspace'}))),items:[],conversation_committed:false});
       }
       return;
     }

@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from copy import copy
 from pathlib import Path
 from typing import TypeVar
@@ -92,7 +92,7 @@ from ._persistence_configuration import validate_persistence_capabilities, capab
 from ..capability import TraceCapability
 from ..history import History
 from ..core import token_seed
-from ._regenerable_turn import _RegenerableTurnRunner
+from ._regenerable_turn import _CONTEXT_BYTES, _RegenerableTurnRunner
 from ._session import RuntimeSessionService
 from ._subagent import SubagentDispatcher
 from ..history import TransientExecutionHistoryStore
@@ -842,7 +842,14 @@ async def _build_local_components(
             history_reader=session_history_reader,
             regenerable_turns=(
                 None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(
-                    state.session_turns, executor, workspace=workspace, workspace_access=input_materializer.access,
+                    state.session_turns, executor, workspace=workspace,
+                    # Borrow the existing workspace access; its original materializer owns teardown.
+                    input_materializer=ExecutionInputMaterializer(
+                        input_materializer.access,
+                        replace(limits, max_binary_input_bytes=min(limits.max_binary_input_bytes, _CONTEXT_BYTES)),
+                        object_store=state.object_store(PersistenceDomain.EXECUTION),
+                        object_key_factory=object_key_factory,
+                    ),
                     instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
                 )
             ),

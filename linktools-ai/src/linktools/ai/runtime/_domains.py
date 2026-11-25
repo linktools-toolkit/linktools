@@ -361,7 +361,7 @@ class RuntimeSessions(Generic[AppT]):
 
     async def start_turn(
         self, session_id: str, prompt: str, *, agent_id: str, principal: Principal,
-        idempotency_key: str, thinking: JsonValue = None,
+        idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
     ) -> str:
         runner, runtime = self._require_turn_sessions()
         resolver = runtime._binding_resolver
@@ -377,7 +377,7 @@ class RuntimeSessions(Generic[AppT]):
             session_id, agent_id=agent_id, prompt=prompt, principal=principal, namespace=runtime.namespace,
             tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
             resolver=resolver, request_key=idempotency_key, limits=PromptLimits(),
-            event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking),
+            event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking), files=files,
         )
 
     async def cancel_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:

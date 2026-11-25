@@ -104,7 +104,7 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..model import FallbackBinding, ModelBinding, model_binding_error, validate_model_inputs
+from ..model import FallbackBinding, ModelBinding, UserPromptInput, model_binding_error, validate_model_inputs
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions, SkillSpec
 from ..workspace import (
@@ -393,7 +393,7 @@ class AgentExecutor:
         *,
         binding: AgentBinding,
         context: AgentContext[object],
-        prompt: str,
+        prompt: UserPromptInput,
         history: list[ModelMessage],
         limits: PromptLimits,
         event_sink: EventSink,

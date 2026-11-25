@@ -45,7 +45,7 @@ from ._turn_snapshot import (
     GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, turn_snapshot_record,
 )
 from ._turn_sql_schema import RUNTIME_TURN_SCOPE, TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
-from ._ordinary_snapshot import capture_ordinary_snapshot, decode_ordinary_snapshot, restore_ordinary_snapshot
+from ._ordinary_snapshot import capture_ordinary_snapshot, decode_ordinary_snapshot, ordinary_input_object_refs, restore_ordinary_snapshot
 from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
 from ..model.messages import decode_model_message_payloads
@@ -1119,6 +1119,13 @@ async def _export_snapshot(
         native_messages.append({"group_id": group_id, "domain": domain.value,
                                 "sequences": [accept(encode_native_sequence_row(row)) for row in retained_sequences],
                                 "messages": [accept(encode_native_message_row(row)) for row in retained_messages]})
+    if source.ordinary_sessions is not None:
+        for reference in ordinary_input_object_refs(
+            source.ordinary_sessions, namespace=source.namespace, tenant_id=source.tenant_id,
+        ):
+            if PersistenceDomain.EXECUTION not in source.object_stores:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            await copy_reference(PersistenceDomain.EXECUTION, reference)
     manifest = {
         "kind": "runtime-storage-snapshot",
         "format_version": 2 if source.ordinary_sessions is not None else 1,
@@ -1283,6 +1290,11 @@ async def restore_snapshot(
             native_closures[group_id].mark(message_root.store_key, message_root.slices)
     object_bytes = 0
     expected_objects: set[tuple[str, str, str, int]] = set()
+    if ordinary_sessions is not None:
+        expected_objects.update(
+            (PersistenceDomain.EXECUTION.value, reference.key, reference.digest, reference.size)
+            for reference in ordinary_input_object_refs(ordinary_sessions, namespace=namespace, tenant_id=tenant_id)
+        )
     required_checkpoint_groups: set[str] = set()
     decoded_domains: dict[
         PersistenceDomain,
@@ -1621,6 +1633,9 @@ async def restore_snapshot(
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             for registration in run_registrations.values():
                 await resources.run_registrations.publish(registration)
+        if any(domain not in resources.object_stores and not source.key.startswith("v1/archive/")
+               for domain, source, _ in decoded_objects):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         for domain, source, content_ref in decoded_objects:
             if source.key.startswith("v1/archive/"):
                 continue

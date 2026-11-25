@@ -500,11 +500,14 @@ class _Console:
             request.state.phase = f"session.{action}"
         if self.turn_sessions:
             if action == "messages":
-                if payload.get("planning") or payload.get("files"):
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns accept text and thinking only")
+                if payload.get("planning"):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns do not support plan mode")
+                files = payload.get("files", [])
+                if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
+                    raise ValueError("files must be a list of workspace-relative paths")
                 turn_id = await runtime.sessions.start_turn(
                     session_id, _text(payload, "prompt"), agent_id=_text(payload, "agent_id", "default"),
-                    principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
+                    principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"), files=files,
                 )
                 return _json({"turn_id": turn_id}, 202)
             if action in {"cancel", "recover"}:
@@ -574,6 +577,16 @@ class _Console:
                 if overflow:
                     return
                 revision = value.get("revision")
+                attachments = value.get("attachments")
+                if isinstance(attachments, list):
+                    value = {
+                        **value,
+                        "attachments": [
+                            {key: item[key] for key in ("attachment_id", "source", "media_type", "size", "position", "path")
+                             if key in item}
+                            for item in attachments if isinstance(item, Mapping)
+                        ],
+                    }
                 frame = _sse_frame("turn", value, str(revision) if isinstance(revision, int) else None)
                 size = len(frame.encode("utf-8"))
                 if queue.full() or buffered + size > _TURN_SSE_BUFFER:

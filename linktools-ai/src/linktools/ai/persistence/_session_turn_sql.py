@@ -214,7 +214,10 @@ class SqlSessionTurnReader:
         succeeded = columns.state == "succeeded"
         prompt = case((succeeded, columns.request_json["prompt"].as_string())).label("prompt")
         result = type_coerce(case((succeeded, columns.result_json)), columns.result_json.type).label("result_json")
-        statement = select(columns.turn_no, columns.state, prompt, result).filter_by(
+        stored_input = type_coerce(
+            case((succeeded, columns.request_json["input"])), columns.request_json.type,
+        ).label("stored_input")
+        statement = select(columns.turn_no, columns.state, prompt, stored_input, result).filter_by(
             **self._session_values(session_id),
         ).where(
             columns.turn_no > after, columns.turn_no <= through,
@@ -226,8 +229,15 @@ class SqlSessionTurnReader:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The finalized session context range is incomplete")
         turns += tuple(
             SessionContextTurn(
-                row["turn_no"], {"prompt": row["prompt"]}, row["result_json"],
-                max(1024, len(canonical_json_bytes(row["prompt"])) + len(canonical_json_bytes(row["result_json"]))),
+                row["turn_no"],
+                {"prompt": row["prompt"], **({"input": row["stored_input"]} if row["stored_input"] is not None else {})},
+                row["result_json"],
+                max(
+                    1024,
+                    len(canonical_json_bytes(row["prompt"]))
+                    + len(canonical_json_bytes(row["stored_input"]))
+                    + len(canonical_json_bytes(row["result_json"])),
+                ),
             )
             for row in rows if row["state"] == "succeeded"
         )
