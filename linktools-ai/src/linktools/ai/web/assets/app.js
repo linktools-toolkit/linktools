@@ -532,14 +532,27 @@ function watchOrdinarySession(id) {
       if(reconnected){
         const discarded=watch.activeRead;
         watch.lostRead=discarded?.overflow ? {id:discarded.id,generation:discarded.generation} : null;
-        watch.activeRead=null;
+        watch.activeRead=null;watch.cancelRead=null;
       }
       watch.readActive();
       if(watch.committedThrough!==null && watch.snapshot?.last_turn_no>watch.committedThrough)
         void catchUpOrdinary(watch,watch.snapshot.last_turn_no).catch(showError);
       return;
     }
-    if(frame.type==='gap'){void catchUpOrdinary(watch).catch(showError);return;}
+    if(frame.type==='gap'){
+      if(frame.phase==='cancelling' && frame.turn_id && frame.turn_id===activeTurn()){
+        const turnId=frame.turn_id;
+        if(watch.cancelRead===turnId)return;
+        watch.cancelRead=turnId;
+        void api(sessionURL(id,'',{turn_id:turnId})).then(turn=>{
+          if(!current() || activeTurn()!==turnId
+            || state.turns.some(row=>row.turn_id===turnId && row.conversation_committed))return;
+          if(turn.status==='CANCELLING'){patchOrdinaryTurn(turn);setDisabled();}
+          else return catchUpOrdinary(watch);
+        }).catch(error=>{if(current() && activeTurn()===turnId)showError(error);});
+      } else void catchUpOrdinary(watch).catch(showError);
+      return;
+    }
     if(!frame.turn_id)return;
     if(frame.type==='admitted'){
       const row=state.turns.find(item=>item.turn_id===frame.turn_id);
@@ -2578,7 +2591,10 @@ async function fromHash() {
   const params=new URLSearchParams(location.hash.slice(1));
   const view=params.get('view') || (params.has('session')?'sessions':params.has('execution')?'executions':'sessions');
   setView(['sessions','executions','metrics'].includes(view)?view:'sessions',false);
-  if(state.view==='metrics'){stopSessionWatch();return;}
+  if(state.view==='metrics'){
+    if(state.config.turn_sessions)stopSessionWatch();
+    return;
+  }
   if(state.view==='executions') {
     if(sessionWatch){stopSessionWatch();clearObservation();}
     const id=params.get('execution') || state.browserExecution;
