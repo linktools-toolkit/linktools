@@ -166,6 +166,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
     binary = os.environ.get("CNTR_TEST_NGINX") or shutil.which("nginx")
     if not binary or not shutil.which("openssl"):
         pytest.skip("Native nginx with SSL, realip, auth_request and openssl is required")
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "app.test")
     nginx = fresh_manager.containers["nginx"]
     events = []
     auth_responses = []
@@ -239,7 +240,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         auth_port = backend("auth")
         http_port, https_port, health_port = (_reserve_port(reservations) for _ in range(3))
         config = {"NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
-                  "NGINX_WAF_PORT": origin_port, "NGINX_ROOT_DOMAIN": "test",
+                  "NGINX_WAF_PORT": origin_port,
                   "SAFELINE_SUBNET_PREFIX": "127.0.0"}
         producer = SimpleNamespace(name="native-fixture", config=Config(None, ConfigSchema(), [DictSource(config)]))
         site = _native_site(app_port)
@@ -309,8 +310,8 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         server_text = server_text.replace("http://authelia:9091", "http://127.0.0.1:" + str(auth_port))
         (tmp_path / "sites/native.conf").write_text(server_text)
         subprocess.check_call(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                               "-subj", "/CN=app.test", "-keyout", str(tmp_path / "test_key.pem"),
-                               "-out", str(tmp_path / "test_fullchain.pem"), "-days", "1"],
+                               "-subj", "/CN=app.test", "-keyout", str(tmp_path / "app.test_key.pem"),
+                               "-out", str(tmp_path / "app.test_fullchain.pem"), "-days", "1"],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         command = [binary, "-p", str(tmp_path) + "/", "-c", str(tmp_path / "nginx.conf")]
         validation = subprocess.run(command + ["-t"], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -511,10 +512,11 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
 
 
 def test_native_fixture_template_contract_without_native_processes(fresh_manager):
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "app.test")
     nginx = fresh_manager.containers["nginx"]
     producer = SimpleNamespace(name="native-fixture", config=Config(None, ConfigSchema(), [DictSource({
         "NGINX_HTTP_PORT": 8080, "NGINX_HTTPS_PORT": 8443,
-        "NGINX_WAF_PORT": 8081, "NGINX_ROOT_DOMAIN": "test",
+        "NGINX_WAF_PORT": 8081,
         "SAFELINE_SUBNET_PREFIX": "127.0.0",
     })]))
     site = _native_site(8082)
@@ -523,7 +525,7 @@ def test_native_fixture_template_contract_without_native_processes(fresh_manager
         producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
     root = nginx._render_site_template(producer, nginx.get_source_path("templates", "nginx.conf"),
         SimpleNamespace(template_vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
-    assert "app.test" in server
+    assert "ssl_certificate /etc/certs/live/app.test_fullchain.pem;" in server
     assert "sites/native.conf" in root
     assert "http://127.0.0.1:8082" in business
 
@@ -534,6 +536,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
     if not binary or not shutil.which("openssl"):
         pytest.skip("Native nginx and openssl are required")
 
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "app.test")
     nginx = fresh_manager.containers["nginx"]
 
     class Backend(http.server.BaseHTTPRequestHandler):
@@ -577,7 +580,6 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         http_port, https_port = (_reserve_port(reservations) for _ in range(2))
         config = {
             "NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
-            "NGINX_ROOT_DOMAIN": "test",
         }
         producer = SimpleNamespace(name="shared-native", config=Config(None, ConfigSchema(), [DictSource(config)]))
 
@@ -626,8 +628,8 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         (tmp_path / "nginx.conf").write_text(root)
         subprocess.check_call([
             "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-subj", "/CN=app.test", "-keyout", str(tmp_path / "test_key.pem"),
-            "-out", str(tmp_path / "test_fullchain.pem"), "-days", "1"],
+            "-subj", "/CN=app.test", "-keyout", str(tmp_path / "app.test_key.pem"),
+            "-out", str(tmp_path / "app.test_fullchain.pem"), "-days", "1"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         command = [binary, "-p", str(tmp_path) + "/", "-c", str(tmp_path / "nginx.conf")]
         check = subprocess.run(command + ["-t"], capture_output=True, text=True)

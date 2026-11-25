@@ -229,13 +229,9 @@ class Container(BaseContainer):
             if not site.enabled or not site.https:
                 continue
             for value in site.cert_domains:
-                if not value:
-                    continue
-                name = value[2:] if value.startswith("*.") else value
-                if not Nginx._is_dns_root(name):
-                    raise ContainerError("Invalid nginx certificate domain: {!r}".format(value))
-                if value not in result:
-                    result.append(value)
+                certificate_domain = Nginx.certificate_domain(value)
+                if certificate_domain is not None and certificate_domain not in result:
+                    result.append(certificate_domain)
         return result
 
     def shell_quote(self, value: object) -> str:

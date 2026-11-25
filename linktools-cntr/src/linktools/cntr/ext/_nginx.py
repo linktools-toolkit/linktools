@@ -62,6 +62,16 @@ class Nginx(Integration):
         return None
 
     @classmethod
+    def certificate_domain(cls, value: str) -> "Optional[str]":
+        """Resolve an optional certificate name, allowing a leading wildcard."""
+        if not value:
+            return None
+        name = value[2:] if value.startswith("*.") else value
+        if not cls._is_dns_root(name):
+            raise ContainerError("Invalid nginx certificate domain: {!r}".format(value))
+        return value
+
+    @classmethod
     def _is_dns_root(cls, value: object) -> bool:
         labels = value.split(".") if isinstance(value, str) and len(value) <= 253 else ()
         return (len(labels) > 1 and not labels[-1].isdigit() and
