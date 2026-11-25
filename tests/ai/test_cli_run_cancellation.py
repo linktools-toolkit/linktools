@@ -115,6 +115,7 @@ async def test_ai_run_native_json_returns_canonical_turn_without_readback(capsys
     assert await emit_result(runtime, "hello", "default", True, False, None) == 0
 
     result = json.loads(capsys.readouterr().out)
-    assert (result["execution_id"], result["status"], result["output"]) == ("canonical-turn", "SUCCEEDED", {"text": "answer"})
+    assert (result["turn_id"], result["status"], result["output"]) == ("canonical-turn", "SUCCEEDED", {"text": "answer"})
+    assert "execution_id" not in result
     runtime.history.turn_result.assert_not_awaited()
     assert subscription == []

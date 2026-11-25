@@ -111,7 +111,7 @@ async def _emit_session_result(
     text = result.get("text") if isinstance(result, Mapping) else None
     if as_json:
         print(json.dumps({
-            "execution_id": turn_id, "status": status,
+            "turn_id": turn_id, "status": status,
             "output": result, "error_code": error_code,
             "safe_error_details": {}, "error_diagnostics": None,
         }, ensure_ascii=False, sort_keys=True))

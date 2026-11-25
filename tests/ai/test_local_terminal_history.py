@@ -141,9 +141,17 @@ def test_run_command_history_is_readable_after_command_close(
     async def inspect() -> None:
         workspace = _load_workspace(str(tmp_path))
         async with Persistence.open('default', storage=_local_runtime_storage(workspace), tenant_id="default", read_only=True) as history_persistence_129, History.open(persistence=history_persistence_129) as history:
-            async with client(create_app(history=history)) as http:
-                response = await http.get(f"/api/executions/{result['execution_id']}/models?include_content=true")
+            async with client(create_app(history=history, local_workspace=True)) as http:
+                params = {"session_id": "default", "turn_id": result["turn_id"]}
+                response = await http.get("/api/session", params=params)
                 assert response.status_code == 200, response.text
-                assert response.json()['items']
+                saved = response.json()
+                assert saved["turn_id"] == result["turn_id"] and saved["conversation_committed"]
+                assert saved["user_input"]["prompt"] == "hello"
+                assert [(item["item_kind"], item["content"]) for item in saved["items"]] == [("assistant", "done")]
+                trace = await http.get("/api/session", params={**params, "trace": "true"})
+                assert trace.status_code == 200, trace.text
+                items = trace.json()["items"]
+                assert items and all(item["turn_id"] == result["turn_id"] for item in items)
 
     asyncio.run(inspect())
