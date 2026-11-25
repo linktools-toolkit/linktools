@@ -131,7 +131,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self,
         staging: StagingAgentRunStore,
         *,
-        conversation_archive: AgentRunStore,
+        conversation_archive: AgentRunStore | None,
         execution_archive: AgentRunStore | None,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
@@ -147,10 +147,11 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._native_step_source: NativeStepSource | None = None
         self._pending_producer_guard: Callable[[str, int, bool], bool] | None = None
         self._tenant_id = tenant_id
-        self._archives = {
-            PersistenceDomain.CONVERSATION: conversation_archive,
-            **({PersistenceDomain.TRACE: execution_archive} if execution_archive is not None else {}),
-        }
+        self._archives: dict[PersistenceDomain, AgentRunStore] = {}
+        if conversation_archive is not None:
+            self._archives[PersistenceDomain.CONVERSATION] = conversation_archive
+        if execution_archive is not None:
+            self._archives[PersistenceDomain.TRACE] = execution_archive
         self._initialized = False
         self._preflight = False
         self._execution_producers: dict[str, tuple[str, int]] = {}
