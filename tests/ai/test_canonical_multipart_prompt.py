@@ -10,9 +10,13 @@ from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, UserPro
 from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
 from linktools.ai.core import TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import StoredUserInput
 from linktools.ai.model._attachment import is_binary_attachment_text
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence.codec import decode_domain
+from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.storage import read_object
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
@@ -29,17 +33,26 @@ async def test_canonical_multipart_prompt_preserves_input_without_exposing_body(
     storage = tmp_path / "state"
     encoded = base64.b64encode(raw).decode()
     calls = []
+    marker = None
 
     async def respond(messages, _info):
         prompts = [part.content for message in messages for part in message.parts if isinstance(part, UserPromptPart)]
         multipart = prompts[0]
         assert not isinstance(multipart, str)
-        before, marker, binary, after = multipart
+        nonlocal marker
+        if not calls:
+            before, marker, binary, after = multipart
+            assert isinstance(binary, BinaryContent)
+            assert is_binary_attachment_text(marker, binary)
+            assert (binary.data, binary.media_type) == (raw, "text/plain")
+            calls.append(binary.data)
+        else:
+            # The provider view retires binary bytes after the first complete
+            # response; the canonical original is not lost from the archive.
+            before, retained_marker, after = multipart
+            assert retained_marker == marker
+            calls.append(None)
         assert (before, after) == ("Before attachment", "After attachment")
-        assert isinstance(binary, BinaryContent)
-        assert is_binary_attachment_text(marker, binary)
-        assert (binary.data, binary.media_type) == (raw, "text/plain")
-        calls.append(binary.data)
         return ModelResponse(parts=[TextPart("Ready.")])
 
     def features():
@@ -89,6 +102,17 @@ async def test_canonical_multipart_prompt_preserves_input_without_exposing_body(
         result = await runtime.history.turn_result("chat", turn_id, principal=runtime.default_principal)
         assert result["conversation_committed"]
         assert result["output"] == {"text": "Ready."}
+        assert result["user_input"]["prompt"] == {"kind": "items", "items": [
+            {"kind": "text", "text": "Before attachment"},
+            {"kind": "text", "text": "After attachment"},
+        ]}
+        accepted = await persistence.session_turns.get_turn(SessionTurnKey("chat", turn_id))
+        stored = decode_domain(accepted["request_json"]["input"], StoredUserInput)
+        (source,) = stored.payload.object_refs()
+        assert await read_object(
+            persistence.object_store(PersistenceDomain.EXECUTION), source.key,
+            expected_digest=source.digest, expected_size=source.size,
+        ) == raw
         attachment, = result["user_input"]["attachments"]
         assert attachment["media_type"] == "text/plain"
         assert attachment["size"] == len(raw)
@@ -102,4 +126,4 @@ async def test_canonical_multipart_prompt_preserves_input_without_exposing_body(
         assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert calls == [raw]
         assert await send_and_commit(runtime, "Use earlier input", "next") != turn_id
-    assert calls == [raw, raw]
+    assert calls == [raw, None]

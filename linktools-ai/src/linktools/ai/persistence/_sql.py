@@ -931,10 +931,19 @@ class SqlStateStorageGroup:
             else:
                 code = ErrorCode.INTERNAL_ERROR
 
+            frame = error.__traceback__
+            while frame is not None and frame.tb_next is not None:
+                frame = frame.tb_next
+            location = (
+                "unknown" if frame is None else
+                f"{frame.tb_frame.f_globals.get('__name__', '?')}:"
+                f"{frame.tb_frame.f_code.co_name}:{frame.tb_lineno}"
+            )
             _logger.error(
-                "SQL Runtime storage mutation error mapped: error_type=%s code=%s",
+                "SQL Runtime storage mutation error mapped: error_type=%s code=%s at=%s",
                 type(error).__name__,
                 code.value,
+                location,
             )
             if code is ErrorCode.INTERNAL_ERROR:
                 raise AIError(
