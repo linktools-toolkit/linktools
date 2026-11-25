@@ -545,3 +545,47 @@ CREATE TABLE ai_metric_observations (
 -- Official StepStore physical mapping.
 
 
+
+-- Regenerable conversation authority
+
+CREATE TABLE ai_sessions (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	scope_key VARBINARY(32) NOT NULL COMMENT 'Partition of one tenant in the configured session store.',
+	session_key VARBINARY(128) NOT NULL COMMENT 'Exact session identity.',
+	owner_principal_id VARBINARY(128) NOT NULL COMMENT 'Principal that owns the session.',
+	agent_id VARBINARY(128) NOT NULL COMMENT 'Agent named by the session.',
+	status VARCHAR(8) NOT NULL COMMENT 'Session lifecycle status.',
+	revision BIGINT NOT NULL COMMENT 'Compare-and-swap revision of the session.',
+	active_turn_id VARBINARY(128) COMMENT 'Accepted turn occupying the session.',
+	last_turn_no BIGINT NOT NULL COMMENT 'Last finalized turn number.',
+	config_json JSON NOT NULL COMMENT 'Session metadata, workspace path and instruction scopes.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	INDEX ix_created_at (created_at),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_scope_key_session_key (scope_key, session_key)
+)ENGINE=InnoDB ROW_FORMAT=DYNAMIC COMMENT='Identity, configuration and publication head of a regenerable conversation.' CHARSET=utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ai_session_turns (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	scope_key VARBINARY(32) NOT NULL COMMENT 'Partition of one tenant in the configured session store.',
+	session_key VARBINARY(128) NOT NULL COMMENT 'Session owning the turn.',
+	turn_id VARBINARY(128) NOT NULL COMMENT 'Exact public turn identity.',
+	request_key VARBINARY(64) NOT NULL COMMENT 'Idempotency key scoped to the session.',
+	turn_no BIGINT NOT NULL COMMENT 'Sequential turn position within the session.',
+	context_through BIGINT NOT NULL COMMENT 'Finalized context boundary at admission.',
+	state VARCHAR(10) NOT NULL COMMENT 'Admission, cancellation or terminal state.',
+	generation BIGINT NOT NULL COMMENT 'Fencing generation of the accepted producer.',
+	lease_until BIGINT COMMENT 'Expiry in database-clock seconds since epoch.',
+	request_json JSON NOT NULL COMMENT 'Accepted principal, canonical request and frozen binding.',
+	result_json JSON COMMENT 'Canonical terminal output and continuation material.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	INDEX ix_created_at (created_at),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_scope_key_session_key_request_key (scope_key, session_key, request_key),
+	UNIQUE INDEX uk_scope_key_session_key_turn_no (scope_key, session_key, turn_no),
+	UNIQUE INDEX uk_scope_key_turn_id (scope_key, turn_id)
+)ENGINE=InnoDB ROW_FORMAT=DYNAMIC COMMENT='Authoritative admission and publication of one regenerable conversation turn.' CHARSET=utf8mb4 COLLATE utf8mb4_bin;
