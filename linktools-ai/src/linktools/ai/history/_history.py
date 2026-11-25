@@ -423,10 +423,12 @@ class History:
 
     async def turn_result(
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool = False,
+        producer_stopped_generation: int | None = None,
     ) -> dict[str, JsonValue]:
-        """Read the requested turn by its own identity and authorized session."""
+        """Read the authorized turn; report a stopped matching producer as needing recovery."""
         return await self._require_ordinary_sessions().turn_result(
             session_id, turn_id, principal=principal, local_workspace=local_workspace,
+            producer_stopped_generation=producer_stopped_generation,
         )
 
     async def read_model_interactions(

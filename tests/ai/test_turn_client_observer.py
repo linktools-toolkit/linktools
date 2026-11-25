@@ -25,11 +25,16 @@ async def test_turn_observer_handles_stopped_producer(case):
         emit = callback
         return unsubscribe
 
-    async def read(*args, **kwargs):
+    async def read(session_id, turn_id, *, principal, local_workspace, producer_stopped_generation=None):
+        if case == "stopped":
+            assert producer_stopped_generation == 2
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if case == "stale":
+            assert producer_stopped_generation == 2
         if case in ("stale", "remote"):
             # A later genuine frame proves observation continued after the gap.
             emit({"type": "tool", "turn_id": "turn"})
-        return {"status": "PENDING_START", "generation": 3 if case == "stale" else 2}
+        return {"status": "PENDING_START"}
 
     turn_result = AsyncMock(side_effect=read)
     runtime = SimpleNamespace(
@@ -64,5 +69,9 @@ async def test_turn_observer_handles_stopped_producer(case):
     unsubscribe.assert_called_once_with()
     if case == "terminal":
         turn_result.assert_not_awaited()
-    else:
+    elif case == "remote":
         turn_result.assert_awaited_once_with("session", "turn", principal=principal, local_workspace=False)
+    else:
+        turn_result.assert_awaited_once_with(
+            "session", "turn", principal=principal, local_workspace=False, producer_stopped_generation=2,
+        )

@@ -7,8 +7,6 @@ import json
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from ..errors import AIError, ErrorCode
-
 if TYPE_CHECKING:
     from ..core import JsonValue, Principal
     from ._runtime_service import Runtime
@@ -101,19 +99,20 @@ class TurnObserver:
                         **self._terminal, "type": "terminal", "state": "waiting_deferred",
                     }
                     return
+                stopped = self._stopped
+                stop_context = (
+                    {"producer_stopped_generation": stopped["generation"]}
+                    if stopped is not None and stopped.get("turn_id") == turn_id
+                    and type(stopped.get("generation")) is int else {}
+                )
                 result = await self._runtime.history.turn_result(
                     self._session_id, turn_id, principal=self._principal, local_workspace=self._local_workspace,
+                    **stop_context,
                 )
                 status = result.get("status")
                 if isinstance(status, str) and status in _END_STATES:
                     yield {**result, "type": "terminal", "state": status.lower()}
                     return
-                stopped = self._stopped
-                if (stopped is not None and stopped.get("turn_id") == turn_id
-                        and type(stopped.get("generation")) is int
-                        and stopped["generation"] == result.get("generation")
-                        and status in ("PENDING_START", "CANCELLING")):
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             elif kind == "preview_reset":
                 self.incomplete = True
                 yield frame
