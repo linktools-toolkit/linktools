@@ -663,10 +663,6 @@ def validate_input_capture_payload(key: str, value: JsonValue, *, namespace: str
     if kind in {"agent", "task", "graph", "template"}:
         if not isinstance(value, Mapping) or value.get("namespace") != namespace or value.get("tenant_id") != tenant_id or value.get("kind") != kind or value.get("version") != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if kind == "agent":
-            version = value.get("request_identity_version", 1)
-            if type(version) is not int or version not in (1, 2):
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     elif kind == "expired":
         if (not isinstance(value, Mapping) or not {"namespace", "tenant_id", "capture_key", "expired_at"}.issubset(value)
                 or set(value) - {"namespace", "tenant_id", "capture_key", "expired_at", "principal", "cleanup_objects"}

@@ -4,14 +4,12 @@
 
 from dataclasses import replace
 from datetime import datetime, timezone
-import json
-from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import StructuredContent, TextContent
 
-from linktools.ai.core import (ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, Principal, PromptLimits, ResourceKind, WorkspaceFileInput,
-                               canonical_json_bytes)
+from linktools.ai.core import (ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, Principal, PromptLimits,
+                               ResourceKind, WorkspaceFileInput)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionRecord, ExecutionRequest, ExecutionStartClaim, IdempotencyRecord, StoredUserInput
 from linktools.ai.inputs import ExecutionInputMaterializer, encode_user_content
@@ -25,7 +23,6 @@ from .test_history_projection_conformance import _record
 from .test_mixed_pending_admission import _start, _writers
 from . import test_mixed_pending_admission as pending_fixture
 from .test_pending_coordination import _ObservedCache, _claim, _helper
-from .test_session_admission_conformance import _session
 
 _PRINCIPAL = Principal("owner", "tenant", "service")
 
@@ -49,7 +46,7 @@ class _ClaimingLauncher(_Launcher):
         return await self._repository.claim_start(ExecutionStartClaim(
             execution.execution_id, execution.revision, execution.event_seq,
             identity.scope, identity.idempotency_key, identity.request_digest,
-            execution.created_at, identity.request_identity_version,
+            execution.created_at,
         ))
 
 
@@ -71,54 +68,12 @@ async def test_new_agent_requests_bind_complete_structured_content(changed: Stru
         identity = await state.execution.idempotency.get(
             "execution.run", "same", tenant_id="tenant",
         )
-        assert identity.request_identity_version == 2
+        assert identity.request_digest == _digest(request, binding.binding_digest)
         assert backend.calls == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("storage_kind", ("memory", "sqlite"))
-@pytest.mark.parametrize("session", (False, True))
-async def test_old_agent_identity_is_rejected_without_rewriting_owner(storage_kind: str, session: bool, tmp_path: Path) -> None:
-    storage = (PersistenceStorage.in_memory() if storage_kind == "memory" else
-               PersistenceStorage.from_root(tmp_path, exclusive_writer=True))
-    async with Persistence.open("legacy-agent", storage=storage, tenant_id="tenant") as state:
-        backend = _ClaimingLauncher(state.execution.executions)
-        service = _service(state, backend=backend)
-        old_request = replace(_request("placeholder", _PRINCIPAL, "same"), user_prompt=(TextContent("fixed rendering"),))
-        binding = _binding()
-        scope = "session.resume" if session else "execution.run"
-        if session:
-            await state.conversation.sessions.create(replace(_session(), agent_id="agent"))
-
-        async def start(value):
-            return await service._start(
-                binding.binding_digest, value, scope=scope,
-                session_id="session" if session else None,
-                session_agent_id="agent" if session else None,
-            )
-
-        await start(old_request)
-        owner = await state.execution.idempotency.get(
-            scope, "same", tenant_id="tenant",
-        )
-        legacy = replace(owner, request_identity_version=1)
-        await state.execution.idempotency.compare_and_swap(
-            legacy.scope, legacy.idempotency_key, tenant_id="tenant",
-            expected_status=owner.status, next_record=legacy,
-        )
-        actions = (start,) if session else (start, lambda value: service.resolve_existing(binding.binding_digest, value))
-        for action in actions:
-            with pytest.raises(AIError) as caught:
-                await action(old_request)
-            assert caught.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-        assert await state.execution.idempotency.get(
-            legacy.scope, legacy.idempotency_key, tenant_id="tenant",
-        ) == legacy
-        assert backend.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_agent_does_not_launch_concurrent_legacy_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_agent_does_not_launch_concurrent_different_request(monkeypatch: pytest.MonkeyPatch) -> None:
     async with Persistence.open("identity-race", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
         backend = _ClaimingLauncher(state.execution.executions)
         service = _service(state, backend=backend)
@@ -132,15 +87,15 @@ async def test_agent_does_not_launch_concurrent_legacy_owner(monkeypatch: pytest
             nonlocal inserted
             if not inserted:
                 inserted = True
-                legacy = replace(
+                winner = replace(
                     proposed,
-                    execution=replace(proposed.execution, execution_id="legacy-winner", root_execution_id="legacy-winner",
+                    execution=replace(proposed.execution, execution_id="different-winner", root_execution_id="different-winner",
                                       stored_user_input=StoredUserInput("user-content-v1", StoredPayload.inline_json(
                                           encode_user_content(old_request.user_prompt)))),
-                    idempotency=replace(proposed.idempotency, resource_id="legacy-winner",
-                                        request_digest=_digest(old_request, binding.binding_digest), request_identity_version=1),
+                    idempotency=replace(proposed.idempotency, resource_id="different-winner",
+                                        request_digest=_digest(old_request, binding.binding_digest)),
                 )
-                await reserve(legacy)
+                await reserve(winner)
             return await reserve(proposed, **kwargs)
 
         monkeypatch.setattr(state.execution.executions, "reserve_start", race)
@@ -149,7 +104,7 @@ async def test_agent_does_not_launch_concurrent_legacy_owner(monkeypatch: pytest
         assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert backend.calls == 0
         owner = await state.execution.idempotency.get("execution.run", "same", tenant_id="tenant")
-        assert owner.request_identity_version == 1
+        assert owner.resource_id == "different-winner"
 
 
 @pytest.mark.asyncio
@@ -202,21 +157,14 @@ async def test_local_and_remote_pending_replay_use_canonical_request(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing_version", (False, True))
-async def test_pending_projection_requires_canonical_version_and_live_owner(missing_version: bool) -> None:
+async def test_pending_projection_requires_live_owner() -> None:
     cache = _ObservedCache()
     helper = _helper(cache)
     owned = await _claim(helper)
     record = _record(ExecutionStatus.STARTED, 1)
     await helper.publish(record, owned)
     assert await helper.read_request_execution("request", tenant_id="tenant") == record
-    if missing_version:
-        key = cache.record_key()
-        value = json.loads(await cache.get(key))
-        del value["request_identity_version"]
-        await cache.put(key, canonical_json_bytes(value))
-    else:
-        await cache.delete(cache.record_key())
+    await cache.delete(cache.record_key())
     with pytest.raises(AIError) as caught:
         await helper.read_request_execution("request", tenant_id="tenant")
     assert caught.value.code is ErrorCode.EXECUTION_START_UNKNOWN
@@ -235,7 +183,7 @@ async def test_canonical_failure_receipt_preserves_error_without_execution_paylo
         owner = IdempotencyRecord(
             "execution.run", "same", _digest(request, binding.binding_digest),
             ResourceKind.EXECUTION, "missing-execution", IdempotencyStatus.FAILED, None,
-            ErrorCode.EXECUTION_START_PERSISTENCE_FAILED.value, now, now, request_identity_version=2,
+            ErrorCode.EXECUTION_START_PERSISTENCE_FAILED.value, now, now,
         )
         await state.execution.idempotency.reserve(owner)
         with pytest.raises(AIError) as caught:

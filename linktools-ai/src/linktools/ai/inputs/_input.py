@@ -38,7 +38,6 @@ from ..model import (
 )
 from ..model.messages import (
     UnsupportedUserContentKind, decode_user_content_item, encode_user_content_item,
-    project_user_content_identity,
 )
 
 if TYPE_CHECKING:
@@ -74,11 +73,11 @@ class InputIntent:
 
 
 def input_intent(
-    value: _UserPromptInput, files: Sequence[str], *, identity_version: int = 2,
+    value: _UserPromptInput, files: Sequence[str],
 ) -> InputIntent:
     canonical = validate_user_input(value)
     normalized_files = normalize_input_files(files)
-    return InputIntent(_draft_prompt(canonical, identity_version=identity_version), normalized_files)
+    return InputIntent(_draft_prompt(canonical), normalized_files)
 
 
 def task_prompt_draft(value: _UserPromptInput) -> TaskPrompt:
@@ -596,9 +595,7 @@ def _binary_parts(
     return tuple(item for item in content if isinstance(item, (BinaryContent, ReferencedContent)))
 
 
-def _draft_prompt(value: _UserPromptInput, *, identity_version: int = 2) -> DraftPrompt:
-    if type(identity_version) is not int or identity_version not in (1, 2):
-        raise ValueError("input identity version is unsupported")
+def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:
     canonical = validate_user_input(value)
     if isinstance(canonical, str):
         return {"kind": "text", "text": canonical}
@@ -631,9 +628,7 @@ def _draft_prompt(value: _UserPromptInput, *, identity_version: int = 2) -> Draf
                 {
                     "kind": "native",
                     "codec": _USER_CONTENT_CODEC,
-                    "value": {"items": [project_user_content_identity(
-                        encode_user_content_item(item), version=identity_version,
-                    )]},
+                    "value": {"items": [encode_user_content_item(item)]},
                 }
             )
     return result

@@ -426,13 +426,9 @@ class DefaultTaskGraphService(TaskGraphService):
                 self._preflight.admit_request(request.graph), request.principal,
                 request.idempotency_key, request.limits, request.correlation, request.budget, request.tool_effects,
             )
-        existing = await self._persistence.admissions.get_submission_ref(
-            request.graph.graph_id, tenant_id=request.principal.tenant_id,
+        return TaskGraphSubmission(
+            self._persistence.admissions.namespace, TaskGraphAdmission.from_request(request), request.graph,
         )
-        admission = TaskGraphAdmission.from_request(
-            request, request_identity_version=2 if existing is None else existing.request_identity_version,
-        )
-        return TaskGraphSubmission(self._persistence.admissions.namespace, admission, request.graph)
 
     async def prepare_described(
         self, submission: TaskGraphSubmission
@@ -449,37 +445,11 @@ class DefaultTaskGraphService(TaskGraphService):
         admission = submission.admission
         await self._authorization.authorize(admission.principal, AuthorizationAction.TASK_RUN,
             ResourceRef(ResourceKind.TASK_GRAPH, admission.graph_id, admission.principal.tenant_id))
-        original = submission
-        existing = await self._persistence.admissions.get_submission_ref(
-            admission.graph_id, tenant_id=admission.principal.tenant_id,
-        )
-        identity_version = 2 if existing is None else existing.request_identity_version
-        if identity_version != admission.request_identity_version:
-            admission = admission.with_request_identity(
-                original.graph, request_identity_version=identity_version,
-            )
-            submission = TaskGraphSubmission(original.namespace, admission, original.graph)
-        try:
-            status = await self._persistence.admissions.submission_status(submission.ref)
-            if status is None and self._preflight is not None:
-                graph = await self._preflight.capture_admission(admission, submission.graph)
-                submission = TaskGraphSubmission(submission.namespace, admission, graph)
-            return await self._persistence.admissions.prepare_with_disposition(submission)
-        except AIError as error:
-            if error.code not in {ErrorCode.IDEMPOTENCY_CONFLICT, ErrorCode.STORAGE_CONFLICT}:
-                raise
-            winner = await self._persistence.admissions.get_submission_ref(
-                admission.graph_id, tenant_id=admission.principal.tenant_id,
-            )
-            if winner is None or winner.request_identity_version == admission.request_identity_version:
-                raise
-            # Capture can lose to a durable owner using a different projection.
-            # Recompare the original intent, never the now-materialized prompt.
-            admission = original.admission.with_request_identity(
-                original.graph, request_identity_version=winner.request_identity_version,
-            )
-            candidate = TaskGraphSubmission(original.namespace, admission, original.graph)
-            return await self._persistence.admissions.prepare_with_disposition(candidate)
+        status = await self._persistence.admissions.submission_status(submission.ref)
+        if status is None and self._preflight is not None:
+            graph = await self._preflight.capture_admission(admission, submission.graph)
+            submission = TaskGraphSubmission(submission.namespace, admission, graph)
+        return await self._persistence.admissions.prepare_with_disposition(submission)
 
     async def start_prepared(
         self, submission: TaskGraphSubmission

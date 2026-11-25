@@ -1353,7 +1353,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 error_code=None,
                 created_at=claim.started_at,
                 updated_at=claim.started_at,
-                request_identity_version=claim.request_identity_version,
             )
             idempotency_record = self._idempotency._stored(
                 "idempotency",
@@ -1382,7 +1381,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                         error_code=idempotency.error_code,
                         created_at=idempotency.created_at,
                         updated_at=idempotency.updated_at,
-                        request_identity_version=idempotency.request_identity_version,
                     ),
                 )
                 or idempotency.status is not IdempotencyStatus.RESERVED
@@ -2837,7 +2835,6 @@ def _same_idempotency_identity(
         left.scope == right.scope
         and left.idempotency_key == right.idempotency_key
         and left.request_digest == right.request_digest
-        and left.request_identity_version == right.request_identity_version
         and left.resource_kind is right.resource_kind
     )
 

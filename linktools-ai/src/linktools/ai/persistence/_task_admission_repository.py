@@ -109,7 +109,6 @@ def _same_task_admission_contract(
 ) -> bool:
     return (
         left.version == right.version
-        and left.request_identity_version == right.request_identity_version
         and left.graph_id == right.graph_id
         and left.principal == right.principal
         and left.limits == right.limits
@@ -205,6 +204,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             return None
         record, stored = existing
         if stored != submission:
+            await self._submission_ref_in_transaction(transaction, submission.graph_id)
             if stored.operation_id != submission.operation_id:
                 graph = await transaction.get_record(self._graph_key(submission.graph_id))
                 if graph is not None:
@@ -280,46 +280,36 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         async def mutate(
             transaction: StateTransaction,
         ) -> tuple[TaskGraphSubmission, bool]:
-            candidate = TaskGraphSubmission(
-                submission.namespace,
-                await self._select_admission_identity(transaction, submission.admission, submission.graph),
-                submission.graph,
-            )
-            record = await self._submission_in_transaction(transaction, candidate.ref)
+            record = await self._submission_in_transaction(transaction, submission.ref)
             if record is None:
-                graph_id = candidate.graph.graph_id
+                graph_id = submission.graph.graph_id
                 records = await transaction.get_records((
                     self._graph_key(graph_id), self._admission_key(graph_id),
                     self._prepared_key(graph_id),
                 ))
-                operation = await transaction.get_operation(operation_key(self._namespace, self._tenant_id, self._domain.value, candidate.admission.operation_id))
+                operation = await transaction.get_operation(operation_key(self._namespace, self._tenant_id, self._domain.value, submission.admission.operation_id))
                 if records or operation is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await transaction.insert_records((
                     self._stored(
-                        "task_submission", (candidate.graph.graph_id,),
-                        candidate.ref, state="prepared",
+                        "task_submission", (submission.graph.graph_id,),
+                        submission.ref, state="prepared",
                     ),
                     self._stored(
-                        "task_submission_payload", (candidate.graph.graph_id,), candidate,
+                        "task_submission_payload", (submission.graph.graph_id,), submission,
                     ),
                 ))
-                return candidate, True
-            return await self._prepared_submission(transaction, record, candidate), False
+                return submission, True
+            return await self._prepared_submission(transaction, record, submission), False
 
         async def readback() -> CommitObservation[tuple[TaskGraphSubmission, bool]]:
             async def read(
                 transaction: StateTransaction,
             ) -> CommitObservation[tuple[TaskGraphSubmission, bool]]:
-                candidate = TaskGraphSubmission(
-                    submission.namespace,
-                    await self._select_admission_identity(transaction, submission.admission, submission.graph),
-                    submission.graph,
-                )
-                record = await self._submission_in_transaction(transaction, candidate.ref)
+                record = await self._submission_in_transaction(transaction, submission.ref)
                 if record is None:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                stored = await self._prepared_submission(transaction, record, candidate)
+                stored = await self._prepared_submission(transaction, record, submission)
                 # Readback establishes durable preparation, but not which caller created it.
                 return CommitObservation(DurableCommitState.COMMITTED, (stored, False))
             return await self._store.read(read)
@@ -360,9 +350,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         async def mutate(transaction: StateTransaction) -> bool:
             record = await self._submission_in_transaction(transaction, submission)
             if record is None:
-                if submission.request_identity_version != 2:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
-                                  safe_details={"reason": "legacy_submission_not_retained"})
                 record = self._stored("task_submission", (submission.graph_id,), submission, state="cancelled")
                 await transaction.insert_records((record,))
             graph_record = await transaction.get_record(self._graph_key(submission.graph_id))
@@ -752,15 +739,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
 
         return await self.state_store.read(read)
 
-    async def _select_admission_identity(
-        self, transaction: StateTransaction, admission: TaskGraphAdmission, graph: TaskGraph,
-    ) -> TaskGraphAdmission:
-        existing = await self._submission_ref_in_transaction(transaction, graph.graph_id)
-        identity_version = 2 if existing is None else existing.request_identity_version
-        if identity_version == admission.request_identity_version:
-            return admission
-        return admission.with_request_identity(graph, request_identity_version=identity_version)
-
     async def _admit_in_transaction(
         self,
         transaction: StateTransaction,
@@ -769,7 +747,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         *,
         require_prepared: bool,
     ) -> TaskGraphView:
-        admission = await self._select_admission_identity(transaction, admission, graph)
         submission = TaskGraphSubmission(self._namespace, admission, graph)
         head = await self._submission_in_transaction(transaction, submission.ref)
         if head is None:
@@ -968,7 +945,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         admission: TaskGraphAdmission,
         graph: TaskGraph,
     ) -> CommitObservation[TaskGraphView]:
-        admission = await self._select_admission_identity(transaction, admission, graph)
         head = await self._submission_in_transaction(
             transaction, TaskSubmissionRef.from_admission(self._namespace, admission),
         )

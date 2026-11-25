@@ -558,7 +558,6 @@ class LocalExecutionBackend:
                 identity.idempotency_key,
                 identity.request_digest,
                 datetime.now(timezone.utc),
-                identity.request_identity_version,
             ),
             session_id=execution.session_id,
             strict_turn_fence=(self._source_turn_fence(owner)
@@ -1129,8 +1128,7 @@ class LocalExecutionBackend:
                 session_id=session.session_id if session is not None else None,
             )
             if existing is not None:
-                if (existing.request_digest != identity.request_digest
-                        or existing.request_identity_version != identity.request_identity_version):
+                if existing.request_digest != identity.request_digest:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 if existing.status is IdempotencyStatus.START_UNKNOWN:
                     raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
@@ -1161,10 +1159,7 @@ class LocalExecutionBackend:
             turn.promotion_claim_id = coordination.owner_id
             if self._execution_buffer is not None:
                 await self._execution_buffer.append(_ExecutionPayloadCapture(turn.execution, turn.reservation))
-            await coordinator.publish(
-                turn.execution, coordination,
-                request_identity_version=reservation.idempotency.request_identity_version,
-            )
+            await coordinator.publish(turn.execution, coordination)
             if not self._accepting:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             self._live_broker.prepare_local_producer(execution.execution_id)
@@ -1919,7 +1914,6 @@ class LocalExecutionBackend:
                 identity.idempotency_key,
                 identity.request_digest,
                 now,
-                identity.request_identity_version,
             ),
             session_id=execution.session_id,
             strict_turn_fence=(self._source_turn_fence(owner)
@@ -4676,10 +4670,7 @@ class LocalExecutionBackend:
                                         audit_events=tuple(self._pending_audit_events.get(execution_id, ())),
                                     ))
                                 assert self._pending_turns.coordination is not None and pending.coordination is not None
-                                await self._pending_turns.coordination.publish(
-                                    current, pending.coordination,
-                                    request_identity_version=pending.reservation.idempotency.request_identity_version,
-                                )
+                                await self._pending_turns.coordination.publish(current, pending.coordination)
                             else:
                                 if context_write is None:
                                     prepared = await self._context_archive.prepare(accepted_context, history_root=loaded_context.archive_root, history_digest=loaded_context.archive_digest)

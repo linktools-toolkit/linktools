@@ -194,7 +194,6 @@ class ExecutionStartIdentity:
     idempotency_key: str = field(repr=False)
     request_digest: str
     expected_session: "SessionRecord | None" = None
-    request_identity_version: int = 2
 
     def __post_init__(self) -> None:
         validate_resource_id(self.scope)
@@ -1339,8 +1338,6 @@ class DefaultExecutionService(TaskExecutionService):
                 tenant_id=request.principal.tenant_id,
             )
         if existing is not None:
-            if existing.request_identity_version != 2:
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if existing.status is IdempotencyStatus.START_UNKNOWN:
@@ -1379,7 +1376,6 @@ class DefaultExecutionService(TaskExecutionService):
                     scope=scope,
                     idempotency_key=idempotency_key,
                     request_digest=request_digest,
-                    request_identity_version=existing.request_identity_version,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
                     capture_metric=capture_metric,
@@ -1590,7 +1586,6 @@ class DefaultExecutionService(TaskExecutionService):
                     error_code=None,
                     created_at=now,
                     updated_at=now,
-                    request_identity_version=2,
                 ),
                 budget=request.budget,
                 parent_producer_generation=parent_producer_generation,
@@ -1866,7 +1861,6 @@ class DefaultExecutionService(TaskExecutionService):
                     scope=scope,
                     idempotency_key=idempotency_key,
                     request_digest=request_digest,
-                    request_identity_version=reservation.idempotency.request_identity_version,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
                     parent_producer_generation=proposed_reservation.parent_producer_generation,
@@ -1934,7 +1928,6 @@ class DefaultExecutionService(TaskExecutionService):
             scope=scope,
             idempotency_key=idempotency_key,
             request_digest=request_digest,
-            request_identity_version=reservation.idempotency.request_identity_version,
             prepare_local_stream=prepare_local_stream,
             dependency_hold_id=dependency_hold_id,
             capture_metric=capture_metric,
@@ -1974,7 +1967,6 @@ class DefaultExecutionService(TaskExecutionService):
         scope: str,
         idempotency_key: str,
         request_digest: str,
-        request_identity_version: int = 2,
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
@@ -1990,7 +1982,7 @@ class DefaultExecutionService(TaskExecutionService):
                 launch_request = replace(request, budget=usage.limits)
             identity = ExecutionStartIdentity(
                 scope, idempotency_key, request_digest,
-                expected_session, request_identity_version,
+                expected_session,
             )
             try:
                 started = await self._backend.prepare_start(

@@ -213,15 +213,12 @@ class PendingTurnCoordination:
 
     async def publish(
         self, record: ExecutionRecord, coordination: TurnCoordination,
-        *, request_identity_version: int = 2,
     ) -> None:
         """Publish an owner's pending observation, never a terminal result.
 
         Publication neither confirms ownership nor promises cache retention.
         Readers confirm authority after reading these generation-scoped bytes.
         """
-        if request_identity_version != 2:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if coordination.lease is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if record.execution_id != coordination.execution_id or not self._is_pending(record):
@@ -237,7 +234,6 @@ class PendingTurnCoordination:
             "owner_id": coordination.owner_id,
             "principal_id": record.principal_id,
             "principal_kind": record.principal_kind,
-            "request_identity_version": request_identity_version,
             "record": encode_domain(replace(record, input_context=None)),
         }
         state_fence = ({"fence": coordination.lease.fence}
@@ -439,8 +435,6 @@ class PendingTurnCoordination:
                 or (fence is not None and (type(envelope.get("fence")) is not int or envelope["fence"] != fence))
             ):
                 return None
-            if envelope.get("request_identity_version") != 2:
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             record = decode_domain(envelope.get("record"), ExecutionRecord)
             if (
                 record.execution_id != current.execution_id

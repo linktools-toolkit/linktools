@@ -24,11 +24,9 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 @pytest.mark.parametrize("entrypoint,outcome,corruption", (
     ("start", "success", None), ("start", "failed", None), ("start", "cancelled", None),
     ("start", "success", "active"), ("start", "success", "digest"), ("start", "success", "request"),
-    ("start", "success", "identity_version"),
     ("resolve", "success", None), ("resolve", "success", "active"),
     ("resolve", "success", "digest"), ("resolve", "success", "request"),
-    ("resolve", "success", "identity_version"),
-    ("session", "success", None), ("session", "success", "identity_version"),
+    ("session", "success", None), ("session", "success", "request"),
 ))
 async def test_start_replay_refreshes_only_a_mixed_terminal_view(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, outcome: str, corruption: str | None,
@@ -78,9 +76,6 @@ async def test_start_replay_refreshes_only_a_mixed_terminal_view(
                 return replace(record, result_digest="0" * 64)
             if corruption == "request":
                 return replace(record, request_digest="0" * 64)
-            if corruption == "identity_version":
-                # A mixed terminal read cannot change the canonical request encoding.
-                return replace(record, request_identity_version=1)
             return record
 
         monkeypatch.setattr(type(repository), "get", interleaved_get)

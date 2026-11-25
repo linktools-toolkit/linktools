@@ -73,7 +73,7 @@ async def test_results_reject_inconsistent_terminal_truth(status, output, error)
 async def test_admission_does_not_reinterpret_unknown_commit_as_started() -> None:
     now = datetime.now(timezone.utc)
     identity = IdempotencyRecord("execution.run", "key", "request", ResourceKind.EXECUTION,
-        "execution", IdempotencyStatus.START_UNKNOWN, None, None, now, now, request_identity_version=2)
+        "execution", IdempotencyStatus.START_UNKNOWN, None, None, now, now)
     manager = ExecutionManager(_ReadPort(_execution(), identity), TenantAuthorizationPolicy())
     with pytest.raises(AIError) as caught:
         await manager.resolve_admission("execution.run", "key", "request", _PRINCIPAL)
@@ -131,7 +131,7 @@ async def test_changed_loaded_owner_is_authorized_without_unrelated_header_read(
 async def test_admission_authorizes_its_one_source_record() -> None:
     now = datetime.now(timezone.utc)
     identity = IdempotencyRecord("execution.run", "key", "request", ResourceKind.EXECUTION,
-        "execution", IdempotencyStatus.STARTED, None, None, now, now, request_identity_version=2)
+        "execution", IdempotencyStatus.STARTED, None, None, now, now)
     record = _execution()
     port = _ReadPort(record, identity)
     manager = ExecutionManager(port, TenantAuthorizationPolicy())
@@ -205,7 +205,7 @@ async def test_admission_reuses_observed_identity_without_bypassing_validation(
 ) -> None:
     now = datetime.now(timezone.utc)
     identity = IdempotencyRecord("execution.run", "key", "request", ResourceKind.EXECUTION,
-        "execution", IdempotencyStatus.STARTED, None, None, now, now, request_identity_version=2)
+        "execution", IdempotencyStatus.STARTED, None, None, now, now)
     record = _execution()
     if mismatch == "request":
         identity = replace(identity, request_digest="other")

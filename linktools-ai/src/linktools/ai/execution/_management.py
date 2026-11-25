@@ -109,8 +109,6 @@ class ExecutionManager:
             identity = await self._port.get_idempotency(scope, idempotency_key, tenant_id=principal.tenant_id)
         if identity is None:
             return None
-        if identity.request_identity_version != 2:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if identity.request_digest != request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (identity.scope != scope or identity.idempotency_key != idempotency_key
@@ -145,7 +143,6 @@ class ExecutionManager:
             or refreshed.scope != identity.scope
             or refreshed.idempotency_key != identity.idempotency_key
             or refreshed.request_digest != identity.request_digest
-            or refreshed.request_identity_version != identity.request_identity_version
             or refreshed.resource_kind is not identity.resource_kind
             or refreshed.resource_id != identity.resource_id
             or not terminal_idempotency_matches(refreshed, execution)

@@ -15,7 +15,7 @@ from ..agent import AgentBindingContract, AgentInputCaptureRef
 from ..asset import AssetStoreReader, AssetVersionRef
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, ImmutableJsonMapping, JsonValue,
-    Principal, ResourceKind, ResourceRef, TaskStatus, WorkspaceFileInput, canonical_json_bytes,
+    Principal, ResourceKind, ResourceRef, TaskStatus, WorkspaceFileInput,
     canonical_sha256, deterministic_id, validate_idempotency_key, principal_identity_payload, validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
@@ -246,8 +246,6 @@ class InputCaptures:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         value = {"kind": kind, "version": 1, "namespace": self._namespace,
                  "tenant_id": principal.tenant_id, "principal": principal_identity_payload(principal), "payload": dict(payload)}
-        if kind == "agent":
-            value["request_identity_version"] = 2
         if expires_at is not None:
             value["expires_at"] = expires_at.isoformat()
         return identity, value
@@ -272,45 +270,7 @@ class InputCaptures:
         object_key = self._key(principal.tenant_id, kind, identity)
         if await self._get(input_capture_expiry_key(object_key)) is not None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
-        try:
-            digest = await self._put(object_key, value)
-        except AIError as error:
-            if kind != "agent" or error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
-                raise
-            existing = await self._get(object_key)
-            if not isinstance(existing, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            version = existing.get("request_identity_version", 1)
-            if type(version) is not int or version not in (1, 2):
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-            candidate = dict(value)
-            if version == 1:
-                candidate["payload"] = self._legacy_agent_payload(payload)
-            if "request_identity_version" in existing:
-                candidate["request_identity_version"] = version
-            else:
-                candidate.pop("request_identity_version", None)
-            if canonical_json_bytes(candidate) != canonical_json_bytes(existing):
-                raise
-            digest = canonical_sha256(existing)
-        return identity, digest
-
-    @classmethod
-    def _legacy_agent_payload(cls, payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-        result = dict(payload)
-        result["prompt"] = AgentTaskNode.prompt_identity_payload(
-            payload["prompt"], request_identity_version=1,
-        )
-        view = payload.get("input_view")
-        if isinstance(view, Mapping):
-            view = dict(view)
-            prompt = view.get("prompt")
-            if isinstance(prompt, Mapping):
-                view["prompt"] = AgentTaskNode.prompt_identity_payload(
-                    prompt, request_identity_version=1,
-                )
-            result["input_view"] = view
-        return result
+        return identity, await self._put(object_key, value)
 
     async def _read(self, reference: AgentInputCaptureRef | TaskInvocationInputRef | TaskGraphCaptureRef | TaskGraphTemplateRef,
                     kind: str, principal: Principal) -> Mapping[str, JsonValue]:
@@ -329,10 +289,6 @@ class InputCaptures:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if value.get("version") != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if kind == "agent":
-            identity_version = value.get("request_identity_version", 1)
-            if type(identity_version) is not int or identity_version not in (1, 2):
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         owner = value.get("principal")
         if not isinstance(owner, Mapping) or not isinstance(owner.get("principal_id"), str) or owner.get("tenant_id") != principal.tenant_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

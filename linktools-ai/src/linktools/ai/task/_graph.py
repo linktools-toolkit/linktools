@@ -7,7 +7,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Generic
@@ -456,10 +456,6 @@ class TaskNode(Generic[_ResultT]):
             value["reconcile"] = True
         return value
 
-    def request_identity_payload(self, *, request_identity_version: int) -> dict[str, JsonValue]:
-        """Project request semantics without interpreting generic Task input."""
-        return self.to_mapping()
-
     def dependency_status(self, dependency_states: Mapping[str, TaskStatus]) -> TaskStatus:
         """Return the dependency-derived state without changing persisted state."""
         statuses = tuple(dependency_states[dependency] for dependency in self.dependencies)
@@ -754,7 +750,6 @@ def _task_graph_request_digest(
     limits: TaskGraphLimits,
     budget: RunBudget | None = None,
     tool_effects: ToolEffects = "live",
-    request_identity_version: int = 2,
 ) -> str:
     identity: dict[str, JsonValue] = {
         "principal": principal_identity_payload(principal),
@@ -762,7 +757,7 @@ def _task_graph_request_digest(
         **({"budget": budget.digest_payload()} if budget is not None else {}),
         **({"tool_effects": tool_effects} if tool_effects != "live" else {}),
         "nodes": [
-            node.request_identity_payload(request_identity_version=request_identity_version)
+            node.to_mapping()
             for node in sorted(graph.nodes, key=lambda item: item.node_id)
         ],
         "limits": {
@@ -802,14 +797,9 @@ class TaskGraphAdmission:
     budget: RunBudget | None = None
     budget_scope_id: str | None = None
     tool_effects: ToolEffects = "live"
-    request_identity_version: int = 1
 
     def __post_init__(self) -> None:
         _validate_task_id(self.graph_id)
-        if type(self.request_identity_version) is not int:
-            raise ValueError("task request identity version is invalid")
-        if self.request_identity_version not in (1, 2):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         normalize_tool_effects(self.tool_effects)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -830,9 +820,7 @@ class TaskGraphAdmission:
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
     @classmethod
-    def from_request(
-        cls, request: TaskGraphRequest, *, request_identity_version: int = 2,
-    ) -> "TaskGraphAdmission":
+    def from_request(cls, request: TaskGraphRequest) -> "TaskGraphAdmission":
         return cls(
             1,
             request.graph.graph_id,
@@ -841,24 +829,11 @@ class TaskGraphAdmission:
             request.idempotency_key,
             _task_graph_request_digest(
                 request.graph, request.principal, request.limits, request.budget, request.tool_effects,
-                request_identity_version,
             ),
             request.correlation,
             request.budget,
             None if request.budget is None else "graph:" + request.graph.graph_id,
             request.tool_effects,
-            request_identity_version,
-        )
-
-    def with_request_identity(self, graph: TaskGraph, *, request_identity_version: int) -> "TaskGraphAdmission":
-        """Compare the original graph using its durable submission owner's rule."""
-        return replace(
-            self,
-            initial_request_digest=_task_graph_request_digest(
-                graph, self.principal, self.limits, self.budget, self.tool_effects,
-                request_identity_version,
-            ),
-            request_identity_version=request_identity_version,
         )
 
     def launch(self) -> TaskGraphLaunch:
@@ -879,7 +854,6 @@ class TaskGraphAdmission:
         if (
             _task_graph_request_digest(
                 graph, self.principal, self.limits, self.budget, self.tool_effects,
-                self.request_identity_version,
             )
             != self.initial_request_digest
         ):

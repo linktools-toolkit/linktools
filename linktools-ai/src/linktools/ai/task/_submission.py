@@ -18,13 +18,8 @@ class TaskSubmissionRef:
     request_digest: str
     operation_id: str = field(repr=False)
     principal: Principal
-    request_identity_version: int = 1
 
     def __post_init__(self) -> None:
-        if type(self.request_identity_version) is not int:
-            raise ValueError("task request identity version is invalid")
-        if self.request_identity_version not in (1, 2):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if (
             not self.namespace
             or not self.graph_id
@@ -43,7 +38,6 @@ class TaskSubmissionRef:
         return cls(
             namespace, admission.principal.tenant_id, admission.graph_id,
             admission.initial_request_digest, admission.operation_id, admission.principal,
-            admission.request_identity_version,
         )
 
 

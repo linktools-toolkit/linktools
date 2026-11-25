@@ -399,7 +399,6 @@ class AgentTaskRunner(Generic[AppT]):
         tenant_id: str,
         contract: Mapping[str, JsonValue],
         materializer: "ExecutionInputMaterializer | None",
-        request_identity_version: int = 2,
     ) -> TaskNode:
         """Freeze Agent input through its producer before graph execution starts."""
         port = self.execution_port
@@ -430,8 +429,7 @@ class AgentTaskRunner(Generic[AppT]):
             body["prompt"] = {
                 "kind": "stored-user-content-v1",
                 "intent": "task-admission",
-                "source_intent_digest": node.prompt_intent_digest(
-                    request_identity_version=request_identity_version),
+                "source_intent_digest": node.prompt_intent_digest(),
                 "value": encode_domain(stored),
             }
             _logger.info("task input resolved: node=%s", node.node_id)
