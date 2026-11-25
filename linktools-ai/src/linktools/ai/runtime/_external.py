@@ -136,10 +136,23 @@ class DefaultExternalService:
         )
         if record is None or record.execution_id != execution_id:
             raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
+        async def read_exact():
+            observed = await self._calls.get(request.call_id, tenant_id=request.principal.tenant_id)
+            return observed if await self._is_exact_replay(observed, execution_id=execution_id, request=request) else None
+
         if record.status is ExternalCallStatus.SUPPLIED:
             if not await self._is_exact_replay(record, execution_id=execution_id, request=request):
                 raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
-            updated = record
+            if frontier is not None and self._session_deferred.uses_split_receipts(self._calls.state_store):
+                # Resume the handoff, not the already completed supply command.
+                async def existing():
+                    return record
+
+                updated = await self._session_deferred.settle(
+                    frontier, self._calls.state_store, existing, read_exact=read_exact,
+                )
+            else:
+                updated = record
         else:
             payload, resolution_kind = await self._resolution_payload(request)
             async def settle():
@@ -160,21 +173,19 @@ class DefaultExternalService:
                     }:
                         raise
                     try:
-                        updated = await self._calls.get(
-                            request.call_id,
-                            tenant_id=request.principal.tenant_id,
-                        )
-                        replay = await self._is_exact_replay(updated, execution_id=execution_id, request=request)
+                        updated = await read_exact()
                     finally:
                         if isinstance(error, asyncio.CancelledError):
                             raise error
-                    if not replay:
+                    if updated is None:
                         raise
                 return updated
             if frontier is None:
                 updated = await settle()
             else:
-                updated = await self._session_deferred.settle(frontier, self._calls.state_store, settle)
+                updated = await self._session_deferred.settle(
+                    frontier, self._calls.state_store, settle, read_exact=read_exact,
+                )
         if updated is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
@@ -184,7 +195,7 @@ class DefaultExternalService:
             updated.resolution_kind,
         )
         if frontier is not None:
-            await self._session_deferred.resume(frontier)
+            await self._session_deferred.resume(frontier, receipt_store=self._calls.state_store)
         else:
             await _reconcile(self._continuation, execution_id, request.principal.tenant_id)
         return ExternalSupplyResult(request.call_id, request.idempotency_key, True)

@@ -5,13 +5,16 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from ..core import AuthorizationAction, AuthorizationPolicy, Principal, ResourceKind, ResourceRef
 from ..errors import AIError, ErrorCode
 from ..execution import PendingToolContinuation
 from ..persistence.turns import CanonicalDeferredFrontier, SessionTurnKey, SqlSessionTurns
 from ..persistence.state import StateStore
+
+if TYPE_CHECKING:
+    from ._canonical_split_step import _CanonicalSplitStep
 
 _Result = TypeVar("_Result")
 
@@ -22,6 +25,7 @@ class SessionDeferredCommands:
         load: Callable[[CanonicalDeferredFrontier], Awaitable[PendingToolContinuation]],
         resume: Callable[[CanonicalDeferredFrontier], Awaitable[None]],
         is_ready: Callable[[CanonicalDeferredFrontier], Awaitable[bool]],
+        split: tuple[Callable[[], Awaitable[_CanonicalSplitStep]], StateStore, StateStore] | None = None,
     ) -> None:
         self._turns = turns
         self._authorization = authorization
@@ -29,6 +33,10 @@ class SessionDeferredCommands:
         self._load = load
         self._resume = resume
         self._is_ready = is_ready
+        self._split = split
+
+    def uses_split_receipts(self, receipt_store: StateStore) -> bool:
+        return self._split is not None and receipt_store.storage_group is not self._split[1].storage_group
 
     async def read(
         self, key: SessionTurnKey, *, principal: Principal, action: AuthorizationAction,
@@ -53,11 +61,21 @@ class SessionDeferredCommands:
 
     async def settle(
         self, frontier: CanonicalDeferredFrontier, receipt_store: StateStore,
-        operation: Callable[[], Awaitable[_Result]],
+        operation: Callable[[], Awaitable[_Result]], *,
+        read_exact: Callable[[], Awaitable[_Result | None]],
     ) -> _Result:
+        if self._split is not None and self.uses_split_receipts(receipt_store):
+            open_source, _, tool_store = self._split
+            source = await open_source()
+            return await source.settle_waiting(
+                frontier, receipt_store=receipt_store, tool_store=tool_store, settle=operation,
+                is_ready=lambda: self._is_ready(frontier), read_exact=read_exact,
+            )
         return await self._turns.settle_waiting_turn(
             frontier, receipt_store, operation, is_ready=lambda: self._is_ready(frontier),
         )
 
-    async def resume(self, frontier: CanonicalDeferredFrontier) -> None:
-        await self._resume(frontier)
+    async def resume(self, frontier: CanonicalDeferredFrontier, *, receipt_store: StateStore) -> None:
+        # Split receipt settlement stops at READY; it grants no producer.
+        if not self.uses_split_receipts(receipt_store):
+            await self._resume(frontier)

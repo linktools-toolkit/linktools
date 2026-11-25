@@ -449,7 +449,10 @@ class ToolRepositoryImpl(_RepositoryBase):
         transaction: StateTransaction,
         request: ToolOperationAdmission,
         *, observed: Observed[ToolOperationRecord] | None = None, known_new: bool = False,
+        expected_pending: ToolOperationRecord | None = None,
     ) -> Observed[ToolOperationRecord]:
+        if expected_pending is not None and (known_new or observed is not None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         validate_lease_owner(request.owner)
         if known_new and (observed is not None or request.recovery_agent_run_id is not None):
             raise ValueError("known-new admission cannot carry recovery evidence")
@@ -467,6 +470,8 @@ class ToolRepositoryImpl(_RepositoryBase):
                                  storage_revision=observed.storage_revision)
             else:
                 record = await transaction.get_record(self._tool_key(request.tool_operation_id))
+            if expected_pending is not None and record is None:
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             if record is None:
                 now = datetime.now(timezone.utc)
                 value = ToolOperationRecord(
@@ -503,6 +508,11 @@ class ToolRepositoryImpl(_RepositoryBase):
             current = await self._decode(record, ToolOperationRecord)
             if not _tool_admission_matches(current, request):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            if expected_pending is not None and (
+                current != expected_pending or current.status is not ToolOperationStatus.PENDING
+                or current.owner is not None
+            ):
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             now = (
                 datetime.now(timezone.utc)
                 if current.status

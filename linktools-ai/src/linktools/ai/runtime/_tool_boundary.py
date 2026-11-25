@@ -296,6 +296,17 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     ) -> Any:
         if not isinstance(tool_args, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        bridge = self._tool_operations
+        split_approved = None
+        if isinstance(bridge, RuntimeToolOperationBridge) and (
+            bridge._settled_split_resume or bridge._split_approval_ref is not None
+        ):
+            split_approved = bridge._split_approved_operation
+            if (split_approved is None or not ctx.tool_call_approved
+                    or (ctx.tool_call_id, name) != (split_approved.tool_call_id, split_approved.tool_name)
+                    or tool_capability_ref(tool.tool_def) != split_approved.capability_ref):
+                # A later model-proposed call never acquires this approval.
+                raise AIError(ErrorCode.EXECUTION_NOT_READY)
         processors = () if self._result_callbacks is None else self._result_callbacks.tool_results(ctx.tool_call_id)
         if not isinstance(tool, _BoundaryTool) or tool.boundary is not self or tool.tool_def.name != name:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -353,7 +364,6 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             )
             raise
         call = ToolCallPart(name, args=final_args, tool_call_id=call_id)
-        bridge = self._tool_operations
         replay_safe = descriptor.effect_policy == "replay_safe"
         try:
             instruction_read = self._repository_boundary is not None and is_instruction_file_read(
@@ -390,7 +400,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         prior_call = bridge is not None and descriptor.effect_owner == "none" and bool(
             await bridge.existing_call_ids((call_id,))
         )
-        if descriptor.effect_owner != "none" or prior_call:
+        if split_approved is not None or descriptor.effect_owner != "none" or prior_call:
             if bridge is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             decision = await bridge.begin(
@@ -458,7 +468,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 result = await self._invoke(
                     call, tool.tool_def, final_args, invoke, capture=capture,
                     preflight=(bridge.require_fresh_control
-                               if self._budget is not None or self._tool_metrics is not None else None),
+                               if split_approved is not None or self._budget is not None
+                               or self._tool_metrics is not None else None),
                     entering=entering,
                 )
             except (

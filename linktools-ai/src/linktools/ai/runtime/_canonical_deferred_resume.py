@@ -17,6 +17,7 @@ from ._tool import settle_canonical_deferred_leaf
 
 def canonical_deferred_commands(
     turns, checkpoint, authorization, *, namespace, tenant_id, objects, read_payload, resume,
+    split_source=None, turn_store=None,
 ):
     approvals = checkpoint.approvals
     calls = checkpoint.external_calls
@@ -135,4 +136,5 @@ def canonical_deferred_commands(
 
     return SessionDeferredCommands(
         turns, authorization, tenant_id=tenant_id, load=load, resume=resume_settled, is_ready=is_ready,
+        split=None if split_source is None else (split_source, turn_store, checkpoint.tools.state_store),
     )

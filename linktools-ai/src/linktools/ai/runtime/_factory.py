@@ -52,6 +52,7 @@ from ..observe import MetricRecorderProvider
 from ..model import ModelBinding
 from ..spec import (
     AgentSpec,
+    CapabilityRef,
     RuleInstructionResolver,
     RepositoryInstructionResolver,
     RepositoryInstructions,
@@ -855,9 +856,31 @@ async def _build_local_components(
             from ._canonical_split_step import _CanonicalSplitStep
 
             source, native, _, _ = await state._open_split_step_archive()
-            return _CanonicalSplitStep(state.session_turns, source, native, read_effects=read_split_effects)
+            return _CanonicalSplitStep(
+                state.session_turns, source, native, read_effects=read_split_effects,
+                stop_effects=(state.checkpoint.tools, tenant_id),
+            )
 
-        async def prepare_canonical_step(binding, key, generation):
+        async def prepare_split_wait_resume(source, key, generation, binding_payload, resolver, *, ready):
+            from ._tool import RuntimeToolOperationBridge
+
+            if binding_payload is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            # This unbound bridge only decodes the persisted native leaf. It
+            # has no canonical write boundary or ability to dispatch.
+            receipt_reader = RuntimeToolOperationBridge(
+                state.checkpoint.tools, state.object_store(PersistenceDomain.CHECKPOINT),
+                namespace=namespace, tenant_id=tenant_id, execution_id=key.turn_id, agent_run_id=key.turn_id,
+                binding_digest=AgentBindingContract.from_payload(binding_payload).binding_digest,
+                owner=secrets.token_hex(16), background_tasks=set(), fresh_execution=False,
+            )
+            return await source.prepare_waiting_recovery(
+                key, generation=generation, checkpoint=state.checkpoint, tenant_id=tenant_id,
+                binding_payload=binding_payload, resolver=resolver, read_payload=backend.read_deferred_payload,
+                tools=receipt_reader, ready=ready,
+            )
+
+        async def prepare_canonical_step(binding, key, generation, *, settled_split=False):
             from ..capability.steps import AtomicStepPersistence
             from ..persistence import SqlStepStore
             from ._step_store import RuntimeStepStore
@@ -876,6 +899,7 @@ async def _build_local_components(
             turn_store = state.session_turns
             selected_store = state.conversation.sessions.state_store
             split_source = None
+            split_approval_ref = None
             if native.store.storage_context.engine is not selected_store.storage_group.context.engine:
                 if split_sql_source is None:
                     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
@@ -885,14 +909,35 @@ async def _build_local_components(
                 from ._canonical_split_step import _CanonicalSplitStep
 
                 compiled = binding.compiled_agent
-                if (compiled.selected_tools or compiled.selected_skills or compiled.selected_mcp
+                candidates = compiled.selected_tools
+                business = False
+                tool_kind = None
+                if len(candidates) == 1 and native.capture_frontier:
+                    candidate = candidates[0]
+                    contract = candidate.contract
+                    metadata = contract.get("metadata")
+                    business = (tuple(compiled.spec.allow_tools) == (candidate.id,)
+                                and isinstance(metadata, Mapping)
+                                and tool_class_from_metadata(metadata) == "business"
+                                and not contract.get("defer_loading", False)
+                                and candidate.materialize_tool().prepare is None)
+                    tool_kind = contract.get("kind", "function")
+                approval_profile = business and tool_kind == "unapproved"
+                settled_profile = business and settled_split and generation >= 2 and tool_kind in (
+                    "function", "unapproved",
+                )
+                if ((candidates and not (approval_profile or settled_profile))
+                        or (settled_split and not settled_profile)
+                        or compiled.selected_skills or compiled.selected_mcp
                         or compiled.selected_subagents or compiled.selected_capabilities
                         or binding.output_binding.mode != "text"
                         or policy.durable_trace or policy.memory_scope is not None
                         or any(type(leaf) not in (StepPersistence, StepPersistenceCapability, ExecutionCapability)
                                for item in policy.capabilities for leaf in runtime_feature_leaves(item))):
                     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
-                                  "Cross-store Step requires a terminal-only text agent")
+                                  "Cross-store Step requires a text agent with no tools or one fixed approval tool")
+                if approval_profile:
+                    split_approval_ref = CapabilityRef("tool", candidate.id, candidate.revision)
                 selected_store = split_sql_source
                 if (native.store.storage_context is not selected_store.context
                         or not native.store.backup_supported):
@@ -906,6 +951,7 @@ async def _build_local_components(
                 binding_digest=binding.binding_digest, owner=secrets.token_hex(16),
                 background_tasks=set(), fresh_execution=generation == 1,
             )
+            tools._split_approval_ref = split_approval_ref
             store = RuntimeStepStore.for_canonical_turn(
                 native.store, tools, turn_store=turn_store, state_store=selected_store,
                 key=key, generation=generation, run_id=key.turn_id, split_source=split_source,
@@ -966,6 +1012,7 @@ async def _build_local_components(
         if turn_runner is not None:
             if split_sql_source is not None:
                 turn_runner._split_recovery_source = open_split_recovery_source
+                turn_runner._prepare_split_wait_resume = prepare_split_wait_resume
             from ..persistence.runs import ModelInteractionStateStepArchive
             from ._canonical_deferred_publication import bind_deferred_publication
 
@@ -1033,7 +1080,8 @@ async def _build_local_components(
             session_deferred = canonical_deferred_commands(
                 state.session_turns, state.checkpoint, authorization, namespace=namespace, tenant_id=tenant_id,
                 objects=state.object_store(PersistenceDomain.CHECKPOINT), read_payload=backend.read_deferred_payload,
-                resume=resume_deferred,
+                resume=resume_deferred, turn_store=turn_state,
+                split_source=None if split_sql_source is None else open_split_recovery_source,
             )
 
         approval = DefaultApprovalService(

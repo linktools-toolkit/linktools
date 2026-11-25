@@ -10,17 +10,25 @@ from ..execution import PendingDeferredCall, PendingToolContinuation
 from ..persistence.contracts import (
     ApprovalRecord, ExternalCallRecord, deferred_resource_id,
 )
+from ..persistence.turns import CanonicalDeferredFrontier, SplitStepWaiting
 
 
 def bind_deferred_publication(runner, turns, checkpoint) -> None:
     approvals = checkpoint.approvals
     external = checkpoint.external_calls
 
-    async def publish(turn, checkpoint_id, tool_bridge, requests, **trace_opts) -> bool:
+    async def publish(turn, checkpoint_id, tool_bridge, requests, *, split_source=None, **trace_opts) -> bool:
         owner = approvals.state_store
         if external.state_store is not owner:
             raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
-        operations = {operation.tool_call_id: operation for operation in await tool_bridge.list_operations()}
+        staged = None
+        if split_source is not None and tool_bridge._split_approval_ref is not None:
+            if (len(requests.approvals) != 1 or requests.calls
+                    or any(requests.metadata.values()) or trace_opts):
+                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            staged = await tool_bridge._consume_split_approval(requests.approvals[0])
+        operations = ({staged.tool_call_id: staged} if staged is not None else
+                      {operation.tool_call_id: operation for operation in await tool_bridge.list_operations()})
 
         def pending(call) -> PendingDeferredCall:
             operation = operations.get(call.tool_call_id)
@@ -57,6 +65,32 @@ def bind_deferred_publication(runner, turns, checkpoint) -> None:
                     deferred_resource_id("external-call-v1", tool_bridge._tenant_id, identity, identity, item.tool_call_id),
                     identity, ExternalCallStatus.PENDING, None, now, None,
                 ))
+
+        if split_source is not None:
+            leaves = (*continuation.approvals, *continuation.calls)
+            if len(leaves) != 1 or trace_opts:
+                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            item = leaves[0]
+            if item.operation_id is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            approved = bool(continuation.approvals)
+            framework_id = deferred_resource_id(
+                "approval-v1" if approved else "external-call-v1",
+                tool_bridge._tenant_id, identity, identity, item.tool_call_id,
+            )
+            frontier = CanonicalDeferredFrontier.from_json(turn.key, turn.generation, {
+                "checkpoint_id": checkpoint_id,
+                "approval_operation_ids": [item.operation_id] if approved else [],
+                "external_operation_ids": [] if approved else [item.operation_id],
+                "operation_metadata": {item.operation_id: dict(item.metadata)},
+            })
+            return await split_source.publish_waiting(
+                frontier, waiting=SplitStepWaiting(
+                    "approval" if approved else "external", item.operation_id, framework_id, turn.generation,
+                ),
+                checkpoint=checkpoint, tenant_id=tool_bridge._tenant_id, max_bytes=turn.terminal_bytes,
+                publish_receipts=receipts, staged_operation=staged,
+            )
 
         return await turns.publish_waiting_turn(
             turn.key, generation=turn.generation, checkpoint_id=checkpoint_id,

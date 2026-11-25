@@ -1836,7 +1836,7 @@ class SqlStepStore:
         runs = self._table("runs")
         source_has_pin = select(runs.c.id).where(
             *self._run_predicates(runs, run_id),
-            runs.c.turn_source_phase.in_(("sealed", "published")),
+            runs.c.turn_source_phase.in_(("sealed", "published", "waiting", "ready", "resuming", "resume_hold")),
             runs.c.turn_source_pin["checkpoint_id"].as_string().is_not(None),
         ).exists()
         canonical_guard = (~source_has_pin,)

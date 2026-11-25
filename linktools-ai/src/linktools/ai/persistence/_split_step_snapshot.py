@@ -66,6 +66,8 @@ async def capture_split_source_pins(
             columns.id > after, or_(*(columns[name].is_not(None) for name in SPLIT_SOURCE_COLUMNS)),
         ).order_by(columns.id).limit(128))
         for row in rows:
+            if row["turn_source_phase"] in ("waiting", "ready", "resuming", "resume_hold"):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Deferred split Step source requires a nonterminal snapshot")
             if row["turn_source_phase"] not in ("sealed", "published", "discarded"):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Live or unresolved split Step source cannot be exported")
             try:
@@ -146,6 +148,8 @@ class PairedSplitTerminalRestore:
                 generation = item["generation"]
                 pin = SplitStepPin.from_json(receipt_id, item["pin"])
                 state = pin.terminal_state
+                if pin.waiting is not None:
+                    raise ValueError("waiting split source cannot be restored by a terminal snapshot")
                 if (turn_id in matched or len(receipt_id.encode("utf-8")) > 64
                         or type(generation) is not int or generation < 1
                         or state not in ("succeeded", "failed", "cancelled")

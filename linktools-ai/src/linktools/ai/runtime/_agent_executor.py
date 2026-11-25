@@ -141,7 +141,7 @@ from ._harness import (
 from ..capability.steps import AtomicStepPersistence, StepBoundaryCapabilities
 from ..model.messages import without_history_system_prompts
 from ._repository_instructions import _RepositoryInstructionCapability
-from ._tool import ToolOperationBridge
+from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ..capability import ToolResponseFixture
 from ._tool_response_fixture import _ToolResponseManifest, _load_tool_response_fixture
 from ._tool_boundary import (
@@ -1201,8 +1201,15 @@ async def _materialize_agent(
         else:
             scope.deferred_capability_refs.pop(call.tool_call_id, None)
 
+    split_approval = scope.tool_operations
     capabilities: list[AbstractCapability[AgentContext[object]]] = [
-        PydanticToolControlCapability(before_validate=observe_tool_validation), RunCallbackScope(callbacks),
+        PydanticToolControlCapability(
+            before_validate=observe_tool_validation,
+            _after_validate=(split_approval._capture_split_approval
+                             if isinstance(split_approval, RuntimeToolOperationBridge)
+                             and split_approval._split_approval_ref is not None
+                             and split_approval._producer_generation == 1 else None),
+        ), RunCallbackScope(callbacks),
         BindReferencedInputOrigins(),
     ]
     for candidate in compiled_agent.selected_capabilities:

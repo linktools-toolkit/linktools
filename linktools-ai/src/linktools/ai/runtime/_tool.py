@@ -443,6 +443,29 @@ class RuntimeToolOperationBridge:
             self.bind_boundaries(admission=admission, terminal=terminal, unknown=unknown)
         self._prepared_boundaries = None
 
+    _settled_split_resume = False
+    _split_approved_operation: ToolOperationRecord | None = None
+    _split_approval_ref: CapabilityRef | None = None
+    _split_approval_args: tuple[str, str, bool, dict[str, Any]] | None = None
+
+    def _capture_split_approval(self, call: ToolCallPart, tool_def: ToolDefinition, args: dict[str, Any]) -> None:
+        from ..capability import tool_effect_policy_from_metadata
+        from ._tool_boundary import tool_capability_ref
+
+        if tool_def.kind != "unapproved" or self._split_approval_ref is None:
+            return
+        if tool_capability_ref(tool_def) != self._split_approval_ref or call.tool_name != tool_def.name:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        policy = tool_effect_policy_from_metadata(tool_def.metadata, require=True)
+        self._split_approval_args = call.tool_call_id, call.tool_name, policy == "replay_safe", _portable_arguments(args)
+
+    async def _consume_split_approval(self, call: ToolCallPart) -> ToolOperationRecord:
+        captured, ref = self._split_approval_args, self._split_approval_ref
+        if (captured is None or ref is None or self._producer_generation != 1
+                or (call.tool_call_id, call.tool_name) != captured[:2]):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return await self._pending_tool_record(call, captured[3], replay_safe=captured[2], capability_ref=ref)
+
     def configure_canonical_budget(self, scope_id: str, repository) -> None:
         if self._canonical_event_writer is None or self._budget_scope_id is not None or self._decisions:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -453,6 +476,8 @@ class RuntimeToolOperationBridge:
         self, native: SqlStepStore, *, state_store: "StateStore", key: "SessionTurnKey", generation: int,
         guard: Callable[["StateTransaction"], Awaitable[None]],
         prepare_event: Callable[[StepEvent], StepEvent],
+        resuming_approval: Callable[[], tuple["StateStore", Callable[..., Awaitable[Observed[ToolOperationRecord]]]]
+                                    | None] | None = None,
     ) -> None:
         """Bind leaf ownership to an admitted canonical turn, not an Execution producer."""
 
@@ -484,6 +509,13 @@ class RuntimeToolOperationBridge:
             admitted_scope = self._budget_scope_id
             budget_receipt = uuid4().hex if budget is not None else None
             participants = members
+            approved = None if resuming_approval is None else resuming_approval()
+            if approved is not None:
+                approval_store, _ = approved
+                if budget is not None or approval_store.storage_group is not group:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                participants = tuple(dict.fromkeys((*participants, approval_store)))
+                await self.require_active()
             if budget is not None:
                 if budget.state_store.storage_group is not group or admitted_scope is None:
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -492,10 +524,15 @@ class RuntimeToolOperationBridge:
             async def write(transaction):
                 # The tool receipt and its start event commit in the same
                 # transaction that proves this generation still may dispatch.
-                await guard(transaction.transaction(state_store))
-                effect = await repository.admit_in_transaction(
-                    transaction.transaction(repository.state_store), request, observed=observed, known_new=known_new,
-                )
+                if approved is None:
+                    await guard(transaction.transaction(state_store))
+                    effect = await repository.admit_in_transaction(
+                        transaction.transaction(repository.state_store), request, observed=observed, known_new=known_new,
+                    )
+                else:
+                    # This port rejects any operation other than the retained
+                    # approved leaf, including duplicate/unknown claims.
+                    effect = await approved[1](transaction, request)
                 if effect.value.status is ToolOperationStatus.CLAIMED and effect.value.producer_generation != generation:
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 if budget is not None and effect.value.status is ToolOperationStatus.CLAIMED:
@@ -751,19 +788,28 @@ class RuntimeToolOperationBridge:
         prior = self._operation_ids.get(call_id)
         if prior is not None and prior != operation_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        portable_args = _portable_arguments(args)
+        await self._canonical_pause(await self._pending_tool_record(
+            call, _portable_arguments(args), replay_safe=replay_safe, capability_ref=capability_ref,
+        ))
+        self._operation_ids[call_id] = operation_id
+        if self._operation_observer is not None:
+            self._operation_observer(call_id, operation_id)
+
+    async def _pending_tool_record(
+        self, call: ToolCallPart, portable_args: dict[str, Any], *, replay_safe: bool,
+        capability_ref: CapabilityRef | None,
+    ) -> ToolOperationRecord:
+        call_id = call.tool_call_id
+        operation_id = self._operation_id(self._agent_run_id, call_id)
         now = datetime.now(UTC)
-        await self._canonical_pause(ToolOperationRecord(
+        return ToolOperationRecord(
             tool_operation_id=operation_id, execution_id=self._execution_id, agent_run_id=self._agent_run_id,
             tool_call_id=call_id, tool_name=call.tool_name, arguments_digest=canonical_sha256(portable_args),
             binding_digest=self._binding_digest, replay_safe=replay_safe, status=ToolOperationStatus.PENDING,
             owner=None, fence=0, error_code=None, created_at=now, updated_at=now,
             producer_generation=self._producer_generation, arguments_payload=await self._arguments_payload(portable_args),
             capability_ref=capability_ref,
-        ))
-        self._operation_ids[call_id] = operation_id
-        if self._operation_observer is not None:
-            self._operation_observer(call_id, operation_id)
+        )
 
     async def begin(
         self,
@@ -1090,15 +1136,20 @@ class RuntimeToolOperationBridge:
             if value is None or value.tool_name != tool_name:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             self._operation_ids[call_id] = value.tool_operation_id
-            if value.status is ToolOperationStatus.COMPLETED:
-                results.calls[call_id] = await self._decode_result(value)
-            else:
-                error = await self._decode_error(value)
-                results.calls[call_id] = (
-                    PydanticToolControlCapability.build_model_retry(error.message) if isinstance(error, ToolCallRetry)
-                    else PydanticToolControlCapability.build_tool_failed(error.message)
-                )
+            results.calls[call_id] = await self._canonical_effect_result(value)
         return results if pending_calls else None
+
+    async def _canonical_effect_result(self, value: ToolOperationRecord):
+        if value.execution_id != self._execution_id or value.agent_run_id != self._agent_run_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if value.status is ToolOperationStatus.COMPLETED:
+            return await self._decode_result(value)
+        if value.status is not ToolOperationStatus.FAILED:
+            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+        error = await self._decode_error(value)
+        if isinstance(error, ToolCallRetry):
+            return PydanticToolControlCapability.build_model_retry(error.message)
+        return PydanticToolControlCapability.build_tool_failed(error.message)
 
     async def _decision_from_record(
         self,

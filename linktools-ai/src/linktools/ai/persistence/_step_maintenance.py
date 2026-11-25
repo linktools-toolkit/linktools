@@ -178,12 +178,15 @@ async def _require_paused_checkpoints(
     turns, scope = _canonical_checkpoint_scope(metadata, store_key)
     if turns is None:
         return
+    # Cross-database pauses are verified by their exact source pin below
+    # when sweeping the source database; the target holds no local checkpoint.
     after = 0
     while True:
         rows = (await session.execute(select(
             turns.c.id, turns.c.session_key, turns.c.turn_id, turns.c.generation, turns.c.result_json,
         ).where(turns.c.scope_key == scope, turns.c.id > after,
-                turns.c.state.in_(("waiting", "ready"))).order_by(turns.c.id).limit(128))).mappings().all()
+                turns.c.state.in_(("waiting", "ready")),
+                turns.c.split_source_receipt.is_(None)).order_by(turns.c.id).limit(128))).mappings().all()
         if not rows:
             return
         if snapshots is None:
@@ -286,7 +289,7 @@ async def purge_step_content(
         pins = () if not has_runs else (await session.execute(select(
             runs.c.run_id, runs.c.conversation_id, runs.c.turn_source_pin,
         ).where(runs.c.store_locator == locator, runs.c.store_key == store_key,
-                runs.c.turn_source_phase.in_(("sealed", "published"))))).mappings()
+                runs.c.turn_source_phase.in_(("sealed", "published", "waiting", "ready", "resuming", "resume_hold"))))).mappings()
         from ._message_root import NativeMessageRoot
         from ..steps import encode_native_replay_key
         checkpoint_keys = []

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 from weakref import finalize
 
 from ..agent import AgentBindingContract
-from ..core import ImmutableJsonMapping, canonical_json_bytes, canonical_sha256, validate_idempotency_key
+from ..core import ImmutableJsonMapping, canonical_json_bytes, canonical_sha256, deterministic_id, validate_idempotency_key
 from ..errors import AIError, ErrorCode
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from ..execution import PendingToolContinuation
     from .state import StateGroupTransaction, StateStore
     from ..storage import SqlStorageContext
-    from ._split_step_source import SplitStepSourceObservation
+    from ._split_step_source import SplitStepSourceObservation, SplitStepWaiting
     from ._step_store import SqlStepStore
     from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 
@@ -224,6 +224,27 @@ class CanonicalDeferredFrontier:
         except (KeyError, ValueError, TypeError, AIError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return cls(key, generation, checkpoint, approvals, calls, metadata)
+
+    @classmethod
+    def from_split_waiting(
+        cls, key: SessionTurnKey, *, checkpoint_id: str, waiting: SplitStepWaiting,
+    ) -> CanonicalDeferredFrontier:
+        """Rebuild the metadata-free frontier solely from its retained source proof."""
+        operation = waiting.operation_id
+        return cls.from_json(key, waiting.original_generation, {
+            "checkpoint_id": checkpoint_id,
+            "approval_operation_ids": [operation] if waiting.kind == "approval" else [],
+            "external_operation_ids": [operation] if waiting.kind == "external" else [],
+            "operation_metadata": {operation: {}},
+        })
+
+    @property
+    def split_receipt_id(self) -> str:
+        """Bind the source receipt to the exact target publication payload."""
+        return deterministic_id(
+            "canonical-split-waiting", self.key.session_id, self.key.turn_id, self.generation,
+            canonical_sha256(self.to_json()),
+        )
 
     def require_continuation(self, continuation: PendingToolContinuation) -> None:
         if (
@@ -1123,6 +1144,125 @@ class SqlSessionTurns(SqlSessionTurnReader):
         members = tuple(dict.fromkeys((turn_store, receipt_store, *trace_stores)))
         return await group.mutate(members, mutate)
 
+    async def publish_split_waiting(
+        self, frontier: CanonicalDeferredFrontier, *, source: SplitStepSourceObservation,
+        max_bytes: int, _expired: bool = False,
+    ) -> bool:
+        """Publish a committed one-leaf source receipt without writing the source again."""
+        from sqlalchemy import select
+
+        receipt = self._require_split_deferred_source(frontier, source, phase="waiting")
+        key = frontier.key
+        payload = frontier.to_json()
+        if len(canonical_json_bytes(payload)) > max_bytes:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+        turn = self._turn_values(key)
+        occupied = select(self._sessions.c.id).filter_by(
+            **self._session_values(key.session_id), active_turn_id=turn["turn_id"],
+        ).exists()
+        lease = self._turns.c.lease_until
+
+        async def write(connection: AsyncSession) -> bool:
+            changed = await connection.execute(self._turns.update().filter_by(
+                **turn, generation=frontier.generation, state="accepted",
+            ).where(occupied, lease <= self._now if _expired else lease > self._now).values(
+                state="waiting", lease_until=None, result_json=payload,
+                split_source_receipt=receipt,
+            ))
+            return changed.rowcount == 1
+
+        return await self._context.run_mutation(write, domain="session.wait")
+
+    @staticmethod
+    def _require_split_deferred_source(
+        frontier: CanonicalDeferredFrontier, source: SplitStepSourceObservation, *, phase: str,
+    ) -> bytes:
+        key, pin = frontier.key, source.pin
+        waiting = pin.waiting
+        if (source.phase != phase or waiting is None
+                or (source.turn_id, source.session_id, source.generation) != (
+                    key.turn_id, key.session_id, frontier.generation,
+                )
+                or pin.checkpoint_id != frontier.checkpoint_id
+                or waiting.original_generation != frontier.generation
+                or pin.receipt_id != frontier.split_receipt_id
+                or frontier.approval_operation_ids != ((waiting.operation_id,) if waiting.kind == "approval" else ())
+                or frontier.external_operation_ids != ((waiting.operation_id,) if waiting.kind == "external" else ())):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return pin.receipt_id.encode("utf-8")
+
+    async def publish_split_ready(
+        self, frontier: CanonicalDeferredFrontier, *, source: SplitStepSourceObservation,
+    ) -> bool:
+        """Publish only the same admitted waiting frontier now settled at its source."""
+        from sqlalchemy import select
+
+        receipt = self._require_split_deferred_source(frontier, source, phase="ready")
+        owner = self._turn_values(frontier.key)
+        occupied = select(self._sessions.c.id).filter_by(
+            **self._session_values(frontier.key.session_id), active_turn_id=owner["turn_id"],
+        ).exists()
+        columns = self._turns.c
+        proved = self._split_deferred_projection(frontier, receipt=receipt, state="ready")
+
+        async def matches(connection: AsyncSession) -> bool:
+            row = (await connection.execute(proved)).one_or_none()
+            return row is not None and CanonicalDeferredFrontier.from_json(
+                frontier.key, frontier.generation, row[0],
+            ) == frontier
+
+        async def write(connection: AsyncSession) -> bool:
+            changed = await connection.execute(self._turns.update().filter_by(
+                **owner, generation=frontier.generation, state="waiting", split_source_receipt=receipt,
+            ).where(occupied, columns.lease_until.is_(None)).values(state="ready"))
+            if changed.rowcount == 1:
+                # Compare the typed frontier while the same CAS owns the row.
+                # A mismatching frontier rolls back READY rather than replacing it.
+                if not await matches(connection):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return True
+            return False
+
+        try:
+            changed = await self._context.run_mutation(write, domain="session.ready")
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+            async with self._context.engine.connect() as connection:
+                if await matches(connection):
+                    return True
+            raise
+        if changed:
+            return True
+        async with self._context.engine.connect() as connection:
+            return await matches(connection)
+
+    async def confirms_split_waiting(self, frontier: CanonicalDeferredFrontier, *, receipt_id: str) -> bool:
+        """Read back only the expected exact waiting publication after an unknown commit."""
+        statement = self._split_deferred_projection(
+            frontier, receipt=receipt_id.encode("utf-8"), state="waiting",
+        )
+        async with self._context.engine.connect() as connection:
+            row = (await connection.execute(statement)).one_or_none()
+        return row is not None and CanonicalDeferredFrontier.from_json(
+            frontier.key, frontier.generation, row[0],
+        ) == frontier
+
+    def _split_deferred_projection(self, frontier: CanonicalDeferredFrontier, *, receipt: bytes, state: str):
+        from sqlalchemy import and_, select
+
+        turns, sessions = self._turns.c, self._sessions.c
+        return select(turns.result_json).select_from(self._turns.join(
+            self._sessions, and_(
+                sessions.scope_key == turns.scope_key, sessions.session_key == turns.session_key,
+                sessions.active_turn_id == turns.turn_id,
+            ),
+        )).where(
+            *(turns[name] == value for name, value in self._turn_values(frontier.key).items()),
+            turns.generation == frontier.generation, turns.state == state,
+            turns.split_source_receipt == receipt,
+        )
+
     async def settle_waiting_turn(
         self, frontier: CanonicalDeferredFrontier, receipt_store: StateStore,
         settle: Callable[[], Awaitable[_Receipt]], *,
@@ -1209,6 +1349,21 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         await self._context.run_mutation(write, domain="session.instructions")
 
+    async def request_split_wait_cancel(self, key: SessionTurnKey, *, generation: int) -> bool:
+        """Record Stop for a parked split owner; there is no live lease to wait for."""
+        columns = self._turns.c
+
+        async def write(connection: AsyncSession) -> bool:
+            changed = await connection.execute(self._turns.update().filter_by(
+                **self._turn_values(key), generation=generation,
+            ).where(
+                columns.state.in_(("waiting", "ready")), columns.split_source_receipt.is_not(None),
+                columns.lease_until.is_(None),
+            ).values(state="cancelling", lease_until=self._now))
+            return changed.rowcount == 1
+
+        return await self._context.run_mutation(write, domain="session.cancel")
+
     async def request_cancel(self, key: SessionTurnKey) -> bool:
         async def write(connection: AsyncSession) -> bool:
             result = await connection.execute(self._turns.update().filter_by(
@@ -1279,6 +1434,13 @@ class SqlSessionTurns(SqlSessionTurnReader):
             cols.generation == generation, cols.state == ("cancelling" if cancelling else "accepted"),
             cols.lease_until <= self._now if expired else cols.lease_until > self._now,
         )
+        if cancelling and expired:
+            # Prove occupancy before a cold Stop can seal a different database.
+            owner = self._sessions.c
+            query = query.where(select(owner.active_turn_id).where(
+                owner.scope_key == cols.scope_key, owner.session_key == cols.session_key,
+                owner.active_turn_id == cols.turn_id,
+            ).exists())
         async with self._context.engine.connect() as connection:
             row = (await connection.execute(query)).one_or_none()
         if row is None:
@@ -1308,14 +1470,136 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         return await self._context.run_mutation(write, domain="session.recover")
 
+    async def take_over_split_ready(
+        self, frontier: CanonicalDeferredFrontier, *, lease_seconds: int, source: SplitStepSourceObservation,
+    ) -> tuple[bool, SessionInstructionFrontier | None]:
+        """Grant a settled frontier once, without a second session or tool receipt."""
+        from sqlalchemy import select
+
+        if lease_seconds < 1:
+            raise ValueError("the turn lease must be positive")
+        key = frontier.key
+        receipt = self._require_split_deferred_source(frontier, source, phase="ready")
+        owner = self._turn_values(key)
+        occupied = select(self._sessions.c.id).filter_by(
+            **self._session_values(key.session_id), active_turn_id=owner["turn_id"],
+        ).exists()
+        proved = self._split_deferred_projection(frontier, receipt=receipt, state="ready")
+
+        async def write(session: AsyncSession):
+            row = (await session.execute(proved)).one_or_none()
+            if row is None:
+                return False, None
+            if CanonicalDeferredFrontier.from_json(key, frontier.generation, row[0]) != frontier:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            # The existing READY payload is immutable at this generation. The
+            # CAS fences concurrent regrant/Stop. Retain the exact original
+            # frontier until the source durably checkpoints the resumed state.
+            changed = await session.execute(self._turns.update().filter_by(
+                **owner, generation=frontier.generation, state="ready", lease_until=None,
+                split_source_receipt=receipt,
+            ).where(occupied).values(
+                state="accepted", generation=frontier.generation + 1, lease_until=self._now + lease_seconds,
+            ))
+            if changed.rowcount != 1:
+                return False, None
+            return True, await self._capture_instruction_frontier(session, key)
+
+        return await self._context.run_mutation(write, domain="session.recover")
+
+    async def read_split_ready_frontier(
+        self, key: SessionTurnKey, *, source: SplitStepSourceObservation,
+    ) -> CanonicalDeferredFrontier | None:
+        """Read the settled target while its exact occupied READY owner survives."""
+        waiting, checkpoint_id = source.pin.waiting, source.pin.checkpoint_id
+        if waiting is None or checkpoint_id is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        expected = CanonicalDeferredFrontier.from_split_waiting(key, checkpoint_id=checkpoint_id, waiting=waiting)
+        receipt = self._require_split_deferred_source(expected, source, phase="ready")
+        statement = self._split_deferred_projection(expected, receipt=receipt, state="ready").where(
+            self._turns.c.lease_until.is_(None),
+        )
+        async with self._context.engine.connect() as connection:
+            row = (await connection.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        frontier = CanonicalDeferredFrontier.from_json(key, expected.generation, row[0])
+        if frontier != expected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return frontier
+
+    async def read_split_resuming_frontier(
+        self, key: SessionTurnKey, *, generation: int, original_generation: int, receipt_id: str,
+    ) -> CanonicalDeferredFrontier | None:
+        """Read the original frontier on the exact expired split regrant."""
+        from sqlalchemy import and_, select
+
+        if not 1 <= original_generation < generation:
+            return None
+        turns, sessions = self._turns.c, self._sessions.c
+        statement = select(turns.result_json).select_from(self._turns.join(
+            self._sessions, and_(
+                sessions.scope_key == turns.scope_key, sessions.session_key == turns.session_key,
+                sessions.active_turn_id == turns.turn_id,
+            ),
+        )).where(
+            *(turns[name] == value for name, value in self._turn_values(key).items()),
+            turns.generation == generation, turns.state == "accepted", turns.lease_until <= self._now,
+            turns.split_source_receipt == receipt_id.encode("utf-8"),
+        )
+        async with self._context.engine.connect() as connection:
+            row = (await connection.execute(statement)).one_or_none()
+        if row is None or row[0] is None:
+            return None
+        return CanonicalDeferredFrontier.from_json(key, original_generation, row[0])
+
+    async def take_over_split_resuming(
+        self, frontier: CanonicalDeferredFrontier, *, source: SplitStepSourceObservation, lease_seconds: int,
+    ) -> tuple[bool, SessionInstructionFrontier | None]:
+        """Grant a replacement lease without releasing the frozen waiting proof."""
+        from sqlalchemy import select
+
+        key, generation = frontier.key, source.generation
+        if generation <= frontier.generation or lease_seconds < 1:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        waiting = source.pin.waiting
+        if (waiting is None or source.phase != "resume_hold"
+                or (source.turn_id, source.session_id) != (key.turn_id, key.session_id)
+                or source.pin.checkpoint_id != frontier.checkpoint_id
+                or waiting.original_generation != frontier.generation
+                or source.pin.receipt_id != frontier.split_receipt_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        owner = self._turn_values(key)
+        occupied = select(self._sessions.c.id).filter_by(
+            **self._session_values(key.session_id), active_turn_id=owner["turn_id"],
+        ).exists()
+
+        async def write(session: AsyncSession):
+            changed = await session.execute(self._turns.update().filter_by(
+                **owner, generation=generation, state="accepted",
+                split_source_receipt=source.pin.receipt_id.encode("utf-8"),
+            ).where(occupied, self._turns.c.lease_until <= self._now).values(
+                generation=generation + 1, lease_until=self._now + lease_seconds,
+            ))
+            if changed.rowcount != 1:
+                return False, None
+            return True, await self._capture_instruction_frontier(session, key)
+
+        return await self._context.run_mutation(write, domain="session.recover")
+
     async def confirmed_split_regrant(
         self, key: SessionTurnKey, *, generation: int, receipt_id: str,
     ) -> tuple[bool, SessionInstructionFrontier | None]:
         from sqlalchemy import select
 
         cols = self._turns.c
+        owner = self._turn_values(key)
+        occupied = select(self._sessions.c.id).filter_by(
+            **self._session_values(key.session_id), active_turn_id=owner["turn_id"],
+        ).exists()
         statement = select(cols.request_json["instruction_frontier"]).where(
-            *(cols[name] == value for name, value in self._turn_values(key).items()),
+            *(cols[name] == value for name, value in owner.items()),
+            occupied,
             cols.generation == generation, cols.state == "accepted", cols.lease_until > self._now,
             cols.split_source_receipt == receipt_id.encode("utf-8"),
         )

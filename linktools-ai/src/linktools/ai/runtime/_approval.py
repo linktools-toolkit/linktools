@@ -131,6 +131,20 @@ class DefaultApprovalService:
             raise AIError(ErrorCode.APPROVAL_CONFLICT)
         decision_digest = _decision_digest(request)
         idempotency_key = request.idempotency_key
+
+        async def read_exact():
+            observed = await self._approvals.get(request.approval_id, tenant_id=request.principal.tenant_id)
+            return observed if _is_exact_replay(
+                observed,
+                execution_id=execution_id,
+                idempotency_key=idempotency_key,
+                decision=request.decision,
+                principal_id=request.principal.principal_id,
+                decision_digest=decision_digest,
+                message=request.message,
+                metadata=request.metadata,
+            ) else None
+
         async def settle():
             try:
                 updated = await self._approvals.decide(
@@ -148,27 +162,17 @@ class DefaultApprovalService:
             except AIError as error:
                 if error.code is not ErrorCode.APPROVAL_CONFLICT:
                     raise
-                updated = await self._approvals.get(
-                    request.approval_id,
-                    tenant_id=request.principal.tenant_id,
-                )
-                if not _is_exact_replay(
-                    updated,
-                    execution_id=execution_id,
-                    idempotency_key=idempotency_key,
-                    decision=request.decision,
-                    principal_id=request.principal.principal_id,
-                    decision_digest=decision_digest,
-                    message=request.message,
-                    metadata=request.metadata,
-                ):
+                updated = await read_exact()
+                if updated is None:
                     raise
             return updated
 
         if frontier is None:
             updated = await settle()
         else:
-            updated = await self._session_deferred.settle(frontier, self._approvals.state_store, settle)
+            updated = await self._session_deferred.settle(
+                frontier, self._approvals.state_store, settle, read_exact=read_exact,
+            )
         if updated is None or updated.decision is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
@@ -178,7 +182,7 @@ class DefaultApprovalService:
             updated.decision.value,
         )
         if frontier is not None:
-            await self._session_deferred.resume(frontier)
+            await self._session_deferred.resume(frontier, receipt_store=self._approvals.state_store)
         elif self._continuation is not None:
             await self._reconcile(execution_id, request.principal.tenant_id)
         return ApprovalDecisionResult(

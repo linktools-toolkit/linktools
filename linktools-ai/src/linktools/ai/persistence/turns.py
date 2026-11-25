@@ -22,7 +22,7 @@ from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage
 from ._session_turn_sql import (
     CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey, SqlSessionTurnReader, SqlSessionTurns,
 )
-from ._split_step_source import SplitStepPin, SplitStepSourceObservation, SqlSplitStepSource
+from ._split_step_source import SplitStepPin, SplitStepSourceObservation, SplitStepWaiting, SqlSplitStepSource
 from ._turn_sql import STANDALONE, SqlTurnNotOwned, turn_hex, turn_session_address
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES
 from .state import (
@@ -962,4 +962,4 @@ def validate_turn_records(records: Sequence[StoredRecord], *, namespace: str, te
 
 
 __all__ = ["ExecutionAuthority", "SourceTurnRevoked", "SourceTurnWriteFence", "StateTurnCoordination", "SqlSessionTurns", "SqlSessionTurnReader", "SessionTurnKey", "SessionTurnSegment", "CanonicalDeferredFrontier", "SessionInstructionFrontier", "decode_session_lineage", "validate_turn_records",
-           "SplitStepPin", "SplitStepSourceObservation", "SqlSplitStepSource"]
+           "SplitStepPin", "SplitStepSourceObservation", "SplitStepWaiting", "SqlSplitStepSource"]

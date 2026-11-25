@@ -125,6 +125,7 @@ class _RegenerableTurnRunner:
         self._prepare_budget = prepare_budget
         self._publish_deferred = None
         self._split_recovery_source: Callable[[], Awaitable[_CanonicalSplitStep]] | None = None
+        self._prepare_split_wait_resume = None
         self._trace_archive: StateStepArchive | None = None
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
         self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
@@ -555,7 +556,11 @@ class _RegenerableTurnRunner:
             ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, turn["request_json"]["principal"]["principal_id"]),
         )
         split = turn["request_json"].get("split_step", False)
-        changed = await self._store.request_cancel(key)
+        changed = (
+            await self._store.request_split_wait_cancel(key, generation=turn["generation"])
+            if split and turn["state"] in ("waiting", "ready")
+            else await self._store.request_cancel(key)
+        )
         if not changed and not (split and turn["state"] == "cancelling"):
             return False
         producer = self._producers.get(key)
@@ -625,7 +630,9 @@ class _RegenerableTurnRunner:
             if row is None:
                 return False
             if ready is None:
-                if row["state"] not in ("accepted", "cancelling"):
+                if row["state"] not in ("accepted", "cancelling") and not (
+                    row["state"] == "ready" and row["request_json"].get("split_step", False)
+                ):
                     return False
             elif row["state"] != "ready" or row["generation"] != ready.generation:
                 return False
@@ -643,12 +650,17 @@ class _RegenerableTurnRunner:
             if ready is not None and admitted != principal:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             split_recovery = None
+            split_wait_resume = False
             if request.get("split_step", False):
                 if self._split_recovery_source is None or ready is not None:
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                 split_recovery = await self._split_recovery_source()
                 source = await split_recovery._read_pin(split_recovery._identity(key, generation))
                 cancelling = row["state"] == "cancelling"
+                split_wait_resume = (row["state"] == "ready"
+                                     or source is not None and source.phase in ("resuming", "resume_hold")
+                                     or source is None and isinstance(row["result_json"], Mapping)
+                                     and "checkpoint_id" in row["result_json"])
                 cancel_result = {"error_code": ErrorCode.EXECUTION_CANCELLED.value} if cancelling else None
                 if source is not None and source.pin.terminal_state is not None:
                     recovered = await split_recovery.recover_terminal(
@@ -663,6 +675,21 @@ class _RegenerableTurnRunner:
                     if outcome not in ("settled", "not_acquired"):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     recovered = outcome == "settled"
+                elif source is not None and source.phase == "waiting":
+                    frozen_binding = row["binding_json"]
+                    if frozen_binding is None:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    max_bytes = _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding}))
+                    restored_wait = await split_recovery.recover_waiting(
+                        key, generation=generation, max_bytes=max_bytes, source=source,
+                    )
+                    if restored_wait:
+                        self._publish(key.session_id, {
+                            "type": "waiting", "turn_id": key.turn_id, "turn_no": row["turn_no"],
+                            "generation": generation, "revision": session["revision"],
+                        })
+                        self._notice_lifecycle(key, "waiting", session["revision"])
+                    return restored_wait
                 else:
                     recovered = None
                 if recovered is not None:
@@ -746,8 +773,18 @@ class _RegenerableTurnRunner:
             if frozen_binding is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted Agent binding is unavailable")
             contract = AgentBindingContract.from_payload(frozen_binding)
-            binding = await resolver.restore(contract)
-            native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, generation + 1)
+            split_wait = None
+            if split_wait_resume:
+                if self._prepare_split_wait_resume is None or split_recovery is None or self._prepare_step is None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                split_wait = await self._prepare_split_wait_resume(
+                    split_recovery, key, generation, frozen_binding, resolver, ready=row["state"] == "ready",
+                )
+                binding = split_wait.binding
+                native_step = await self._prepare_step(binding, key, generation + 1, settled_split=True)
+            else:
+                binding = await resolver.restore(contract)
+                native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, generation + 1)
             split = (native_step[0].store._canonical_split_source
                      if native_step is not None and isinstance(native_step[0].store, RuntimeStepStore) else None)
             if (split_recovery is None) != (split is None):
@@ -814,7 +851,21 @@ class _RegenerableTurnRunner:
                 steps = capability.store
                 if not isinstance(steps, RuntimeStepStore):
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                if split_recovery is not None:
+                if split_wait is not None:
+                    granted, instruction_frontier = await split_recovery.reacquire_waiting_recovery(
+                        split_wait, lease_seconds=_LEASE_SECONDS,
+                    )
+                    if granted is None:
+                        return False
+                    await steps.bind_canonical_resume(
+                        granted.resume.checkpoint, key=key, generation=generation + 1,
+                        split_proof=granted.evidence.source, split_approval=granted.approval,
+                        settled_only=granted.approval is None,
+                    )
+                    continuation = granted.resume.messages
+                    output_retries_used = granted.resume.output_retries_used
+                    deferred_results = granted.results
+                elif split_recovery is not None:
                     phase, split_resume, instruction_frontier = await split_recovery.recover_open_turn(
                         key, generation=generation, turn_no=row["turn_no"], lease_seconds=_LEASE_SECONDS,
                         cancelling=False, require_effects_resolved=split_recovery.require_no_effects,
@@ -1493,13 +1544,14 @@ class _RegenerableTurnRunner:
                     plan_store=turn.plan_store, budget=turn.budget, **trace_opts,
                 )
                 if isinstance(outcome, DeferredToolRequests):
-                    if turn.split_source is not None:
-                        # A split turn cannot publish the colocated waiting receipt.
-                        # An unexpected deferred frontier must retain occupancy.
-                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     if turn.native_step is None or self._publish_deferred is None:
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     capability, tools = turn.native_step
+                    if turn.split_source is not None and (
+                        turn.generation != 1 or tools._split_approval_ref is None
+                        or len(outcome.approvals) != 1 or outcome.calls or any(outcome.metadata.values())
+                    ):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     if not isinstance(capability.store, RuntimeStepStore):
                         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                     checkpoint_id = capability.store.require_interrupted_checkpoint()
@@ -1517,7 +1569,10 @@ class _RegenerableTurnRunner:
                             item["linktools"] = evidence
                         outcome = replace(outcome, metadata=metadata)
                     trace_wait = await self._terminal_trace(turn, binding.compiled_agent.spec.id, "waiting", captured=captured)
-                    committed = await self._publish_deferred(turn, checkpoint_id, tools, outcome, **trace_wait)
+                    committed = await self._publish_deferred(
+                        turn, checkpoint_id, tools, outcome,
+                        split_source=capability.store._canonical_split_source, **trace_wait,
+                    )
                     if committed:
                         self._publish(turn.key.session_id, {
                             "type": "waiting", "turn_id": turn.key.turn_id, "turn_no": turn.number,
