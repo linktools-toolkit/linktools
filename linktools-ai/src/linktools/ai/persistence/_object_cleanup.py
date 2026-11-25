@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from ..core import JsonValue, validate_page_limit
+from ..core import JsonValue, RUNTIME_OBJECT_STORE_ID, validate_page_limit
 from ..steps import native_store_locator, native_store_key
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload
@@ -34,7 +34,7 @@ from ._record_key import decode_key_components, RECORD_KEY_MAX_BYTES
 from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
                                  restore_native_text_payload, restore_native_user_input)
-from ._sql import SqlStateStorageGroup
+from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._step_schema import native_message_sql_tables
 from ._step_maintenance import inspect_native_message_tables, native_message_partitions
 from ._capability_marker import has_capability_partition_marker
@@ -51,8 +51,10 @@ from .state import (
     FactScanCursor,
     OperationScanCursor,
     RecordScanCursor,
+    SqlStateRowReader,
     StateStorageGroup,
     StateStore,
+    StateTransaction,
     StoredRecord,
 )
 
@@ -164,6 +166,53 @@ async def purge_unreferenced_captures(
                     expected_storage_revision=record.storage_revision))
                 (deleted if removed else missing).append(key)
         return CaptureCleanupResult(tuple(deleted), tuple(missing), tuple(retained), tuple(blocked))
+
+
+async def _ordinary_input_object_keys(
+    store: SqlStateStore, *, namespace: str, tenant_id: str, candidates: set[str],
+) -> set[str]:
+    """Read only typed admitted inputs, scoped to this Conversation owner."""
+    from sqlalchemy import select
+
+    from ..execution import StoredUserInput
+    from ._session_turn_sql import SESSION_TURN_TABLE
+    from .codec import decode_domain
+    from .objects import ObjectKeyFactory
+    from .state import state_store_key
+
+    columns = store.storage_group.metadata.tables[SESSION_TURN_TABLE].c
+    scope = state_store_key(namespace, tenant_id, "regenerable-session")
+    object_keys = ObjectKeyFactory(namespace)
+    input_value = columns.request_json["input"]
+
+    async def scan(transaction: StateTransaction) -> set[str]:
+        if not isinstance(transaction, SqlStateRowReader):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        protected: set[str] = set()
+        after = 0
+        while protected != candidates:
+            rows = await transaction.read_sql_rows(
+                store.context,
+                select(columns.id, input_value.label("input")).where(
+                    columns.scope_key == scope, columns.id > after, input_value.as_string().is_not(None),
+                ).order_by(columns.id).limit(32),
+            )
+            for row in rows:
+                if row["input"] is None:
+                    continue
+                admitted = decode_domain(row["input"], StoredUserInput)
+                for reference in admitted.payload.object_refs():
+                    if (reference.store_id != RUNTIME_OBJECT_STORE_ID
+                            or reference.key != object_keys.key(PersistenceDomain.EXECUTION, tenant_id, reference.digest)):
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    if reference.key in candidates:
+                        protected.add(reference.key)
+            if len(rows) < 32:
+                break
+            after = rows[-1]["id"]
+        return protected
+
+    return await store.read(scan)
 
 
 async def purge_unreferenced_objects(
@@ -291,6 +340,28 @@ async def _purge_unreferenced_objects(
 
     candidate_locations = {(id(source_for(domain, reference)), reference.key) for domain, reference in candidates}
     protected: set[str] = set()
+    foreign_ordinary_candidates: set[str] = set()
+    conversation = stores.get(PersistenceDomain.CONVERSATION)
+    if isinstance(conversation, SqlStateStore):
+        from .objects import ObjectKeyFactory
+
+        object_keys = ObjectKeyFactory(namespace)
+        local_ordinary_candidates: set[str] = set()
+        for domain, reference in selected:
+            if not reference.key.startswith("v1/runtime/"):
+                continue
+            if (reference.store_id == RUNTIME_OBJECT_STORE_ID
+                    and reference.key == object_keys.key(domain, tenant_id, reference.digest)):
+                local_ordinary_candidates.add(reference.key)
+            else:
+                # Other namespaces or tenants may borrow these same stores;
+                # this scoped scan cannot prove their objects unreachable.
+                foreign_ordinary_candidates.add(reference.key)
+        if local_ordinary_candidates:
+            protected.update(await _ordinary_input_object_keys(
+                conversation, namespace=namespace, tenant_id=tenant_id, candidates=local_ordinary_candidates,
+            ))
+
     visited: set[tuple[int, str, str, int]] = set()
     metadata: dict[tuple[int, str], ObjectStat | None] = {}
 
@@ -562,7 +633,8 @@ async def _purge_unreferenced_objects(
         source = source_for(domain, reference)
         if reference.key in protected:
             retained.append(candidate)
-        elif not isinstance(source, ObjectStoreDeletion) or len(deleted) + len(missing) >= limit:
+        elif (reference.key in foreign_ordinary_candidates or not isinstance(source, ObjectStoreDeletion)
+              or len(deleted) + len(missing) >= limit):
             blocked.append(candidate)
         else:
             removed = await source.delete_object(reference.key, expected_digest=reference.digest)

@@ -10,6 +10,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    UserContent,
     UserPromptPart,
 )
 
@@ -19,7 +20,8 @@ from ..model.messages import decode_model_messages, encode_model_messages
 
 
 def encode_regenerable_turn(
-    prompt: str, history: Sequence[ModelMessage], messages: Sequence[ModelMessage], output: JsonValue,
+    prompt: str | Sequence[UserContent], history: Sequence[ModelMessage],
+    messages: Sequence[ModelMessage], output: JsonValue,
 ) -> JsonValue:
     """Keep the message envelope, substituting the admitted prompt only on read."""
     prefix = len(history)
@@ -31,11 +33,14 @@ def encode_regenerable_turn(
     return json.loads(encode_model_messages((_substitute_input(suffix[0], prompt, ""), *suffix[1:])))
 
 
-def decode_regenerable_turn(prompt: str, payload: JsonValue) -> tuple[ModelMessage, ...]:
+def decode_regenerable_turn(
+    prompt: str | Sequence[UserContent], payload: JsonValue,
+) -> tuple[ModelMessage, ...]:
     messages = decode_model_messages(canonical_json_bytes(payload))
     if not messages:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn messages are missing")
-    return (_substitute_input(messages[0], "", prompt), *messages[1:])
+    restored = prompt if isinstance(prompt, str) else list(prompt)
+    return (_substitute_input(messages[0], "", restored), *messages[1:])
 
 
 def reply_from_turn(messages: Sequence[ModelMessage]) -> JsonValue:
@@ -45,11 +50,23 @@ def reply_from_turn(messages: Sequence[ModelMessage]) -> JsonValue:
     return {"text": response.text}
 
 
-def _substitute_input(message: ModelMessage, expected: str, value: str) -> ModelRequest:
+def _substitute_input(
+    message: ModelMessage, expected: str | Sequence[UserContent], value: str | Sequence[UserContent],
+) -> ModelRequest:
     if not isinstance(message, ModelRequest):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
     prompts = [part for part in message.parts if isinstance(part, UserPromptPart)]
-    if len(prompts) != 1 or prompts[0].content != expected:
+    if len(prompts) != 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
-    return replace(message, parts=[replace(part, content=value) if part is prompts[0] else part
-                                   for part in message.parts])
+    [prompt] = prompts
+    content = prompt.content
+    same_input = (
+        content == expected
+        if isinstance(content, str) or isinstance(expected, str)
+        else tuple(content) == tuple(expected)
+    )
+    if not same_input:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
+    return replace(message, parts=[
+        replace(part, content=value) if part is prompt else part for part in message.parts
+    ])
