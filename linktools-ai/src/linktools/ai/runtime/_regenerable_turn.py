@@ -5,12 +5,16 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from dataclasses import asdict, dataclass
 
 from linktools.core import environ
 from typing import TYPE_CHECKING
 
-from ..core import JsonValue, canonical_json_bytes
+from sqlalchemy.exc import IntegrityError
+
+from ..capability import AgentContext
+from ..core import AuthorizationAction, JsonValue, ResourceKind, ResourceRef, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..persistence.turns import SessionTurnKey
 from ._regenerable_transcript import decode_regenerable_turn, encode_regenerable_turn
@@ -19,9 +23,9 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage
 
     from ..agent import AgentBinding
-    from ..capability import AgentContext
-    from ..core import PromptLimits, ThinkingValue
+    from ..core import AuthorizationPolicy, Principal, PromptLimits, ThinkingValue
     from ..persistence.turns import SqlSessionTurns
+    from ._agent_binding_resolver import _AgentBindingResolver
     from ._agent_executor import AgentExecutor, EventSink
 
 _TURN_BYTES = 64 * 1024
@@ -47,6 +51,74 @@ class _RegenerableTurnRunner:
         self._executor = executor
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
+
+    async def start_session(
+        self, session_id: str, *, principal: Principal, namespace: str, tenant_id: str,
+        app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
+        request_key: str, prompt: str, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
+    ) -> str:
+        """Start on the authoritative SQL session after session and execution authorization."""
+        if principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        session = await self._store.get_session(session_id)
+        if session is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_READ,
+            ResourceRef(ResourceKind.SESSION, session_id, tenant_id, session["owner_principal_id"].decode("utf-8")),
+        )
+        if session["status"] != "open":
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+
+        async def replay() -> str | None:
+            prior = await self._store.find_request(session_id, request_key)
+            if prior is None:
+                return None
+            identity = prior["turn_id"].decode("utf-8")
+            await authorization.authorize(
+                principal, AuthorizationAction.EXECUTION_RUN,
+                ResourceRef(ResourceKind.EXECUTION, identity, tenant_id),
+            )
+            request = prior["request_json"]
+            if (
+                request["prompt"] != prompt or request["principal"] != asdict(principal)
+                or request["thinking"] != thinking
+            ):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            return identity
+
+        if session["active_turn_id"] is not None:
+            if (identity := await replay()) is not None:
+                return identity
+            raise AIError(ErrorCode.SESSION_BUSY)
+
+        key = SessionTurnKey(session_id, secrets.token_hex(16))
+        await authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id),
+        )
+        agent_id = session["agent_id"].decode("utf-8")
+        binding = await resolver.resolve_agent(agent_id)
+        config = session["config_json"]
+        if config.get("cwd") is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "This turn path has no workspace binding")
+        context = AgentContext(
+            app, principal, namespace, session_id, key.turn_id, config.get("metadata", {}),
+            agent_id=agent_id,
+        )
+        try:
+            if await self.start(
+                key, revision=session["revision"], through=session["last_turn_no"],
+                request_key=request_key, prompt=prompt, binding=binding, context=context,
+                limits=limits, event_sink=event_sink, thinking=thinking,
+            ):
+                return key.turn_id
+        except IntegrityError:
+            if (identity := await replay()) is not None:
+                return identity
+            raise
+        if (identity := await replay()) is not None:
+            return identity
+        raise AIError(ErrorCode.SESSION_CONFLICT)
 
     async def start(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
