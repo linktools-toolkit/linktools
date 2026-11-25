@@ -74,7 +74,12 @@ class _CanonicalSplitStep:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if run is not None and (
             generation != 1 or (run.run_id, run.conversation_id) != (key.turn_id, key.session_id)
-            or snapshot is not None or len(events) != 1 or events[0].kind != "run_started"
+            or not events or events[0].kind != "run_started"
+            or any(event.kind != "model_request_started" for event in events[1:])
+            or any(event.conversation_id != key.session_id for event in events)
+            or (snapshot is not None and (
+                snapshot.conversation_id != key.session_id or snapshot.state != "complete"
+            ))
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         identity = self._identity(key, generation)

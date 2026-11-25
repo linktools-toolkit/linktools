@@ -6,8 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart
-from pydantic_ai_harness.step_persistence import RunRecord, StepEvent
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
 
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus
@@ -117,7 +117,15 @@ async def test_split_cold_stop_requires_exact_source_owner(tmp_path: Path, monke
                 run_id=key.turn_id, conversation_id=key.session_id, kind="run_started",
                 step_index=0, idempotency_key="initial",
             )
-            prepared = await native.prepare_step(run=run, events=(start,))
+            request = StepEvent(
+                run_id=key.turn_id, conversation_id=key.session_id, kind="model_request_started",
+                step_index=1, idempotency_key="request",
+            )
+            checkpoint = ContinuableSnapshot(
+                run_id=key.turn_id, conversation_id=key.session_id, step_index=1, state="complete",
+                idempotency_key="checkpoint", messages=[ModelRequest(parts=[UserPromptPart("body")])],
+            )
+            prepared = await native.prepare_step(run=run, events=(start, request), snapshot=checkpoint)
             assert await turns.request_cancel(key)
             table = turns._turns
             async with turns._context.engine.begin() as connection:
@@ -186,10 +194,19 @@ async def test_split_cold_stop_requires_exact_source_owner(tmp_path: Path, monke
             registered = await native.get_run(run_id=key.turn_id)
             assert registered is not None
             assert registered.registration_id == ("old" if ordering == "registration-first" else None)
+            events = await native.list_events(run_id=key.turn_id)
+            checkpoints = await native.list_snapshots(run_id=key.turn_id, include_interrupted=True)
+            if ordering == "registration-first":
+                assert [event.kind for event in events] == ["run_started", "model_request_started"]
+                assert [snapshot.idempotency_key for snapshot in checkpoints] == ["checkpoint"]
+            else:
+                assert events == [] and checkpoints == []
             if ordering == "stop-first":
                 with pytest.raises(AIError) as conflict:
                     await owner.commit_step(prepared, key=key, generation=1)
                 assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
                 assert await owner._read_pin(owner._identity(key, 1)) == source
+                assert await native.list_events(run_id=key.turn_id) == []
+                assert await native.list_snapshots(run_id=key.turn_id, include_interrupted=True) == []
         finally:
             await native.close()
