@@ -1703,7 +1703,7 @@ class _SqlTransaction:
         execution_id: str, token: str, fence: int, receipt: str, coowned: bool = False,
     ) -> bool:
         """Retire an exactly owned, live admission and preserve its release receipt."""
-        from ._turn_sql import SqlTurnNotOwned, SqlTurnRows, turn_session_address
+        from ._turn_sql import SqlTurnNotOwned, SqlTurnProof, SqlTurnRows, turn_session_address
 
         active = active_state_scope()
         if active is None or not active.writable or not is_active_state_transaction(self):
@@ -1746,14 +1746,16 @@ class _SqlTransaction:
                 token=token, clock=release_clock, sqlite=dialect.single_writer,
             ))).rowcount != 1:
                 if release_clock is not None:
-                    # A failed release rolls back all three writes. Compare
-                    # using the same SQL clock/precision as the attempted CAS.
-                    live = (await self._execute(source.revoked_control_deadline(
+                    # A failed release rolls back all writes. Read exact
+                    # receipt and deadline together, using the CAS precision.
+                    observed = (await self._execute(source.failed_coowned_release(
                         execution_id=execution_id, fence=fence, clock=release_clock, sqlite=dialect.single_writer,
-                    ))).scalar_one_or_none()
-                    if not live:
+                    ))).mappings().one_or_none()
+                    if observed is None or not observed["deadline_live"]:
                         raise SqlTurnNotOwned()
-                proof = await self.get_turn_operation_proof(scope, execution_id, coowned=coowned)
+                    proof = None if observed["execution_id"] is None else SqlTurnProof.from_row(observed)
+                else:
+                    proof = await self.get_turn_operation_proof(scope, execution_id, coowned=coowned)
                 if proof is not None and (proof.session_key, proof.fence) == (session_key, fence):
                     proof.validate_live_token(token.encode("utf-8"))
                     if proof.request_key != request_key:

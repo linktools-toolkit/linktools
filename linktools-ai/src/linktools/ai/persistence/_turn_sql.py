@@ -448,13 +448,19 @@ class SqlTurnRows:
         expiry = self._control.c.turn_expiry
         return func.julianday(expiry) > func.julianday(clock) if sqlite else expiry > clock
 
-    def revoked_control_deadline(
+    def failed_coowned_release(
         self, *, execution_id: str, fence: int, clock: "ColumnElement", sqlite: bool,
     ) -> "Select":
-        from sqlalchemy import select
+        """Observe expiry and the exact retained receipt at one post-guard boundary."""
+        from sqlalchemy import and_, select
 
-        control = self._control
-        return select(self._deadline_is_live(clock, sqlite=sqlite)).where(
+        control, admission = self._control, self._admission
+        return select(admission, self._deadline_is_live(clock, sqlite=sqlite).label("deadline_live")).select_from(
+            control.outerjoin(admission, and_(
+                self._owns(admission),
+                admission.c.execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES),
+            )),
+        ).where(
             self._execution_address(control, execution_id),
             control.c.turn_fence == fence, control.c.turn_token.is_(None),
         )
