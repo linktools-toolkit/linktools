@@ -160,6 +160,7 @@ from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
 _ORDINARY_WORKSPACE_TOOLS = frozenset({"list_files", "read_file"})
+_ORDINARY_TOOL_TURN_LIMIT = 8
 _PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 
 
@@ -458,14 +459,16 @@ class AgentExecutor:
         compiled_agent = binding.compiled_agent
         run_usage = RunUsage()
         configured_limits = compiled_agent.spec.usage_limits
+        requests = None if configured_limits is None else configured_limits.model_requests
+        tool_calls = None if configured_limits is None else configured_limits.tool_calls
+        if scope.regenerable and compiled_agent.selected_tools:
+            # The SDK checks the entire projected tool batch before executing it.
+            requests = _ORDINARY_TOOL_TURN_LIMIT if requests is None else min(requests, _ORDINARY_TOOL_TURN_LIMIT)
+            tool_calls = _ORDINARY_TOOL_TURN_LIMIT if tool_calls is None else min(tool_calls, _ORDINARY_TOOL_TURN_LIMIT)
         usage_limits = UsageLimits(
             cost_limit=None,
-            request_limit=None
-            if configured_limits is None
-            else configured_limits.model_requests,
-            tool_calls_limit=None
-            if configured_limits is None
-            else configured_limits.tool_calls,
+            request_limit=requests,
+            tool_calls_limit=tool_calls,
             input_tokens_limit=None
             if configured_limits is None
             else configured_limits.input_tokens,
