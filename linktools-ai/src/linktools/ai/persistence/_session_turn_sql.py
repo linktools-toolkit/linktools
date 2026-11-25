@@ -79,6 +79,7 @@ class SessionContextTurn:
     messages: tuple[ModelMessage, ...]
     size: int
     transcript_bytes: int
+    reset_context: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,6 +505,10 @@ class SqlSessionTurnReader:
             return turns
 
         turns += await self.read_context_range(session_id, after=after, through=through, lineage=lineage)
+        for index in range(len(turns) - 1, -1, -1):
+            if turns[index].reset_context:
+                turns = turns[index:]
+                break
         self._remember_context(session_id, after=start, through=through, turns=turns)
         return turns
 
@@ -534,8 +539,9 @@ class SqlSessionTurnReader:
         system_prompt = case((
             has_refs, binding_json[("agent_spec", "system_prompt")].as_string(),
         )).label("system_prompt")
+        reset = (columns.request_json["session_context"].as_string() == "current_turn").label("reset_context")
         statement = select(
-            columns.turn_no, columns.state, prompt, stored_input, result, instructions, system_prompt,
+            columns.turn_no, columns.state, prompt, stored_input, result, instructions, system_prompt, reset,
         ).select_from(self._bound_turns(extra=succeeded & has_refs)).where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
@@ -548,18 +554,20 @@ class SqlSessionTurnReader:
         return tuple(
             self._context_turn(
                 row["turn_no"], row["prompt"], row["stored_input"], row["messages"],
+                reset_context=row["reset_context"] is True,
             )
             for row in rows if row["state"] == "succeeded"
         )
 
     @staticmethod
     def _context_turn(
-        turn_no: int, prompt: str, stored_input: JsonValue, messages: Sequence[ModelMessage],
+        turn_no: int, prompt: str, stored_input: JsonValue, messages: Sequence[ModelMessage], *,
+        reset_context: bool = False,
     ) -> SessionContextTurn:
         request = {"prompt": prompt, **({"input": stored_input} if stored_input is not None else {})}
         transcript_bytes = len(encode_model_messages(messages))
         size = max(1024, len(canonical_json_bytes(request)) + transcript_bytes)
-        return SessionContextTurn(turn_no, request, tuple(messages), size, transcript_bytes)
+        return SessionContextTurn(turn_no, request, tuple(messages), size, transcript_bytes, reset_context)
 
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],
@@ -613,12 +621,14 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
     def note_terminal_context(
         self, key: SessionTurnKey, *, turn_no: int, prompt: str | None, stored_input: JsonValue,
-        messages: Sequence[ModelMessage], succeeded: bool,
+        messages: Sequence[ModelMessage], succeeded: bool, reset_context: bool = False,
     ) -> None:
         """Advance coverage only over a known committed adjacent position."""
         cached = self._recent.get(key.session_id)
         after = max(0, turn_no - _CONTEXT_POSITIONS)
-        if cached is None:
+        if succeeded and reset_context:
+            turns = ()
+        elif cached is None:
             if turn_no != 1:
                 return
             turns = ()
@@ -630,7 +640,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
             if prompt is None:
                 return
             turns += (self._context_turn(
-                turn_no, prompt, stored_input, messages,
+                turn_no, prompt, stored_input, messages, reset_context=reset_context,
             ),)
         self._remember_context(key.session_id, after=after, through=turn_no, turns=turns)
 

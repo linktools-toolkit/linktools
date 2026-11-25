@@ -25,7 +25,7 @@ from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.turns import SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
-from ..session import ToolProcessItem, project_tool_process_event
+from ..session import SessionContext, ToolProcessItem, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta
 from ._regenerable_transcript import prepare_native_turn_transcript, reply_from_turn, restore_turn_prompt
@@ -71,6 +71,7 @@ class _AdmittedTurn:
     revision: int
     repository_instructions: RepositoryInstructions | None
     generation: int = 1
+    session_context: SessionContext = "all"
     model_prompt: Sequence[UserContent] | None = None
     attachments: Sequence[Mapping[str, JsonValue]] = ()
     stored_input: JsonValue = None
@@ -235,6 +236,7 @@ class _RegenerableTurnRunner:
         self._store.note_terminal_context(
             turn.key, turn_no=turn.number, prompt=turn.prompt if succeeded else None,
             stored_input=turn.stored_input if succeeded else None, messages=messages, succeeded=succeeded,
+            reset_context=turn.session_context == "current_turn",
         )
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
@@ -339,7 +341,7 @@ class _RegenerableTurnRunner:
         self, session_id: str, *, agent_id: str, principal: Principal, namespace: str, tenant_id: str,
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
         request_key: str, prompt: str, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
-        files: Sequence[str] = (),
+        files: Sequence[str] = (), session_context: SessionContext = "all",
     ) -> str:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
@@ -378,6 +380,7 @@ class _RegenerableTurnRunner:
             if (
                 request["prompt"] != prompt or request["principal"] != asdict(principal)
                 or request["thinking"] != thinking or prior_files != normalized_files
+                or request.get("session_context", "all") != session_context
                 or prior["agent_id"] != agent_id
             ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -405,6 +408,7 @@ class _RegenerableTurnRunner:
                 key, revision=session["revision"], through=session["last_turn_no"],
                 request_key=request_key, prompt=prompt, binding=binding, context=context,
                 limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
+                session_context=session_context,
             ):
                 return key.turn_id
         except IntegrityError:
@@ -537,7 +541,9 @@ class _RegenerableTurnRunner:
             prompt = request["prompt"]
             after = row["context_from"] - 1
             through = row["context_through"]
-            if not 0 <= through - after <= 128:
+            session_context = request.get("session_context", "all")
+            if (not 0 <= through - after <= 128 or session_context not in ("all", "current_turn")
+                    or session_context == "current_turn" and after != through):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted context range is invalid")
             stored = self._stored_input(request)
             remaining = _CONTEXT_BYTES - self._input_bytes(prompt, stored)
@@ -645,7 +651,7 @@ class _RegenerableTurnRunner:
             turn = _AdmittedTurn(
                 key, row["turn_no"], prompt, history,
                 _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding})),
-                session["revision"], repository_instructions, generation + 1,
+                session["revision"], repository_instructions, generation + 1, session_context=session_context,
                 model_prompt=None if isinstance(model_prompt, str) else model_prompt,
                 attachments=() if stored is None else stored_input_attachment_views(stored),
                 stored_input=request.get("input"), native_step=native_step,
@@ -699,6 +705,7 @@ class _RegenerableTurnRunner:
         prompt: str, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue, cwd: str | None = None,
         files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
+        session_context: SessionContext = "all",
     ) -> bool:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
@@ -711,6 +718,7 @@ class _RegenerableTurnRunner:
                 turn = await self.admit(
                     key, revision=revision, through=through, request_key=request_key,
                     prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
+                    session_context=session_context,
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
@@ -874,6 +882,7 @@ class _RegenerableTurnRunner:
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
         cwd: str | None = None, files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
+        session_context: SessionContext = "all",
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, 1)
@@ -894,6 +903,8 @@ class _RegenerableTurnRunner:
             "cwd": cwd,
             "repository_instructions": None if repository_instructions is None else repository_instructions.to_payload(),
         }
+        if session_context == "current_turn":
+            request["session_context"] = session_context
         model_prompt = None
         attachments = ()
         input_size = len(prompt.encode("utf-8"))
@@ -920,7 +931,8 @@ class _RegenerableTurnRunner:
         remaining = _CONTEXT_BYTES - input_size
         history: list[tuple[ModelMessage, ...]] = []
         context_from = through + 1
-        candidates = await self._store.recent_context(key.session_id, through=through, lineage=lineage)
+        candidates = (() if session_context == "current_turn"
+                      else await self._store.recent_context(key.session_id, through=through, lineage=lineage))
         for candidate in reversed(candidates):
             if not isinstance(candidate.request, dict) or not isinstance(candidate.request.get("prompt"), str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Missing admitted session input")
@@ -942,7 +954,7 @@ class _RegenerableTurnRunner:
         return _AdmittedTurn(
             key, through + 1, prompt,
             [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
-            repository_instructions, model_prompt=model_prompt, attachments=attachments,
+            repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
             stored_input=request.get("input"),
             native_step=native_step,
         )
