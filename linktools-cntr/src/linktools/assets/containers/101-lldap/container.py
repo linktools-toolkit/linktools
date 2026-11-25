@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cli import CommandError
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import Flare, load_port_url
+from linktools.cntr.ext import Flare, Nginx, load_port_url
 from linktools.core import ConfigRef, ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
@@ -23,7 +23,7 @@ class Container(BaseContainer):
     @cached_property
     def fields(self) -> "dict[str, Any]":
         def get_base_dn(cfg: "ConfigResolver") -> str:
-            domain = cfg.get("NGINX_ROOT_DOMAIN")
+            domain = Nginx.root_domain(cfg) or "example.org"
             parts = domain.split(".")
             return ",".join(f"dc={part}" for part in parts)
 
@@ -47,9 +47,8 @@ class Container(BaseContainer):
         ]
 
     def on_check(self, context: "OperationContext") -> None:
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if not domain or "." not in domain:
-            raise ContainerError("Invalid LDAP domain; configure NGINX_ROOT_DOMAIN")
+        if not self.get_config("LLDAP_BASE_DN"):
+            raise ContainerError("LLDAP base DN must not be empty")
         if not self.get_config("LLDAP_ADMIN_PASSWORD"):
             raise ContainerError("LLDAP administrator password must not be empty")
 

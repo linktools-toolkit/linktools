@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr import OperationContext
+from linktools.cntr import ContainerError, OperationContext
 
 
 @pytest.fixture
@@ -664,3 +664,29 @@ exit 94
     subprocess.run(["sh", "-c", setup], check=True, env=env)
     assert (usr_bin / "acme.sh").resolve() == home / "acme.sh"
     assert all(os.access(local_bin / name, os.X_OK) for name in ("nginx-certificates", "nginx-acme"))
+
+
+@pytest.mark.parametrize("root", ["", "_", "localhost", "LOCALHOST", "127.0.0.1", "*.example.test",
+                                  "https://example.test", "example.test:443", "bad..test"])
+def test_https_requires_configured_dns_root_before_build(fresh_manager, root):
+    nginx = fresh_manager.containers["nginx"]
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", root)
+    fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", False)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
+    with pytest.raises(ContainerError, match="Configure NGINX_ROOT_DOMAIN.*HTTPS"):
+        _ = nginx.docker_compose
+
+
+@pytest.mark.parametrize("root", ["", "_", "localhost"])
+def test_http_and_standalone_ldap_do_not_require_dns_root(fresh_manager, root):
+    nginx = fresh_manager.containers["nginx"]
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", root)
+    fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", False)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", False)
+    nginx.__dict__["sites"] = {}
+    build = nginx.docker_compose["services"]["nginx"]["build"]
+    assert build["args"] == {"NGINX_TAG": "stable-alpine"}
+    assert nginx.acme_ssl_domains == []
+    assert fresh_manager.config.get("LLDAP_BASE_DN") == "dc=example,dc=org"
+    fresh_manager.config.set("LLDAP_BASE_DN", "dc=team,dc=internal")
+    assert fresh_manager.config.get("LLDAP_BASE_DN") == "dc=team,dc=internal"

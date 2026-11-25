@@ -303,6 +303,7 @@ def test_nginx_validation_explicitly_mounts_candidate_without_changing_deploymen
     values = {"NGINX_WILDCARD_DOMAIN": False, "NGINX_WAF_ENABLE": False,
               "NGINX_AUTH_ENABLE": False, "NGINX_HTTPS_ENABLE": https, "NGINX_ROOT_DOMAIN": "example.test"}
     monkeypatch.setattr(container, "get_config", lambda key, **kwargs: values[key])
+    container.manager.config = SimpleNamespace(get=values.get)
     monkeypatch.setattr(container, "get_app_path", lambda *parts: tmp_path.joinpath("persistent", *parts))
     calls = []
     def validate(context, service, command, **kwargs):
@@ -447,6 +448,7 @@ def test_builtin_config_path_defers_materialization_to_start_hook(tmp_path, monk
     ("flare", ("flare",), ("/app/apps.yml", "/app/bookmarks.yml")),
 ])
 def test_builtin_compose_binds_the_immutable_config_path(fresh_manager, tmp_path, name, services, targets):
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
     container = fresh_manager.containers[name]
     destination = tmp_path / "generated" / ("a" * 64)
     container.__dict__["config_path"] = destination

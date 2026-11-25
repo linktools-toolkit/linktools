@@ -286,6 +286,7 @@ def test_regenerating_unchanged_compose_does_not_touch_file_mtime(fresh_manager)
 
 
 def test_nginx_network_attachment_resolves_dependencies_without_prepared_enable_flags(fresh_manager, monkeypatch):
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", False)
     fresh_manager.installed_state.remove(*fresh_manager.containers)
     fresh_manager.installed_state.add("portainer")
     monkeypatch.setattr(type(fresh_manager.containers["portainer"]), "dependencies",

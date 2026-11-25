@@ -390,6 +390,13 @@ an unnamed nginx routing name, not a public hostname. Wildcard routing
 requires a configured root and does not prefix an empty root, `_`, or
 `localhost`.
 
+The built-in HTTPS configuration requires a DNS root such as `example.com`
+even when wildcard routing is off. Nginx validates that input before the
+certificate build. HTTP route placeholders are not certificate names.
+Consumers that need the configured DNS root (rather than a site's routing
+name or URL) use `Nginx.root_domain(config)` and handle the result as an
+optional value; `required=True` raises a configuration error if it is unavailable.
+
 Import the URL factories from `linktools.cntr.ext`:
 
 ```python

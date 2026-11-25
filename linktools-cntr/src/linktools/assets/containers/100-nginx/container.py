@@ -15,6 +15,7 @@ from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined,
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.container import ContainerTemplateError
+from linktools.cntr.ext import Nginx
 from linktools.core import ConfigValue, ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -24,7 +25,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from types import SimpleNamespace
-    from linktools.cntr.ext import ResolvedSite, Nginx
+    from linktools.cntr.ext import ResolvedSite
     from collections.abc import Sequence
     from typing import Any, Callable, Iterator
     from linktools.core import Config
@@ -213,29 +214,33 @@ class Container(BaseContainer):
         return "".join(values)
 
     @cached_property
+    def acme_primary_domain(self) -> str:
+        domain = Nginx.root_domain(self.config, required=True)
+        assert domain is not None
+        return domain
+
+    @cached_property
     def acme_ssl_domains(self) -> "list[str]":
-        result = []
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if domain:
-            result.extend([domain, f"*.{domain}"])
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            for site in self.sites.values():
-                if not site.enabled or not site.https:
-                    continue
-                for value in site.cert_domains:
-                    if value and value not in result:
-                        result.append(value)
+        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            return []
+        domain = self.acme_primary_domain
+        result = [domain, f"*.{domain}"]
+        for site in self.sites.values():
+            if not site.enabled or not site.https:
+                continue
+            for value in site.cert_domains:
+                if value and value not in result:
+                    result.append(value)
         return result
 
     def shell_quote(self, value: object) -> str:
         return shlex.quote(str(value))
 
     def _get_default_index_url(self):
+        root = self.get_config("NGINX_ROOT_DOMAIN")
         return utils.make_url(
             self.get_config("NGINX_DEFAULT_SCHEME"),
-            "www.google.com" \
-                if self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost") \
-                else self.get_config("NGINX_ROOT_DOMAIN"),
+            "www.google.com" if root in ("", "_", "localhost") else root,
             self.get_config("NGINX_DEFAULT_PORT")
         )
 
@@ -244,8 +249,9 @@ class Container(BaseContainer):
         import tempfile
         if context.target_services is not None and "nginx" not in context.target_services:
             return
-        if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
-            raise ContainerError("Wildcard domain is enabled but root domain is not set.")
+        if self.get_config("NGINX_WILDCARD_DOMAIN") and Nginx.root_domain(self.config) is None:
+            raise ContainerError("Wildcard domain is enabled; configure NGINX_ROOT_DOMAIN with a DNS domain.")
+        domain = self.acme_primary_domain if self.get_config("NGINX_HTTPS_ENABLE", type=bool) else None
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
@@ -271,7 +277,7 @@ class Container(BaseContainer):
         runner = self.manager.compose_runner
         command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-t")
         mounts = {"/etc/nginx/managed": str(self.config_path)}
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+        if domain is not None:
             with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
                 mounts["/etc/certs"] = directory
                 root = self.get_app_path("certs")
@@ -282,7 +288,6 @@ class Container(BaseContainer):
                 if versions.is_dir():
                     candidates.extend((source, Path(directory) / "versions" / source.name)
                                       for source in versions.iterdir() if source.is_dir())
-                domain = self.get_config("NGINX_ROOT_DOMAIN")
                 names = [domain + "_" + suffix + ".pem" for suffix in ("cert", "key", "fullchain")]
                 names.extend(("primary", "domains", "settings"))
                 for source, destination in candidates:

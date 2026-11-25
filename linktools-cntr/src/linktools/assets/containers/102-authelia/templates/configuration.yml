@@ -33,7 +33,7 @@ session:
   expiration: 1h
   remember_me: 1M
   cookies:
-    - domain: {{ NGINX_ROOT_DOMAIN }}
+    - domain: {{ container.root_domain | tojson }}
       authelia_url: {{ container.public_url | tojson }}
       default_redirection_url: {{ utils.join_url(container.public_url, "settings") | tojson }}
   redis:

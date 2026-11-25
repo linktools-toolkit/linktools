@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Nginx declarations, lazy domain configuration, and site resolution."""
+import re
 from typing import TYPE_CHECKING
 
 from ._base import Integration
+from ..errors import ContainerError
 
 if TYPE_CHECKING:
     from typing import Any, Mapping, Optional, Sequence
@@ -50,6 +52,22 @@ class Nginx(Integration):
         return self
 
     @classmethod
+    def root_domain(cls, config: "ConfigResolver", *, required: bool = False) -> "Optional[str]":
+        """Return the configured DNS root, distinct from nginx routing placeholders."""
+        root = config.get("NGINX_ROOT_DOMAIN")
+        if cls._is_dns_root(root):
+            return root
+        if required:
+            raise ContainerError("Configure NGINX_ROOT_DOMAIN with a DNS domain for HTTPS.")
+        return None
+
+    @classmethod
+    def _is_dns_root(cls, value: object) -> bool:
+        labels = value.split(".") if isinstance(value, str) and len(value) <= 253 else ()
+        return (len(labels) > 1 and not labels[-1].isdigit() and
+                all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels))
+
+    @classmethod
     def domain(cls, container: "BaseContainer", name: "Optional[str]" = None) -> "LazyProvider":
         """Resolve a container's domain from the installed nginx configuration."""
         from linktools.core import LazyProvider
@@ -58,7 +76,7 @@ class Nginx(Integration):
             if not container.containers["nginx"].enable:
                 return ""
             root = config.get("NGINX_ROOT_DOMAIN")
-            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool) or root in ("", "_", "localhost"):
+            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool) or not cls._is_dns_root(root):
                 return root
             if name is None:
                 return f"{container.name}.{root}"
