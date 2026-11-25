@@ -64,7 +64,7 @@ async def _produce(project: Path, mode: str) -> None:
                 result = await agent.prompt("session", [SimpleNamespace(text=prompt)])
                 assert result.stop_reason == "end_turn"
             else:
-                from linktools.ai.runtime._turn_client import TurnObserver
+                from linktools.ai.runtime.turn_clients import TurnObserver
 
                 principal = local.runtime.default_principal
                 with TurnObserver(local.runtime, "session", principal, local_workspace=True) as observer:

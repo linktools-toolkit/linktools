@@ -149,7 +149,7 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
         principal: Principal,
         authorization: AuthorizationPolicy,
         session_id: str,
-        execution_id: str,
+        turn_id: str,
         *,
         shared_cache: CacheBackend | None = None,
     ) -> None:
@@ -168,17 +168,11 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
         async with Persistence.open(
             namespace, storage=storage, tenant_id=principal.tenant_id, read_only=True,
         ) as persistence, History.open(persistence=persistence, authorization=authorization) as history:
-            detail = await history.session_detail(
-                session_id, principal=principal, limit=20,
-            )
-            transcript = await history.transcript(
-                execution_id, principal=principal,
-                include_content=True, limit=20,
-            )
-            result = await history.result(execution_id, principal=principal)
-            print(detail.session, detail.timeline.items, transcript.items, result.output)
+            detail = await history.turn_session(session_id, principal=principal, limit=20)
+            turn = await history.turn_result(session_id, turn_id, principal=principal)
+            print(detail["session"], detail["timeline"]["items"], turn["output"])
 
-Persistence.open 负责绑定 namespace/tenant 与物理资源，并在外层退出时关闭自身拥有的资源。History.open 只借用已经打开的 Persistence，关闭时仅清理自己的读取订阅；不会关闭 Persistence、运行中的 Runtime 或共享缓存。此例以 read_only=True 打开独立只读 Persistence。示例仅读首个 timeline/transcript 页面；完整分页继续使用返回的 next_cursor 与相同查询参数。构造函数不会替调用者找已有会话，目录和身份参数需由宿主提供。
+Persistence.open 负责绑定 namespace/tenant 与物理资源，并在外层退出时关闭自身拥有的资源。History.open 只借用已经打开的 Persistence，关闭时仅清理自己的读取订阅；不会关闭 Persistence、运行中的 Runtime 或共享缓存。此例以 read_only=True 打开独立只读 Persistence。示例仅读首个会话历史页面和一个精确轮次；完整分页继续使用timeline 中返回的 next_cursor 与相同查询参数。构造函数不会替调用者找已有会话，目录和身份参数需由宿主提供。
 
 有 shared_cache 时依次检查内存、文件、宿主共享层，命中向前层提升；put 向配置的层写入。只需要内存或两层时直接删减组合，避免无收益副本与写放大。示例预算用于展示，不是固定最佳值；Runtime 和资产使用独立预算，避免大正文挤出资产缓存。
 

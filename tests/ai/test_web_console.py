@@ -1506,7 +1506,7 @@ async def test_local_chat_streams_public_progress_then_reads_committed_turn_afte
 async def test_chat_tool_positions_match_history_when_parallel_results_finish_out_of_order(tmp_path: Path) -> None:
     from linktools.ai.capability import AgentContext
     from linktools.ai.core import TenantAuthorizationPolicy
-    from linktools.ai.runtime._turn_client import TurnObserver
+    from linktools.ai.runtime.turn_clients import TurnObserver
 
     class Policy(TenantAuthorizationPolicy):
         pass
@@ -1733,7 +1733,7 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
 
     from linktools.ai.capability import AgentContext, ToolCallFailed, ToolCallRetry
     from linktools.ai.core import TenantAuthorizationPolicy
-    from linktools.ai.runtime._turn_client import TurnObserver
+    from linktools.ai.runtime.turn_clients import TurnObserver
 
     class Policy(TenantAuthorizationPolicy):
         pass
