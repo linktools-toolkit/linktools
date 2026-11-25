@@ -23,6 +23,7 @@ from ..storage import (
     ObjectStore,
     StorageRetentionMode,
 )
+from ._session_turn_sql import SqlSessionTurnReader, SqlSessionTurns
 from ._root import PersistenceStorage, StateTurnResources, _validate_storage_configuration
 from ._plan import PersistenceDomain, PersistencePlan
 from .contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
@@ -38,7 +39,6 @@ from ._object_cleanup import ObjectCleanupResult
 if TYPE_CHECKING:
     from pydantic_ai_harness.step_persistence import StepStore
     from ._step_store import SqlStepStore
-    from ._session_turn_sql import SqlSessionTurns
     from ._materializer import _MaterializedRuntimeStorage
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
@@ -93,7 +93,7 @@ class Persistence:
         self._namespace: str | None = None
         self._tenant_id: str | None = None
         self._conversation: ConversationRepositories | None = None
-        self._session_turns: SqlSessionTurns | None = None
+        self._session_turn_reader: SqlSessionTurnReader | None = None
         self._execution: ExecutionRepositories | None = None
         self._memory: MemoryRepositories | None = None
         self._artifact: ArtifactRepositories | None = None
@@ -208,7 +208,14 @@ class Persistence:
     def session_turns(self) -> "SqlSessionTurns | None":
         """The writable conversation route's turn store, when backed by SQL."""
         self._require_ready()
-        return self._session_turns
+        reader = self._session_turn_reader
+        return reader if isinstance(reader, SqlSessionTurns) else None
+
+    @property
+    def session_turn_reader(self) -> SqlSessionTurnReader | None:
+        """Borrow the current conversation route’s SQL reader without opening another pool."""
+        self._require_ready()
+        return self._session_turn_reader
 
     @property
     def execution(self) -> ExecutionRepositories:
@@ -522,7 +529,7 @@ class Persistence:
             action = self._close_actions[self._close_cursor]
             await action()
             self._close_cursor += 1
-        self._session_turns = None
+        self._session_turn_reader = None
         self._lifecycle = _RuntimeStateLifecycle.CLOSED
 
     def _assign_materialized(
@@ -532,7 +539,7 @@ class Persistence:
         tenant_id: str,
     ) -> None:
         self._conversation = value.conversation
-        self._session_turns = value.session_turns
+        self._session_turn_reader = value.session_turn_reader
         self._execution = value.execution
         self._memory = value.memory
         self._artifact = value.artifact

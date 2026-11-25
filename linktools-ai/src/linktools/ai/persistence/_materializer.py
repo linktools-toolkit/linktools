@@ -42,7 +42,7 @@ from ._resource_scope import (
 )
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStore
-from ._session_turn_sql import SqlSessionTurns
+from ._session_turn_sql import SqlSessionTurnReader, SqlSessionTurns
 from ._step_materializer import build_runtime_agent_run_store
 from .runs import RuntimeAgentRunStore
 from .state import StateStore, state_store_key
@@ -76,7 +76,7 @@ _logger = environ.get_logger("ai.runtime.state.materializer")
 @dataclass(frozen=True, slots=True)
 class _MaterializedRuntimeStorage:
     conversation: ConversationRepositories
-    session_turns: SqlSessionTurns | None
+    session_turn_reader: SqlSessionTurnReader | None
     execution: ExecutionRepositories
     memory: MemoryRepositories
     artifact: ArtifactRepositories
@@ -159,7 +159,7 @@ async def materialize_runtime_storage(
         requests, namespace=namespace, tenant_id=tenant_id, read_only=read_only,
     )
     cleanups.append(resources.close)
-    session_turns = None
+    session_turn_reader = None
     for domain, resource in zip(PersistenceDomain, resources.resources):
         selected = plan.route(domain).cache
         cache = selected if isinstance(selected, CacheBackend) else None
@@ -178,8 +178,9 @@ async def materialize_runtime_storage(
                 store_key=state_store_key(namespace, tenant_id, domain.value),
             )
             sql_contexts[domain] = resource.context
-        if domain is PersistenceDomain.CONVERSATION and isinstance(resource, SqlResource) and not read_only:
-            session_turns = SqlSessionTurns(resource.context, resource.metadata, namespace=namespace, tenant_id=tenant_id)
+        if domain is PersistenceDomain.CONVERSATION and isinstance(resource, SqlResource):
+            turn_store = SqlSessionTurnReader if read_only else SqlSessionTurns
+            session_turn_reader = turn_store(resource.context, resource.metadata, namespace=namespace, tenant_id=tenant_id)
         stores[domain] = store
         cleanups.append(store.close)
         register_cleanup((store.close,))
@@ -301,7 +302,7 @@ async def materialize_runtime_storage(
     )
     return _MaterializedRuntimeStorage(
         conversation=repositories.conversation,
-        session_turns=session_turns,
+        session_turn_reader=session_turn_reader,
         execution=repositories.execution,
         memory=repositories.memory,
         artifact=repositories.artifact,

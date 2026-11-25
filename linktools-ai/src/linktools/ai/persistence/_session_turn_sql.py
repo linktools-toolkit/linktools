@@ -113,15 +113,14 @@ class SessionTurnKey:
     turn_id: str
 
 
-class SqlSessionTurns:
-    """A tenant-scoped store. The session service owns authorization and request codecs."""
+class SqlSessionTurnReader:
+    """Read one tenant’s committed session and turn history."""
 
     def __init__(self, context: SqlStorageContext, metadata: MetaData, *, namespace: str, tenant_id: str) -> None:
         self._context = context
         self._scope = state_store_key(namespace, tenant_id, "regenerable-session")
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
-        self._now = sql_epoch_seconds()
         self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
         self._recent_bytes = 0
 
@@ -137,15 +136,6 @@ class SqlSessionTurns:
 
     def _turn_values(self, key: SessionTurnKey) -> dict[str, bytes]:
         return {**self._session_values(key.session_id), "turn_id": self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES)}
-
-    async def create(self, session_id: str, *, owner_principal_id: str, agent_id: str, config: JsonValue) -> None:
-        async def write(connection: AsyncSession) -> None:
-            await connection.execute(self._sessions.insert().values(
-                **self._session_values(session_id), owner_principal_id=self._key(owner_principal_id, 128),
-                agent_id=self._key(agent_id, 128), status="open", revision=0, last_turn_no=0, config_json=config,
-            ))
-
-        await self._context.run_mutation(write, domain="session.create")
 
     async def get_session(self, session_id: str) -> RowMapping | None:
         async with self._context.engine.connect() as connection:
@@ -228,6 +218,22 @@ class SqlSessionTurns:
             self._recent[session_id] = _ContextWindow(start, through, turns, size)
             self._recent_bytes += size
         return turns
+
+class SqlSessionTurns(SqlSessionTurnReader):
+    """Write authority for one tenant’s ordinary SQL sessions."""
+
+    def __init__(self, context: SqlStorageContext, metadata: MetaData, *, namespace: str, tenant_id: str) -> None:
+        super().__init__(context, metadata, namespace=namespace, tenant_id=tenant_id)
+        self._now = sql_epoch_seconds()
+
+    async def create(self, session_id: str, *, owner_principal_id: str, agent_id: str, config: JsonValue) -> None:
+        async def write(connection: AsyncSession) -> None:
+            await connection.execute(self._sessions.insert().values(
+                **self._session_values(session_id), owner_principal_id=self._key(owner_principal_id, 128),
+                agent_id=self._key(agent_id, 128), status="open", revision=0, last_turn_no=0, config_json=config,
+            ))
+
+        await self._context.run_mutation(write, domain="session.create")
 
     async def accept(
         self, key: SessionTurnKey, *, expected_revision: int, context_from: int, context_through: int,
