@@ -52,7 +52,7 @@ async def test_original_client_http_view_preserves_bytes_and_decode_provenance(e
             return Page((replace(_model(1), request={}, response=None, content_included=False,
                                  client_requests=(original,), client_requests_included=True),))
 
-    async with _client(create_app(history=History())) as http:
+    async with _client(create_app(ordinary_turns=False, history=History())) as http:
         response = await http.get("/api/executions/execution/models?include_client_requests=true")
         assert response.status_code == 200, response.text
         assert response.headers["cache-control"] == "private, no-store"
@@ -189,7 +189,7 @@ class _ExecutionListHistory:
 @pytest.mark.asyncio
 async def test_execution_list_scans_for_newest_only_when_explicitly_requested() -> None:
     history = _ExecutionListHistory()
-    async with _client(create_app(history=history)) as http:  # type: ignore[arg-type]
+    async with _client(create_app(ordinary_turns=False, history=history)) as http:  # type: ignore[arg-type]
         ordinary = await http.get("/api/executions?limit=20")
         assert ordinary.status_code == 200, ordinary.text
         assert [item["execution_id"] for item in ordinary.json()["items"]] == [
@@ -267,7 +267,7 @@ class _PagedHistory:
 
 @pytest.mark.asyncio
 async def test_execution_viewers_page_history_transcript_and_models_without_eager_trace() -> None:
-    async with _client(create_app(history=_PagedHistory())) as http:  # type: ignore[arg-type]
+    async with _client(create_app(ordinary_turns=False, history=_PagedHistory())) as http:  # type: ignore[arg-type]
         response = await http.get("/api/executions/execution")
         assert response.status_code == 200, response.text
         execution = response.json()
@@ -334,7 +334,7 @@ class _TraceHistory(_PagedHistory):
 
 @pytest.mark.asyncio
 async def test_trace_viewer_preserves_compact_model_timing_and_usage() -> None:
-    async with _client(create_app(history=_TraceHistory())) as http:  # type: ignore[arg-type]
+    async with _client(create_app(ordinary_turns=False, history=_TraceHistory())) as http:  # type: ignore[arg-type]
         response = await http.get("/api/executions/execution/trace")
         assert response.status_code == 200, response.text
         page = response.json()
@@ -371,7 +371,7 @@ class _SessionHistory:
 
 @pytest.mark.asyncio
 async def test_session_viewer_preserves_recent_session_metadata() -> None:
-    async with _client(create_app(history=_SessionHistory())) as http:  # type: ignore[arg-type]
+    async with _client(create_app(ordinary_turns=False, history=_SessionHistory())) as http:  # type: ignore[arg-type]
         response = await http.get("/api/sessions?limit=20")
         assert response.status_code == 200, response.text
         page = response.json()
@@ -413,7 +413,7 @@ class _UnavailableSessionTimeline:
 @pytest.mark.asyncio
 async def test_session_metadata_is_readable_without_loading_unavailable_timeline() -> None:
     history = _UnavailableSessionTimeline()
-    async with _client(create_app(history=history)) as http:  # type: ignore[arg-type]
+    async with _client(create_app(ordinary_turns=False, history=history)) as http:  # type: ignore[arg-type]
         metadata = await http.get(
             "/api/session", params={"session_id": "session", "include_timeline": "false"},
         )
@@ -522,7 +522,7 @@ async def test_original_client_selectors_use_existing_model_endpoint() -> None:
                           agent_run_seq, model_request_seq, limit))
             return Page(())
 
-    async with _client(create_app(history=History())) as http:
+    async with _client(create_app(ordinary_turns=False, history=History())) as http:
         response = await http.get("/api/executions/child/models?include_client_requests=true&agent_run_seq=2&model_request_seq=11&limit=1")
         assert response.status_code == 200
         assert calls == [("child", "default", False, True, 2, 11, 1)]

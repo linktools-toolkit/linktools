@@ -573,7 +573,9 @@ CREATE TABLE ai_session_bindings (
 	binding_json JSON NOT NULL COMMENT 'Immutable admitted Agent binding.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (scope_key, binding_key)
+	PRIMARY KEY (scope_key, binding_key),
+	INDEX ix_created_at (created_at),
+	INDEX ix_updated_at (updated_at)
 )ENGINE=InnoDB ROW_FORMAT=DYNAMIC COMMENT='Shared frozen Agent bindings for regenerable conversation turns.' CHARSET=utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE ai_session_turns (

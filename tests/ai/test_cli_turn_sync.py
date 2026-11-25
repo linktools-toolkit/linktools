@@ -90,7 +90,7 @@ async def test_other_process_tools_use_the_web_session_stream_without_idle_sql(t
         await runtime.sessions.create("default", CreateSessionRequest(runtime.default_principal, "session", "create"))
         async with local_turn_notices(local, receive=True) as feed:
             assert feed is not None
-            app = create_app(runtime=runtime, session_notices=feed)
+            app = create_app(ordinary_turns=False, runtime=runtime, session_notices=feed)
             path = "/api/session/events"
             scope = {
                 "type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",

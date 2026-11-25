@@ -231,19 +231,35 @@ async def test_recent_context_reads_latest_positions_and_reuses_covered_history(
     assert await fresh.recent_context("chat", through=130) == warm
     assert [turn.turn_no for turn in warm] == list(range(3, 130))
     assert len(reads) == 3
-    assert reads[1][2:4] == (129, 130)
+    # The warm read fetches the single uncovered position; JSON path and
+    # dialect bind positions are not part of that contract.
+    assert {value for value in reads[1] if type(value) is int and value > 128} == {129, 130}
 
 
 @pytest.mark.asyncio
 async def test_runtime_uses_its_conversation_route_for_new_turn_storage(tmp_path):
+    from linktools.ai.core import AuthorizationAction, Principal, ResourceKind, TenantAuthorizationPolicy
+    from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.runtime import Runtime, RuntimeFeatures
 
+    class ChatAuthorization(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            await super().authorize(principal, action, resource)
+            if (principal.principal_id, action, resource.kind, resource.id) != (
+                "tester", AuthorizationAction.SESSION_READ, ResourceKind.SESSION, "chat",
+            ):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
     async with Runtime.open("test", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db"),
-                            features=RuntimeFeatures("test"), metrics=None) as runtime:
+                            features=RuntimeFeatures("test"), metrics=None,
+                            tenant_id="default", authorization=ChatAuthorization()) as runtime:
         runner = runtime._session_service._regenerable_turns
         assert runner is not None
         turns = runtime._state.session_turns
         assert turns is not None
         await turns.create("chat", config={})
-        assert (await turns.get_session("chat"))["session_key"] == b"chat"
+        state = await runtime.history.turn_session_state(
+            "chat", principal=Principal(principal_id="tester", tenant_id="default"),
+        )
+        assert state["session_id"] == "chat"

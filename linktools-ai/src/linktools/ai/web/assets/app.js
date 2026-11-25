@@ -137,7 +137,7 @@ function setDisabled() {
     for(const [id,action] of [['rename-session','update'],['close-session','close']])
       $(id).disabled ||= busy || state.actionsPending.has(`session:${state.selectedSession}:${action}`);
   }
-  $('planning').closest('label').hidden=ordinary;
+  $('planning-control').hidden=ordinary;
   $('turn-file-options').hidden=!ordinary || readonly;
   $('turn-files').disabled=readonly || !ordinary || state.session?.status!=='OPEN';
   $('new-agent').disabled=readonly || (ordinary && (!state.session || state.session.status!=='OPEN'));

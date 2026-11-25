@@ -169,6 +169,29 @@ async def purge_unreferenced_captures(
         return CaptureCleanupResult(tuple(deleted), tuple(missing), tuple(retained), tuple(blocked))
 
 
+def _is_canonical_runtime_key(key: str, domain: PersistenceDomain, digest: str) -> bool:
+    """Only framed Runtime keys can be named by an ordinary attachment."""
+    prefix = "v1/runtime/"
+    if not key.startswith(prefix):
+        return False
+    remaining = key[len(prefix):]
+    parts = []
+    for _ in range(2):
+        length, separator, rest = remaining.partition(":")
+        if (not separator or not 1 <= len(length) <= 9
+                or not length.isascii() or not length.isdecimal()):
+            return False
+        size = int(length)
+        if len(rest) <= size or rest[size] != "/":
+            return False
+        parts.append(rest[:size])
+        remaining = rest[size + 1:]
+    try:
+        return key == ObjectKeyFactory(parts[0]).key(domain, parts[1], digest)
+    except (AIError, ValueError):
+        return False
+
+
 _ORDINARY_ATTACHMENT_SCAN_PAGE = 32
 
 
@@ -353,12 +376,10 @@ async def _purge_unreferenced_objects(
         object_keys = ObjectKeyFactory(namespace)
         local_ordinary_candidates: set[str] = set()
         for domain, reference in selected:
-            if not reference.key.startswith("v1/runtime/"):
-                continue
             if (reference.store_id == RUNTIME_OBJECT_STORE_ID
                     and reference.key == object_keys.key(domain, tenant_id, reference.digest)):
                 local_ordinary_candidates.add(reference.key)
-            else:
+            elif _is_canonical_runtime_key(reference.key, domain, reference.digest):
                 # Other namespaces or tenants may borrow these same stores;
                 # this scoped scan cannot prove their objects unreachable.
                 foreign_ordinary_candidates.add(reference.key)

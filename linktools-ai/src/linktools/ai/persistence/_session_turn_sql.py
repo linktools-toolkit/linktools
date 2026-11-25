@@ -105,7 +105,7 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
     sql_unique(session, "scope_key", "session_key")
     sql_audit_indexes(session)
 
-    Table(
+    bindings = Table(
         SESSION_BINDING_TABLE, metadata,
         key("scope_key", 32, "Partition of one tenant in the configured session store."),
         key("binding_key", 32, "Content identity of the frozen compiled Agent binding."),
@@ -115,6 +115,8 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         comment="Shared frozen Agent bindings for regenerable conversation turns.",
         **sql_table_options(),
     )
+
+    sql_audit_indexes(bindings)
 
     turn = Table(
         SESSION_TURN_TABLE, metadata, sql_id_column(),

@@ -202,7 +202,7 @@ async def test_execution_authority_point_queries_use_sqlite_unique_locator(tmp_p
             ("ai_execution_records", source.control_set_expiry(
                 execution_id=execution_id, token=token, fence=1, expiry=None,
             )),
-            ("ai_execution_records", source.revoked_control_deadline(
+            ("ai_execution_records", source.failed_coowned_release(
                 execution_id=execution_id, fence=1, clock=clock, sqlite=True,
             )),
             ("ai_execution_records", source.reclaim_retired_shell(execution_id)),

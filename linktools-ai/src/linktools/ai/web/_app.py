@@ -1128,12 +1128,13 @@ def create_app(
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
-    available = runtime.sessions.supports_turn_sessions if runtime is not None else (
-        history is not None and history.has_turn_sessions
-    )
-    if ordinary_turns and not available:
-        raise ValueError("ordinary_turns requires ordinary turn support")
-    enabled = available if ordinary_turns is None else ordinary_turns
+    enabled = False
+    if ordinary_turns is not False:
+        enabled = runtime.sessions.supports_turn_sessions if runtime is not None else (
+            history is not None and history.has_turn_sessions
+        )
+        if ordinary_turns is True and not enabled:
+            raise ValueError("ordinary_turns requires ordinary turn support")
     lifespan = None
     if turn_notice_transport is not None:
         if runtime is None or not enabled:
