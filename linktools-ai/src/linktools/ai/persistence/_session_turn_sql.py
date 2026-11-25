@@ -44,7 +44,8 @@ if TYPE_CHECKING:
     from sqlalchemy import MetaData, RowMapping
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from ..core import JsonValue
+    from ..core import JsonValue, RunBudget
+    from .contracts import BudgetRepository
     from ..execution import PendingToolContinuation
     from .state import StateGroupTransaction, StateStore
     from ..storage import SqlStorageContext
@@ -476,7 +477,7 @@ class SqlSessionTurnReader:
         columns = self._turns.c
         request = columns.request_json
         required = ("prompt", "principal", "thinking")
-        optional = ("input", "input_intent", "session_context", "correlation")
+        optional = ("input", "input_intent", "budgeted", "session_context", "correlation")
         statement = select(
             columns.turn_id, columns.binding_key, request["explicit_agent_binding"].as_boolean().label("explicit_agent_binding"),
             *(request[name].label(name) for name in (*required, *optional)),
@@ -755,6 +756,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
     async def accept(
         self, key: SessionTurnKey, *, expected_revision: int, context_from: int, context_through: int,
         request_key: str, request: JsonValue, binding: JsonValue, lease_seconds: int,
+        _budget: tuple[BudgetRepository, RunBudget] | None = None,
     ) -> bool:
         """Claim and record a turn atomically; a uniqueness failure rolls back the claim."""
         if lease_seconds < 1:
@@ -769,6 +771,14 @@ class SqlSessionTurns(SqlSessionTurnReader):
         )
         binding_key = bytes.fromhex(content.digest)
         prepared = None
+        budget_store = None
+        if _budget is not None:
+            if self._transcript_write_binding is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            store = self._transcript_write_binding[0]
+            budget_store = _budget[0].state_store
+            if budget_store.storage_group is not store.storage_group:
+                raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
         if binding_key not in self._committed_bindings:
             if self._transcript_write_binding is None:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -793,16 +803,25 @@ class SqlSessionTurns(SqlSessionTurnReader):
             ))
             return True
 
-        if prepared is None:
+        if prepared is None and _budget is None:
             accepted = await self._context.run_mutation(write, domain="session.accept")
         else:
             async def publish(transaction) -> bool:
                 if not await transaction.transaction(store).run_sql(self._context, write):
                     return False
-                await archive.publish(transaction.transaction(archive.store), prepared)
+                if prepared is not None:
+                    await archive.publish(transaction.transaction(archive.store), prepared)
+                if _budget is not None:
+                    repository, limits = _budget
+                    await repository.ensure_in_transaction(
+                        transaction.transaction(repository.state_store), "turn:" + key.turn_id, limits,
+                    )
                 return True
 
-            accepted = await store.storage_group.mutate(tuple(dict.fromkeys((store, archive.store))), publish)
+            members = (store,) if prepared is None else (store, archive.store)
+            if budget_store is not None:
+                members = (*members, budget_store)
+            accepted = await store.storage_group.mutate(tuple(dict.fromkeys(members)), publish)
         if accepted:
             self._committed_bindings[binding_key] = None
             self._committed_bindings.move_to_end(binding_key)

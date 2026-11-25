@@ -102,7 +102,7 @@ from ..execution import CancelExecutionRequest, ExecutionHistoryReader
 from ..session import SessionHistoryReader
 from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
-from ..persistence.repositories import ExecutionRepositoryImpl
+from ..persistence.repositories import BudgetRepositoryImpl, ExecutionRepositoryImpl
 from ..persistence.runs import RuntimeAgentRunStore
 from ..persistence.runs import StagingAgentRunStore, StateStepArchive
 
@@ -887,6 +887,27 @@ async def _build_local_components(
                 owner_kind="session", owner_id=key.session_id, _before_edit=guard,
             ))
 
+        turn_state = state.conversation.sessions.state_store
+        budget_repository = state.execution.budgets
+
+        def prepare_canonical_budget(key, generation):
+            from ._budget import RunBudgetContext
+            scope = "turn:" + key.turn_id
+
+            async def guard(transaction):
+                await state.session_turns.guard_step_in_transaction(transaction, key, generation=generation)
+
+            authority = turn_state, guard
+            return RunBudgetContext(
+                budget_repository, scope, key.turn_id, key.turn_id, _turn_generation=generation,
+                _guarded_admit_model=lambda request_id: budget_repository._admit_model(
+                    scope, request_id, turn_authority=authority,
+                ),
+                _guarded_admit_tool=lambda call_id: budget_repository._admit_tool(
+                    scope, call_id, turn_authority=authority,
+                ),
+            )
+
         turn_runner = (
             None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(
                 state.session_turns, executor, workspace=workspace,
@@ -899,6 +920,9 @@ async def _build_local_components(
                 ),
                 instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
                 prepare_step=prepare_canonical_step, prepare_plan=prepare_canonical_plan,
+                prepare_budget=(prepare_canonical_budget
+                                if type(budget_repository) is BudgetRepositoryImpl
+                                and budget_repository.state_store.storage_group is turn_state.storage_group else None),
             )
         )
         if turn_runner is not None:

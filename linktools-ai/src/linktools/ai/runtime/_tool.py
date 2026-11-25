@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from uuid import uuid4
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import TypeAdapter
@@ -386,6 +387,7 @@ class RuntimeToolOperationBridge:
         self._fresh_execution = fresh_execution
         self._terminal_commands = terminal_commands
         self._budget_scope_id = budget_scope_id
+        self._canonical_budget = None
         self._pending_tools = pending_tools
         if pending_tools is not None and (budget_scope_id is not None or recovery_agent_run_id is not None):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -441,6 +443,12 @@ class RuntimeToolOperationBridge:
             self.bind_boundaries(admission=admission, terminal=terminal, unknown=unknown)
         self._prepared_boundaries = None
 
+    def configure_canonical_budget(self, scope_id: str, repository) -> None:
+        if self._canonical_event_writer is None or self._budget_scope_id is not None or self._decisions:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self._canonical_budget = repository
+        self._budget_scope_id = scope_id
+
     def prepare_canonical_boundaries(
         self, native: SqlStepStore, *, state_store: "StateStore", key: "SessionTurnKey", generation: int,
         guard: Callable[["StateTransaction"], Awaitable[None]],
@@ -472,6 +480,15 @@ class RuntimeToolOperationBridge:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             prepared = await native.prepare_step(events=(prepare_event(event),))
 
+            budget = self._canonical_budget
+            admitted_scope = self._budget_scope_id
+            budget_receipt = uuid4().hex if budget is not None else None
+            participants = members
+            if budget is not None:
+                if budget.state_store.storage_group is not group or admitted_scope is None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                participants = tuple(dict.fromkeys((*members, budget.state_store)))
+
             async def write(transaction):
                 # The tool receipt and its start event commit in the same
                 # transaction that proves this generation still may dispatch.
@@ -481,10 +498,22 @@ class RuntimeToolOperationBridge:
                 )
                 if effect.value.status is ToolOperationStatus.CLAIMED and effect.value.producer_generation != generation:
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                if budget is not None and effect.value.status is ToolOperationStatus.CLAIMED:
+                    call_identity = canonical_sha256({
+                        "execution_id": effect.value.execution_id, "tool_operation_id": effect.value.tool_operation_id,
+                        "fence": effect.value.fence,
+                    })
+                    await budget.admit_tool_in_transaction(
+                        transaction.transaction(budget.state_store), admitted_scope, call_identity,
+                        admission_id=budget_receipt,
+                    )
                 receipt = await native.write_prepared_step(transaction.transaction(state_store), prepared)
                 return effect, receipt
 
-            effect, receipt = await group.mutate(members, write)
+            async def commit():
+                return await group.mutate(participants, write)
+
+            effect, receipt = await commit() if budget is None else await budget.retry_admission(commit)
             native.confirm_prepared_step(receipt)
             return effect
 

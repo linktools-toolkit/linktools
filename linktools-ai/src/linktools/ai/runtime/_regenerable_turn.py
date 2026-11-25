@@ -42,6 +42,8 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, UserContent
 
     from ..agent import AgentBinding
+    from ..core import RunBudget
+    from ._budget import RunBudgetContext
     from ..model import CanonicalUserInput
     from ..capability.steps import AtomicStepPersistence
     from ._tool import RuntimeToolOperationBridge
@@ -91,6 +93,7 @@ class _AdmittedTurn:
     mode: ExecutionMode = "run"
     planning: bool = False
     plan_store: PlanningStore | None = None
+    budget: RunBudgetContext | None = None
     trace_enabled: bool = False
     trace_event_base: int = 0
     trace_interaction_base: int = 0
@@ -106,6 +109,7 @@ class _RegenerableTurnRunner:
         prepare_step: Callable[[AgentBinding, SessionTurnKey, int], Awaitable[
             tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None]] | None = None,
         prepare_plan: Callable[[SessionTurnKey, int], PlanningStore] | None = None,
+        prepare_budget: Callable[[SessionTurnKey, int], RunBudgetContext] | None = None,
     ) -> None:
         self._store = store
         self._executor = executor
@@ -116,6 +120,7 @@ class _RegenerableTurnRunner:
         self._instruction_resolver_for = instruction_resolver_for
         self._prepare_step = prepare_step
         self._prepare_plan = prepare_plan
+        self._prepare_budget = prepare_budget
         self._publish_deferred = None
         self._trace_archive: StateStepArchive | None = None
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
@@ -126,6 +131,13 @@ class _RegenerableTurnRunner:
         self._observed_revisions: dict[str, int] = {}
         self._cancel_notices: dict[SessionTurnKey, asyncio.Task[None]] = {}
         self._observed_cancellation: dict[str, str] = {}
+
+    def _prepare_turn_budget(self, key, generation, native_step):
+        if self._prepare_budget is None or native_step is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, "Canonical run budgets require coowned SQL Step")
+        budget = self._prepare_budget(key, generation)
+        native_step[1].configure_canonical_budget(budget.scope_id, budget.repository)
+        return budget
 
     def _require_turn_trace(self, binding: AgentBinding, *, canonical_step: bool) -> bool:
         policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
@@ -373,7 +385,7 @@ class _RegenerableTurnRunner:
         files: Sequence[str] = (), session_context: SessionContext = "all", output: type[BaseModel] | None = None,
         correlation: CorrelationData | None = None,
         selected_binding: Callable[[], Awaitable[AgentBinding]] | None = None,
-        mode: ExecutionMode = "run", planning: bool = False,
+        mode: ExecutionMode = "run", planning: bool = False, budget: RunBudget | None = None,
     ) -> str:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
@@ -399,6 +411,10 @@ class _RegenerableTurnRunner:
         if mode not in ("run", "plan") or type(planning) is not bool:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         planning = planning or mode == "plan"
+        if budget is not None:
+            from ..core import RunBudget
+            if not isinstance(budget, RunBudget):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "budget"})
         effective_correlation = {} if correlation is None else dict(correlation)
         resolved_binding = None
 
@@ -434,6 +450,7 @@ class _RegenerableTurnRunner:
                 or request.get("session_context", "all") != session_context
                 or request.get("correlation", {}) != effective_correlation
                 or request.get("mode", "run") != mode or request.get("planning", False) != planning
+                or bool(request.get("budgeted", False)) != (budget is not None)
                 or prior["agent_id"] != agent_id
                 or (prior.get("binding_digest") is not None) != (selected_binding is not None)
                 or (selected_binding is None and (prior["output_mode"] != output_binding.mode
@@ -442,6 +459,13 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if selected_binding is not None and prior["binding_digest"] != (await bind()).binding_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            if budget is not None:
+                if self._prepare_budget is None:
+                    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+                budget_owner = self._prepare_budget(SessionTurnKey(session_id, identity), 1)
+                confirmed = await budget_owner.repository.read(budget_owner.scope_id)
+                if confirmed.limits != budget:
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return identity
 
         if session["active_turn_id"] is not None:
@@ -467,7 +491,7 @@ class _RegenerableTurnRunner:
                 request_key=request_key, prompt=prompt, binding=binding, context=context,
                 limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
                 session_context=session_context, mode=mode, planning=planning,
-                explicit_agent_binding=selected_binding is not None,
+                explicit_agent_binding=selected_binding is not None, budget=budget,
             ):
                 return key.turn_id
         except (IntegrityError, AIError):
@@ -649,6 +673,8 @@ class _RegenerableTurnRunner:
             contract = AgentBindingContract.from_payload(frozen_binding)
             binding = await resolver.restore(contract)
             native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, generation + 1)
+            budget = (self._prepare_turn_budget(key, generation + 1, native_step)
+                      if request.get("budgeted", False) else None)
             if planning and self._prepare_plan is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             plan_store = self._prepare_plan(key, generation + 1) if planning else None
@@ -765,7 +791,7 @@ class _RegenerableTurnRunner:
                 deferred_approvals=() if settled_continuation is None else settled_continuation.approvals,
                 instruction_frontier=instruction_frontier,
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
-                mode=mode, planning=planning, plan_store=plan_store,
+                mode=mode, planning=planning, plan_store=plan_store, budget=budget,
                 trace_enabled=trace_enabled, trace_event_base=trace_event_base, trace_interaction_base=trace_interaction_base,
             )
             self._admitted(turn)
@@ -814,7 +840,7 @@ class _RegenerableTurnRunner:
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue, cwd: str | None = None,
         files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
         session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
-        explicit_agent_binding: bool = False,
+        explicit_agent_binding: bool = False, budget: RunBudget | None = None,
     ) -> bool:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
@@ -828,7 +854,7 @@ class _RegenerableTurnRunner:
                     key, revision=revision, through=through, request_key=request_key,
                     prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
                     session_context=session_context, mode=mode, planning=planning,
-                    explicit_agent_binding=explicit_agent_binding,
+                    explicit_agent_binding=explicit_agent_binding, budget=budget,
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
@@ -997,10 +1023,11 @@ class _RegenerableTurnRunner:
         prompt: CanonicalUserInput, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
         cwd: str | None = None, files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
         session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
-        explicit_agent_binding: bool = False,
+        explicit_agent_binding: bool = False, budget: RunBudget | None = None,
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, 1)
+        run_budget = None if budget is None else self._prepare_turn_budget(key, 1, native_step)
         if planning and self._prepare_plan is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         plan_store = self._prepare_plan(key, 1) if planning else None
@@ -1029,6 +1056,8 @@ class _RegenerableTurnRunner:
         }
         if trace_enabled:
             request["trace"] = True
+        if run_budget is not None:
+            request["budgeted"] = True
         if explicit_agent_binding:
             request["explicit_agent_binding"] = True
         if session_context == "current_turn":
@@ -1098,6 +1127,7 @@ class _RegenerableTurnRunner:
         if not await self._store.accept(
             key, expected_revision=revision, context_from=context_from, context_through=through,
             request_key=request_key, request=request, binding=frozen_binding, lease_seconds=_LEASE_SECONDS,
+            **({} if run_budget is None else {"_budget": (run_budget.repository, budget)}),
         ):
             return None
         return _AdmittedTurn(
@@ -1106,6 +1136,7 @@ class _RegenerableTurnRunner:
             repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
             stored_input=request.get("input"),
             native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
+            budget=run_budget,
         )
 
     @staticmethod
@@ -1306,7 +1337,7 @@ class _RegenerableTurnRunner:
                     generation=turn.generation, continuation=turn.continuation,
                     deferred_tool_results=turn.deferred_results, deferred_approvals=turn.deferred_approvals,
                     output_retries_used=turn.output_retries_used, mode=turn.mode, planning=turn.planning,
-                    plan_store=turn.plan_store, **trace_opts,
+                    plan_store=turn.plan_store, budget=turn.budget, **trace_opts,
                 )
                 if isinstance(outcome, DeferredToolRequests):
                     if turn.native_step is None or self._publish_deferred is None:

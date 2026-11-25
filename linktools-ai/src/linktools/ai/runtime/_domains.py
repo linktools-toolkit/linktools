@@ -23,7 +23,7 @@ from ..session import CloseSessionRequest, CreateSessionRequest, ForkSessionRequ
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from ..core import ThinkingValue
+    from ..core import RunBudget, ThinkingValue
     from ..model import UserPromptInput
     from pydantic import BaseModel
     from ._agent import Agent, Session
@@ -396,6 +396,7 @@ class RuntimeSessions(Generic[AppT]):
         idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
         session_context: SessionContext = "all",
         planning: bool = False,
+        budget: "RunBudget | None" = None,
         output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> str:
@@ -433,7 +434,7 @@ class RuntimeSessions(Generic[AppT]):
             resolver=resolver, request_key=idempotency_key, limits=PromptLimits(),
             event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking), files=files, output=output,
             session_context=normalize_session_context(session_context), selected_binding=selected_binding,
-            planning=planning,
+            planning=planning, budget=budget,
             correlation=overlay_correlation(runtime.correlation, correlation),
         )
 

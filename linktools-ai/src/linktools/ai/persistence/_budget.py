@@ -258,7 +258,35 @@ class BudgetRepositoryImpl(RepositoryBase):
         if usage.total_tokens >= limits.total_tokens:
             self._reject(usage.scope_id, "total_tokens", "limit_exceeded")
 
+    async def _mutate_guarded_turn(
+        self, authority: tuple[StateStore, Callable[[StateTransaction], Awaitable[None]]],
+        write: Callable[[StateTransaction], Awaitable[BudgetUsage]],
+    ) -> BudgetUsage:
+        turn_store, guard = authority
+        group = self._store.storage_group
+        if turn_store.storage_group is not group:
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        async def guarded(transaction) -> BudgetUsage:
+            try:
+                await guard(transaction.transaction(turn_store))
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_CONFLICT:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT,
+                                  safe_details={"reason": "turn_budget_authority_lost"}) from error
+                raise
+            return await write(transaction.transaction(self._store))
+
+        members = tuple(dict.fromkeys((turn_store, self._store)))
+        return await self.retry_admission(lambda: group.mutate(members, guarded))
+
     async def admit_model(self, scope_id: str, request_id: str) -> BudgetUsage:
+        return await self._admit_model(scope_id, request_id)
+
+    async def _admit_model(
+        self, scope_id: str, request_id: str, *,
+        turn_authority: tuple[StateStore, Callable[[StateTransaction], Awaitable[None]]] | None = None,
+    ) -> BudgetUsage:
         reservation = BudgetModelReservation(scope_id, request_id, self._owner_id, uuid4().hex)
         identity = [scope_id, request_id]
         active = (scope_id, request_id, reservation.admission_id)
@@ -294,7 +322,8 @@ class BudgetRepositoryImpl(RepositoryBase):
         self._active_requests.add(active)
         try:
             return await self._commit(
-                lambda: self._mutate(write), readback,
+                (lambda: self._mutate(write)) if turn_authority is None
+                else (lambda: self._mutate_guarded_turn(turn_authority, write)), readback,
                 on_cancel=lambda: self.settle_model(scope_id, request_id, None),
             )
         except BaseException:
@@ -405,11 +434,20 @@ class BudgetRepositoryImpl(RepositoryBase):
         return await self._store.read(read)
 
     async def admit_tool(self, scope_id: str, call_id: str) -> BudgetUsage:
+        return await self._admit_tool(scope_id, call_id)
+
+    async def _admit_tool(
+        self, scope_id: str, call_id: str, *,
+        turn_authority: tuple[StateStore, Callable[[StateTransaction], Awaitable[None]]] | None = None,
+    ) -> BudgetUsage:
         admission_id = uuid4().hex
+
+        async def write(transaction: StateTransaction) -> BudgetUsage:
+            return await self.admit_tool_in_transaction(transaction, scope_id, call_id, admission_id=admission_id)
+
         return await self._commit(
-            lambda: self._mutate(lambda transaction: self.admit_tool_in_transaction(
-                transaction, scope_id, call_id, admission_id=admission_id,
-            )),
+            (lambda: self._mutate(write)) if turn_authority is None
+            else (lambda: self._mutate_guarded_turn(turn_authority, write)),
             lambda: self.read_tool_admission(scope_id, call_id, admission_id=admission_id),
         )
 
