@@ -4,6 +4,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
 import pytest
 from sqlalchemy import select, update
@@ -14,6 +15,7 @@ from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceSt
 from linktools.ai.persistence._split_turn_anchor import SplitSessionTurnTransactions
 from linktools.ai.persistence.contracts import SessionRecord, SessionStatus
 from linktools.ai.persistence.state import record_key
+from linktools.ai.persistence._turn_sql_schema import unoccupied_turn_route
 from linktools.ai.storage import FilesystemObjectStore, StorageRoute, TurnScopeIdentity
 
 
@@ -116,7 +118,8 @@ async def test_native_strict_current_layouts_replay_and_fence_expired_takeover(t
             _, owner, observed = await _read(first, split=split, route="request", identity=_REQUEST)
             assert owner.execution_id == "second" and not observed.expired and not owner.cancel_requested
             old, retired, observed = await _read(first, split=split, route="execution", identity="first")
-            assert retired.receipt_kind == "expire" and old["turn_request_route"] is None and observed is None
+            assert retired.receipt_kind == "expire" and observed is None
+            assert old["turn_request_route"] == unoccupied_turn_route(old["key_locator"])
             assert await _confirm(first, split=split, execution_id="first", receipt="2" * 32) is None
 
 
@@ -126,8 +129,10 @@ async def test_native_strict_broken_current_owner_is_not_read_as_idle(tmp_path, 
     async with _stores(tmp_path / "broken", split=split) as (state, execution, conversation):
         await _declare_session(state, conversation, split=split)
         await _claim(execution, conversation, split=split, execution_id="current", owner_id="1" * 32, token="2" * 32)
+        key = record_key(_SCOPE.namespace, _SCOPE.tenant_id, "execution", "execution", ("current",))
         await _update_control(execution, "current", **(
-            {"turn_occupied_route": None} if split else {"turn_session_owner_id": 100000}
+            {"turn_occupied_route": unoccupied_turn_route(sha256(key).hexdigest())}
+            if split else {"turn_session_owner_id": 100000}
         ))
         with pytest.raises(AIError) as caught:
             await _read(execution, split=split, route="execution", identity="current")

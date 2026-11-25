@@ -3,6 +3,7 @@
 """Execution-local SESSION slot routing for split Runtime storage."""
 
 from ._turn_sql import SESSION, STANDALONE, turn_session_address
+from ._turn_sql_schema import unoccupied_turn_route
 
 
 class SplitSessionTurnTransactions:
@@ -89,7 +90,7 @@ class SplitSessionTurnTransactions:
             expected_key = record_key(scope.namespace, scope.tenant_id, "execution", "execution", (execution_id,))
             if (key != expected_key or row["key_locator"] != sha256(key).hexdigest()
                     or row["kind"] not in ("execution", EXECUTION_SHELL_KIND)
-                    or row["turn_occupied_route"] not in (None, slot)
+                    or row["turn_occupied_route"] not in (unoccupied_turn_route(row["key_locator"]), slot)
                     or active and (type(token) is not bytes or row["turn_occupied_route"] != slot)
                     or not isinstance(receipt, Mapping)
                     or receipt.keys() != {"request_key", "owner_id", "request_digest", "receipt_id", "receipt_kind", "cancel_requested"}
@@ -98,7 +99,8 @@ class SplitSessionTurnTransactions:
                     or receipt["receipt_kind"] not in (("claim", "renew", "cancel") if active else ("release", "expire"))):
                 raise ValueError("invalid split session receipt")
             request = receipt["request_key"]
-            if row["turn_request_route"] != (turn_hex(request, TURN_REQUEST_MAX_BYTES) if active else None):
+            inactive = unoccupied_turn_route(row["key_locator"])
+            if row["turn_request_route"] != (turn_hex(request, TURN_REQUEST_MAX_BYTES) if active else inactive):
                 raise ValueError("invalid split request route")
             for name, width in (("owner_id", 32), ("request_digest", 64), ("receipt_id", 32)):
                 turn_hex(receipt[name], width)
@@ -254,11 +256,12 @@ class SplitSessionTurnTransactions:
                     (table.c.kind == "execution") & (table.c.scan_kind == "e:0"),
                 ))
                 extras = {}
+                unoccupied = unoccupied_turn_route(row["key_locator"])
                 if observation is not None:
                     retire = retire.where(await self._deadline(live=False))
-                    extras.update(turn_token=None, turn_request_route=None,
+                    extras.update(turn_token=None, turn_request_route=unoccupied,
                                   turn_receipt=self._receipt(previous, token, "expire"))
-                await self._advance(retire.values(turn_occupied_route=None, turn_revision=revision + 1, **extras))
+                await self._advance(retire.values(turn_occupied_route=unoccupied, turn_revision=revision + 1, **extras))
             if row["candidate_id"] is None:
                 await self._advance(table.insert().values(
                     authority.shell_values(store_key=self._store, expiry=expiry) | values,
@@ -313,7 +316,7 @@ class SplitSessionTurnTransactions:
             await self._advance(self._fence(row, proof, revision=revision).values(turn_revision=revision + 1))
             if kind == "release":
                 # Park, retaining the slot anchor and this exact receipt.
-                values.update(turn_token=None, turn_request_route=None)
+                values.update(turn_token=None, turn_request_route=unoccupied_turn_route(row["key_locator"]))
             elif kind == "renew":
                 interval = timedelta(seconds=duration)
                 if inline_deadline is not None and type(self._dialect) in (SQLiteDialect, MySQLDialect, PostgreSQLDialect):

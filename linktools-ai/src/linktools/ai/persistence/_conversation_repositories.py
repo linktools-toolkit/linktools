@@ -1704,7 +1704,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             s.strict_turn_execution_id.is_not(None),
             e.turn_session_owner_id == s.id, e.turn_fence == s.strict_turn_fence,
             e.store_key == execution_store.store_key, e.turn_slot_kind == SESSION, e.turn_slot_key == session_key,
-            e.turn_request_route.is_not(None), e.turn_receipt.is_not(None),
+            e.turn_token.is_not(None), e.turn_receipt.is_not(None),
         ))).where(
             s.store_key == store.store_key, s.kind == "session",
             s.key_locator == sha256(key).hexdigest(), s.key == key,

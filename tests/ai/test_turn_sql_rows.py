@@ -14,7 +14,7 @@ from linktools.ai.persistence._execution_authority import ExecutionAuthority
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._split_turn_anchor import SplitSessionTurnTransactions
 from linktools.ai.persistence._sql import _SqlTransaction
-from linktools.ai.persistence._turn_sql_schema import RUNTIME_TURN_SCOPE
+from linktools.ai.persistence._turn_sql_schema import RUNTIME_TURN_SCOPE, unoccupied_turn_route
 from linktools.ai.persistence.state import state_store_key
 from linktools.ai.persistence.turns import StateTurnCoordination
 from linktools.ai.storage import TurnScopeIdentity
@@ -94,7 +94,8 @@ async def test_sql_turn_request_route_is_exact_and_reusable_after_retirement(tmp
         assert await authority.read_turn(_SCOPE, "e1") is None
         parked = await _receipt(store, "e1")
         assert not parked[1].active and parked[1].receipt_kind == "release"
-        assert parked[0]["turn_occupied_route"] is None and parked[0]["turn_request_route"] is None
+        unoccupied = unoccupied_turn_route(parked[0]["key_locator"])
+        assert parked[0]["turn_occupied_route"] == parked[0]["turn_request_route"] == unoccupied
         assert (await authority.read_turn_by_request(_SCOPE, "a" * 64)).execution_id == "e3"
 
 
@@ -118,7 +119,8 @@ async def test_native_release_preserves_exact_receipt_at_existing_statement_budg
             event.remove(engine, "before_cursor_execute", count)
         row, proof, observation = await _receipt(store, "e")
         assert not proof.active and observation is None and proof.receipt_kind == "release"
-        assert row["turn_occupied_route"] == b"s" and row["turn_request_route"] is None
+        assert row["turn_occupied_route"] == b"s"
+        assert row["turn_request_route"] == unoccupied_turn_route(row["key_locator"])
         assert await authority.read_turn_by_session(_SCOPE, "session:s") is None
         assert not await authority.release_turn(first.lease)
 

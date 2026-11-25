@@ -17,6 +17,7 @@ from linktools.ai.persistence._turn_snapshot import (
     decode_turn_snapshot, execution_receipt_snapshot_record, strict_session_snapshot_record,
 )
 from linktools.ai.persistence._turn_sql import SqlTurnProof
+from linktools.ai.persistence._turn_sql_schema import unoccupied_turn_route
 from linktools.ai.persistence.contracts import SessionRecord, SessionStatus
 from linktools.ai.persistence.snapshots import restore_snapshot
 from linktools.ai.snapshot import SnapshotLimits
@@ -75,13 +76,14 @@ async def _add_receipt(state, proof, *, parked=False, split=False, session_owner
     authority = ExecutionAuthority(_SCOPE, proof.execution_id, proof.session_key, proof.receipt_id, proof.fence)
     values = authority.shell_values(store_key=store.store_key, expiry=_DEADLINE)
     session = proof.session_key.startswith("session:")
-    request = proof.request_key.encode() if proof.active or (parked and not session) else None
+    request = proof.request_key.encode() if proof.active or (parked and not session) else values["turn_request_route"]
     async with store.context.engine.begin() as conn:
         await conn.execute(control.insert().values({
             **values, "turn_token": values["turn_token"] if proof.active else None,
             "turn_revision": proof.fence + 1, "turn_receipt": _receipt(proof, session=session),
             "turn_request_route": request, "turn_session_owner_id": session_owner,
-            "turn_occupied_route": values["turn_slot_key"] if split and (proof.active or parked) else None,
+            "turn_occupied_route": (values["turn_slot_key"] if split and (proof.active or parked)
+                                    else values["turn_occupied_route"]),
         }))
 
 
@@ -135,13 +137,16 @@ async def test_native_turn_snapshot_restores_expired_authority_and_preserves_fen
                 assert row["turn_token"] is None
                 assert row["turn_receipt"]["receipt_kind"] == "release"
                 assert store.context.dialect.decode_database_time(row["turn_expiry"]) == _DEADLINE
-            assert rows["standalone-old"]["turn_request_route"] is None
+            unoccupied = {name: unoccupied_turn_route(row["key_locator"]) for name, row in rows.items()}
+            assert len(set(unoccupied.values())) == len(rows)
+            assert rows["standalone-old"]["turn_request_route"] == unoccupied["standalone-old"]
             assert rows["standalone-parked"]["turn_request_route"] == b"c" * 64
             assert rows["session-live"]["turn_fence"] == 3 and rows["session-live"]["turn_revision"] == 4
-            assert rows["session-parked"]["turn_fence"] == 2 and rows["session-parked"]["turn_request_route"] is None
-            assert rows["older-session"]["turn_occupied_route"] is None
-            assert rows["session-parked"]["turn_occupied_route"] == (b"idle" if split else None)
-            assert rows["session-live"]["turn_occupied_route"] == (b"active" if split else None)
+            assert rows["session-parked"]["turn_fence"] == 2
+            assert rows["session-parked"]["turn_request_route"] == unoccupied["session-parked"]
+            assert rows["older-session"]["turn_occupied_route"] == unoccupied["older-session"]
+            assert rows["session-parked"]["turn_occupied_route"] == (b"idle" if split else unoccupied["session-parked"])
+            assert rows["session-live"]["turn_occupied_route"] == (b"active" if split else unoccupied["session-live"])
         conversation = resources.stores[PersistenceDomain.CONVERSATION]
         owner = conversation.storage_group.metadata.tables["ai_state_records"]
         async with conversation.context.engine.begin() as conn:

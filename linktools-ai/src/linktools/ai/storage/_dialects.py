@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
 from linktools.core import environ
 
+from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 
 SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
@@ -112,6 +113,8 @@ class SqlAlchemyDialect(Protocol):
     async def database_now(self, session: "AsyncSession") -> datetime: ...
 
     async def database_current_time(self, session: "AsyncSession") -> datetime: ...
+
+    def set_json_member(self, column: "ColumnElement", key: str, value: JsonValue) -> "ColumnElement": ...
 
     async def insert_ignore_conflict(
         self,
@@ -217,6 +220,13 @@ class SqlAlchemyDialect(Protocol):
 
 
 class SQLiteDialect:
+    def set_json_member(self, column: "ColumnElement", key: str, value: JsonValue) -> "ColumnElement":
+        """Set one top-level JSON member without reserializing siblings in Python."""
+        from sqlalchemy import func
+
+        path = "$." + canonical_json_bytes(key).decode("utf-8")
+        return func.json_set(column, path, func.json(canonical_json_bytes(value).decode("utf-8")))
+
     @property
     def name(self) -> str:
         return "sqlite"
@@ -531,6 +541,15 @@ class SQLiteDialect:
 
 
 class PostgreSQLDialect(SQLiteDialect):
+    def set_json_member(self, column: "ColumnElement", key: str, value: JsonValue) -> "ColumnElement":
+        from sqlalchemy import JSON, Text, bindparam, cast, func
+        from sqlalchemy.dialects.postgresql import JSONB, array
+
+        return cast(func.jsonb_set(
+            cast(column, JSONB), array([key], type_=Text()),
+            cast(bindparam(None, canonical_json_bytes(value).decode("utf-8"), type_=Text()), JSONB),
+        ), JSON)
+
     @property
     def name(self) -> str:
         return "postgresql"
@@ -567,6 +586,12 @@ class PostgreSQLDialect(SQLiteDialect):
 
 
 class MySQLDialect(SQLiteDialect):
+    def set_json_member(self, column: "ColumnElement", key: str, value: JsonValue) -> "ColumnElement":
+        from sqlalchemy import func
+
+        path = "$." + canonical_json_bytes(key).decode("utf-8")
+        return func.json_set(column, path, func.json_extract(canonical_json_bytes(value).decode("utf-8"), "$"))
+
     @property
     def name(self) -> str:
         return "mysql"

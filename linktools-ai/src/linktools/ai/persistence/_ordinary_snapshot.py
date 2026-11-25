@@ -35,7 +35,7 @@ _TURN_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "turn_id": TURN_EXECUTION
                 "request_key": TURN_REQUEST_MAX_BYTES}
 _SESSION_FIELDS = (*_SESSION_BINARY, "status", "revision", "last_turn_no", "config_json", "lineage_json", *_AUDIT)
 _TURN_FIELDS = (*_TURN_BINARY, "binding_key", "turn_no", "context_from", "context_through", "state", "generation",
-                "request_json", "instruction_frontier_json", "result_json", *_AUDIT)
+                "request_json", "result_json", *_AUDIT)
 _TABLES = (("sessions", SESSION_TABLE, _SESSION_FIELDS, _SESSION_BINARY),
            ("turns", SESSION_TURN_TABLE, _TURN_FIELDS, _TURN_BINARY))
 _WAITING = {"waiting", "ready"}
@@ -211,18 +211,18 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
                         or type(row["context_through"]) is not int or row["context_through"] != number - 1
                         or not 0 <= number - row["context_from"] <= 128
                         or not isinstance(request, dict) or not isinstance(request.get("prompt"), str)
-                        or "binding" in request
-                        or len(canonical_json_bytes(request))
-                        + len(canonical_json_bytes(result)) > 64 * 1024):
+                        or "binding" in request):
                     raise _invalid()
                 try:
-                    frontier = row["instruction_frontier_json"]
+                    request_core = dict(request)
+                    frontier = request_core.pop("instruction_frontier", None)
+                    if len(canonical_json_bytes(request_core)) + max(
+                        len(canonical_json_bytes(result)),
+                        0 if frontier is None else len(canonical_json_bytes(frontier)),
+                    ) > 64 * 1024:
+                        raise _invalid()
                     if frontier is not None:
                         SessionInstructionFrontier.from_json(frontier)
-                        if len(canonical_json_bytes(request)) + len(
-                            canonical_json_bytes(frontier)
-                        ) > 64 * 1024:
-                            raise _invalid()
                     principal = Principal(**request["principal"])
                 except (TypeError, ValueError, KeyError, AIError) as error:
                     raise _invalid() from error

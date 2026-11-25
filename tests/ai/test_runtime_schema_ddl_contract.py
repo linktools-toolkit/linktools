@@ -505,14 +505,7 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
                 if isinstance(column.type, (LargeBinary, String)):
                     assert column.type.length is not None and column.type.length <= 128, (table.name, column.name)
                 if unique:
-                    sparse_route = (
-                        table.name == "ai_execution_records"
-                        and tuple(index.columns.keys()) in (
-                            ("store_key", "turn_request_route"), ("store_key", "turn_occupied_route"),
-                        )
-                        and column.name in ("turn_request_route", "turn_occupied_route")
-                    )
-                    assert column.nullable is sparse_route, (table.name, index.name, column.name)
+                    assert not column.nullable, (table.name, index.name, column.name)
         for index in table.indexes:
             assert not index.dialect_options["mysql"].get("length"), (table.name, index.name)
 
@@ -598,6 +591,36 @@ def test_record_scan_bucket_is_write_through_and_replaces_only_generic_index(dia
 
 
 
+def test_mysql_execution_and_session_turn_keep_two_large_fields() -> None:
+    metadata = build_sql_schema_metadata()
+    dialect = mysql.dialect()
+    migration = (
+        Path(__file__).resolve().parents[2] / "linktools-ai" / "migrations" / "init_schema.sql"
+    ).read_text(encoding="utf-8")
+    for name, expected in {
+        "ai_execution_records": {"payload_json", "turn_receipt"},
+        "ai_session_turns": {"request_json", "result_json"},
+    }.items():
+        table = metadata.tables[name]
+        large_columns = {
+            column.name for column in table.c
+            if column.type.compile(dialect=dialect).split()[0].upper() in {
+                "JSON", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT",
+                "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB",
+            }
+        }
+        assert large_columns == expected
+        table_ddl = migration.split(f"CREATE TABLE {name} (", 1)[1].split(")ENGINE=", 1)[0]
+        assert {
+            line.strip().split()[0].strip("`") for line in table_ddl.splitlines()
+            if len(line.strip().split()) > 1
+            and line.strip().split()[1] in {
+                "JSON", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT",
+                "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB",
+            }
+        } == expected
+
+
 def test_strict_turn_sql_uses_only_exact_native_owner_routes() -> None:
     from sqlalchemy import func, insert
     from linktools.ai.persistence._execution_authority import ExecutionAuthority
@@ -616,6 +639,7 @@ def test_strict_turn_sql_uses_only_exact_native_owner_routes() -> None:
     assert owner.c.strict_turn_execution_id.type.length == control.c.turn_occupied_route.type.length == 128
     assert owner.c.strict_turn_fence.nullable and control.c.turn_session_owner_id.nullable
     assert control.c.turn_request_route.type.length == 64
+    assert not control.c.turn_occupied_route.nullable and not control.c.turn_request_route.nullable
     indexes = {tuple(index.columns.keys()): index.unique for index in control.indexes}
     assert indexes["store_key", "turn_request_route"] and indexes["store_key", "turn_occupied_route"]
     assert indexes["turn_session_owner_id", "turn_fence"] is False

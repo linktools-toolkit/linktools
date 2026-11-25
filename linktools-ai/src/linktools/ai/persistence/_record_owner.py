@@ -69,11 +69,14 @@ def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) ->
 
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
+EXECUTION_SORT_KEY_MAX_BYTES = 8 + RECORD_KEY_MAX_BYTES
+EXECUTION_LEASE_OWNER_MAX_BYTES = 256
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
 _EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}
 _KIND_OWNERS = {"execution": "ai_execution_records", "idempotency": "ai_execution_records", "task_graph": "ai_task_graphs", "tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
 _CONSTANTS = {
+    "ai_execution_records": {"payload_bytes": None},
     "ai_task_graphs": {"kind": "task_graph"},
     "ai_step_tool_operations": {"kind": "tool_operation", "payload_bytes": None},
     "ai_step_run_admissions": {"kind": "agent_run", "subject_id": None, "state": None,
@@ -171,10 +174,20 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
 
 def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, object]:
     """Validate and shape values for the record's physical owner."""
-    if name == "ai_execution_records" and "key" in values and "kind" in values:
-        key = values["key"]
-        if not isinstance(key, bytes) or values["kind"] != decode_key_components(key, RECORD_KEY_MAX_BYTES)[4]:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if name == "ai_execution_records":
+        if "key" in values and "kind" in values:
+            key = values["key"]
+            if not isinstance(key, bytes) or values["kind"] != decode_key_components(key, RECORD_KEY_MAX_BYTES)[4]:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if "sort_key" in values and (
+            type(values["sort_key"]) is not bytes or not 1 <= len(values["sort_key"]) <= EXECUTION_SORT_KEY_MAX_BYTES
+        ):
+            raise ValueError("execution sort key exceeds its bounded record ordering size")
+        lease_owner = values.get("lease_owner")
+        if lease_owner is not None and (
+            not isinstance(lease_owner, str) or len(lease_owner.encode("utf-8")) > EXECUTION_LEASE_OWNER_MAX_BYTES
+        ):
+            raise ValueError("execution lease owner exceeds its bounded UTF-8 size")
     for key, value in _CONSTANTS.get(name, {}).items():
         if key in values and values[key] != value:
             raise ValueError(f"{name} requires {key}={value!r}")

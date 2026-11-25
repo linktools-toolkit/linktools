@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 from dataclasses import replace
+from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.turns import StateTurnCoordination, validate_turn_records
+from linktools.ai.persistence._turn_sql_schema import unoccupied_turn_route
 from linktools.ai.storage import TurnAdmissionReader, TurnCoordinationBackend, TurnSessionReader
 from .test_state_batch_delete_backends import _open_store as _open_base_store
 from .test_state_lease_availability import _clock
@@ -98,7 +100,6 @@ def _validate_authority(records, *, namespace="turn-authority", tenant_id="tenan
 
 
 async def _damage_sql(store, *, execution="e", receipt_changes=None, **changes):
-    from hashlib import sha256
     from sqlalchemy import select, update
 
     table = store.storage_group.metadata.tables["ai_execution_records"]
@@ -317,7 +318,8 @@ async def test_state_turn_reachable_broken_edges_are_never_idle(tmp_path, backen
             await tx.delete_record(record.key)
         if backend == "sql":
             if missing == "turn_session":
-                await _damage_sql(store, turn_occupied_route=None)
+                key = record_key(_SCOPE.namespace, _SCOPE.tenant_id, "execution", "execution", ("e",))
+                await _damage_sql(store, turn_occupied_route=unoccupied_turn_route(sha256(key).hexdigest()))
             elif missing == "turn_execution":
                 await _damage_sql(store, key_locator="f" * 64)
             else:

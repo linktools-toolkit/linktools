@@ -36,7 +36,7 @@ from ._content_reference_projection import (
 from ._record_owner import EXECUTION_SHELL_KIND, RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
-from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES
+from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, unoccupied_turn_route
 from .state import state_content_members
 from .state import (
     FactQuery,
@@ -1455,10 +1455,14 @@ class _SqlTransaction:
             c.c.turn_token == turn_hex(token, 32), c.c.turn_revision == revision + 1,
             c.c.turn_request_route == turn_hex(proof.request_key, TURN_REQUEST_MAX_BYTES),
             ~source._deadline_is_live(clock, sqlite=dialect.single_writer),
-        ).values(turn_token=None, turn_request_route=None, turn_receipt={
-            "request_key": proof.request_key, "owner_id": proof.owner_id, "request_digest": proof.request_digest,
-            "receipt_id": receipt, "receipt_kind": "expire", "cancel_requested": proof.cancel_requested,
-        }))
+        ).values(
+            turn_token=None,
+            turn_request_route=unoccupied_turn_route(_key_locator(source.execution_key(proof.execution_id))),
+            turn_receipt={
+                "request_key": proof.request_key, "owner_id": proof.owner_id, "request_digest": proof.request_digest,
+                "receipt_id": receipt, "receipt_kind": "expire", "cancel_requested": proof.cancel_requested,
+            },
+        ))
         if written.rowcount != 1:
             return False
         await self._clear_native_session_owner(source, scope, session_key=proof.session_key,
@@ -1808,7 +1812,7 @@ class _SqlTransaction:
             if session_owner is not None:
                 values["turn_receipt"]["request_key"] = proof.request_key
                 if kind == "release":
-                    values.update(turn_token=None, turn_request_route=None)
+                    values.update(turn_token=None, turn_request_route=unoccupied_turn_route(row["key_locator"]))
             if kind == "renew":
                 now = await self._context.run_statement(dialect.database_current_time(self._session))
                 values["turn_expiry"] = now + timedelta(seconds=duration)
@@ -2006,6 +2010,8 @@ class _SqlTransaction:
             live = (func.julianday(expiry) > func.julianday(clock)
                     if self._context.dialect.single_writer else expiry > clock)
             values, = _record_insert_rows(table.name, (record,), self._store_key)
+            values.pop("turn_request_route")
+            values.pop("turn_occupied_route")
             # Physical and logical addresses are unchanged, including the SQL id.
             promoted = await self._execute(update(table).where(exact_shell, live).values(**values))
             if promoted.rowcount != 1:
@@ -3953,6 +3959,10 @@ def _record_values(record: StoredRecord) -> dict[str, object]:
 def _record_insert_rows(owner: str, records: Sequence[StoredRecord], store_key: bytes) -> list[dict[str, object]]:
     rows = [{**record_owner_values(owner, _record_values(record)), "store_key": store_key}
             for record in records]
+    if owner == "ai_execution_records":
+        for row in rows:
+            unoccupied = unoccupied_turn_route(row["key_locator"])
+            row.update(turn_request_route=unoccupied, turn_occupied_route=unoccupied)
     # Unset projections have the schema's NULL default on INSERT; CAS still
     # explicitly clears a previously populated slot when the payload changes.
     for column in CONTENT_REFERENCE_COLUMNS.get(owner, ()):

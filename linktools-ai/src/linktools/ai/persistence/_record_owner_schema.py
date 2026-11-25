@@ -8,12 +8,14 @@ from ..core import RESOURCE_ID_MAX_BYTES
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
+    sql_binary_key,
     sql_blob,
     sql_id_column,
     sql_query_index,
     sql_sha256,
     sql_state,
     sql_table_options,
+    sql_text_key,
     sql_unique,
 )
 from .state import STORE_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
-from ._record_owner import SCAN_KIND_OWNERS
+from ._record_owner import EXECUTION_LEASE_OWNER_MAX_BYTES, EXECUTION_SORT_KEY_MAX_BYTES, SCAN_KIND_OWNERS
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 
 
@@ -74,7 +76,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         ),
         Column(
             "sort_key",
-            sql_blob(),
+            sql_binary_key(EXECUTION_SORT_KEY_MAX_BYTES) if name == "ai_execution_records" else sql_blob(),
             nullable=False,
             comment="Stable canonical ordering token used for deterministic keyset pagination.",
         ),
@@ -92,7 +94,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         ),
         Column(
             "lease_owner",
-            Text,
+            sql_text_key(EXECUTION_LEASE_OWNER_MAX_BYTES) if name == "ai_execution_records" else Text,
             nullable=True,
             comment="Current durable lease owner for record kinds using claim and fencing semantics.",
         ),
@@ -160,17 +162,19 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
             Column("turn_revision", BigInteger, nullable=False, server_default=text("0"),
                    comment="Independent writable revision for source lease renewal."),
             Column("turn_request_route", LargeBinary(TURN_REQUEST_MAX_BYTES).with_variant(mysql.VARBINARY(TURN_REQUEST_MAX_BYTES), "mysql"),
-                   nullable=True, comment="Unique live request or parked standalone request address."),
+                   nullable=False, comment="Unique live request, parked standalone request, or row-local unoccupied address."),
             Column("turn_occupied_route", LargeBinary(TURN_SESSION_MAX_BYTES).with_variant(mysql.VARBINARY(TURN_SESSION_MAX_BYTES), "mysql"),
-                   nullable=True, comment="Unique active or parked split-store session address."),
+                   nullable=False, comment="Unique active or parked split-store session or row-local unoccupied address."),
             Column("turn_session_owner_id", BigInteger, nullable=True,
                    comment="Exact same-store strict SessionRecord row; never a portable address."),
             Column("turn_receipt", JSON(none_as_null=True), nullable=True,
                    comment="Compact retained coordination receipt, independent of the execution payload."),
         ]
-    omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
-    if name == "ai_task_graphs":
-        omitted = {"kind"}
+    omitted = {
+        "ai_execution_records": {"payload_bytes"},
+        "ai_step_tool_operations": {"kind", "payload_bytes"},
+        "ai_task_graphs": {"kind"},
+    }.get(name, set())
     records = Table(name, metadata, *(column for column in columns if column.name not in omitted),
                     comment=comment, **sql_table_options())
     sql_unique(records, "store_key", "key_locator")

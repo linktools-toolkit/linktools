@@ -45,7 +45,7 @@ from ._turn_snapshot import (
     GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, execution_receipt_snapshot_record,
     strict_session_snapshot_record,
 )
-from ._turn_sql_schema import RUNTIME_TURN_SCOPE
+from ._turn_sql_schema import RUNTIME_TURN_SCOPE, unoccupied_turn_route
 from ._ordinary_snapshot import (
     capture_ordinary_snapshot, decode_ordinary_snapshot, has_waiting_turns, ordinary_input_object_refs,
     ordinary_transcript_roots, rekey_ordinary_transcripts, require_waiting_checkpoints, restore_ordinary_snapshot,
@@ -1770,10 +1770,12 @@ async def restore_snapshot(
             binding = ordinary_binding_payloads.get(identity)
             if binding is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            request_size = len(canonical_json_bytes({**row["request_json"], "binding": binding}))
-            if (request_size + len(canonical_json_bytes(row["result_json"])) > 64 * 1024
-                    or row["instruction_frontier_json"] is not None
-                    and request_size + len(canonical_json_bytes(row["instruction_frontier_json"])) > 64 * 1024):
+            request = {**row["request_json"], "binding": binding}
+            frontier = request.pop("instruction_frontier", None)
+            if len(canonical_json_bytes(request)) + max(
+                len(canonical_json_bytes(row["result_json"])),
+                0 if frontier is None else len(canonical_json_bytes(frontier)),
+            ) > 64 * 1024:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     for group_id, entry in native_entries.items():
@@ -2091,11 +2093,14 @@ async def restore_snapshot(
                             identity = (control.c.store_key == store.store_key, control.c.key == authority.key)
                             owner = (await session.execute(select(control.c.kind, control.c.turn_token, control.c.turn_receipt)
                                                            .where(*identity))).one_or_none()
+                            unoccupied = unoccupied_turn_route(sha256(authority.key).hexdigest())
                             values = dict(
                                 turn_slot_kind=admission["session_kind"], turn_slot_key=admission["session_key"],
                                 turn_token=token, turn_fence=admission["turn_fence"], turn_expiry=expiry,
-                                turn_revision=admission["turn_revision"], turn_request_route=admission["turn_request_route"],
-                                turn_receipt=admission["turn_receipt"], turn_occupied_route=admission["turn_occupied_route"],
+                                turn_revision=admission["turn_revision"],
+                                turn_request_route=admission["turn_request_route"] or unoccupied,
+                                turn_receipt=admission["turn_receipt"],
+                                turn_occupied_route=admission["turn_occupied_route"] or unoccupied,
                             )
                             if admission["session_kind"] == SESSION and not admission["split_session"]:
                                 table = metadata.tables["ai_state_records"]

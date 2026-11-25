@@ -14,7 +14,7 @@ from ..storage import Lease, TurnCoordination, TurnScopeIdentity
 from .state import record_key, state_store_key
 from ._turn_sql_schema import (
     TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES,
-    RUNTIME_TURN_SCOPE, TURN_SESSION_MAX_BYTES,
+    RUNTIME_TURN_SCOPE, TURN_SESSION_MAX_BYTES, unoccupied_turn_route,
 )
 
 if TYPE_CHECKING:
@@ -232,7 +232,7 @@ class SqlTurnRows:
                 raise ValueError("invalid native session receipt")
             request = receipt["request_key"]
             route = turn_hex(request, TURN_REQUEST_MAX_BYTES)
-            if row["turn_request_route"] != (route if active else None):
+            if row["turn_request_route"] != (route if active else unoccupied_turn_route(row["key_locator"])):
                 raise ValueError("invalid native session request route")
             for field, width in (("owner_id", 32), ("request_digest", 64), ("receipt_id", 32)):
                 turn_hex(receipt[field], width)
@@ -267,7 +267,7 @@ class SqlTurnRows:
             active = token is not None
             if (key != self.execution_key(execution_id) or row["key_locator"] != sha256(key).hexdigest()
                     or row["kind"] not in ("execution", "execution_shell")
-                    or route not in (None, request) or active and route != request
+                    or route not in (unoccupied_turn_route(row["key_locator"]), request) or active and route != request
                     or not isinstance(receipt, Mapping)
                     or receipt.keys() != {"owner_id", "request_digest", "receipt_id", "receipt_kind", "cancel_requested"}
                     or type(fence) is not int or fence < 1 or type(revision) is not int or revision < 0
@@ -327,7 +327,9 @@ class SqlTurnRows:
             or_(control.c.turn_slot_kind.is_(None), and_(
                 control.c.turn_slot_kind == STANDALONE, control.c.turn_slot_key == request,
                 control.c.turn_fence < proof.fence,
-                or_(control.c.turn_request_route.is_(None), control.c.turn_request_route == request),
+                control.c.turn_request_route.in_((
+                    unoccupied_turn_route(sha256(self.execution_key(proof.execution_id)).hexdigest()), request,
+                )),
                 control.c.turn_receipt["request_digest"].as_string() == proof.request_digest,
             )),
         ).values(**values, turn_revision=control.c.turn_revision + 1)
@@ -380,7 +382,10 @@ class SqlTurnRows:
             control.c.turn_fence == proof.fence, control.c.turn_revision == revision,
             control.c.turn_token.is_(None), control.c.turn_receipt["receipt_id"].as_string() == proof.receipt_id,
             control.c.turn_receipt["receipt_kind"].as_string() == proof.receipt_kind,
-        ).values(turn_request_route=None, turn_revision=control.c.turn_revision + 1)
+        ).values(
+            turn_request_route=unoccupied_turn_route(sha256(self.execution_key(proof.execution_id)).hexdigest()),
+            turn_revision=control.c.turn_revision + 1,
+        )
 
     def control_guard(
         self, *, session_key: str, execution_id: str, token: str, fence: int,

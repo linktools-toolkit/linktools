@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from ..errors import AIError, ErrorCode
 from ..storage import TurnScopeIdentity
 from ._turn_sql import SESSION, STANDALONE, SqlTurnProof, turn_hex, turn_session_address, turn_session_identity
-from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, RUNTIME_TURN_SCOPE
+from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, RUNTIME_TURN_SCOPE, unoccupied_turn_route
 from .state import StoredRecord, record_key, scope_key
 
 
@@ -66,7 +66,7 @@ def execution_receipt_snapshot_record(
     kind = "turn_admission"
     key, grouped = _address(scope, kind, proof.execution_id)
     retained = row["turn_occupied_route"] if split_session else row["turn_request_route"]
-    state = "ACTIVE" if proof.active else "PARKED" if retained is not None else "RETIRED"
+    state = "ACTIVE" if proof.active else "RETIRED" if retained == unoccupied_turn_route(row["key_locator"]) else "PARKED"
     token = row["turn_token"].decode("ascii") if proof.active else None
     return StoredRecord(
         key, grouped, None, kind, key, state, row["turn_revision"], token, proof.fence, _utc(row["turn_expiry"]),

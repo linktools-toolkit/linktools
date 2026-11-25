@@ -11,6 +11,7 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._execution_authority import ExecutionAuthority
+from linktools.ai.persistence._turn_sql_schema import unoccupied_turn_route
 from linktools.ai.storage import TurnScopeIdentity
 
 from .test_history_projection_conformance import _record
@@ -101,7 +102,8 @@ async def test_control_slot_claim_renew_release_uses_one_execution_authority(tmp
         assert await coordination.release_turn(claim.lease)
         parked = await shell()
         assert parked["id"] == first["id"] and parked["kind"] == "execution_shell"
-        assert parked["turn_token"] is None and parked["turn_request_route"] is None
+        assert parked["turn_token"] is None
+        assert parked["turn_request_route"] == unoccupied_turn_route(parked["key_locator"])
         assert parked["turn_occupied_route"] == b"session" and parked["turn_receipt"]["receipt_kind"] == "release"
         assert await coordination.read_turn_by_session(scope, "session:session") is None
         after = await coordination.claim_turn(scope, **fields, owner_id="e" * 32, lease_seconds=60)

@@ -10,7 +10,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import TurnScopeIdentity
 from ._record_owner import EXECUTION_SHELL_KIND
 from ._turn_sql import turn_hex, turn_session_address
-from ._turn_sql_schema import RUNTIME_TURN_SCOPE
+from ._turn_sql_schema import RUNTIME_TURN_SCOPE, unoccupied_turn_route
 from .state import record_key
 
 if TYPE_CHECKING:
@@ -50,9 +50,12 @@ class ExecutionAuthority:
         key = self.key
         if expiry.tzinfo is None:
             raise ValueError("execution authority expiry must be timezone-aware")
+        locator = sha256(key).hexdigest()
+        unoccupied = unoccupied_turn_route(locator)
         return dict(store_key=store_key, key=key, kind=EXECUTION_SHELL_KIND, sort_key=key, sort_prefix=key[:128],
                     scan_kind="k:" + EXECUTION_SHELL_KIND, storage_revision=0, payload_json={},
-                    key_locator=sha256(key).hexdigest(), turn_expiry=expiry, **self.authority_values())
+                    key_locator=locator, turn_expiry=expiry, turn_request_route=unoccupied,
+                    turn_occupied_route=unoccupied, **self.authority_values())
 
     def owner_matches(self, table: "Table", store_key: bytes) -> "ColumnElement[bool]":
         from hashlib import sha256

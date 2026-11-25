@@ -129,8 +129,6 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         Column("lease_until", BigInteger, nullable=True, comment="Expiry in database-clock seconds since epoch."),
         key("binding_key", 32, "Frozen Agent binding in the same scope."),
         Column("request_json", JSON(), nullable=False, comment="Accepted principal and canonical request."),
-        Column("instruction_frontier_json", JSON(none_as_null=True), nullable=True,
-               comment="Additional repository instructions and their discovery barriers for this turn."),
         Column("result_json", JSON(none_as_null=True), nullable=True,
                comment="Canonical terminal output and continuation material."),
         *sql_audit_columns(),
@@ -428,7 +426,12 @@ class SqlSessionTurnReader:
         return await group.read_many(members, read)
 
     async def get_turn_for_recovery(self, key: SessionTurnKey) -> Mapping[str, object] | None:
-        return await self._read_bound_turn(self._turns.select().filter_by(**self._turn_values(key)))
+        row = await self._read_bound_turn(self._turns.select().filter_by(**self._turn_values(key)))
+        if row is None:
+            return None
+        # Recovery consumes discovery evidence only after the generation regrant.
+        request = {name: value for name, value in row["request_json"].items() if name != "instruction_frontier"}
+        return {**row, "request_json": request}
 
     def _history_view_select(self, *, observe_lease: bool = False):
         from sqlalchemy import select
@@ -471,7 +474,14 @@ class SqlSessionTurnReader:
         from sqlalchemy import select
 
         columns = self._turns.c
-        row = await self._read_bound_turn(select(columns.turn_id, columns.request_json, columns.binding_key).where(
+        request = columns.request_json
+        required = ("prompt", "principal", "thinking")
+        optional = ("input", "session_context", "correlation")
+        statement = select(
+            columns.turn_id, columns.binding_key,
+            *(request[name].label(name) for name in (*required, *optional)),
+        )
+        row = await self._read_bound_turn(statement.where(
             columns.scope_key == self._scope,
             columns.session_key == self._key(session_id, TURN_SESSION_MAX_BYTES),
             columns.request_key == self._key(request_key, TURN_REQUEST_MAX_BYTES),
@@ -480,7 +490,10 @@ class SqlSessionTurnReader:
             return None
         binding = row["binding_json"]
         return {
-            "turn_id": row["turn_id"], "request_json": row["request_json"],
+            "turn_id": row["turn_id"], "request_json": {
+                name: row[name] for name in (*required, *optional)
+                if name in required or row[name] is not None
+            },
             "agent_id": binding["agent_spec"]["id"], "output_mode": binding["output_mode"],
             "output_schema": binding["output_schema"],
         }
@@ -1000,7 +1013,11 @@ class SqlSessionTurns(SqlSessionTurnReader):
         async def write(connection: AsyncSession) -> None:
             changed = await connection.execute(self._turns.update().filter_by(
                 **self._turn_values(key), generation=generation, state="accepted",
-            ).where(self._turns.c.lease_until > self._now).values(instruction_frontier_json=payload))
+            ).where(self._turns.c.lease_until > self._now).values(
+                request_json=self._context.dialect.set_json_member(
+                    self._turns.c.request_json, "instruction_frontier", payload,
+                ),
+            ))
             if changed.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
@@ -1071,7 +1088,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         # The successful regrant UPDATE owns this row until the transaction
         # commits. Capture after it, not from the earlier authorization read.
         columns = self._turns.c
-        statement = select(columns.instruction_frontier_json).where(
+        statement = select(columns.request_json["instruction_frontier"]).where(
             *(columns[name] == value for name, value in self._turn_values(key).items()),
         )
         result = await session.execute(statement)
