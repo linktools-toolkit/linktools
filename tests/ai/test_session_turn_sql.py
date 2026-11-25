@@ -217,3 +217,16 @@ async def test_recent_context_reads_latest_positions_and_reuses_covered_history(
     assert [turn.turn_no for turn in warm] == list(range(3, 130))
     assert len(reads) == 3
     assert reads[1][2:4] == (129, 130)
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_its_conversation_route_for_new_turn_storage(tmp_path):
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+    async with Runtime.open("test", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db"),
+                            features=RuntimeFeatures("test"), metrics=None) as runtime:
+        turns = runtime._session_service._session_turns
+        assert turns is not None
+        await turns.create("chat", owner_principal_id="actor", agent_id="qa", config={})
+        assert (await turns.get_session("chat"))["owner_principal_id"] == b"actor"

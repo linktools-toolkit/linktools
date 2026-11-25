@@ -18,6 +18,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScope, TurnScopeIdentity, RenewingTurnScope, sql_observation_phase, sql_observation_scope
 from ._execution_authority import ExecutionAuthority, SourceTurnRevoked
 from ._sql import SqlStateStore
+from ._session_turn_sql import SqlSessionTurns
 from ._turn_sql import SqlTurnNotOwned, turn_hex, turn_session_address
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES
 from .state import (
@@ -858,4 +859,4 @@ def validate_turn_records(records: Sequence[StoredRecord], *, namespace: str, te
         codec.graph(execution, request, session)
 
 
-__all__ = ["ExecutionAuthority", "SourceTurnRevoked", "SourceTurnWriteFence", "StateTurnCoordination", "validate_turn_records"]
+__all__ = ["ExecutionAuthority", "SourceTurnRevoked", "SourceTurnWriteFence", "StateTurnCoordination", "SqlSessionTurns", "validate_turn_records"]

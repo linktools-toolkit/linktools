@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 
 from ._feature_policy import _RuntimeFeaturePolicy, _runtime_feature_policy
@@ -55,6 +55,9 @@ from ..execution import ExecutionRecord
 from ..persistence.repositories import SessionRepositoryImpl
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.state import active_state_scope
+
+if TYPE_CHECKING:
+    from ..persistence.turns import SqlSessionTurns
 
 
 
@@ -262,6 +265,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         cursor_signer: CursorSigner,
         *,
         history_reader: SessionHistoryReader,
+        session_turns: "SqlSessionTurns | None" = None,
         enabled: bool = True,
         current_policy: Callable[[], Awaitable[_RuntimeFeaturePolicy]] | None = None,
         transcript_store: "_SessionTranscriptStore | None" = None,
@@ -298,6 +302,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             observe_view=self._observe_session_view,
         )
         self._history_reader = history_reader
+        self._session_turns = session_turns
         self._transcript_store = transcript_store
         self._cache = cache if isinstance(cache, CacheBackend) else None
         self._display_cache = SessionDisplayCache(

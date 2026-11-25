@@ -837,6 +837,7 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
+            session_turns=state.session_turns,
             enabled=session_execution_ready,
             current_policy=current_policy,
             cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
