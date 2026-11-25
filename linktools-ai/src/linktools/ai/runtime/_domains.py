@@ -392,7 +392,7 @@ class RuntimeSessions(Generic[AppT]):
         )
 
     async def start_turn(
-        self, session_id: str, prompt: UserPromptInput, *, agent: str | Agent[AppT], principal: Principal,
+        self, session_id: str, prompt: "UserPromptInput", *, agent: "str | Agent[AppT]", principal: Principal,
         idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
         session_context: SessionContext = "all",
         planning: bool = False,
