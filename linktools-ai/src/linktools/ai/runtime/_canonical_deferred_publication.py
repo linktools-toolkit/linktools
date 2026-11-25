@@ -16,7 +16,7 @@ def bind_deferred_publication(runner, turns, checkpoint) -> None:
     approvals = checkpoint.approvals
     external = checkpoint.external_calls
 
-    async def publish(turn, checkpoint_id, tool_bridge, requests) -> bool:
+    async def publish(turn, checkpoint_id, tool_bridge, requests, **trace_opts) -> bool:
         owner = approvals.state_store
         if external.state_store is not owner:
             raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
@@ -61,7 +61,7 @@ def bind_deferred_publication(runner, turns, checkpoint) -> None:
         return await turns.publish_waiting_turn(
             turn.key, generation=turn.generation, checkpoint_id=checkpoint_id,
             continuation=continuation, receipt_store=owner, publish_receipts=receipts,
-            max_bytes=turn.terminal_bytes,
+            max_bytes=turn.terminal_bytes, **trace_opts,
         )
 
     runner.bind_deferred_publication(publish)

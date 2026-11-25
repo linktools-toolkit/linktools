@@ -415,6 +415,8 @@ class _Console:
             "runtime": self.runtime.status() if self.runtime is not None else None,
             "read_only": self.runtime is None,
             "turn_sessions": self.turn_sessions,
+            **({"turn_trace": True} if self.turn_sessions and self.history is not None
+               and self.history.has_turn_trace else {}),
             "capabilities": self.capabilities,
             "metric_names": _SUMMARY_METRICS,
         })
@@ -463,6 +465,15 @@ class _Console:
         include_timeline = request.query_params.get("include_timeline", "true")
         if include_timeline not in {"true", "false"}:
             raise ValueError("include_timeline must be true or false")
+        trace = request.query_params.get("trace")
+        if trace is not None:
+            if (trace != "true" or not self.turn_sessions or include_timeline != "true"
+                    or "execution_id" in request.query_params):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Trace requires an exact canonical turn")
+            return _json(await history.turn_trace(
+                identity, _text(request.query_params, "turn_id"), principal=self.principal,
+                local_workspace=self.local_turn_workspace, **_paging(request),
+            ))
         if self.turn_sessions:
             if "execution_id" in request.query_params:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Identify the conversation turn with turn_id")

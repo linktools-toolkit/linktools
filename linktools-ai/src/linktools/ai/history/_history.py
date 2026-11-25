@@ -60,7 +60,7 @@ from ._service import DefaultExecutionHistoryService, _read_model_interaction_up
 from ..core import token_seed
 from ._transient import TransientExecutionHistoryStore
 from ._session_display_cache import SessionDisplayCache
-from ._ordinary_sessions import _OrdinarySessionHistory
+from ._ordinary_sessions import SessionTurnTraceItem, _OrdinarySessionHistory
 from ..persistence.turns import SqlSessionTurnReader
 from ..persistence.state import active_state_scope
 from ._session_timeline import (
@@ -91,7 +91,7 @@ from ..session import SessionTurn, SessionView
 from ..persistence import Persistence, PersistenceDomain
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
-from ..persistence.runs import StagingAgentRunStore
+from ..persistence.runs import StagingAgentRunStore, StateStepArchive
 from ..persistence.contracts import (
     ConversationRepositories,
     EventRepository,
@@ -329,6 +329,7 @@ class History:
         pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
         cache: CacheBackend | None = None,
         session_turn_reader: SqlSessionTurnReader | None = None,
+        session_trace_source: StateStepArchive | None = None,
     ) -> None:
         self._service = service
         self._subscriptions: set[_HistorySubscription] = set()
@@ -350,6 +351,7 @@ class History:
         self._artifacts = artifacts
         self._conversation = conversation
         self._session_transcript_store = session_transcript_store
+        self._session_trace_source = session_trace_source
         self._pending_session_execution = pending_session_execution
         self._pending_execution = pending_execution
         self._session_cursor_signer = (cursor_signer if namespace is None else
@@ -368,6 +370,15 @@ class History:
     def has_turn_sessions(self) -> bool:
         """Whether this history reader can query ordinary SQL sessions."""
         return self._ordinary_sessions is not None
+
+    @property
+    def has_turn_trace(self) -> bool:
+        """Whether this reader has the canonical SQL Trace source."""
+        return bool(
+            self.has_turn_sessions
+            and self._session_trace_source is not None
+            and self._session_trace_source.has_turn_trace
+        )
 
     def _require_ordinary_sessions(self) -> _OrdinarySessionHistory:
         if self._closed or self._ordinary_sessions is None:
@@ -398,6 +409,16 @@ class History:
         """Read an authorized page of committed turns, newest page first."""
         return await self._require_ordinary_sessions().session(
             session_id, principal=principal, cursor=cursor, limit=limit, local_workspace=local_workspace,
+        )
+
+    async def turn_trace(
+        self, session_id: str, turn_id: str, *, principal: Principal,
+        local_workspace: bool = False, cursor: str | None = None, limit: int = 100,
+    ) -> Page[SessionTurnTraceItem]:
+        """Read exact canonical turn Trace metadata, not standalone executions."""
+        return await self._require_ordinary_sessions().turn_trace(
+            session_id, turn_id, principal=principal, local_workspace=local_workspace,
+            source=self._session_trace_source, cursor=cursor, limit=limit,
         )
 
     async def turn_result(
@@ -1820,6 +1841,7 @@ async def _open_runtime_history(
         pending_execution=None if pending_coordination is None else pending_coordination.read_execution,
         conversation=selected_state.conversation,
         session_turn_reader=selected_state.session_turn_reader if authorization is not None else None,
+        session_trace_source=history_store if isinstance(history_store, StateStepArchive) else None,
         session_transcript_store=selected_state.run_store.conversation_persistence,
         cache=(selected_state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
             selected_state.plan.route(domain).retention is StorageRetentionMode.DURABLE

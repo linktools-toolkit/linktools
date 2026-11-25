@@ -153,6 +153,8 @@ function setDisabled() {
   $('detail-view').disabled=!state.execution;
   $('native-mode').disabled=!state.selectedExecution;$('activity-mode').disabled=!state.selectedExecution;
   $('detail-turn-picker').hidden=state.view!=='sessions';
+  $('detail-view').disabled=ordinary;
+  $('run-actions').hidden=ordinary;
   const needsRecovery=['RECOVERY_REQUIRED','START_UNKNOWN','CANCELLING'].includes(state.execution?.status);
   $('detail-attention').hidden=!needsRecovery && state.execution?.status!=='FAILED';
   $('detail-attention-text').textContent=state.execution?.status==='FAILED'?`Failed${state.execution.error_code?' · '+state.execution.error_code:''}. Actions offers retry or fork.`:needsRecovery?`${state.execution.status.replaceAll('_',' ')}${state.execution.error_code?' · '+state.execution.error_code:''}. Review the recorded state before continuing.`:'';
@@ -175,7 +177,9 @@ function setDisabled() {
   $('recover-turn').hidden=readonly || !turn;
   $('recover-turn').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
   if(ordinary){
-    $('open-recovery').hidden=true;$('inspector-toggle').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
+    $('open-recovery').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
+    $('inspector-toggle').hidden=!state.config.turn_trace || (!turn && !state.turns.some(row=>row.turn_id));
+    $('inspector-toggle').textContent='Turn trace';
     $('cancel').hidden=readonly || !turn;$('cancel').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
     $('cancel').setAttribute('aria-label','Stop current turn');
     if(turn && sessionWatch?.ready){
@@ -185,7 +189,7 @@ function setDisabled() {
       $('current-status').textContent=status==='RECOVERY_REQUIRED'?'Recovery required'
         :status==='WAITING_DEFERRED'?'Waiting for approval or tool results':'Turn in progress';
     }
-  } else {$('open-recovery').hidden=false;$('inspector-toggle').hidden=false;}
+  } else {$('open-recovery').hidden=false;$('inspector-toggle').hidden=false;$('inspector-toggle').textContent='Run details';}
 
 }
 function renderPage() {
@@ -1085,6 +1089,7 @@ async function moreTurns() {
   } finally {state.actionsPending.delete(key);$('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);}
 }
 function renderTurnPickers() {
+  if(nativeTurnInspector())return;
   const options=state.turns.filter(turn=>turn.execution_id).map((turn,index)=>({id:turn.execution_id,label:`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status} · ${short(turn.execution_id)}`}));
   if(state.selectedExecution && !options.some(option=>option.id===state.selectedExecution))options.push({id:state.selectedExecution,label:`Execution ${short(state.selectedExecution)}`});
   const signature=json(options);
@@ -1996,7 +2001,8 @@ function renderOverview() {
   }
 }
 function traceItem(item) {
-  const row=item.payload || {},key=`${item.execution_id}:${item.step_event_seq}`,selected=state.traceSelection===key;
+  const identity=item.turn_id || item.execution_id;
+  const row=item.payload || {},key=`${identity}:${item.step_event_seq}`,selected=state.traceSelection===key;
   const node=element('section','trace-item'),toggle=button('',async()=>{state.traceSelection=selected?null:key;renderDetails();});
   toggle.className='trace-row';toggle.dataset.requestFocus=`trace:${key}`;toggle.setAttribute('aria-expanded',String(selected));
   toggle.append(element('span','trace-seq',`#${item.step_event_seq}`),element('span','trace-label',`${(row.kind || 'Step').replaceAll('_',' ').toLowerCase()}${row.tool_name?' · '+row.tool_name:''}`));
@@ -2004,7 +2010,8 @@ function traceItem(item) {
   toggle.append(element('span','trace-duration',duration(row.duration_ns)));node.append(toggle);
   if(!selected)return node;
   const detail=element('div','trace-detail');
-  detail.append(element('p','mono',`${item.execution_id} · ${row.scope || '—'} · run ${row.agent_run_seq ?? '—'} · step ${row.step_index ?? '—'} · request #${row.model_request_seq ?? '—'}`),element('p','muted',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`));
+  detail.append(element('p','mono',`${identity} · ${row.scope || '—'} · run ${row.agent_run_seq ?? '—'} · step ${row.step_index ?? '—'} · request #${row.model_request_seq ?? '—'}`),element('p','muted',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`));
+  if(item.turn_id){node.append(detail);return node;}
   const selectors={};['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
   if(row.call_id)selectors.tool_call_id=row.call_id;
   const content=button('Read SDK content',async()=>{
@@ -2676,7 +2683,9 @@ $('menu').onclick=()=>{const open=$('menu').getAttribute('aria-expanded')!=='tru
 $('sidebar-close').onclick=()=>closeSidebar(true);
 window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open && !$('plan-dialog').open)closeSidebar(true);});
 $('new-title').oninvalid=()=>$('new-options').open=true;
-$('detail-turn').onchange=()=>selectExecution($('detail-turn').value).catch(showError);
+$('detail-turn').onchange=()=>(
+  nativeTurnInspector()?loadOrdinaryTrace($('detail-turn').value):selectExecution($('detail-turn').value)
+).catch(showError);
 async function openRecovery(active=false) {
   const id=active?state.session?.active_execution_id:state.selectedExecution;if(!id)return;
   showInspector(true,true);state.tab='recovery';await selectExecution(id);
@@ -2684,7 +2693,54 @@ async function openRecovery(active=false) {
 $('open-recovery').onclick=()=>{ $('action-menu').open=false;return openRecovery(Boolean(state.session?.active_execution_id)).catch(showError); };
 $('recovery-shortcut').onclick=()=>openRecovery(true).catch(showError);
 $('thinking').oninput=renderThinking;
-$('inspector-toggle').onclick=()=>{$('action-menu').open=false;const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';showInspector(open,true);if(open)return loadDetail(false,{},reuseNative).catch(showError);};
+function nativeTurnInspector() {
+  return state.view==='sessions' && state.config?.turn_sessions && state.config.turn_trace;
+}
+let ordinaryTrace = null;
+async function loadOrdinaryTrace(turnId,more=false) {
+  if(!nativeTurnInspector() || $('inspector').hidden || !turnId || !state.selectedSession)return;
+  const session=state.selectedSession,generation=state.generation,detail=++state.detailGeneration;
+  const current=()=>detail===state.detailGeneration && generation===state.generation
+    && session===state.selectedSession && nativeTurnInspector() && !$('inspector').hidden;
+  if(!more || ordinaryTrace?.session!==session || ordinaryTrace.turnId!==turnId){
+    ordinaryTrace={session,turnId,cursor:null};
+    state.tab='trace';state.details=[];state.traceSelection=null;
+    $('detail-title').textContent='Turn trace';$('detail-view').value='trace';
+    $('execution-meta').textContent='Turn '+short(turnId);
+    $('inspector-content').classList.remove('native-reader');clear('inspector-content');
+  }
+  $('detail-more').hidden=true;
+  try {
+    const page=await api(sessionURL(session,'',{turn_id:turnId,trace:'true',limit:'50',
+      ...(ordinaryTrace.cursor?{cursor:ordinaryTrace.cursor}:{})}));
+    if(!current())return;
+    ordinaryTrace.cursor=page.next_cursor;
+    state.details.push(...page.items);renderDetails();
+    $('detail-more').hidden=!ordinaryTrace.cursor;
+  } catch(error){
+    if(current())throw error;
+  }
+}
+$('inspector-toggle').onclick=()=>{
+  $('action-menu').open=false;
+  const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';
+  showInspector(open,true);
+  if(!open)return;
+  if(nativeTurnInspector()){
+    const select=$('detail-turn'),seen=new Set();
+    select.replaceChildren();
+    const add=(id,label)=>{
+      if(!id || seen.has(id))return;
+      seen.add(id);const option=element('option','',label);option.value=id;select.append(option);
+    };
+    for(const row of state.turns)add(row.turn_id,row.turn_no?`Turn ${row.turn_no} · ${row.status}`:short(row.turn_id));
+    const active=state.session?.active_turn_id;
+    add(active,'Current turn');
+    select.value=active || [...seen].at(-1) || '';select.disabled=!seen.size;
+    return loadOrdinaryTrace(select.value).catch(showError);
+  }
+  return loadDetail(false,{},reuseNative).catch(showError);
+};
 $('inspector-close').onclick=()=>showInspector(false,true);
 $('show-active').onclick=()=>{const id=state.session?.active_execution_id;if(id){showInspector(true,true);selectExecution(id).catch(showError);}};
 $('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').open=false;$('actions-toggle').focus();}};
@@ -2699,7 +2755,9 @@ $('native-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeR
 $('chat-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');$('action-menu').open=false;state.conversationMode='chat';showInspector(false);renderPage();renderConversation();($('prompt').disabled?$('chat-mode'):$('prompt')).focus();};
 $('activity-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();return loadDetail().catch(showError);};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
-$('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
+$('detail-more').onclick=()=>(
+  nativeTurnInspector()?loadOrdinaryTrace(ordinaryTrace?.turnId,true):loadDetail(true,state.detailSelectors)
+).catch(showError);
 $('refresh').onclick=()=>{if(state.config?.turn_sessions && state.view==='sessions'){
     if(sessionWatch?.source.readyState===EventSource.CLOSED)stopSessionWatch();
     return openSelection(state.selectedSession,null).then(()=>loadList()).catch(showError);

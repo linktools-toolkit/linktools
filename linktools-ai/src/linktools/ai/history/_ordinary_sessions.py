@@ -4,14 +4,16 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from pydantic_ai.messages import ModelResponse
 
 from ..core import (
-    AuthorizationAction, AuthorizationPolicy, CursorSigner, JsonValue, Principal, PrincipalKind, ResourceKind,
+    AuthorizationAction, AuthorizationPolicy, CursorSigner, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
     ResourceRef, TenantAuthorizationPolicy, canonical_sha256, decode_cursor, encode_cursor,
     principal_identity_payload, validate_page_limit, validate_resource_id,
 )
@@ -21,10 +23,13 @@ from ..model import StoredUserInput
 from ..model.messages import CANONICAL_OUTPUT_TOOL_NAME, canonical_structured_output
 from ..persistence.codec import decode_domain
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
+from ._projection import _trace_payload
 from ._session_timeline import _project_turn_tool_process, _timeline_items
 
 if TYPE_CHECKING:
     from sqlalchemy import RowMapping
+
+    from ..persistence.runs import StateStepArchive
 
 _TURN_PAGE_MAX = 64
 
@@ -96,6 +101,13 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
         "error_code": result.get("error_code") if isinstance(result, Mapping) else None,
         "safe_error_details": {},
     }
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTurnTraceItem:
+    turn_id: str
+    step_event_seq: int
+    payload: JsonValue
 
 
 class _OrdinarySessionHistory:
@@ -210,6 +222,59 @@ class _OrdinarySessionHistory:
             "session": _session_view(row),
             "timeline": {"items": [_turn_view(turn) for turn in reversed(turns[:limit])], "next_cursor": next_cursor},
         }
+
+    async def turn_trace(
+        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
+        source: StateStepArchive | None, cursor: str | None, limit: int,
+    ) -> Page[SessionTurnTraceItem]:
+        await self._session(session_id, principal, local_workspace=local_workspace)
+        validate_resource_id(turn_id)
+        key = SessionTurnKey(session_id, turn_id)
+        owner = await self._store.get_turn(key)
+        if owner is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_READ,
+            ResourceRef(ResourceKind.EXECUTION, turn_id, self._tenant_id, owner["request_json"]["principal"]["principal_id"]),
+        )
+        if source is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        limit = validate_page_limit(limit)
+        digest = canonical_sha256({
+            "session": session_id, "turn": turn_id, "principal": principal_identity_payload(principal),
+        })
+        kind = "SESSION_TURN_TRACE"
+        head = timestamp = None
+        sequence = 0
+        if cursor is not None:
+            encoded = decode_cursor(cursor, self._signer, tenant_id=self._tenant_id,
+                                    resource_kind=kind, filter_digest=digest).position
+            try:
+                head, time, sequence = json.loads(encoded)
+                timestamp = datetime.fromisoformat(time)
+                if timestamp.tzinfo is None or type(head) is not int or type(sequence) is not int or not 0 < sequence <= head:
+                    raise ValueError("invalid trace cursor")
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.CURSOR_INVALID) from error
+        head, events = await source.list_turn_trace_events(
+            turn_id=turn_id, high_water=head, after_timestamp=timestamp, after_sequence=sequence, limit=limit + 1,
+        )
+        items = []
+        for ordinal, event in events[:limit]:
+            if event.agent_run_id != turn_id or event.agent_conversation_id != session_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            payload = _trace_payload(event, agent_run_seq=1, depth=0)
+            if payload is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            items.append(SessionTurnTraceItem(turn_id, ordinal, payload))
+        next_cursor = None
+        if len(events) > limit:
+            last_sequence, last_event = events[limit - 1]
+            next_cursor = encode_cursor(
+                self._signer, tenant_id=self._tenant_id, resource_kind=kind, filter_digest=digest,
+                position=json.dumps((head, last_event.timestamp.isoformat(), last_sequence), separators=(",", ":")),
+            )
+        return Page(tuple(items), next_cursor)
 
     async def turn_result(
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,

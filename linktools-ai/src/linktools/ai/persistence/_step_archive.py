@@ -141,6 +141,7 @@ class _StepArchiveBatch(Protocol):
 
 if TYPE_CHECKING:
     from ._checkpoint_repositories import ToolRepositoryImpl
+    from ._session_turn_sql import SessionTurnKey, SqlSessionTurns
 
 
 @dataclass(slots=True)
@@ -2933,6 +2934,80 @@ class StateStepArchive(AgentRunStore):
                                                    observation=observation, archive=archive or PreparedArchive())
         await self._mutate(commit)
 
+    async def _append_canonical_turn_trace_in_transaction(
+        self,
+        transaction: StateTransaction,
+        run: AgentRunRecord,
+        events: Sequence[StepEvent],
+        *,
+        turns: "SqlSessionTurns",
+        key: "SessionTurnKey",
+        generation: int,
+    ) -> AgentRunRecord:
+        """Append trace facts only under the canonical turn's source fence.
+
+        The caller owns the grouped transaction and immutable run source.
+        Checkpoints, interaction bodies and transcript publication are not
+        part of this operation. Do not blindly retry an uncertain append.
+        """
+        if (self._runtime_domain is not PersistenceDomain.TRACE or self._trace_events is None
+                or (self._run_registrations is not None and not self._run_registrations.joins(self._store))
+                or active_state_transaction(self._store, writable=True) is not transaction
+                or run.agent_run_id != key.turn_id or run.agent_conversation_id != key.session_id
+                or any(event.agent_run_id != key.turn_id or event.agent_conversation_id != key.session_id
+                       for event in events)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if self._run_registrations is None or self._run_registrations.native is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        source = await self._run_registrations.get_in_transaction(transaction, key.turn_id)
+        if source is not None:
+            if (source.conversation_id != key.session_id or source.parent_run_id is not None
+                    or source.agent_name != run.agent_id):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            self.remember_run_registration(source)
+            from ._official_step_reader import OfficialStepReader
+            run = OfficialStepReader.project_run(source)
+        await self._sync_projection_in_transaction(
+            transaction, run, events=events, checkpoints=(),
+            canonical_turn=(turns, key, generation),
+        )
+        return run
+
+    async def _canonical_trace_frontier(self, transaction: StateTransaction, run_id: str) -> tuple[int, int]:
+        streams = self._stream(run_id, "event"), self._stream(run_id, "interaction")
+        values = await transaction.get_sequences(streams)
+        return values.get(streams[0], 0), values.get(streams[1], 0)
+
+    async def _append_canonical_turn_trace_terminal(
+        self,
+        transaction: StateTransaction,
+        run: AgentRunRecord,
+        events: Sequence[StepEvent],
+        *,
+        key: "SessionTurnKey",
+    ) -> AgentRunRecord:
+        """Join the caller's already-CASed canonical terminal mutation."""
+        if (self._runtime_domain is not PersistenceDomain.TRACE or self._trace_events is None
+                or self._run_registrations is None or self._run_registrations.native is None
+                or not self._run_registrations.joins(self._store)
+                or active_state_transaction(self._store, writable=True) is not transaction
+                or run.agent_run_id != key.turn_id or run.agent_conversation_id != key.session_id
+                or any(event.agent_run_id != key.turn_id or event.agent_conversation_id != key.session_id
+                       for event in events)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        source = await self._run_registrations.get_in_transaction(transaction, key.turn_id)
+        if source is not None:
+            if (source.conversation_id != key.session_id or source.parent_run_id is not None
+                    or source.agent_name != run.agent_id):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            self.remember_run_registration(source)
+            from ._official_step_reader import OfficialStepReader
+            run = OfficialStepReader.project_run(source)
+        await self._sync_projection_in_transaction(
+            transaction, run, events=events, checkpoints=(), canonical_terminal=True,
+        )
+        return run
+
     async def _sync_projection_in_transaction(
         self,
         transaction: StateTransaction,
@@ -2947,6 +3022,8 @@ class StateStepArchive(AgentRunStore):
         execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
         prefetch_keys: Sequence[bytes] = (),
+        canonical_turn: tuple["SqlSessionTurns", "SessionTurnKey", int] | None = None,
+        canonical_terminal: bool = False,
     ) -> bool:
         """Commit projection metadata and report whether its AgentRun was admitted."""
         self._ensure_open()
@@ -2963,15 +3040,16 @@ class StateStepArchive(AgentRunStore):
             ("checkpoint", checkpoint.stored, checkpoint.stored.state)
             for checkpoint in checkpoints
         )
-        execution_guard = await self._execution_history_guard_in_transaction(
-            transaction,
-            execution_id,
-            execution_guard,
-            producer_generation,
-            inserted_terminal=inserted_terminal,
-        )
+        if canonical_turn is not None:
+            turns, key, generation = canonical_turn
+            await turns.guard_step_in_transaction(transaction, key, generation=generation)
+        elif not canonical_terminal:
+            await self._execution_history_guard_in_transaction(
+                transaction, execution_id, execution_guard, producer_generation,
+                inserted_terminal=inserted_terminal,
+            )
         source_receipt = None
-        if self._native_events is not None:
+        if canonical_turn is None and not canonical_terminal and self._native_events is not None:
             source_receipt = await self._native_events.publish(transaction, events)
             run = self._native_events.resolve_run(run)
         owner_record, created = await self._ensure_run_with_head_in_transaction(
@@ -3012,6 +3090,10 @@ class StateStepArchive(AgentRunStore):
         high_waters = await transaction.reserve_sequences({
             stream: len(grouped[family]) for family, stream in streams.items()
         })
+        if events and (canonical_turn is not None or canonical_terminal):
+            first = high_waters[streams["event"]] - len(events)
+            events = tuple(replace(event, event_index=first + index) for index, event in enumerate(events))
+            grouped["event"] = list(events)
         for family in ("event", "checkpoint"):
             values = grouped[family]
             if not values:
@@ -3032,7 +3114,7 @@ class StateStepArchive(AgentRunStore):
                         fact_kind,
                         None,
                         kind,
-                        ((self._native_events.encode(value) if self._native_events is not None and family == "event" else None)
+                        ((self._native_events.encode(value) if canonical_turn is None and not canonical_terminal and self._native_events is not None and family == "event" else None)
                          or _encode_step(value)),
                     )
                 )
@@ -4205,6 +4287,31 @@ class StateStepArchive(AgentRunStore):
             return result
 
         return await self._store.read(read)
+
+    async def list_turn_trace_events(
+        self, *, turn_id: str, high_water: int | None, after_timestamp: datetime | None,
+        after_sequence: int, limit: int,
+    ) -> tuple[int, list[tuple[int, StepEvent]]]:
+        """Capture the exact canonical run and a bounded Trace page."""
+        require_no_run_history_lock("StateStepArchive.list_turn_trace_events")
+        if self._trace_events is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+
+        async def read(transaction: StateTransaction) -> tuple[int, list[tuple[int, StepEvent]]]:
+            head = high_water
+            if head is None:
+                head = await transaction.get_sequence(self._stream(turn_id, "event"))
+            facts = await self._trace_events.select(
+                transaction, turn_id, high_water=head, after_timestamp=after_timestamp,
+                after_sequence=after_sequence, limit=limit,
+            )
+            return head, [(fact.sequence, _decode_step(fact.data)) for fact in facts]
+
+        return await self._store.read(read)
+
+    @property
+    def has_turn_trace(self) -> bool:
+        return self._trace_events is not None
 
     async def _list_sql_trace_events(
         self, *, agent_run_id: str, event_high_water: int,

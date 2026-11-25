@@ -104,7 +104,7 @@ from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.runs import RuntimeAgentRunStore
-from ..persistence.runs import StagingAgentRunStore
+from ..persistence.runs import StagingAgentRunStore, StateStepArchive
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -888,7 +888,15 @@ async def _build_local_components(
             )
         )
         if turn_runner is not None:
+            from ..persistence.runs import ModelInteractionStateStepArchive
             from ._canonical_deferred_publication import bind_deferred_publication
+
+            trace_archive = run_store.trace_persistence.archive
+            session_group = state.conversation.sessions.state_store.storage_group
+            if (isinstance(trace_archive, ModelInteractionStateStepArchive)
+                    and state.plan.route(PersistenceDomain.TRACE).retention is StorageRetentionMode.DURABLE
+                    and all(member.storage_group is session_group for member in trace_archive.transaction_stores)):
+                turn_runner._trace_archive = trace_archive
 
             bind_deferred_publication(turn_runner, state.session_turns, state.checkpoint)
         session = RuntimeSessionService(
@@ -1055,6 +1063,7 @@ def _borrowed_runtime_history(
     pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
     pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
 ) -> "History":
+    trace_archive = run_store.trace_persistence.archive if enable_turn_sessions else None
     return History(
         service,
         tenant_id=tenant_id,
@@ -1062,6 +1071,7 @@ def _borrowed_runtime_history(
         events=state.execution.events,
         sessions=state.conversation.sessions,
         session_turn_reader=state.session_turn_reader if enable_turn_sessions else None,
+        session_trace_source=trace_archive if isinstance(trace_archive, StateStepArchive) else None,
         conversation=state.conversation,
         session_transcript_store=run_store.conversation_persistence,
         pending_session_execution=pending_session_execution,

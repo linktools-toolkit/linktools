@@ -992,6 +992,7 @@ def test_web_cli_provides_default_memory_tools_to_messages(monkeypatch: pytest.M
     from contextlib import asynccontextmanager
     from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
     from pydantic_ai.models.function import AgentInfo
+    from linktools.ai.runtime.turn_clients import TurnObserver
     import linktools.commands.ai.web as web_command
     import uvicorn
 
@@ -1031,20 +1032,36 @@ def test_web_cli_provides_default_memory_tools_to_messages(monkeypatch: pytest.M
                 created = await http.post("/api/sessions", headers=_HEADERS,
                     json={"session_id": "memory-session", "request_id": "create-memory-session"})
                 assert created.status_code == 201, created.text
+                runtime = runtimes[0]
                 for prompt in ("remember", "recall"):
-                    response = await http.post("/api/session/messages?session_id=memory-session", headers=_HEADERS,
-                        json={"prompt": prompt, "request_id": prompt})
-                    assert response.status_code == 202, response.text
-                    execution = await runtimes[0].executions.get(response.json()["execution_id"])
-                    result = (await execution.wait(timeout_seconds=10)).result
-                    assert result.status.value == "SUCCEEDED", result
-                    history = await http.get("/api/session?session_id=memory-session")
-                    turns = history.json()["timeline"]["items"]
-                    turn = next(item for item in turns if item["execution_id"] == execution.execution_id)
+                    with TurnObserver(
+                        runtime, "memory-session", runtime.default_principal, local_workspace=True,
+                    ) as live:
+                        response = await http.post("/api/session/messages?session_id=memory-session", headers=_HEADERS,
+                            json={"prompt": prompt, "request_id": prompt})
+                        assert response.status_code == 202 and set(response.json()) == {"turn_id"}, response.text
+                        turn_id = response.json()["turn_id"]
+                        async with asyncio.timeout(10):
+                            async for frame in live.events(turn_id):
+                                if frame["type"] != "terminal":
+                                    continue
+                                assert frame["state"] == "succeeded", frame
+                                result = frame["output"]
+                                break
+                            else:
+                                pytest.fail("Memory tool turn did not publish a terminal result")
+
+                    history = await http.get("/api/session", params={"session_id": "memory-session", "turn_id": turn_id})
+                    assert history.status_code == 200, history.text
+                    turn = history.json()
+                    assert turn["turn_id"] == turn_id and turn["conversation_committed"]
                     tool, = turn["process"]
                     assert tool["argument_preview"] == "web-notes.md"
+                    assert tool["status"] == "SUCCEEDED"
+                    assert "remembered from web" not in json.dumps(tool)
                     if prompt == "recall":
-                        assert result.output["text"].strip() == "remembered from web"
+                        assert result["text"].strip() == "remembered from web"
+                        assert _turn_text(turn).strip() == "remembered from web"
 
     monkeypatch.setattr(Runtime, "open", tracked_open)
     monkeypatch.setattr(common_command._ModelOptions, "create_model_binding", lambda _self: _Models(_UsageFunctionModel(respond)))

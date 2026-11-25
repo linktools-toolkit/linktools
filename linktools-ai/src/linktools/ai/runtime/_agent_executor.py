@@ -89,6 +89,7 @@ from ..capability import (
     validate_tool_metadata,
     ExecutionCapability,
     FileSystemCapability,
+    TraceCapability,
     MemoryCapability,
     ShellCapability,
     StepPersistenceCapability,
@@ -218,6 +219,9 @@ class _AgentRunScope:
     history_id: str | None = None
     memory_store: MemoryStore | None = None
     memory_tool_names: tuple[str, ...] = ()
+    trace_interaction_base: int = 0
+    trace_boundary: Callable[[], Awaitable[None]] | None = None
+    trace_auto_flush: bool = False
     plan_store_resolver: (
         Callable[[PydanticRunContext[object]], PlanningStore] | None
     ) = None
@@ -389,14 +393,16 @@ class AgentExecutor:
             )
         return None
 
-    def require_regenerable(self, binding: AgentBinding, *, canonical_step: bool = False) -> None:
+    def require_regenerable(
+        self, binding: AgentBinding, *, canonical_step: bool = False, canonical_trace: bool = False,
+    ) -> None:
         compiled = binding.compiled_agent
         policy = _runtime_feature_policy(compiled.runtime_contributions)
         if policy.memory_scope is not None and (not canonical_step or self._canonical_memory_store is None):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical memory requires a coowned Step store")
         if (compiled.selected_capabilities or compiled.skill_definitions
                 or compiled.mcp_servers or compiled.selected_subagents
-                or policy.restart_checkpoints != canonical_step or policy.durable_trace
+                or policy.restart_checkpoints != canonical_step or policy.durable_trace != canonical_trace
                 or policy.tool_responses is not None):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
         if compiled.selected_tools and not canonical_step:
@@ -437,6 +443,10 @@ class AgentExecutor:
         deferred_tool_results: DeferredToolResults | None = None,
         deferred_approvals: tuple[PendingDeferredCall, ...] = (),
         output_retries_used: int = 0,
+        capture_trace: Callable[[StagingAgentRunStore], None] | None = None,
+        trace_interaction_base: int = 0,
+        trace_boundary: Callable[[StagingAgentRunStore], Awaitable[None]] | None = None,
+        trace_auto_flush: bool = False,
     ) -> AgentExecutionOutcome:
         """Run a plain turn with no durable recorder or execution handoff."""
         if context.session_id is None:
@@ -445,9 +455,12 @@ class AgentExecutor:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, "No output capacity remains for this turn")
         if (canonical_step is None) != (tool_operations is None):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        self.require_regenerable(binding, canonical_step=canonical_step is not None)
+        self.require_regenerable(
+            binding, canonical_step=canonical_step is not None, canonical_trace=trace_boundary is not None,
+        )
+        staging = StagingAgentRunStore()
         store = RuntimeAgentRunStore(
-            StagingAgentRunStore(),
+            staging,
             conversation_archive=(InMemoryStepArchive(PersistenceDomain.CONVERSATION)
                                   if canonical_step is None else None),
             execution_archive=None,
@@ -470,6 +483,10 @@ class AgentExecutor:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             memory_store = self._canonical_memory_store(context.principal.tenant_id, context.execution_id, memory_scope)
             context = replace(context, memory_scope=memory_scope)
+        async def flush_trace() -> None:
+            assert trace_boundary is not None
+            await trace_boundary(staging)
+
         await store.initialize()
         try:
             outcome = await self.execute(_AgentRunScope(
@@ -483,6 +500,8 @@ class AgentExecutor:
                 repository_instruction_boundary=repository_instruction_boundary,
                 canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
                 output_retries_used=output_retries_used, deferred_approvals=deferred_approvals,
+                trace_interaction_base=trace_interaction_base,
+                trace_boundary=None if trace_boundary is None else flush_trace, trace_auto_flush=trace_auto_flush,
                 tool_effects="read_only" if canonical_step is None else "live",
                 memory_store=memory_store, memory_tool_names=memory_names if memory_store is not None else (),
             ))
@@ -490,8 +509,12 @@ class AgentExecutor:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")
             return outcome
         finally:
-            await store.preflight_close()
-            await store.close()
+            try:
+                if capture_trace is not None:
+                    capture_trace(staging)
+            finally:
+                await store.preflight_close()
+                await store.close()
 
     async def execute(self, scope: _AgentRunScope) -> AgentExecutionOutcome:
         binding = scope.binding
@@ -836,12 +859,13 @@ class AgentExecutor:
                         tenant_id=scope.context.principal.tenant_id,
                         execution_id=scope.context.execution_id,
                         agent_run_id=scope.agent_run_id,
-                        next_model_request_seq=interaction_high_water + 1,
+                        next_model_request_seq=max(interaction_high_water, scope.trace_interaction_base) + 1,
                     )
                     if scope.canonical_step is not None:
                         runtime_capabilities = (*(
                             capability for capability in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
-                            if type(capability) in (ExecutionCapability, FileSystemCapability)
+                            if (type(capability) in (ExecutionCapability, FileSystemCapability)
+                                or type(capability) is TraceCapability and scope.trace_boundary is not None)
                         ), scope.canonical_step)
                     elif scope.regenerable:
                         runtime_capabilities = tuple(
@@ -1247,6 +1271,8 @@ async def _materialize_agent(
         )
     )
     async def commit_history_boundary() -> None:
+        if scope.trace_auto_flush and scope.trace_boundary is not None:
+            await scope.trace_boundary()
         if isinstance(scope.run_store, RuntimeAgentRunStore):
             await scope.run_store.flush_execution_projection(
                 scope.agent_run_id,
@@ -1407,6 +1433,7 @@ async def _materialize_agent(
         model_journal=model_journal,
         model_request_recorder=model_observation.record_external_model_request,
         recorder=run_recorder,
+        canonical_trace_flush=scope.trace_boundary,
         budget=scope.budget,
     )
     existing_ids: set[str] = set()
