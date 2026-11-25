@@ -51,6 +51,8 @@ def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[
 EXECUTION_SHELL_KIND = "execution_shell"
 EXECUTION_AUTHORITY_COLUMNS = frozenset({
     "turn_slot_kind", "turn_slot_key", "turn_token", "turn_fence", "turn_expiry", "turn_revision",
+    "strict_turn_execution_id", "strict_turn_fence",
+    "turn_request_route", "turn_occupied_route", "turn_session_owner_id", "turn_receipt",
 })
 
 
