@@ -71,6 +71,13 @@ _SNAPSHOT_ADAPTER = TypeAdapter(ContinuableSnapshot)
 _BATCH_SIZE = 128
 _RUN_CACHE_SIZE = 128
 _RUN_CACHE_BYTES = 1024 * 1024
+_STEP_TABLE_NAMES = {
+    "runs": "ai_step_runs",
+    "events": "ai_step_events",
+    "snapshots": "ai_step_snapshots",
+    "messages": "ai_messages",
+    "sequences": "ai_message_sequences",
+}
 _EVENT_RUN_FIELDS = ("conversation_id", "parent_run_id", "agent_name", "metadata")
 _EVENT_SOURCE_COLUMNS = tuple(field.name for field in fields(StepEvent)) + (
     "outcome", "store_key", "run_fields", "body_sha256", "fields_sha256",
@@ -902,7 +909,7 @@ class SqlStepStore:
         runs = {}
         managed_starts = {}
         for name in ("runs", "events", "snapshots"):
-            table = metadata.tables[f"ai_step_{name}"]
+            table = metadata.tables[_STEP_TABLE_NAMES[name]]
             columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at"}
             seen = set()
             for row in getattr(backup, name):
@@ -1977,7 +1984,7 @@ class SqlStepStore:
         return NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"]), raw
 
     def _table(self, name: str) -> "Table":
-        return self._metadata.tables[f"ai_step_{name}"]
+        return self._metadata.tables[_STEP_TABLE_NAMES[name]]
 
     def _run_values(self, run_id: str) -> "dict[str, SqlValue]":
         validate_resource_id(run_id)

@@ -221,8 +221,8 @@ async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_rep
         event.remove(engine.sync_engine, "before_cursor_execute", fail_reference)
         assert await store.latest_snapshot(run_id="run") is None
         async with engine.connect() as connection:
-            for table in ("snapshots", "messages", "sequences"):
-                assert await connection.scalar(text(f"SELECT count(*) FROM ai_step_{table}")) == 0
+            for table in ("ai_step_snapshots", "ai_messages", "ai_message_sequences"):
+                assert await connection.scalar(text(f"SELECT count(*) FROM {table}")) == 0
         await store.save_snapshot(snapshot)
         assert await store.latest_snapshot(run_id="run") == snapshot
     finally:

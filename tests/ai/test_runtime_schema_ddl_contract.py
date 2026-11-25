@@ -525,15 +525,15 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
         "ai_state_operations": ("operation_key", "stream_key"),
     }
     raw_columns = {(name, column): 768 for name, columns in state_raw.items() for column in columns}
-    raw_columns.update({("ai_step_" + name, "store_key"): 274
-                        for name in ("runs", "events", "snapshots", "messages", "sequences")})
+    native_tables = ("ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_messages", "ai_message_sequences")
+    raw_columns.update({(name, "store_key"): 274 for name in native_tables})
     raw_columns.update({("ai_asset_entries", "asset_id"): 512, ("ai_objects", "object_key"): 1024})
     for (name, column_name), capacity in raw_columns.items():
         table = metadata.tables[name]
         column = table.c[column_name]
         assert column.type.length == capacity, (name, column_name)
         assert all(column_name not in index.columns for index in table.indexes), (name, column_name)
-        if name.startswith(("ai_state_", "ai_step_")):
+        if name.startswith("ai_state_") or name in native_tables:
             assert column.type.compile(dialect=dialect) == {
                 "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
             }[dialect_name]

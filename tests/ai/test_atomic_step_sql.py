@@ -123,8 +123,8 @@ async def test_compound_failure_rolls_back_every_record_and_body_receipt(atomic_
     assert not store._message_proofs
     assert not store._message_content._known_nodes
     async with engine.connect() as connection:
-        for table in ("runs", "events", "snapshots", "sequences", "messages"):
-            assert await connection.scalar(text(f"SELECT count(*) FROM ai_step_{table}")) == 0
+        for table in ("ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_message_sequences", "ai_messages"):
+            assert await connection.scalar(text(f"SELECT count(*) FROM {table}")) == 0
     await store.commit_step(run=run, events=events, snapshot=snapshot)
     assert traffic.message_rows == 2
     assert await store.latest_snapshot(run_id="run") == snapshot

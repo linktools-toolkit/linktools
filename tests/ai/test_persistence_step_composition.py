@@ -262,7 +262,9 @@ async def test_native_factory_uses_execution_route_in_split_plan(tmp_path: Path)
         assert connection.execute("SELECT run_id FROM ai_step_runs").fetchall() == [("routed",)]
     with sqlite3.connect(conversation) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {name for name in tables if name.startswith("ai_step_")} == {
+        step_tables = {name for name in tables if name.startswith("ai_step_")}
+        message_tables = {"ai_messages", "ai_message_sequences"}
+        assert step_tables | (tables & message_tables) == {
             "ai_step_runs", "ai_messages", "ai_message_sequences",
             "ai_step_run_admissions", "ai_step_tool_operations",
         }

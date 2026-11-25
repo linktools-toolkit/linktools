@@ -846,7 +846,9 @@ async def _build_local_components(
             values = await prepare_runtime_capabilities(binding.compiled_agent)
             steps = tuple(leaf for value in values for leaf in runtime_feature_leaves(value)
                           if isinstance(leaf, StepPersistence))
-            if len(steps) != 1 or type(steps[0]) is not AtomicStepPersistence or type(steps[0].store) is not SqlStepStore:
+            native = AtomicStepPersistence.adapt(steps[0]) if len(steps) == 1 else None
+            if (type(native) is not AtomicStepPersistence or type(native.store) is not SqlStepStore
+                    or native.store.store_key != SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical Step requires native SQL persistence")
             tools = RuntimeToolOperationBridge(
                 state.checkpoint.tools, state.object_store(PersistenceDomain.CHECKPOINT),
@@ -855,10 +857,10 @@ async def _build_local_components(
                 background_tasks=set(), fresh_execution=generation == 1,
             )
             store = RuntimeStepStore.for_canonical_turn(
-                steps[0].store, tools, turn_store=state.session_turns, state_store=state.conversation.sessions.state_store,
+                native.store, tools, turn_store=state.session_turns, state_store=state.conversation.sessions.state_store,
                 key=key, generation=generation, run_id=key.turn_id,
             )
-            return replace(steps[0], store=store), tools
+            return replace(native, store=store), tools
 
         turn_runner = (
             None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(
