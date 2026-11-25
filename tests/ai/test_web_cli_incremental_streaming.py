@@ -23,6 +23,8 @@ def test_web_command_delivers_text_before_model_completion(monkeypatch: pytest.M
     entered = asyncio.Event()
     completed = asyncio.Event()
     first_text = asyncio.Event()
+    subscribed = asyncio.Event()
+    terminal = asyncio.Event()
     frames = []
 
     async def model(messages, info):
@@ -40,10 +42,8 @@ def test_web_command_delivers_text_before_model_completion(monkeypatch: pytest.M
             async with client(self.config.app) as http:
                 response = await http.post('/api/sessions', json={'session_id': 'session', 'request_id': 'create'}, headers=_HEADERS)
                 assert response.status_code == 201, response.text
-                response = await http.post('/api/session/messages?session_id=session', json={'prompt': 'hello', 'request_id': 'turn'}, headers=_HEADERS)
-                assert response.status_code == 202, response.text
-                identity = response.json()['execution_id']
-                path = f'/api/executions/{identity}/events'
+                path = '/api/session/events'
+                streamed_ids = set()
                 requested = False
                 disconnect = asyncio.Event()
 
@@ -65,25 +65,38 @@ def test_web_command_delivers_text_before_model_completion(monkeypatch: pytest.M
                             if not line.startswith('data: '):
                                 continue
                             payload = json.loads(line[6:])
-                            event = payload.get('item', {}).get('event', {})
-                            if event.get('event_type') == 'ASSISTANT_TEXT_DELTA':
-                                assert payload['item']['depth'] == 0
-                                assert event['payload']['text']
+                            if payload.get('type') == 'snapshot':
+                                assert payload['session']['session_id'] == 'session'
+                                subscribed.set()
+                            elif payload.get('type') == 'delta' and payload.get('delta_kind') == 'text':
+                                streamed_ids.add(payload['turn_id'])
+                                assert payload['text']
                                 assert not release.is_set() or first_text.is_set()
                                 first_text.set()
+                            elif payload.get('type') == 'terminal':
+                                streamed_ids.add(payload['turn_id'])
+                                assert payload['state'] == 'succeeded'
+                                terminal.set()
 
-                scope = {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.0'}, 'method': 'GET', 'scheme': 'http', 'path': path, 'raw_path': path.encode(), 'query_string': b'', 'headers': [(b'host', b'127.0.0.1:8765')], 'server': ('127.0.0.1', 8765), 'client': ('127.0.0.1', 12345)}
+                scope = {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.0'}, 'method': 'GET', 'scheme': 'http', 'path': path, 'raw_path': path.encode(), 'query_string': b'session_id=session', 'headers': [(b'host', b'127.0.0.1:8765')], 'server': ('127.0.0.1', 8765), 'client': ('127.0.0.1', 12345)}
                 observing = asyncio.create_task(self.config.app(scope, receive, send))
                 try:
+                    await asyncio.wait_for(subscribed.wait(), 5)
+                    response = await http.post('/api/session/messages?session_id=session', json={'prompt': 'hello', 'request_id': 'turn'}, headers=_HEADERS)
+                    assert response.status_code == 202, response.text
+                    identity = response.json()['turn_id']
                     await asyncio.wait_for(entered.wait(), 5)
                     await asyncio.wait_for(first_text.wait(), 5)
                     assert not completed.is_set()
                     assert not release.is_set()
                     release.set()
-                    await asyncio.wait_for(observing, 10)
+                    await asyncio.wait_for(terminal.wait(), 10)
                     assert completed.is_set()
-                    assert 'OBSERVATION_FAILED' not in ''.join(frames)
-                    assert 'event: snapshot' in ''.join(frames)
+                    assert streamed_ids == {identity}
+                    assert 'event: session_error' not in ''.join(frames)
+                    assert 'event: turn' in ''.join(frames)
+                    disconnect.set()
+                    await asyncio.wait_for(observing, 5)
                 finally:
                     release.set()
                     disconnect.set()

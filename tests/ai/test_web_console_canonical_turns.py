@@ -4,8 +4,10 @@
 
 import asyncio
 import json
+from contextlib import AsyncExitStack
 
 import pytest
+from pydantic_ai_harness.step_persistence import StepPersistence
 
 pytest.importorskip("starlette")
 
@@ -15,7 +17,7 @@ from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.web import create_app
 
-from ._runtime_test_helpers import RuntimeUsageModels, model_features, native_checkpoint
+from ._runtime_test_helpers import RuntimeUsageModels, model_features
 from .test_web_console import _HEADERS, client
 
 
@@ -28,14 +30,18 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
 
     features = RuntimeFeatures("web-canonical")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    if step_enabled:
-        features.capability(native_checkpoint(), scope="runtime")
-
-    async with (
-        Persistence.open("web-canonical", storage=PersistenceStorage.from_root(tmp_path)) as state,
-        Runtime.open(persistence=state, features=model_features(RuntimeUsageModels(), features),
-                     authorization=WorkspacePolicy()) as runtime,
-    ):
+    async with AsyncExitStack() as stack:
+        state = await stack.enter_async_context(Persistence.open(
+            "web-canonical", storage=PersistenceStorage.from_root(tmp_path),
+        ))
+        if step_enabled:
+            native = await state.create_step_store()
+            stack.push_async_callback(native.close)
+            features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+        runtime = await stack.enter_async_context(Runtime.open(
+            persistence=state, features=model_features(RuntimeUsageModels(), features),
+            authorization=WorkspacePolicy(),
+        ))
         app = create_app(runtime=runtime, local_workspace=True)
         async with client(app) as http:
             settings = await http.get("/api/config")
@@ -74,7 +80,8 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
                     accepted = await http.post("/api/session/messages?session_id=chat", headers=_HEADERS, json={
                         "prompt": "question", "agent_id": "default", "request_id": "send",
                     })
-                    assert accepted.status_code == 202 and set(accepted.json()) == {"turn_id"}
+                    assert accepted.status_code == 202, accepted.text
+                    assert set(accepted.json()) == {"turn_id"}
                     turn_id = accepted.json()["turn_id"]
                     seen = []
                     while True:

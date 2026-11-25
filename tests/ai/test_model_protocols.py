@@ -337,7 +337,7 @@ def test_model_declaration_inspection_does_not_open_connections(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("factory,api,name", PROTOCOLS)
-async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_path, factory, api, name):
+async def test_strict_session_and_durable_web_model_content(monkeypatch, tmp_path, factory, api, name):
     from linktools.ai.capability import TraceCapability, ExecutionCapability
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from linktools.ai.persistence import PersistenceStorage
@@ -357,9 +357,11 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
     async with Persistence.open('default', storage=storage) as persistence_341, Runtime.open(persistence=persistence_341, features=features) as runtime:
         session = await runtime.agents.get("old").create_session("session")
+        # This is the explicit SDK Execution-backed session, not the Web
+        # Conversation store. The model wire still uses its public HTTP API.
+        meta = await runtime.history.inspect_session("session", principal=runtime.default_principal)
+        assert meta.session_id == "session"
         async with _client(create_app(runtime=runtime)) as http:
-            meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
-            assert meta.status_code == 200, meta.text
             execution = await session.start("Hello", thinking=False)
             result = await execution.wait()
             assert result.result.status.value == "SUCCEEDED", result
@@ -377,10 +379,8 @@ async def test_runtime_web_session_and_durable_model_content(monkeypatch, tmp_pa
     replacement.capability(TraceCapability(), scope="runtime")
     replacement.capability(ExecutionCapability(), scope="runtime")
     async with Persistence.open('default', storage=storage) as persistence_362, Runtime.open(persistence=persistence_362, features=replacement) as runtime:
-        async with _client(create_app(runtime=runtime)) as http:
-            meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
-            assert meta.status_code == 200, meta.text
-            assert meta.json()["session"]["session_id"] == "session"
+        meta = await runtime.history.inspect_session("session", principal=runtime.default_principal)
+        assert meta.session_id == "session"
 
 
 @pytest.mark.parametrize('kind,api,model_name', PROTOCOLS)

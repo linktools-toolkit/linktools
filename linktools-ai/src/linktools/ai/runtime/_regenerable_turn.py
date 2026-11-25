@@ -805,7 +805,11 @@ class _RegenerableTurnRunner:
                     accepted.set_exception(error)
                 else:
                     self._gap(key)
-                    _logger.error("Regenerable turn producer stopped: turn=%s error=%s", key.turn_id, type(error).__name__)
+                    _logger.error(
+                        "Regenerable turn producer stopped: turn=%s code=%s error=%s",
+                        key.turn_id, error.code.value if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR.value,
+                        type(error).__name__,
+                    )
 
         self._spawn_owned(produce, name="linktools-regenerable-turn")
         try:

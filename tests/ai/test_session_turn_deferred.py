@@ -57,7 +57,16 @@ async def test_canonical_deferred_outcome_uses_original_turn_and_pending_leaf(
         )
         key = SessionTurnKey("chat", turn_id)
         turns = persistence.session_turns
-        paused = await _wait_for_committed(lambda: turns.get_turn(key), lambda row: row is not None and row["state"] == "waiting")
+        async def read_pause():
+            row = await turns.get_turn(key)
+            if row is not None and row["state"] in ("failed", "cancelled", "succeeded"):
+                pytest.fail(
+                    f"deferred turn settled as {row['state']}: {row['result_json']!r}; "
+                    f"tool invocations={len(entries)}"
+                )
+            return row
+
+        paused = await _wait_for_committed(read_pause, lambda row: row is not None and row["state"] == "waiting")
         assert paused["generation"] == 1 and paused["lease_until"] is None
         assert (await turns.get_session("chat"))["active_turn_id"] == turn_id.encode()
         assert (await turns.get_session("chat"))["last_turn_no"] == 0
