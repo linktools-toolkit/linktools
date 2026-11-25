@@ -2943,7 +2943,7 @@ class StateStepArchive(AgentRunStore):
         turns: "SqlSessionTurns",
         key: "SessionTurnKey",
         generation: int,
-    ) -> AgentRunRecord:
+    ) -> AgentRunRecord | None:
         """Append trace facts only under the canonical turn's source fence.
 
         The caller owns the grouped transaction and immutable run source.
@@ -2960,13 +2960,15 @@ class StateStepArchive(AgentRunStore):
         if self._run_registrations is None or self._run_registrations.native is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         source = await self._run_registrations.get_in_transaction(transaction, key.turn_id)
-        if source is not None:
-            if (source.conversation_id != key.session_id or source.parent_run_id is not None
-                    or source.agent_name != run.agent_id):
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            self.remember_run_registration(source)
-            from ._official_step_reader import OfficialStepReader
-            run = OfficialStepReader.project_run(source)
+        if source is None:
+            # Managed Step owns initial registration; Trace can get here first.
+            return None
+        if (source.conversation_id != key.session_id or source.parent_run_id is not None
+                or source.agent_name != run.agent_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self.remember_run_registration(source)
+        from ._official_step_reader import OfficialStepReader
+        run = OfficialStepReader.project_run(source)
         await StateStepArchive._sync_projection_in_transaction(
             self, transaction, run, events=events, checkpoints=(),
             canonical_turn=(turns, key, generation),

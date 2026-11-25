@@ -1292,10 +1292,14 @@ class _RegenerableTurnRunner:
                         transaction.transaction(trace_archive.state_store), batch.run, batch.events,
                         turns=self._store, key=turn.key, generation=turn.generation,
                     )
+                    if run is None:
+                        return False
                     await append(transaction, run)
+                    return True
 
                 try:
-                    await group.mutate(stores, publish)
+                    if not await group.mutate(stores, publish):
+                        return
                 except Exception as error:
                     # Record implementation location only: provider/tool errors
                     # may carry prompts, credentials or raw arguments.

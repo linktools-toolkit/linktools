@@ -16,6 +16,7 @@ from linktools.ai.persistence._session_turn_sql import (
     SessionTurnKey,
     SqlSessionTurns,
 )
+from linktools.ai.persistence._step_schema import native_message_sql_tables
 from linktools.ai.storage import create_sql_storage_context
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import event, func, select
@@ -171,8 +172,9 @@ async def test_takeover_fences_old_writer_and_cancel_precedes_success(store):
     assert (await turns.get_session("chat"))["active_turn_id"] == b"turn"
     assert await turns.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
     assert (await turns.get_turn(key))["state"] == "cancelled"
+    sequences = native_message_sql_tables()["ai_message_sequences"]
     async with engine.connect() as connection:
-        assert (await connection.execute(select(func.count()).select_from(metadata.tables["ai_message_sequences"]))).scalar_one() == 0
+        assert (await connection.execute(select(func.count()).select_from(sequences))).scalar_one() == 0
     assert await turns.read_context_range("chat", after=0, through=1) == ()
 
 

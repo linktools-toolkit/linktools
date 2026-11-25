@@ -21,7 +21,7 @@ from .test_web_console import _HEADERS, _turn_text, client
 
 
 @pytest.mark.asyncio
-async def test_default_local_web_memory_survives_runtime_and_session_reopen(tmp_path):
+async def test_default_local_web_memory_survives_runtime_and_session_reopen(tmp_path, caplog):
     workspace = Workspace.initialize(tmp_path)
     remembered = "stored by the first runtime"
     seen = []
@@ -54,7 +54,13 @@ async def test_default_local_web_memory_survives_runtime_and_session_reopen(tmp_
                     async with asyncio.timeout(15):
                         async for frame in observer.events(turn_id):
                             if frame["type"] == "terminal":
-                                assert frame["state"] == "succeeded", frame
+                                if frame["state"] != "succeeded":
+                                    source = next((record.getMessage() for record in reversed(caplog.records)
+                                                   if record.name == "linktools.ai.runtime._regenerable_turn"
+                                                   and record.msg.startswith("Canonical turn failed:")
+                                                   and record.args and record.args[0] == turn_id), None)
+                                    pytest.fail(f"Memory turn failed: state={frame['state']}, "
+                                                f"code={frame.get('error_code')}, source={source}")
                                 break
                         else:
                             pytest.fail("The turn did not publish a terminal frame")

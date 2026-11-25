@@ -50,7 +50,7 @@ async def test_canonical_budget_guards_effect_and_replayed_request_does_not_debi
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("chat", principal=principal)
         turn_id = await runtime.sessions.start_turn(
-            "chat", "work", agent_id="default", principal=principal, idempotency_key="same-send", budget=limits,
+            "chat", "work", agent="default", principal=principal, idempotency_key="same-send", budget=limits,
         )
         key = SessionTurnKey("chat", turn_id)
         terminal = await _wait_for_committed(
@@ -74,12 +74,12 @@ async def test_canonical_budget_guards_effect_and_replayed_request_does_not_debi
     async with _runtime(database, model, work, authorization=policy) as (runtime, persistence, _steps):
         principal = runtime.default_principal
         assert await runtime.sessions.start_turn(
-            "chat", "work", agent_id="default", principal=principal, idempotency_key="same-send", budget=limits,
+            "chat", "work", agent="default", principal=principal, idempotency_key="same-send", budget=limits,
         ) == turn_id
         for changed in (RunBudget(tool_calls=limit + 1, model_requests=3), None):
             with pytest.raises(AIError) as conflict:
                 await runtime.sessions.start_turn(
-                    "chat", "work", agent_id="default", principal=principal, idempotency_key="same-send", budget=changed,
+                    "chat", "work", agent="default", principal=principal, idempotency_key="same-send", budget=changed,
                 )
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert await persistence.execution.budgets.read("turn:" + turn_id) == usage

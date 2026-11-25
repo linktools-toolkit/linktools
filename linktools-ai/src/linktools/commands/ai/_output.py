@@ -17,7 +17,6 @@ from linktools.cli import CommandError
 from linktools.core import environ
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.session import ToolProcessItem
 
 if TYPE_CHECKING:
     from linktools.ai.execution import Execution, ExecutionResult, ExecutionTreeEvent
@@ -60,6 +59,7 @@ async def _emit_session_result(
     runtime: "Runtime", prompt: str, session_id: str, as_json: bool, thinking: bool | None,
 ) -> int:
     from linktools.ai.runtime.turn_clients import TurnObserver
+    from linktools.ai.session import ToolProcessItem
 
     principal = runtime.default_principal
     try:
