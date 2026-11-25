@@ -392,13 +392,14 @@ function ordinaryOccupancy(watch, revision, turn, lastTurn) {
   if(Number.isSafeInteger(lastTurn))watch.snapshot.last_turn_no=lastTurn;
   if(state.session && revision>=state.session.revision)Object.assign(state.session,watch.snapshot);
 }
-async function catchUpOrdinary(watch) {
-  watch.needsCatchUp=true;
+async function catchUpOrdinary(watch, through=null) {
+  if(through===null)watch.needsCatchUp=true;
+  else watch.targetHead=Math.max(watch.targetHead || 0,through);
   if(watch.catchUp)return watch.catchUp;
   const current=()=>sessionWatch===watch && state.selectedSession===watch.id;
   const read=(async()=>{
-    while(current() && watch.needsCatchUp){
-      watch.needsCatchUp=false;
+    while(current() && (watch.needsCatchUp || watch.targetHead>watch.committedThrough)){
+      watch.needsCatchUp=false;watch.targetHead=0;
       await readOrdinaryGap(watch,current);
     }
   })();
@@ -535,7 +536,7 @@ function watchOrdinarySession(id) {
       }
       watch.readActive();
       if(watch.committedThrough!==null && watch.snapshot?.last_turn_no>watch.committedThrough)
-        void catchUpOrdinary(watch).catch(showError);
+        void catchUpOrdinary(watch,watch.snapshot.last_turn_no).catch(showError);
       return;
     }
     if(frame.type==='gap'){void catchUpOrdinary(watch).catch(showError);return;}
@@ -574,7 +575,12 @@ function watchOrdinarySession(id) {
       const bufferedGeneration=watch.activeRead?.id===frame.turn_id ? watch.activeRead.generation : 0;
       if(Math.max(previous?.liveGeneration || 0,bufferedGeneration)>frame.generation)return;
       ordinaryOccupancy(watch,frame.revision,null,frame.turn_no);
-      if(frame.turn_no===(watch.committedThrough ?? 0)+1)watch.committedThrough=frame.turn_no;
+      const previousHead=watch.committedThrough;
+      if(frame.turn_no===(previousHead ?? 0)+1)watch.committedThrough=frame.turn_no;
+      else if(previousHead!==null && frame.turn_no>previousHead+1)
+        // A newer terminal can arrive while a reconnect page is in flight.
+        // Only a jump means there is another missing range to reconcile.
+        void catchUpOrdinary(watch,frame.turn_no).catch(showError);
       const status=ordinaryStatus(frame.status ?? frame.state),items=frame.items || [],process=frame.process || [];
       const interruptions=(status==='FAILED' || status==='CANCELLED') && !items.length && !process.length
         && previous?.liveGeneration===frame.generation;
@@ -967,7 +973,8 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
         renderSessionHeader();renderConversation();setDisabled();renderList();
         if(sessionWatch?.ready){
           sessionWatch.readActive();
-          if(sessionWatch.snapshot?.last_turn_no>sessionWatch.committedThrough)void catchUpOrdinary(sessionWatch).catch(showError);
+          if(sessionWatch.snapshot?.last_turn_no>sessionWatch.committedThrough)
+            void catchUpOrdinary(sessionWatch,sessionWatch.snapshot.last_turn_no).catch(showError);
         }
         if(focusComposer && generation===state.generation)$('prompt').focus();
         return;
