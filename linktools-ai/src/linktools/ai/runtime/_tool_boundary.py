@@ -42,7 +42,9 @@ from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
 from ..model.messages import bind_tool_return_attachments
 from ._harness import bind_tool_reference_origins
-from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
+from ._tool import (
+    RuntimeToolOperationBridge, TOOL_CAPABILITY_REF_METADATA_KEY, ToolOperationBridge, tool_capability_ref,
+)
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
     ToolMetricContext,
@@ -51,15 +53,6 @@ from ._tool_metrics import (
 
 if TYPE_CHECKING:
     from ..capability import RunCallbacks
-
-
-TOOL_CAPABILITY_REF_METADATA_KEY = "linktools.ai.capability_ref"
-
-
-def tool_capability_ref(tool: ToolDefinition) -> CapabilityRef | None:
-    """Read the execution identity carried by the provided native definition."""
-    value = (tool.metadata or {}).get(TOOL_CAPABILITY_REF_METADATA_KEY)
-    return None if value is None else CapabilityRef.from_payload(value)
 
 
 def is_instruction_file_read(

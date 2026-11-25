@@ -59,6 +59,15 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ai.runtime.tool")
 
 
+TOOL_CAPABILITY_REF_METADATA_KEY = "linktools.ai.capability_ref"
+
+
+def tool_capability_ref(tool: ToolDefinition) -> CapabilityRef | None:
+    """Read the execution identity carried by the provided native definition."""
+    value = (tool.metadata or {}).get(TOOL_CAPABILITY_REF_METADATA_KEY)
+    return None if value is None else CapabilityRef.from_payload(value)
+
+
 async def settle_canonical_deferred_leaf(
     repository: ToolStateRepository, *, checkpoint_objects: ObjectStore, namespace: str, tenant_id: str,
     turn_id: str, generation: int, pending: "PendingDeferredCall", resolution: ApprovalRecord | ExternalCallRecord,
@@ -450,7 +459,6 @@ class RuntimeToolOperationBridge:
 
     def _capture_split_approval(self, call: ToolCallPart, tool_def: ToolDefinition, args: dict[str, Any]) -> None:
         from ..capability import tool_effect_policy_from_metadata
-        from ._tool_boundary import tool_capability_ref
 
         if tool_def.kind != "unapproved" or self._split_approval_ref is None:
             return
