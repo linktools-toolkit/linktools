@@ -416,7 +416,9 @@ class SqlTurnRows:
                 joined = s.outerjoin(a, linked)
                 conditions = (self._owns(s), self._session(s, address))
         else:
-            joined = a.outerjoin(s, linked)
+            # Marked standalone admissions already own the request address.
+            # Do not probe a legacy slot to confirm an exact receipt or owner.
+            joined = a.outerjoin(s, and_(a.c.standalone_idle.is_(None), linked))
             predicate = (a.c.execution_id == self._key(identity, TURN_EXECUTION_MAX_BYTES) if route == "execution"
                          else and_(a.c.route_kind == ACTIVE_REQUEST, a.c.route_key == turn_hex(identity, TURN_REQUEST_MAX_BYTES)))
             conditions = (self._owns(a), predicate)
