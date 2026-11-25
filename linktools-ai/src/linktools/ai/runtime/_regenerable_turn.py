@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from ..agent import AgentBinding
     from ..capability.steps import AtomicStepPersistence
     from ._tool import RuntimeToolOperationBridge
-    from ..core import AuthorizationPolicy, PromptLimits, ThinkingValue
+    from ..core import AuthorizationPolicy, CorrelationData, PromptLimits, ThinkingValue
     from ..inputs import ExecutionInputMaterializer
     from ..spec import RepositoryInstructionResolver
     from ..workspace import Workspace
@@ -343,6 +343,7 @@ class _RegenerableTurnRunner:
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
         request_key: str, prompt: str, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
         files: Sequence[str] = (), session_context: SessionContext = "all", output: type[BaseModel] | None = None,
+        correlation: CorrelationData | None = None,
     ) -> str:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
@@ -363,6 +364,7 @@ class _RegenerableTurnRunner:
 
         files = normalize_input_files(files)
         output_binding = bind_output(output)
+        effective_correlation = {} if correlation is None else dict(correlation)
 
         async def replay() -> str | None:
             prior = await self._store.find_request(session_id, request_key)
@@ -383,6 +385,7 @@ class _RegenerableTurnRunner:
                 request["prompt"] != prompt or request["principal"] != asdict(principal)
                 or request["thinking"] != thinking or prior_files != normalized_files
                 or request.get("session_context", "all") != session_context
+                or request.get("correlation", {}) != effective_correlation
                 or prior["agent_id"] != agent_id
                 or prior["output_mode"] != output_binding.mode
                 or prior["output_schema"] != output_binding.schema_definition
@@ -405,7 +408,7 @@ class _RegenerableTurnRunner:
         cwd = config.get("cwd")
         context = AgentContext(
             app, principal, namespace, session_id, key.turn_id, config.get("metadata", {}),
-            agent_id=agent_id,
+            agent_id=agent_id, correlation=effective_correlation,
         )
         try:
             if await self.start(
@@ -585,10 +588,13 @@ class _RegenerableTurnRunner:
                 if instruction_resolver is None:
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted instruction policy is unavailable")
                 instruction_resolver.validate(repository_instructions)
-            context = AgentContext(
-                app, admitted, namespace, key.session_id, key.turn_id, request["session_metadata"],
-                agent_id=binding.compiled_agent.spec.id,
-            )
+            try:
+                context = AgentContext(
+                    app, admitted, namespace, key.session_id, key.turn_id, request["session_metadata"],
+                    agent_id=binding.compiled_agent.spec.id, correlation=request.get("correlation", {}),
+                )
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             model_prompt = await self._restore_prompt(prompt, stored)
             continuation = deferred_results = None
             completed_checkpoint = False
@@ -909,6 +915,8 @@ class _RegenerableTurnRunner:
         }
         if session_context == "current_turn":
             request["session_context"] = session_context
+        if context.correlation:
+            request["correlation"] = dict(context.correlation)
         model_prompt = None
         attachments = ()
         input_size = len(prompt.encode("utf-8"))

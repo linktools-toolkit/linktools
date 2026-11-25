@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn, SessionService, SessionContext, normalize_session_context
 from ..agent import AgentBindingContract
 from ..core import (
-    AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, normalize_thinking,
+    AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, normalize_thinking, overlay_correlation,
     validate_agent_id, validate_idempotency_key, validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
@@ -396,6 +396,7 @@ class RuntimeSessions(Generic[AppT]):
         idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
         session_context: SessionContext = "all",
         output: "type[BaseModel] | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
     ) -> str:
         runner, runtime = self._require_turn_sessions()
         resolver = runtime._binding_resolver
@@ -413,6 +414,7 @@ class RuntimeSessions(Generic[AppT]):
             resolver=resolver, request_key=idempotency_key, limits=PromptLimits(),
             event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking), files=files, output=output,
             session_context=normalize_session_context(session_context),
+            correlation=overlay_correlation(runtime.correlation, correlation),
         )
 
     async def cancel_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
