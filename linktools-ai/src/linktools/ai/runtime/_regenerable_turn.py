@@ -443,21 +443,18 @@ class _RegenerableTurnRunner:
             if remaining < 0:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
             history: list[ModelMessage] = []
-            if through > after:
-                positions = await self._store.history(
-                    key.session_id, through=through, limit=128, after=after, lineage=lineage,
-                )
-                if len(positions) != through - after:
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted context range is no longer available")
-                for position in positions:
-                    if position["state"] == "succeeded":
-                        prior = position["request_json"]
-                        prior_input = self._stored_input(prior)
-                        remaining -= self._input_bytes(prior["prompt"], prior_input) + len(canonical_json_bytes(position["result_json"]))
-                        if remaining < 0:
-                            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
-                        restored = await self._restore_prompt(prior["prompt"], prior_input)
-                        history.extend(decode_regenerable_turn(restored, position["result_json"]))
+            positions = await self._store.read_context_range(
+                key.session_id, through=through, after=after, lineage=lineage,
+                missing=ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            )
+            for position in positions:
+                prior = position.request
+                prior_input = self._stored_input(prior)
+                remaining -= self._input_bytes(prior["prompt"], prior_input) + len(canonical_json_bytes(position.result))
+                if remaining < 0:
+                    raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+                restored = await self._restore_prompt(prior["prompt"], prior_input)
+                history.extend(decode_regenerable_turn(restored, position.result))
             contract = AgentBindingContract.from_payload(request["binding"])
             binding = await resolver.restore(contract)
             self._executor.require_regenerable(binding)

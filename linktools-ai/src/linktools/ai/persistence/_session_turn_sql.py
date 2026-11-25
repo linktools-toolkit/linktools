@@ -255,8 +255,6 @@ class SqlSessionTurnReader:
         self, session_id: str, *, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
     ) -> tuple[SessionContextTurn, ...]:
         """Read bounded candidates after the caller authorizes the current session head."""
-        from sqlalchemy import case, select, type_coerce
-
         start = max(0, through - _CONTEXT_POSITIONS)
         cached = self._recent.get(session_id)
         if cached is not None and cached.after <= start <= cached.through <= through:
@@ -270,6 +268,22 @@ class SqlSessionTurnReader:
             turns = ()
         if after == through:
             return turns
+
+        turns += await self.read_context_range(session_id, after=after, through=through, lineage=lineage)
+        self._remember_context(session_id, after=start, through=through, turns=turns)
+        return turns
+
+    async def read_context_range(
+        self, session_id: str, *, after: int, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
+        missing: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR,
+    ) -> tuple[SessionContextTurn, ...]:
+        """Read an exact finalized interval, omitting non-success bodies."""
+        from sqlalchemy import case, select, type_coerce
+
+        if not 0 <= through - after <= _CONTEXT_POSITIONS or after < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted context range is invalid")
+        if after == through:
+            return ()
 
         columns = self._turns.c
         succeeded = columns.state == "succeeded"
@@ -287,13 +301,11 @@ class SqlSessionTurnReader:
         async with self._context.engine.connect() as connection:
             rows = (await connection.execute(statement)).mappings().all()
         if len(rows) != through - after:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The finalized session context range is incomplete")
-        turns += tuple(
+            raise AIError(missing, "The finalized session context range is incomplete")
+        return tuple(
             self._context_turn(row["turn_no"], row["prompt"], row["stored_input"], row["result_json"])
             for row in rows if row["state"] == "succeeded"
         )
-        self._remember_context(session_id, after=start, through=through, turns=turns)
-        return turns
 
     @staticmethod
     def _context_turn(turn_no: int, prompt: str, stored_input: JsonValue, result: JsonValue) -> SessionContextTurn:
