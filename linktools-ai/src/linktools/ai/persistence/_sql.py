@@ -1466,11 +1466,11 @@ class _SqlTransaction:
                     self._metadata, self._store_key, scope, coowned=not coowned,
                 )
             fence = (target["lease_fence"] or 0) + 1
-            initial_claim = coowned and publish is not None and not retire
+            initial_claim = coowned and not retire
             for key in sorted(set(protected) | {session}):
-                # The first grouped claim publishes the idle slot, Execution,
-                # and receipt atomically; no other reader sees this pointer
-                # before its source record exists.
+                # A fresh co-owned claim can bind in its mandatory slot guard,
+                # whether this transaction publishes an Execution or stages its
+                # hidden shell. The slot, control and receipt commit together.
                 bind = (execution_id, fence) if initial_claim and key == session else None
                 if key not in protected:
                     await self._execute(source.create_slot(session_key, bind=bind))
@@ -1490,7 +1490,7 @@ class _SqlTransaction:
             # A fresh grouped claim has no previous lease to check. Only its
             # Execution row stores the deadline, so sample the clock in that
             # mandatory INSERT, after the slot's write serialization.
-            initial_duration = (lease_duration if initial_claim
+            initial_duration = (lease_duration if initial_claim and publish is not None
                                 and lease_duration <= timedelta(days=1)
                                 and type(dialect) in (SQLiteDialect, MySQLDialect, PostgreSQLDialect)
                                 and (type(dialect) is not SQLiteDialect or lease_duration.microseconds % 1000 == 0)
