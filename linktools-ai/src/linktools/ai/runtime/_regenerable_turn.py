@@ -50,6 +50,7 @@ class _RegenerableTurnRunner:
         self._store = store
         self._executor = executor
         self._tasks: set[asyncio.Task[None]] = set()
+        self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
         self._closed = False
 
     async def start_session(
@@ -120,6 +121,32 @@ class _RegenerableTurnRunner:
             return identity
         raise AIError(ErrorCode.SESSION_CONFLICT)
 
+    async def cancel_session_turn(
+        self, key: SessionTurnKey, *, principal: Principal, tenant_id: str, authorization: AuthorizationPolicy,
+    ) -> bool:
+        if principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        session = await self._store.get_session(key.session_id)
+        if session is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        owner = session["owner_principal_id"].decode("utf-8")
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id, owner),
+        )
+        turn = await self._store.get_turn(key)
+        if turn is None:
+            return False
+        await authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_CANCEL,
+            ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, turn["request_json"]["principal"]["principal_id"]),
+        )
+        if not await self._store.request_cancel(key):
+            return False
+        producer = self._producers.get(key)
+        if producer is not None:
+            producer.cancel()
+        return True
+
     async def start(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object],
@@ -184,15 +211,30 @@ class _RegenerableTurnRunner:
         producer = asyncio.create_task(self.settle(
             turn, binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=thinking,
         ))
+        self._producers[turn.key] = producer
         try:
             while not producer.done():
                 done, _ = await asyncio.wait((producer,), timeout=_LEASE_SECONDS / 3)
                 if done:
                     break
                 if not await self._store.renew(turn.key, generation=1, lease_seconds=_LEASE_SECONDS):
-                    return
-            await producer
+                    producer.cancel()
+                    break
+            outcome, = await asyncio.gather(producer, return_exceptions=True)
+            if outcome is True:
+                return
+            if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
+                raise outcome
+            # The normal finish path has no post-commit read. When settlement
+            # lost its fence, only a durable cancellation authorizes this branch.
+            row = await self._store.get_turn(turn.key)
+            if row is not None and row["state"] == "cancelling" and row["generation"] == 1:
+                await self._store.finish(
+                    turn.key, generation=1, turn_no=turn.number, state="cancelled",
+                    result={"error_code": ErrorCode.EXECUTION_CANCELLED.value},
+                )
         finally:
+            self._producers.pop(turn.key, None)
             if not producer.done():
                 producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)
