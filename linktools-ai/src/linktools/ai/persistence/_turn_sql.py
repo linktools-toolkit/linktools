@@ -352,14 +352,38 @@ class SqlTurnRows:
         ).values(**values)
 
     def refresh_admission(self, *, execution_id: str, session_key: str, request_key: str,
-                          fence: int, receipt: str, kind: str) -> "Update":
-        from sqlalchemy import update
+                          fence: int, receipt: str, kind: str, token: str | None = None,
+                          clock: "ColumnElement | None" = None, sqlite: bool = False) -> "Update":
+        from sqlalchemy import exists, func, select, update
 
         a = self._admission
         values = dict(receipt_id=turn_hex(receipt, 32), receipt_kind=kind)
         if kind == "cancel":
             values["cancel_requested"] = True
-        return update(a).where(
+        live = ()
+        if clock is not None:
+            assert token is not None
+            token_key = turn_hex(token, 32)
+            if self.coowned:
+                control = self._control
+                kind_key, slot = turn_session_address(session_key)
+                authority = select(1).where(
+                    control.c.id == a.c.control_id, self._execution_address(control, execution_id),
+                    control.c.turn_slot_kind == kind_key, control.c.turn_slot_key == slot,
+                    control.c.turn_fence == fence, control.c.turn_token == token_key,
+                    self._deadline_is_live(clock, sqlite=sqlite),
+                )
+            else:
+                slot = self._slot
+                expiry = slot.c.lease_expires_at
+                authority = select(1).where(
+                    self._owns(slot), self._session(slot, turn_session_address(session_key)),
+                    slot.c.active_execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES),
+                    slot.c.lease_fence == fence, slot.c.lease_token == token_key,
+                    func.julianday(expiry) > func.julianday(clock) if sqlite else expiry > clock,
+                )
+            live = (exists(authority),)
+        return update(a).where(*live,
             self._owns(a), a.c.execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES),
             self._session(a, turn_session_address(session_key)), a.c.lease_fence == fence,
             a.c.route_kind == ACTIVE_REQUEST, a.c.route_key == turn_hex(request_key, TURN_REQUEST_MAX_BYTES),

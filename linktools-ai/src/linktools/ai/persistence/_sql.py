@@ -1639,6 +1639,7 @@ class _SqlTransaction:
             proof = None if row is None else source.live_proof(row, decode_time=dialect.decode_database_time)
             return row, proof
 
+        captured_cancel = None
         if lease is None:
             row, proof = await capture()
             if proof is None:
@@ -1648,6 +1649,8 @@ class _SqlTransaction:
                 coowned = actual_coowned
                 source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
             lease = proof.session_key, proof.request_key, row["lease_token"].decode("utf-8"), proof.fence
+            if kind == "cancel":
+                captured_cancel = proof
         session, request, token, fence = lease
         matched = (await self._execute(source.serialize_slot(
             session_key=session, execution_id=execution_id, token=token, fence=fence,
@@ -1657,6 +1660,18 @@ class _SqlTransaction:
         try:
             if matched != 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if captured_cancel is not None:
+                # The exact authority row is now serialized. Test live expiry
+                # in the receipt write with a post-lock clock; immutable proof
+                # identities from the earlier route observation remain valid.
+                recorded = await self._execute(source.refresh_admission(
+                    execution_id=execution_id, session_key=session, request_key=request,
+                    fence=fence, receipt=receipt, kind=kind, token=token,
+                    clock=dialect.read_snapshot_time_expression(), sqlite=dialect.single_writer,
+                ))
+                if recorded.rowcount != 1:
+                    raise SqlTurnNotOwned()
+                return replace(captured_cancel, cancel_requested=True).coordination(scope)
             row, proof = await capture()
             if proof is None:
                 raise SqlTurnNotOwned()
