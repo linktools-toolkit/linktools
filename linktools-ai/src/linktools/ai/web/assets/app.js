@@ -414,6 +414,7 @@ async function readOrdinaryGap(watch,current) {
   // A newer read may already own occupancy. This authorized page still
   // fills its range of committed history, regardless of read generation.
   acceptSession(payload);
+  watch.readActive();
   if(!payload.timeline)return;
   const through=payload.session.last_turn_no;
   let timeline=payload.timeline;
@@ -434,11 +435,6 @@ async function readOrdinaryGap(watch,current) {
     timeline=earlier.timeline;
   }
   if(Number.isSafeInteger(through))watch.committedThrough=Math.max(watch.committedThrough ?? 0,through);
-  const active=state.session?.active_turn_id;
-  if(active && !state.turns.some(row=>row.turn_id===active)) {
-    const turn=await api(sessionURL(watch.id,'',{turn_id:active}));
-    if(current() && state.session?.active_turn_id===active)patchOrdinaryTurn(turn);
-  }
   renderList();setDisabled();
 }
 function watchOrdinarySession(id) {
@@ -447,6 +443,56 @@ function watchOrdinarySession(id) {
   const watch={id,source,ready:false,ordinary:true,snapshot:null,opened:false,catchUp:null,committedThrough:null};
   sessionWatch=watch;
   const current=()=>sessionWatch===watch && state.selectedSession===id;
+  const activeTurn=()=>state.session?.session_id===id ? state.session.active_turn_id : watch.snapshot?.active_turn_id;
+  watch.readActive=()=>{
+    const turnId=activeTurn();
+    if(!turnId || watch.activeRead?.id===turnId || state.turns.some(row=>row.turn_id===turnId))return;
+    const read={id:turnId,frames:[],units:0,generation:0};
+    watch.activeRead=read;
+    void api(sessionURL(id,'',{turn_id:turnId})).then(turn=>{
+      if(!current() || watch.activeRead!==read || activeTurn()!==turnId
+        || state.turns.some(row=>row.turn_id===turnId && row.conversation_committed))return;
+      patchOrdinaryTurn(turn);
+      if(!turn.conversation_committed)for(const frame of read.frames || [])applyPreview(frame);
+    }).catch(error=>{
+      if(current() && watch.activeRead===read && activeTurn()===turnId
+        && !state.turns.some(row=>row.turn_id===turnId))showError(error);
+    }).finally(()=>{read.frames=null;});
+  };
+  function applyPreview(frame) {
+    const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
+    if(!turn || turn.liveGeneration>frame.generation)return;
+    const reset=turn.liveGeneration!==frame.generation;
+    if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];}
+    if(frame.type==='tool'){
+      const item=frame.item;
+      if(item?.kind!=='tool' || typeof item.key!=='string' || !Object.hasOwn(processToolStatus,item.status))return;
+      const previous=turn.liveParts.find(part=>part.tool?.key===item.key);
+      if(previous){
+        previous.tool=mergeProcessRow(previous.tool,item);
+        const node=[...$('conversation').children].find(row=>row.dataset.turn===turn.turn_id);
+        if(node?.toolRows?.has(item.key))toolProcessRow(node.toolRows,previous.tool,true);
+      } else {
+        turn.liveParts.push({tool:item});
+        patchOrdinaryTurn(turn);
+      }
+      return;
+    }
+    if(typeof frame.text!=='string' || frame.delta_kind!=='text' || !frame.text)return;
+    let part=turn.liveParts.at(-1);
+    if(!part || part.tool){part={text:''};turn.liveParts.push(part);}
+    part.text+=frame.text;
+    if(reset)patchOrdinaryTurn(turn);
+    if(!watch.paint)watch.paint=requestAnimationFrame(()=>{
+      watch.paint=null;
+      if(!current())return;
+      const active=activeTurn();
+      const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
+      const node=[...$('conversation').children].find(item=>item.dataset.turn===active);
+      const tail=row?.liveParts?.at(-1);
+      if(node?.liveAnswer && tail && !tail.tool){node.liveAnswer.hidden=!tail.text;node.liveAnswer.textContent=tail.text;}
+    });
+  }
   source.addEventListener('session_error',event=>{
     if(!current())return;
     source.close();watch.ready=false;setDisabled();
@@ -468,7 +514,10 @@ function watchOrdinarySession(id) {
         if(state.session && watch.snapshot.revision>=state.session.revision)Object.assign(state.session,watch.snapshot);
       }
       setDisabled();renderList();
-      if(reconnected || state.session && (snapshot?.active_turn_id || snapshot?.last_turn_no > (state.turns.filter(row=>row.conversation_committed).at(-1)?.turn_no || 0)))void catchUpOrdinary(watch).catch(showError);
+      if(reconnected)watch.activeRead=null;
+      watch.readActive();
+      if(watch.committedThrough!==null && watch.snapshot?.last_turn_no>watch.committedThrough)
+        void catchUpOrdinary(watch).catch(showError);
       return;
     }
     if(frame.type==='gap'){void catchUpOrdinary(watch).catch(showError);return;}
@@ -477,38 +526,21 @@ function watchOrdinarySession(id) {
       ordinaryOccupancy(watch,frame.revision,frame.turn_id);
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false});
     } else if(frame.type==='delta' || frame.type==='tool'){
-      const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
-      if(!turn || turn.liveGeneration>frame.generation)return;
-      const reset=turn.liveGeneration!==frame.generation;
-      if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];}
-      if(frame.type==='tool'){
-        const item=frame.item;
-        if(item?.kind!=='tool' || typeof item.key!=='string' || !Object.hasOwn(processToolStatus,item.status))return;
-        const previous=turn.liveParts.find(part=>part.tool?.key===item.key);
-        if(previous){
-          previous.tool=mergeProcessRow(previous.tool,item);
-          const node=[...$('conversation').children].find(row=>row.dataset.turn===turn.turn_id);
-          if(node?.toolRows?.has(item.key))toolProcessRow(node.toolRows,previous.tool,true);
+      if(state.turns.some(row=>row.turn_id===frame.turn_id)){
+        applyPreview(frame);
+      } else if(activeTurn()===frame.turn_id){
+        watch.readActive();
+        const read=watch.activeRead;
+        if(read?.id!==frame.turn_id || read.generation>frame.generation || !read.frames)return;
+        if(read.generation!==frame.generation){read.generation=frame.generation;read.frames=[];read.units=0;}
+        // Limit temporary browser memory while the exact pending-turn read
+        // is in flight. On overflow wait for the authoritative terminal.
+        if(read.frames.length>=128 || read.units+event.data.length>64*1024){
+          read.frames=null;
         } else {
-          turn.liveParts.push({tool:item});
-          patchOrdinaryTurn(turn);
+          read.frames.push(frame);read.units+=event.data.length;
         }
-        return;
       }
-      if(typeof frame.text!=='string' || frame.delta_kind!=='text' || !frame.text)return;
-      let part=turn.liveParts.at(-1);
-      if(!part || part.tool){part={text:''};turn.liveParts.push(part);}
-      part.text+=frame.text;
-      if(reset)patchOrdinaryTurn(turn);
-      if(!watch.paint)watch.paint=requestAnimationFrame(()=>{
-        watch.paint=null;
-        if(!current())return;
-        const active=state.session?.active_turn_id || watch.snapshot?.active_turn_id;
-        const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
-        const node=[...$('conversation').children].find(item=>item.dataset.turn===active);
-        const tail=row?.liveParts?.at(-1);
-        if(node?.liveAnswer && tail && !tail.tool){node.liveAnswer.hidden=!tail.text;node.liveAnswer.textContent=tail.text;}
-      });
       return;
     } else if(frame.type==='terminal'){
       ordinaryOccupancy(watch,frame.revision,null,frame.turn_no);
@@ -903,7 +935,10 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
         if(sessionWatch?.id===sessionId && Number.isSafeInteger(payload.session.last_turn_no))
           sessionWatch.committedThrough=Math.max(sessionWatch.committedThrough ?? 0,payload.session.last_turn_no);
         renderSessionHeader();renderConversation();setDisabled();renderList();
-        if(sessionWatch?.ready && state.session?.active_turn_id)void catchUpOrdinary(sessionWatch).catch(showError);
+        if(sessionWatch?.ready){
+          sessionWatch.readActive();
+          if(sessionWatch.snapshot?.last_turn_no>sessionWatch.committedThrough)void catchUpOrdinary(sessionWatch).catch(showError);
+        }
         if(focusComposer && generation===state.generation)$('prompt').focus();
         return;
       }
