@@ -178,11 +178,19 @@ class _RepositoryInstructionBoundary:
             "overlay": [list(document) for document in _repository_instruction_signature(self._overlay)],
         })
 
-    def approval_frontiers(self, calls: Sequence[ToolCallPart]) -> dict[str, str]:
+    def approval_frontiers(self, calls: Sequence[ToolCallPart], *, omit_empty: bool = False) -> dict[str, str]:
+        observed = self._observed_frontier
+        if (omit_empty and observed is not None and not self._has_initial
+                and (self._overlay is None or not self._overlay.documents)
+                and observed == self._frontier_digest()):
+            # An empty observation is not a repository instruction. Only the
+            # split profile omits it; an earlier nonempty or checked frontier
+            # must still reach approval persistence and its policy checks.
+            observed = None
         result = {}
         for call in calls:
-            if self._observed_frontier is not None:
-                result[call.tool_call_id] = self._observed_frontier
+            if observed is not None:
+                result[call.tool_call_id] = observed
             else:
                 # Deferred replay may pause again without a new model request.
                 # Only that original approved call can carry its observed frontier.

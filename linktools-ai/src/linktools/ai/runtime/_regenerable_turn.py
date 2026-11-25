@@ -1557,7 +1557,9 @@ class _RegenerableTurnRunner:
                     checkpoint_id = capability.store.require_interrupted_checkpoint()
                     if repository_boundary is not None:
                         metadata = {key: dict(value) for key, value in outcome.metadata.items()}
-                        for call_id, digest in repository_boundary.approval_frontiers(outcome.approvals).items():
+                        for call_id, digest in repository_boundary.approval_frontiers(
+                            outcome.approvals, omit_empty=turn.split_source is not None,
+                        ).items():
                             item = metadata.setdefault(call_id, {})
                             original = item.get("linktools")
                             evidence = {"repository_instruction_frontier": digest}
