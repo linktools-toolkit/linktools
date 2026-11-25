@@ -94,6 +94,7 @@ class Persistence:
         self._tenant_id: str | None = None
         self._conversation: ConversationRepositories | None = None
         self._session_turn_reader: SqlSessionTurnReader | None = None
+        self._mysql_split_archive = None
         self._execution: ExecutionRepositories | None = None
         self._memory: MemoryRepositories | None = None
         self._artifact: ArtifactRepositories | None = None
@@ -301,7 +302,8 @@ class Persistence:
                 max_cached_messages=max_cached_messages,
             )
             await store.initialize()
-            opened = await state.storage_group.open_archive(create=True)
+            mysql = self._mysql_split_archive
+            opened = (mysql[2], mysql[3]) if mysql is not None else await state.storage_group.open_archive(create=True)
             if opened is None or self._objects is None:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             scope_id, archive_store = opened
@@ -469,6 +471,9 @@ class Persistence:
                         _split_session_execution_receipts=split,
                     )
                     self._turn_stream = config.stream
+                    self._mysql_split_archive = await self._prepare_mysql_split_step_source(namespace=namespace, tenant_id=tenant_id)
+                    if self._mysql_split_archive is not None:
+                        self._register_initialization_cleanup((self._mysql_split_archive[1].close,))
                 else:
                     self._coordination_backend = config
                     self._pending_turn_coordination = PendingTurnCoordination.select(
@@ -539,6 +544,7 @@ class Persistence:
         if self._session_turn_reader is not None:
             self._session_turn_reader.clear_recent_context()
             self._session_turn_reader = None
+        self._mysql_split_archive = None
         self._lifecycle = _RuntimeStateLifecycle.CLOSED
 
     def _assign_materialized(
@@ -660,6 +666,8 @@ class Persistence:
         from ._sql import SqlStateStore
 
         self._require_ready()
+        if self._mysql_split_archive is not None:
+            return self._mysql_split_archive[0]
         source = self._stores[PersistenceDomain.EXECUTION]
         checkpoint = self._stores[PersistenceDomain.CHECKPOINT]
         conversation = self._stores[PersistenceDomain.CONVERSATION]
@@ -676,9 +684,23 @@ class Persistence:
             return None
         return source
 
+    async def _prepare_mysql_split_step_source(self, *, namespace: str, tenant_id: str):
+        """Bind an explicit MySQL pair during Persistence initialization."""
+        from ._sql import _configured_mysql_split_step_source
+
+        prepared = await _configured_mysql_split_step_source(self._plan, self._stores)
+        if prepared is None:
+            return None
+        state, scope_id, archive_store = prepared
+        native = self._bind_checkpoint_archive(state, (scope_id, archive_store), namespace=namespace, tenant_id=tenant_id)
+        return state, native, scope_id, archive_store
+
     async def _open_split_step_archive(self):
         from ._step_store import SqlStepStore
 
+        self._require_ready()
+        if self._mysql_split_archive is not None:
+            return self._mysql_split_archive
         source = self._configured_split_step_source()
         if source is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -710,19 +732,28 @@ class Persistence:
         state = self._stores[PersistenceDomain.EXECUTION]
         if not isinstance(source, NativeStepSource) or not isinstance(state, SqlStateStore):
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        mysql = self._mysql_split_archive
+        if mysql is not None:
+            if (source.group_id, source.store_key) != (mysql[2], mysql[1].store_key):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            return mysql[1]
         opened = await state.storage_group.open_archive()
         if (opened is None or opened[0] != source.group_id
                 or source.store_key != SqlStepStore.scope_key(
                     namespace=self.namespace, tenant_id=self.tenant_id)):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return self._bind_checkpoint_archive(state, opened, namespace=self.namespace, tenant_id=self.tenant_id)
+
+    def _bind_checkpoint_archive(self, state, opened, *, namespace: str, tenant_id: str) -> "SqlStepStore":
         from functools import partial
         from ._archive import ContentArchive
+        from ._step_store import SqlStepStore
 
         if self._objects is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        store = SqlStepStore(state.context, namespace=self.namespace, tenant_id=self.tenant_id)
+        store = SqlStepStore(state.context, namespace=namespace, tenant_id=tenant_id)
         store.bind_message_archive(ContentArchive(
-            opened[1], opened[0], namespace=self.namespace, tenant_id=self.tenant_id,
+            opened[1], opened[0], namespace=namespace, tenant_id=tenant_id,
             object_store=self._objects.archive_object_store(PersistenceDomain.EXECUTION),
             object_reader=partial(self._objects.read_archive_object, PersistenceDomain.EXECUTION),
         ))

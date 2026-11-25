@@ -79,6 +79,7 @@ from .state import (
 from ._run_counters import RUN_COUNTER_COLUMNS, run_counter_address, run_counter_streams, run_counter_page_start
 
 if TYPE_CHECKING:
+    from ._plan import PersistencePlan
     from ._execution_authority import ExecutionAuthority, InitialExecutionAuthority
     from typing import Literal
     from ..storage import TurnCoordination, TurnScopeIdentity
@@ -109,6 +110,61 @@ _GROUP_RECORD_BIND_BUDGET = 999
 _ARCHIVE_READ_BIND_BUDGET = 999
 # MySQL repeats fixed predicates/JSON paths across eight branches plus direct content.
 _ARCHIVE_READ_FIXED_BINDS = 145
+_ARCHIVE_SCOPE_RECORD_KEY = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+
+
+def _archive_scope_id(record: StoredRecord | None) -> str:
+    scope = None if record is None else record.data.get("archive_scope_id")
+    if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return scope
+
+
+
+async def _configured_mysql_split_step_source(
+    plan: "PersistencePlan", stores: Mapping[PersistenceDomain, StateStore],
+) -> "tuple[SqlStateStore, str, SqlStateStore] | None":
+    """Recognize provisioned MySQL routes without activating split execution."""
+    execution, checkpoint, conversation = (
+        PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT, PersistenceDomain.CONVERSATION,
+    )
+    durable_domains = plan.durable_domains
+    if plan.checkpoint is None or any(
+        plan.route(domain).kind != "sql" or domain not in durable_domains
+        for domain in (execution, checkpoint, conversation)
+    ):
+        return None
+    source, step, target = stores[execution], stores[checkpoint], stores[conversation]
+    if (
+        not isinstance(source, SqlStateStore)
+        or not isinstance(step, SqlStateStore)
+        or not isinstance(target, SqlStateStore)
+    ):
+        return None
+    source_group, target_group = source.storage_group, target.storage_group
+    if (
+        not isinstance(source_group, SqlStateStorageGroup)
+        or not isinstance(target_group, SqlStateStorageGroup)
+        or step.storage_group is not source_group
+        or source_group is target_group
+        or type(source_group.context.dialect) is not MySQLDialect
+        or type(target_group.context.dialect) is not MySQLDialect
+    ):
+        return None
+    source_id = await source_group._existing_archive_scope_id()
+    if source_id is None:
+        return None
+    target_id = await target_group._existing_archive_scope_id()
+    # Like the SQL context itself, this proof assumes each route stays bound
+    # to one logical database. Identical identities are aliases or copies,
+    # neither of which is safe to use as a split pair.
+    if target_id is None or target_id == source_id:
+        return None
+    from ._step_schema import build_step_domain_sql_metadata
+
+    build_step_domain_sql_metadata((checkpoint,), metadata=source_group.metadata)
+    group_id, archive_store = source_group.opened_archive or await source_group._bind_open_archive(source_id)
+    return source, group_id, archive_store
 
 
 class _SqlGroupTransaction:
@@ -564,6 +620,21 @@ class SqlStateStorageGroup:
     def opened_archive(self) -> tuple[str, "SqlStateStore"] | None:
         return self._opened_archive
 
+    async def _existing_archive_scope_id(self) -> str | None:
+        """Read an initialized resource identity without provisioning or scanning content."""
+        if active_state_scope() is not None:
+            raise StateTransactionNestingError("archive identity lookup must run outside a state callback")
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if not self._initialized:
+            return None
+        if self._opened_archive is not None:
+            return self._opened_archive[0]
+        async with self._session() as session:
+            metadata = _SqlTransaction(session, self._metadata, self._context, STATE_GROUP_METADATA_KEY)
+            record = await metadata.get_record(_ARCHIVE_SCOPE_RECORD_KEY)
+        return None if record is None else _archive_scope_id(record)
+
     async def open_archive(
         self, *, create: bool = False,
     ) -> tuple[str, "SqlStateStore"] | None:
@@ -583,7 +654,7 @@ class SqlStateStorageGroup:
             if self._opened_archive is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return self._opened_archive
-        key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+        key = _ARCHIVE_SCOPE_RECORD_KEY
         record = await metadata_store.read(lambda tx: tx.get_record(key))
         archive_key = STATE_GROUP_ARCHIVE_KEY
         if record is None:
@@ -615,11 +686,10 @@ class SqlStateStorageGroup:
                     raise
         if record is None:
             return None
-        scope = record.data.get("archive_scope_id")
-        if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        archive_key = STATE_GROUP_ARCHIVE_KEY
-        self._archive_member = await self._open_partition(archive_key)
+        return await self._bind_open_archive(_archive_scope_id(record))
+
+    async def _bind_open_archive(self, scope: str) -> tuple[str, "SqlStateStore"]:
+        self._archive_member = await self._open_partition(STATE_GROUP_ARCHIVE_KEY)
         self._archive_scope_initialized = True
         self._opened_archive = scope, self._archive_member
         return self._opened_archive
@@ -629,16 +699,13 @@ class SqlStateStorageGroup:
     ) -> tuple[str, bool]:
         """Establish resource identity in the first owner mutation's commit."""
         metadata_key = STATE_GROUP_METADATA_KEY
-        key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+        key = _ARCHIVE_SCOPE_RECORD_KEY
         metadata = _SqlTransaction(
             session, self._metadata, self._context, metadata_key, clock=clock,
         )
         record = await metadata.get_record(key)
         if record is not None:
-            scope = record.data.get("archive_scope_id")
-            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return scope, True
+            return _archive_scope_id(record), True
         from sqlalchemy import func, literal, select, union_all
 
         # Only existence matters here; never hydrate an orphan's stored body.
@@ -656,10 +723,7 @@ class SqlStateStorageGroup:
                 session, self._metadata, self._context, metadata_key, clock=clock,
             )
             record = await metadata.get_record(key)
-            scope = None if record is None else record.data.get("archive_scope_id")
-            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return scope, True
+            return _archive_scope_id(record), True
         record = StoredRecord(
             key=key, scope_key=None, parent_key=None,
             kind="archive_scope", sort_key=b"archive_scope", state=None,
@@ -678,9 +742,7 @@ class SqlStateStorageGroup:
         # Expose only its committed identity, never our rollback-prone candidate.
         metadata = _SqlTransaction(session, self._metadata, self._context, metadata_key, clock=clock)
         winner = await metadata.get_record(key)
-        scope = None if winner is None else winner.data.get("archive_scope_id")
-        if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        scope = _archive_scope_id(winner)
         return scope, scope != record.data["archive_scope_id"]
 
     async def _open_partition(self, key: bytes) -> "SqlStateStore":

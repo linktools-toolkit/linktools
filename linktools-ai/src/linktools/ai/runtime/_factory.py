@@ -879,7 +879,7 @@ async def _build_local_components(
             if native.store.storage_context.engine is not selected_store.storage_group.context.engine:
                 if split_sql_source is None:
                     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
-                                  "Cross-store Step requires separate SQLite Conversation and Execution/Checkpoint databases")
+                                  "Cross-store Step requires provisioned separate Conversation and Execution/Checkpoint databases")
 
                 from ..capability import ExecutionCapability
                 from ._canonical_split_step import _CanonicalSplitStep
