@@ -169,13 +169,16 @@ async def purge_unreferenced_captures(
 
 
 _ORDINARY_ATTACHMENT_SCAN_PAGE = 32
-_ORDINARY_ATTACHMENT_SCAN_ROWS = 1024
 
 
 async def _ordinary_input_object_keys(
     store: SqlStateStore, *, namespace: str, tenant_id: str, candidates: set[str],
 ) -> set[str]:
-    """Find typed references; retain every unproven candidate when the scan budget is exhausted."""
+    """Prove reachability for all candidates in one offline keyset sweep.
+
+    Worst case: linear in the scoped turns, with only one projected page and
+    the candidate keys in memory. Never run this against active writers.
+    """
     from sqlalchemy import select
 
     from ..execution import StoredUserInput
@@ -194,7 +197,7 @@ async def _ordinary_input_object_keys(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         protected: set[str] = set()
         after = 0
-        for _ in range(_ORDINARY_ATTACHMENT_SCAN_ROWS // _ORDINARY_ATTACHMENT_SCAN_PAGE):
+        while True:
             rows = await transaction.read_sql_rows(
                 store.context,
                 select(columns.id, input_value.label("input")).where(
@@ -214,9 +217,7 @@ async def _ordinary_input_object_keys(
             if protected == candidates or len(rows) < _ORDINARY_ATTACHMENT_SCAN_PAGE:
                 return protected
             after = rows[-1]["id"]
-        # Reaching the budget is not evidence that unobserved rows have no
-        # references. Keep them until a separately bounded inventory is available.
-        return candidates
+
 
     return await store.read(scan)
 
