@@ -126,6 +126,37 @@ def _require_turn_snapshot_partition(store: SqlStateStore, *, namespace: str, te
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
 
+async def _require_no_unrepresented_ordinary_sessions(
+    store: SqlStateStore, *, namespace: str, tenant_id: str,
+) -> None:
+    """The v1 artifact cannot represent ordinary SQL sessions. Reject lossy export."""
+    from sqlalchemy import select
+
+    from ._session_turn_sql import SESSION_TABLE, SESSION_TURN_TABLE
+    from .state import state_store_key
+
+    scope = state_store_key(namespace, tenant_id, "regenerable-session")
+    tables = store.storage_group.metadata.tables
+    statements = tuple(
+        select(tables[name].c.id).where(tables[name].c.scope_key == scope).exists()
+        for name in (SESSION_TABLE, SESSION_TURN_TABLE)
+    )
+
+    async def read(transaction: StateTransaction) -> None:
+        if not isinstance(transaction, SqlStateRowReader):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        row, = await transaction.read_sql_rows(
+            store.context, select(statements[0].label("sessions"), statements[1].label("turns")),
+        )
+        if row["sessions"] or row["turns"]:
+            raise AIError(
+                ErrorCode.SNAPSHOT_UNSUPPORTED,
+                "Portable v1 snapshots cannot represent ordinary SQL sessions and turns",
+            )
+
+    await store.read(read)
+
+
 class _SnapshotReader(Protocol):
     async def validate_trace_prefix(self, records: Sequence[StoredRecord], facts: Sequence[StoredFact]) -> None: ...
 
@@ -638,6 +669,10 @@ class RuntimeSnapshotOperations:
                 roots = []
                 event_references = []
                 for domain, store in members:
+                    if domain is PersistenceDomain.CONVERSATION and isinstance(store, SqlStateStore):
+                        await _require_no_unrepresented_ordinary_sessions(
+                            store, namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+                        )
                     reader = _StateSnapshotReader(store,
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
                                           if domain is PersistenceDomain.TRACE else None),
