@@ -476,7 +476,7 @@ class SqlSessionTurnReader:
         columns = self._turns.c
         request = columns.request_json
         required = ("prompt", "principal", "thinking")
-        optional = ("input", "session_context", "correlation")
+        optional = ("input", "input_intent", "session_context", "correlation")
         statement = select(
             columns.turn_id, columns.binding_key, request["explicit_agent_binding"].as_boolean().label("explicit_agent_binding"),
             *(request[name].label(name) for name in (*required, *optional)),

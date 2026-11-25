@@ -59,6 +59,35 @@ def _session_view(row: RowMapping) -> dict[str, JsonValue]:
     }
 
 
+def _multipart_prompt(value: StoredUserInput) -> dict[str, JsonValue]:
+    """Project admitted text without opening attachments or exposing provider metadata."""
+    payload = value.payload
+    content = payload.value
+    if payload.encoding == "json-attachments" and isinstance(content, Mapping):
+        content = content.get("content")
+    if (value.codec != "user-content-v1" or not isinstance(content, Mapping)
+            or not isinstance(items := content.get("items"), list)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    text_items: list[JsonValue] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        kind = item.get("kind")
+        if kind == "text":
+            text = item.get("text")
+        elif kind in ("text-content", "structured-content"):
+            metadata = item.get("metadata")
+            if isinstance(metadata, Mapping) and metadata.get("source") == "linktools.attachment":
+                continue
+            text = item.get("content")
+        else:
+            continue
+        if not isinstance(text, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        text_items.append({"kind": "text", "text": text})
+    return {"kind": "items", "items": text_items}
+
+
 def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
     state = row["state"]
     result = row["result_json"]
@@ -82,18 +111,23 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
             asdict(replace(item, error_message=None))
             for item in _project_turn_tool_process(messages) if item.tool_name != CANONICAL_OUTPUT_TOOL_NAME
         ]
-    stored_input = row["stored_input"]
-    attachments = [] if stored_input is None else [
-        {key: item.get(key) for key in ("attachment_id", "source", "media_type", "size", "position")}
-        for item in stored_input_attachment_views(decode_domain(stored_input, StoredUserInput))
-    ]
+    prompt = row["prompt"]
+    attachments = []
+    if row["stored_input"] is not None:
+        stored_input = decode_domain(row["stored_input"], StoredUserInput)
+        attachments = [
+            {key: item.get(key) for key in ("attachment_id", "source", "media_type", "size", "position")}
+            for item in stored_input_attachment_views(stored_input)
+        ]
+        if prompt == "":
+            prompt = _multipart_prompt(stored_input)
     return {
         "turn_id": row["turn_id"].decode("utf-8"),
         "turn_no": row["turn_no"],
         "status": "RECOVERY_REQUIRED" if row.get("needs_recovery") else _STATUS[state],
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
-        "user_input": {"version": 1, "prompt": row["prompt"], "files": [], "attachments": attachments},
+        "user_input": {"version": 1, "prompt": prompt, "files": [], "attachments": attachments},
         "conversation_committed": state in ("succeeded", "failed", "cancelled"),
         "items": items,
         "process": process,

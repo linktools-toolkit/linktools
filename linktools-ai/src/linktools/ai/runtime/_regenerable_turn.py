@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, UserContent
 
     from ..agent import AgentBinding
+    from ..model import CanonicalUserInput
     from ..capability.steps import AtomicStepPersistence
     from ._tool import RuntimeToolOperationBridge
     from ..capability.planning import PlanningStore
@@ -368,7 +369,7 @@ class _RegenerableTurnRunner:
     async def start_session(
         self, session_id: str, *, agent_id: str, principal: Principal, namespace: str, tenant_id: str,
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
-        request_key: str, prompt: str, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
+        request_key: str, prompt: CanonicalUserInput, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
         files: Sequence[str] = (), session_context: SessionContext = "all", output: type[BaseModel] | None = None,
         correlation: CorrelationData | None = None,
         selected_binding: Callable[[], Awaitable[AgentBinding]] | None = None,
@@ -392,6 +393,8 @@ class _RegenerableTurnRunner:
         )
 
         files = normalize_input_files(files)
+        if not isinstance(prompt, str):
+            prompt = await self._input_materializer.canonicalize_input(prompt)
         output_binding = bind_output(output)
         if mode not in ("run", "plan") or type(planning) is not bool:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -417,13 +420,17 @@ class _RegenerableTurnRunner:
                 ResourceRef(ResourceKind.EXECUTION, identity, tenant_id, request["principal"]["principal_id"]),
             )
             normalized_files = await self._input_materializer.canonicalize_files(files) if files else ()
-            prior_input = self._stored_input(request)
-            prior_files = () if prior_input is None else tuple(
-                item["path"] for item in stored_input_attachment_views(prior_input)
-            )
+            if isinstance(prompt, str):
+                prior_input = self._stored_input(request)
+                prior_files = () if prior_input is None or "input_intent" in request else tuple(
+                    item["path"] for item in stored_input_attachment_views(prior_input)
+                )
+                same_input = request["prompt"] == prompt and prior_files == normalized_files
+            else:
+                same_input = request.get("input_intent") == self._input_materializer.intent(prompt, normalized_files).digest
             if (
-                request["prompt"] != prompt or request["principal"] != asdict(principal)
-                or request["thinking"] != thinking or prior_files != normalized_files
+                not same_input or request["principal"] != asdict(principal)
+                or request["thinking"] != thinking
                 or request.get("session_context", "all") != session_context
                 or request.get("correlation", {}) != effective_correlation
                 or request.get("mode", "run") != mode or request.get("planning", False) != planning
@@ -803,7 +810,7 @@ class _RegenerableTurnRunner:
 
     async def start(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
-        prompt: str, binding: AgentBinding, context: AgentContext[object],
+        prompt: CanonicalUserInput, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue, cwd: str | None = None,
         files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
         session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
@@ -987,7 +994,7 @@ class _RegenerableTurnRunner:
 
     async def admit(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
-        prompt: str, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
+        prompt: CanonicalUserInput, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
         cwd: str | None = None, files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
         session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
         explicit_agent_binding: bool = False,
@@ -1009,8 +1016,11 @@ class _RegenerableTurnRunner:
             repository_instructions = await instruction_resolver.resolve(cwd or ".")
             instruction_resolver.validate(repository_instructions)
         frozen_binding = binding.binding_contract.to_payload()
+        # A nonempty scalar owns its own text. A multipart sequence has one
+        # complete typed input manifest and no duplicate text field.
+        text = prompt if isinstance(prompt, str) else ""
         request: dict[str, JsonValue] = {
-            "prompt": prompt,
+            "prompt": text,
             "principal": asdict(context.principal),
             "thinking": thinking,
             "session_metadata": dict(context.session_metadata),
@@ -1031,8 +1041,23 @@ class _RegenerableTurnRunner:
             request["planning"] = True
         model_prompt = None
         attachments = ()
-        input_size = len(prompt.encode("utf-8"))
-        if files:
+        input_size = len(text.encode("utf-8"))
+        if not isinstance(prompt, str):
+            materialized = await self._input_materializer.materialize(prompt, files)
+            validate_model_inputs(binding.compiled_agent.model, materialized)
+            model_prompt = tuple(materialized)
+            captured = self._input_materializer.capture(materialized)
+            attachments = stored_input_attachment_views(captured)
+            input_size = captured.payload.size
+            if input_size > _CONTEXT_BYTES:
+                raise AIError(ErrorCode.PROMPT_TOO_LARGE)
+            # The payload already contains the ordered text and native content
+            # metadata. Only retain the derived attachment summaries as a view.
+            captured = replace(captured, view={"version": 1, "attachments": list(attachments)})
+            stored = await self._input_materializer.materialize_payload(captured, tenant_id=context.principal.tenant_id)
+            request["input"] = encode_domain(stored)
+            request["input_intent"] = self._input_materializer.intent(prompt, files).digest
+        elif files:
             materialized = await self._input_materializer.materialize(prompt, files)
             validate_model_inputs(binding.compiled_agent.model, materialized)
             # The materializer prepends attachment parts and retains the text as the last item.
@@ -1076,7 +1101,7 @@ class _RegenerableTurnRunner:
         ):
             return None
         return _AdmittedTurn(
-            key, through + 1, prompt,
+            key, through + 1, text,
             [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
             repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
             stored_input=request.get("input"),
@@ -1099,7 +1124,7 @@ class _RegenerableTurnRunner:
         detached = await self._input_materializer.restore(stored)
         if isinstance(detached, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Detached turn input is not multipart")
-        return (*detached, prompt)
+        return (*detached, prompt) if prompt else tuple(detached)
 
     def _step_instruction_boundary(
         self, turn: _AdmittedTurn, binding: AgentBinding,

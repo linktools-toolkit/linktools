@@ -392,13 +392,14 @@ class RuntimeSessions(Generic[AppT]):
         )
 
     async def start_turn(
-        self, session_id: str, prompt: str, *, agent: str | Agent[AppT], principal: Principal,
+        self, session_id: str, prompt: UserPromptInput, *, agent: str | Agent[AppT], principal: Principal,
         idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
         session_context: SessionContext = "all",
         planning: bool = False,
         output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> str:
+        from ..model import validate_user_input
         from ._agent import Agent
 
         runner, runtime = self._require_turn_sessions()
@@ -422,8 +423,9 @@ class RuntimeSessions(Generic[AppT]):
         validate_resource_id(session_id)
         validate_agent_id(agent_id)
         validate_idempotency_key(idempotency_key)
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A plain text prompt is required")
+        if isinstance(prompt, str) and not prompt.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A nonempty prompt is required")
+        prompt = validate_user_input(prompt)
         await self._service.require_available()
         return await runner.start_session(
             session_id, agent_id=agent_id, prompt=prompt, principal=principal, namespace=runtime.namespace,
