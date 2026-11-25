@@ -159,7 +159,7 @@ from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
-_ORDINARY_WORKSPACE_TOOL = "list_files"
+_ORDINARY_WORKSPACE_TOOLS = frozenset({"list_files", "read_file"})
 _PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 
 
@@ -395,21 +395,20 @@ class AgentExecutor:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
         if compiled.selected_tools:
             filesystems = tuple(item for item in policy.capabilities if type(item) is FileSystemCapability)
-            if len(compiled.selected_tools) != 1 or len(filesystems) != 1:
+            if len(filesystems) != 1:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns require the native read-only tool surface")
-            (tool,) = compiled.selected_tools
-            metadata = _bound_tool_metadata(tool)
-            if (
-                tool.id != _ORDINARY_WORKSPACE_TOOL
-                or tool_class_from_metadata(metadata) != "filesystem.read"
-                or tool_effect_policy_from_metadata(metadata, require=True) != "none"
-                or tool.contract.get("kind", "function") != "function"
-                or tool.contract.get("defer_loading", False)
-                or filesystems[0].workspace.policy.tool_permissions.decide(
-                    tool_name=tool.id, tool_class="filesystem.read",
-                ) != "allow"
-            ):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns require an allowed native list_files tool")
+            permissions = filesystems[0].workspace.policy.tool_permissions
+            for tool in compiled.selected_tools:
+                metadata = _bound_tool_metadata(tool)
+                if (
+                    tool.id not in _ORDINARY_WORKSPACE_TOOLS
+                    or tool_class_from_metadata(metadata) != "filesystem.read"
+                    or tool_effect_policy_from_metadata(metadata, require=True) != "none"
+                    or tool.contract.get("kind", "function") != "function"
+                    or tool.contract.get("defer_loading", False)
+                    or permissions.decide(tool_name=tool.id, tool_class="filesystem.read") != "allow"
+                ):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns require allowed native read-only file tools")
 
     async def execute_regenerable(
         self,
@@ -1269,7 +1268,8 @@ async def _materialize_agent(
             return capability.bind(
                 [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
                 backend=scope.workspace_backend, limits=scope.limits,
-                model_binding=compiled_agent.model, wrap_toolset=wrap_workspace_toolset,
+                model_binding=compiled_agent.model, bounded_text_read=scope.regenerable,
+                wrap_toolset=wrap_workspace_toolset,
             )
         return capability
 

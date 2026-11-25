@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, TypeVar, cast
 
@@ -242,6 +242,14 @@ class _FileSystemToolSurface:
             rejected_codes=_WORKSPACE_REJECTED_CODES | {ErrorCode.STORAGE_CONFLICT},
         )
 
+    async def _read_text_preview(self, path: str, *, offset: int = 0, limit: int = 100) -> ToolReturn:
+        """Read one text file with a bounded preview (up to 200 lines)."""
+        if not isinstance(path, str) or type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 200:
+            raise ToolCallRetry("Supply one text path, a nonnegative offset and a limit between 1 and 200.")
+        # A mandatory range makes the existing reader reject non-text after its
+        # bounded probe, before it can enter the binary read path.
+        return await self.read_file(path, offset=offset, limit=limit)
+
     async def _read_files_bounded(
         self, path: str | list[str], *, as_file: bool, offset: int | None,
         limit: int | None, cursor: str | None, full_metadata: bool,
@@ -423,6 +431,7 @@ class _FileSystemToolset(FunctionToolset[AgentContext[object]]):
         limits: PromptLimits,
         *,
         model_binding: ModelBinding | None = None,
+        bounded_text_read: bool = False,
     ) -> None:
         super().__init__(id=_FILESYSTEM_CAPABILITY_ID)
         surface = _FileSystemToolSurface(
@@ -431,12 +440,25 @@ class _FileSystemToolset(FunctionToolset[AgentContext[object]]):
             limits,
             model_binding=model_binding,
         )
+        text_surface = None
+        if bounded_text_read and "read_file" in selected_tool_names:
+            text_surface = _FileSystemToolSurface(
+                backend, policy, replace(
+                    limits, max_binary_input_bytes=min(limits.max_binary_input_bytes, 8192),
+                    max_file_output_bytes=min(limits.max_file_output_bytes, 8192),
+                ), model_binding=model_binding,
+            )
         for name in selected_tool_names:
             metadata = _runtime_tool_metadata(_declaration_for(name))
             path_fields = tool_path_fields_from_metadata(metadata)
             if len(path_fields) == 1:
                 metadata.update(_registered_preview(path_fields[0]))
-            self.add_tool(_filesystem_tool(surface, name, metadata))
+            if name == "read_file" and text_surface is not None:
+                self.add_tool(Tool(
+                    text_surface._read_text_preview, takes_ctx=False, name=name, metadata=dict(metadata),
+                ))
+            else:
+                self.add_tool(_filesystem_tool(surface, name, metadata))
 
 
 
@@ -472,6 +494,7 @@ class FileSystemCapability(AbstractCapability[AgentContext[object]]):
         backend: SupportsFileTools | None,
         limits: PromptLimits | None = None,
         model_binding: ModelBinding | None = None,
+        bounded_text_read: bool = False,
         wrap_toolset: Callable[
             [AbstractToolset[AgentContext[object]]],
             AbstractToolset[AgentContext[object]],
@@ -481,6 +504,7 @@ class FileSystemCapability(AbstractCapability[AgentContext[object]]):
 
         A supplied wrap_toolset owns the execution boundary, including policy
         enforcement. Without one, the native SDK handles this Workspace policy.
+        Bounded text reads use a one-file preview schema instead of accepting binary input.
         """
         selected_limits = PromptLimits() if limits is None else limits
         if not isinstance(selected_limits, PromptLimits):
@@ -498,6 +522,7 @@ class FileSystemCapability(AbstractCapability[AgentContext[object]]):
             toolset = _FileSystemToolset(
                 tuple(item.name for item in filesystem_tool_declarations() if item.name in selected),
                 backend, self.workspace.policy, selected_limits, model_binding=model_binding,
+                bounded_text_read=bounded_text_read,
             )
             policy = self.workspace.policy.tool_permissions
             if wrap_toolset is not None:
