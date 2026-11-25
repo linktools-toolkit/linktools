@@ -120,7 +120,8 @@ from ._tool_metrics import ToolMetricContext
 from ._capabilities import compose_platform_capabilities, runtime_feature_leaves
 from ._feature_policy import _runtime_feature_policy
 from ._agent_run_recorder import AgentRunRecorder
-from ..persistence.runs import RuntimeAgentRunStore
+from ..persistence import PersistenceDomain
+from ..persistence.runs import InMemoryStepArchive, RuntimeAgentRunStore, StagingAgentRunStore
 from ..execution import PendingDeferredCall
 from ._compaction import CompactionPolicy
 from ..inputs import CanonicalUserInput
@@ -150,7 +151,7 @@ from ._tool_metrics import (
     ToolMetricsCapability,
 )
 from ..model.messages import rehydrate_deferred_tool_results, tool_error_message, tool_return_content_digest
-from ..persistence.contracts import LoadedModelContext
+from ..persistence.contracts import LoadedContextMessage, LoadedModelContext
 from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
@@ -376,6 +377,48 @@ class AgentExecutor:
                 "a tool response fixture cannot replace an admitted live execution",
             )
         return None
+
+    async def execute_regenerable(
+        self,
+        *,
+        binding: AgentBinding,
+        context: AgentContext[object],
+        prompt: str,
+        history: list[ModelMessage],
+        limits: PromptLimits,
+        event_sink: EventSink,
+        workspace: Workspace | None = None,
+        thinking: ThinkingValue = None,
+    ) -> AgentExecutionResult:
+        """Run a plain turn with no durable recorder or execution handoff."""
+        compiled = binding.compiled_agent
+        policy = _runtime_feature_policy(compiled.runtime_contributions)
+        if (context.session_id is None or binding.output_binding.mode != "text"
+                or compiled.selected_tools or compiled.mcp_servers or compiled.selected_subagents
+                or policy.restart_checkpoints or policy.durable_trace or policy.memory_scope is not None
+                or policy.tool_responses is not None):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
+        store = RuntimeAgentRunStore(
+            StagingAgentRunStore(),
+            conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
+            execution_archive=None,
+        )
+        await store.initialize()
+        try:
+            outcome = await self.execute(_AgentRunScope(
+                binding=binding, context=context, workspace=workspace, limits=limits,
+                execution_cwd=None, user_prompt=prompt, history=history,
+                initial_context=LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history)),
+                agent_conversation_id=context.session_id, run_store=store,
+                agent_run_id=context.execution_id, agent_run_seq=1,
+                event_sink=event_sink, thinking=thinking,
+            ))
+            if isinstance(outcome, DeferredToolRequests):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")
+            return outcome
+        finally:
+            await store.preflight_close()
+            await store.close()
 
     async def execute(self, scope: _AgentRunScope) -> AgentExecutionOutcome:
         binding = scope.binding
