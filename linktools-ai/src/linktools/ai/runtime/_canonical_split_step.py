@@ -409,6 +409,10 @@ class _CanonicalSplitStep:
     async def _claim_unregistered_stop(
         self, key: SessionTurnKey, *, target: _SplitTargetObservation, result: JsonValue,
     ) -> SplitStepSourceObservation:
+        from sqlalchemy.exc import IntegrityError
+
+        from ..storage import IntegrityViolationKind
+
         if (target.state != "cancelling" or target.generation != 1
                 or target.receipt_id is not None or target.admitted_at is None):
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -416,17 +420,34 @@ class _CanonicalSplitStep:
             deterministic_id("canonical-split-unregistered-stop", key.turn_id, target.generation),
             terminal_state="cancelled", result=result,
         )
+        duplicate = None
         try:
             source = await self._write(lambda db: self._source.cancel_unregistered(
-                db, self._context, turn_id=key.turn_id, session_id=key.session_id,
+                db, turn_id=key.turn_id, session_id=key.session_id,
                 admitted_at=target.admitted_at.isoformat(), pin=pin,
             ))
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+        except (AIError, IntegrityError) as error:
+            # The group boundary may translate a failed INSERT. Both paths
+            # return only after rollback; don't interpret a bare conflict as
+            # proof of this unique registration race.
+            sql_error = (
+                error.__cause__ if isinstance(error, AIError) and error.code is ErrorCode.STORAGE_CONFLICT else error
+            )
+            if (isinstance(sql_error, IntegrityError)
+                    and self._context.dialect.classify_integrity_error(sql_error) is IntegrityViolationKind.UNIQUE_CONFLICT):
+                duplicate = error
+            elif not isinstance(error, AIError) or error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
             source = None
         if source is None:
             observed = await self._read_pin(self._identity(key, target.generation))
+            if observed is None and duplicate is not None:
+                async with self._context.sessions() as session:
+                    exact = await self._source.has_registration(
+                        session, turn_id=key.turn_id, session_id=key.session_id,
+                    )
+                if not exact:
+                    raise duplicate
             if observed is None or observed.pin != pin:
                 # An original registration can win the unique insert and may
                 # have reached the provider. Missing proof cannot settle it.

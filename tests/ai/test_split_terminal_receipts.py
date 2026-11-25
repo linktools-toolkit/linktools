@@ -154,10 +154,10 @@ async def test_split_cold_stop_requires_exact_source_owner(tmp_path: Path, monke
                 original_claim = SqlSplitStepSource.cancel_unregistered
                 claim_committed = False
 
-                async def claim(source, db, context, **kwargs):
+                async def claim(source, db, **kwargs):
                     if ordering == "lost-ack-unrelated":
                         kwargs["pin"] = replace(kwargs["pin"], receipt_id="unrelated")
-                    return await original_claim(source, db, context, **kwargs)
+                    return await original_claim(source, db, **kwargs)
 
                 async def write(callback):
                     nonlocal claim_committed

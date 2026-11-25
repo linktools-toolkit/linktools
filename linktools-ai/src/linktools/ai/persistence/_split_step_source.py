@@ -16,7 +16,6 @@ from ._native_content_index import stage_owner
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy import Table
-    from ..storage import SqlStorageContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,25 +127,29 @@ class SqlSplitStepSource:
         return changed.rowcount == 1
 
     async def cancel_unregistered(
-        self, session: AsyncSession, context: SqlStorageContext, *, turn_id: str, session_id: str,
+        self, session: AsyncSession, *, turn_id: str, session_id: str,
         admitted_at: str, pin: SplitStepPin,
-    ) -> SplitStepSourceObservation | None:
-        """Claim the source's unique identity before its first writer can."""
+    ) -> SplitStepSourceObservation:
+        """Claim the exact unique identity before its first writer can."""
         if pin.terminal_state != "cancelled" or pin.checkpoint_id is not None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        result = await context.dialect.insert_ignore_conflict(
-            session, table=self._runs, index_elements=("store_locator", "run_id"),
-            values={
-                "store_locator": native_store_locator(self.store_key), "store_key": self.store_key,
-                "run_id": turn_id, "conversation_id": session_id, "metadata": "{}", "started_at": admitted_at,
-                "turn_source_generation": 1, "turn_source_phase": "sealed",
-                "turn_source_receipt": pin.receipt_id, "turn_source_pin": pin.to_json(),
-            },
-        )
+        await session.execute(self._runs.insert().values(
+            store_locator=native_store_locator(self.store_key), store_key=self.store_key,
+            run_id=turn_id, conversation_id=session_id, metadata="{}", started_at=admitted_at,
+            turn_source_generation=1, turn_source_phase="sealed",
+            turn_source_receipt=pin.receipt_id, turn_source_pin=pin.to_json(),
+        ))
         # Deliberately metadata-only: no SDK registration identity, managed
-        # start, events or result body. The real writer cannot win this key
-        # or adopt a header that was terminal before its first registration.
-        return SplitStepSourceObservation(turn_id, session_id, 1, "sealed", pin) if result.inserted else None
+        # start, events or result body. A late writer cannot win this key.
+        return SplitStepSourceObservation(turn_id, session_id, 1, "sealed", pin)
+
+    async def has_registration(self, session: AsyncSession, *, turn_id: str, session_id: str) -> bool:
+        from sqlalchemy import select
+
+        row = await session.scalar(select(self._runs.c.id).where(
+            *self._where(self._runs, turn_id=turn_id, session_id=session_id),
+        ))
+        return row is not None
 
     async def guard(
         self, session: AsyncSession, *, turn_id: str, session_id: str, generation: int,
