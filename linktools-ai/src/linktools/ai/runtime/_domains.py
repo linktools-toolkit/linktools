@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn, SessionService
 from ..agent import AgentBindingContract
 from ..core import (
-    BudgetUsage, JsonValue, Principal, PromptLimits, normalize_thinking,
+    AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, normalize_thinking,
     validate_agent_id, validate_idempotency_key, validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
@@ -312,6 +312,52 @@ class RuntimeSessions(Generic[AppT]):
             session_id, agent_id, principal=principal, tenant_id=runtime.tenant_id,
             authorization=runtime._authorization, resolver=resolver,
             metadata={} if metadata is None else metadata, request_key=idempotency_key,
+        )
+
+    async def update_turn_session(
+        self, session_id: str, *, principal: Principal, expected_revision: int,
+        metadata: "Mapping[str, JsonValue]",
+    ) -> bool:
+        return await self._mutate_turn_session(
+            session_id, principal=principal, expected_revision=expected_revision,
+            action=AuthorizationAction.SESSION_UPDATE, metadata=metadata,
+        )
+
+    async def close_turn_session(
+        self, session_id: str, *, principal: Principal, expected_revision: int,
+    ) -> bool:
+        return await self._mutate_turn_session(
+            session_id, principal=principal, expected_revision=expected_revision,
+            action=AuthorizationAction.SESSION_CLOSE,
+        )
+
+    async def _mutate_turn_session(
+        self, session_id: str, *, principal: Principal, expected_revision: int,
+        action: AuthorizationAction, metadata: "Mapping[str, JsonValue] | None" = None,
+    ) -> bool:
+        _, runtime = self._require_turn_sessions()
+        validate_resource_id(session_id)
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if principal.tenant_id != runtime.tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        store = runtime._state.session_turns
+        if store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        row = await store.get_session(session_id)
+        if row is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        owner = row["owner_principal_id"].decode("utf-8")
+        await runtime._authorization.authorize(
+            principal, action, ResourceRef(ResourceKind.SESSION, session_id, runtime.tenant_id, owner),
+        )
+        if action is AuthorizationAction.SESSION_CLOSE:
+            return await store.close_session(
+                session_id, owner_principal_id=owner, expected_revision=expected_revision,
+            )
+        return await store.update_session(
+            session_id, owner_principal_id=owner, expected_revision=expected_revision,
+            config={**row["config_json"], "metadata": dict(metadata or {})},
         )
 
     async def start_turn(
