@@ -529,7 +529,9 @@ class Persistence:
             action = self._close_actions[self._close_cursor]
             await action()
             self._close_cursor += 1
-        self._session_turn_reader = None
+        if self._session_turn_reader is not None:
+            self._session_turn_reader.clear_recent_context()
+            self._session_turn_reader = None
         self._lifecycle = _RuntimeStateLifecycle.CLOSED
 
     def _assign_materialized(

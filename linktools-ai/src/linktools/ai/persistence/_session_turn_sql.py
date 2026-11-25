@@ -7,7 +7,9 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from threading import RLock
 from typing import TYPE_CHECKING, Literal
+from weakref import finalize
 
 from ..core import canonical_json_bytes, canonical_sha256, validate_idempotency_key
 from ..errors import AIError, ErrorCode
@@ -42,6 +44,21 @@ TerminalState = Literal["succeeded", "failed", "cancelled"]
 _CONTEXT_POSITIONS = 128
 _HISTORY_CACHE_BYTES = 16 * 1024 * 1024
 _HISTORY_CACHE_SESSIONS = 32
+_HISTORY_CACHE_LOCK = RLock()
+_history_cache_total = 0
+
+
+@dataclass(slots=True)
+class _ContextBudget:
+    used: int = 0
+
+
+def _release_context_budget(budget: _ContextBudget) -> None:
+    global _history_cache_total
+    with _HISTORY_CACHE_LOCK:
+        _history_cache_total -= budget.used
+        budget.used = 0
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +140,8 @@ class SqlSessionTurnReader:
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
         self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
-        self._recent_bytes = 0
+        self._recent_budget = _ContextBudget()
+        self._recent_finalizer = finalize(self, _release_context_budget, self._recent_budget)
 
     @staticmethod
     def _key(value: str, size: int) -> bytes:
@@ -275,20 +293,38 @@ class SqlSessionTurnReader:
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],
     ) -> None:
-        previous = self._recent.get(session_id)
-        if previous is not None and previous.through > through:
-            return
-        if previous is not None:
-            self._recent_bytes -= self._recent.pop(session_id).size
-        size = sum(turn.size for turn in turns)
-        if size > _HISTORY_CACHE_BYTES:
-            return
-        while self._recent and (
-            self._recent_bytes + size > _HISTORY_CACHE_BYTES or len(self._recent) >= _HISTORY_CACHE_SESSIONS
-        ):
-            self._recent_bytes -= self._recent.popitem(last=False)[1].size
-        self._recent[session_id] = _ContextWindow(after, through, turns, size)
-        self._recent_bytes += size
+        global _history_cache_total
+        # Charge an entry even for windows containing only failed/cancelled turns.
+        size = 1024 + sum(turn.size for turn in turns)
+        with _HISTORY_CACHE_LOCK:
+            if not self._recent_finalizer.alive:
+                return
+            previous = self._recent.get(session_id)
+            if previous is not None and previous.through > through:
+                return
+            owner = self._recent_budget
+            if previous is not None:
+                owner.used -= self._recent.pop(session_id).size
+                _history_cache_total -= previous.size
+            if size > _HISTORY_CACHE_BYTES:
+                return
+            while self._recent and (
+                _history_cache_total + size > _HISTORY_CACHE_BYTES or len(self._recent) >= _HISTORY_CACHE_SESSIONS
+            ):
+                released = self._recent.popitem(last=False)[1].size
+                owner.used -= released
+                _history_cache_total -= released
+            if _history_cache_total + size > _HISTORY_CACHE_BYTES:
+                return
+            self._recent[session_id] = _ContextWindow(after, through, turns, size)
+            owner.used += size
+            _history_cache_total += size
+
+    def clear_recent_context(self) -> None:
+        """Drop retained history and disable caching for this closed Persistence."""
+        with _HISTORY_CACHE_LOCK:
+            self._recent.clear()
+            self._recent_finalizer()
 
 
 class SqlSessionTurns(SqlSessionTurnReader):
