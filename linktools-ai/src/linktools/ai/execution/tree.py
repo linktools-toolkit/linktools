@@ -525,7 +525,9 @@ class ExecutionTreeStreamer:
         async def discover_ready(done: set[asyncio.Task]) -> None:
             nonlocal discovery_wait, discovery_backoff, remote_wait
             observed = len(views)
-            members = tuple(pending)
+            # A stream remains attached while its last event is being yielded,
+            # even though no next-event task is pending yet.
+            members = tuple(streams)
             if remote_wait in done:
                 await discover_remote()
                 remote_wait = asyncio.create_task(remote_changed.wait())

@@ -43,6 +43,7 @@ from ._payload import encode_payload_bytes, decode_payload_bytes
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, encode_model_messages
 from ._native_checkpoint import NativeCheckpoint
 from ._step_backup import NativeStepBackup
+from ._split_step_snapshot import SPLIT_SOURCE_COLUMNS, require_no_unpaired_split_pins
 from ._step_maintenance import StepContentCleanupResult, canonical_checkpoint_prune_guard, purge_step_content
 from ._step_schema import build_step_sql_metadata
 from .state import SqlStateTransaction, SqlMutationObserver, StateStore, StateTransaction, SqlStateRowReader
@@ -130,6 +131,8 @@ class StepWriteReceipt:
     run_fields: _RunFields | None = None
     native_messages: NativeMessageReceipt | None = None
     lifecycle_keys: tuple[str, ...] = ()
+
+
 
 
 class SqlStepStore:
@@ -910,7 +913,7 @@ class SqlStepStore:
         managed_starts = {}
         for name in ("runs", "events", "snapshots"):
             table = metadata.tables[_STEP_TABLE_NAMES[name]]
-            columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at"}
+            columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at", *SPLIT_SOURCE_COLUMNS}
             seen = set()
             for row in getattr(backup, name):
                 if set(row) != columns or row["store_key"] != backup.store_key:
@@ -969,6 +972,12 @@ class SqlStepStore:
         self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
         validate_messages: bool = True,
     ) -> NativeStepBackup:
+        return await self._capture_backup(reader, accept=accept, validate_messages=validate_messages)
+
+    async def _capture_backup(
+        self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
+        validate_messages: bool = True, paired_split: bool = False,
+    ) -> NativeStepBackup:
         """Capture and strictly verify every owner row in the caller's read transaction.
 
         The caller begins a consistent read and captures the shared message
@@ -987,8 +996,10 @@ class SqlStepStore:
         batches = []
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
+            if name == "runs" and not paired_split:
+                await require_no_unpaired_split_pins(reader, self._context, table, self._store_key)
             columns = tuple(column for column in table.columns
-                            if column.name not in {"id", "updated_at", "created_at"})
+                            if column.name not in {"id", "updated_at", "created_at"} | SPLIT_SOURCE_COLUMNS)
             rows = []
             cursor = 0
             while True:
@@ -1137,9 +1148,13 @@ class SqlStepStore:
             existing_runs.update((row["run_id"], row) for row in rows)
         for row in backup.runs:
             existing = existing_runs.get(row["run_id"])
-            if existing is not None and (_RUN_ADAPTER.validate_python(self._record_data(existing))
-                                         != _RUN_ADAPTER.validate_python(self._record_data(row))):
-                raise ValueError("native backup registration differs from its canonical owner")
+            if existing is not None:
+                if any(existing[name] is not None for name in SPLIT_SOURCE_COLUMNS):
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Native restore cannot replace a split Step handoff")
+                if _RUN_ADAPTER.validate_python(self._record_data(existing)) != _RUN_ADAPTER.validate_python(
+                    self._record_data(row)
+                ):
+                    raise ValueError("native backup registration differs from its canonical owner")
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
             # Individual inserts preserve ordering even on dialects that do not
@@ -1814,11 +1829,17 @@ class SqlStepStore:
         if last_complete is not None:
             complete_safe = or_(complete_safe, table.c.id < last_complete)
         conditions += (complete_safe,)
-        canonical_guard = ()
+        runs = self._table("runs")
+        source_has_pin = select(runs.c.id).where(
+            *self._run_predicates(runs, run_id),
+            runs.c.turn_source_phase.in_(("sealed", "published")),
+            runs.c.turn_source_pin["checkpoint_id"].as_string().is_not(None),
+        ).exists()
+        canonical_guard = (~source_has_pin,)
         if self._message_archive is not None:
             metadata = self._message_archive.store.storage_group.metadata
-            canonical_guard = (canonical_checkpoint_prune_guard(metadata, self._store_key, run_id),)
-            conditions += canonical_guard
+            canonical_guard += (canonical_checkpoint_prune_guard(metadata, self._store_key, run_id),)
+        conditions += canonical_guard
         after = 0
         while True:
             retired = (await session.execute(select(table.c.id).where(

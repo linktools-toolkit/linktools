@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from threading import RLock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeVar
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
     from ..execution import PendingToolContinuation
     from .state import StateGroupTransaction, StateStore
     from ..storage import SqlStorageContext
+    from ._split_step_source import SplitStepSourceObservation
     from ._step_store import SqlStepStore
     from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 
@@ -130,6 +132,8 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         Column("lease_until", BigInteger, nullable=True, comment="Expiry in database-clock seconds since epoch."),
         key("binding_key", 32, "Frozen Agent binding in the same scope."),
         Column("request_json", JSON(), nullable=False, comment="Accepted principal and canonical request."),
+        Column("split_source_receipt", sql_binary_key(64), nullable=True,
+               comment="Exact separately committed Step receipt; absent for same-group publication."),
         Column("result_json", JSON(none_as_null=True), nullable=True,
                comment="Canonical terminal output and continuation material."),
         *sql_audit_columns(),
@@ -239,6 +243,7 @@ class SqlSessionTurnReader:
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
         self._transcript_source = None
+        self._split_transcript_source = None
         self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
         self._recent_budget = _ContextBudget()
         self._recent_finalizer = finalize(self, _release_context_budget, self._recent_budget)
@@ -246,6 +251,9 @@ class SqlSessionTurnReader:
     def bind_transcript_reader(self, conversation_store, archive_provider, capture) -> None:
         """Bind native transcript reads to the same SQL snapshot as turn metadata."""
         self._transcript_source = conversation_store, archive_provider, capture
+
+    def _bind_split_transcript_reader(self, resolve) -> None:
+        self._split_transcript_source = resolve
 
     async def _read_transcripts(self, statement, *, display: bool, body_limit: int | None = None) -> tuple[Mapping[str, object], ...]:
         if self._transcript_source is None:
@@ -263,28 +271,55 @@ class SqlSessionTurnReader:
             if not isinstance(owner, SqlStateRowReader):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             rows = await owner.read_sql_rows(self._context, statement)
-            manifests = [
-                self._transcript_manifest(row["result_json"])
-                for row in rows[:body_limit] if row["state"] == "succeeded"
+            successes = [row for row in rows[:body_limit] if row["state"] == "succeeded"]
+            manifests = [self._transcript_manifest(row["result_json"]) for row in successes]
+            local_positions = [
+                index for index, row in enumerate(successes) if row["split_source_receipt"] is None
             ]
             if not manifests:
-                return rows, manifests, None, {}
-            if archive_store is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            archive = group.transaction(archive_store)
-            if not isinstance(archive, SqlStateRowReader):
-                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            load = await capture(tuple(root for root, _ in manifests), transaction=archive)
+                return rows, manifests, local_positions, (), None, {}
+            foreign = [
+                (index, row, manifests[index][0]) for index, row in enumerate(successes)
+                if row["split_source_receipt"] is not None
+            ]
+            load = None
+            if local_positions:
+                if archive_store is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                archive = group.transaction(archive_store)
+                if not isinstance(archive, SqlStateRowReader):
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                load = await capture(tuple(manifests[index][0] for index in local_positions), transaction=archive)
             binding_keys = tuple(dict.fromkeys(
                 row["binding_key"] for row in rows[:body_limit]
                 if not display and row["state"] == "succeeded" and row["result_json"]["binding_refs"]
             ))
+            if binding_keys and content_archive is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             bindings = await self._read_binding_payloads(content_archive, binding_keys)
-            return rows, manifests, load, bindings
+            return rows, manifests, local_positions, foreign, load, bindings
 
         members = (turn_store, archive_store) if archive_store not in (None, turn_store) else (turn_store,)
-        rows, manifests, load, bindings = await group.read_many(members, read)
-        loaded = iter(zip(manifests, () if load is None else await load(), strict=True))
+        rows, manifests, local_positions, foreign, load, bindings = await group.read_many(members, read)
+        encoded_by_position = dict(zip(local_positions, () if load is None else await load(), strict=True))
+        if foreign:
+            if self._split_transcript_source is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            from ._split_session_transcript import SplitTranscriptReference
+
+            # The earlier authorized Conversation read cannot be held open while
+            # reading a different database. Exact retained receipts prove the link.
+            source = await self._split_transcript_source()
+            contents = await source.read(tuple(
+                SplitTranscriptReference(
+                    row["turn_id"].decode("utf-8"), row["session_key"].decode("utf-8"),
+                    row["generation"], row["split_source_receipt"].decode("utf-8"), root,
+                ) for _, row, root in foreign
+            ))
+            encoded_by_position.update(zip((index for index, _, _ in foreign), contents, strict=True))
+        loaded = iter(
+            (manifest, encoded_by_position[index]) for index, manifest in enumerate(manifests)
+        )
         projected = []
         for position, row in enumerate(rows):
             if row["state"] != "succeeded" or (body_limit is not None and position >= body_limit):
@@ -440,6 +475,7 @@ class SqlSessionTurnReader:
         columns = self._turns.c
         statement = select(
             columns.turn_id, columns.turn_no, columns.state, columns.created_at, columns.updated_at,
+            columns.session_key, columns.generation, columns.split_source_receipt,
             columns.result_json, columns.request_json["prompt"].as_string().label("prompt"),
             columns.request_json["input"].label("stored_input"),
         )
@@ -578,6 +614,7 @@ class SqlSessionTurnReader:
         reset = (columns.request_json["session_context"].as_string() == "current_turn").label("reset_context")
         statement = select(
             columns.turn_no, columns.state, prompt, stored_input, result, columns.binding_key, reset,
+            columns.turn_id, columns.session_key, columns.generation, columns.split_source_receipt,
         ).where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
@@ -640,6 +677,21 @@ class SqlSessionTurnReader:
         with _HISTORY_CACHE_LOCK:
             self._recent.clear()
             self._recent_finalizer()
+
+
+class _TerminalFenceLost(AIError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _SplitTargetObservation:
+    generation: int
+    state: str
+    receipt_id: str | None
+    admitted_at: datetime | None = None
+
+    def confirms(self, *, generation: int, state: str, receipt_id: str) -> bool:
+        return self.generation == generation and self.state == state and self.receipt_id == receipt_id
 
 
 class SqlSessionTurns(SqlSessionTurnReader):
@@ -837,9 +889,6 @@ class SqlSessionTurns(SqlSessionTurnReader):
         _publish_trace: tuple[tuple[StateStore, ...], Callable[[StateGroupTransaction], Awaitable[None]]] | None = None,
     ) -> bool:
         """Finalize and release using the same lock order as acceptance."""
-        class FenceLost(AIError):
-            pass
-
         if state not in ("succeeded", "failed", "cancelled"):
             raise ValueError("invalid terminal state")
         turn_key = self._turn_values(key)
@@ -862,20 +911,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
             raise ValueError("an unsuccessful session turn cannot publish a transcript")
 
         async def write(connection: AsyncSession) -> bool:
-            released = await connection.execute(self._sessions.update().filter_by(
-                **self._session_values(key.session_id), active_turn_id=turn_key["turn_id"], last_turn_no=turn_no - 1,
-            ).values(active_turn_id=None, last_turn_no=turn_no, revision=self._sessions.c.revision + 1))
-            if released.rowcount != 1:
-                return False
-            finished = await connection.execute(self._turns.update().filter_by(
-                **turn_key, generation=generation, turn_no=turn_no,
-                state="cancelling" if state == "cancelled" else "accepted",
-            ).where(self._turns.c.lease_until > self._now).values(
-                state=state, lease_until=None, result_json=result,
-            ))
-            if finished.rowcount != 1:
-                raise FenceLost(ErrorCode.STORAGE_CONFLICT)
-            return True
+            return await self._finish_turn(
+                connection, key, generation=generation, turn_no=turn_no, state=state, result=result,
+            )
 
         try:
             if state != "succeeded" and _publish_trace is None:
@@ -915,8 +953,111 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
             stores = (store, archive.store) if state == "succeeded" else (store,)
             return await group.mutate(tuple(dict.fromkeys((*stores, *trace_stores))), publish)
-        except FenceLost:
+        except _TerminalFenceLost:
             return False
+
+    async def _finish_turn(
+        self, connection: AsyncSession, key: SessionTurnKey, *, generation: int, turn_no: int,
+        state: TerminalState, result: JsonValue, source_receipt: bytes | None = None,
+        _expired: bool = False,
+    ) -> bool:
+        turn_key = self._turn_values(key)
+        source = {} if source_receipt is None else {"split_source_receipt": source_receipt}
+        released = await connection.execute(self._sessions.update().filter_by(
+            **self._session_values(key.session_id), active_turn_id=turn_key["turn_id"], last_turn_no=turn_no - 1,
+        ).values(active_turn_id=None, last_turn_no=turn_no, revision=self._sessions.c.revision + 1))
+        if released.rowcount != 1:
+            return False
+        lease = self._turns.c.lease_until
+        deadline = lease <= self._now if _expired else lease > self._now
+        finished = await connection.execute(self._turns.update().filter_by(
+            **turn_key, generation=generation, turn_no=turn_no,
+            state="cancelling" if state == "cancelled" else "accepted",
+        ).where(deadline).values(
+            state=state, lease_until=None, result_json=result, **source,
+        ))
+        if finished.rowcount != 1:
+            raise _TerminalFenceLost(ErrorCode.STORAGE_CONFLICT)
+        return True
+
+
+    async def publish_split_terminal(
+        self, key: SessionTurnKey, *, generation: int, turn_no: int, state: TerminalState,
+        source: SplitStepSourceObservation, result: JsonValue = None,
+        binding_refs: tuple[tuple[int, int | None], ...] = (),
+        output_ref: tuple[int, int] | None = None, _expired: bool = False,
+    ) -> bool:
+        """Project an already sealed source receipt; no source writes or body copies here."""
+        if state not in ("succeeded", "failed", "cancelled"):
+            raise ValueError("invalid terminal state")
+        if (source.turn_id != key.turn_id or source.session_id != key.session_id
+                or source.generation != generation or source.pin.terminal_state != state
+                or source.phase != "sealed"):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        source_pin = source.pin
+        receipt = source_pin.receipt_id.encode("utf-8")
+        if state == "succeeded":
+            root = source_pin.transcript
+            if result is not None or root is None or not root.count:
+                raise ValueError("successful split publication requires its pinned native transcript")
+            if self._transcript_write_binding is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            _store, _archive, native = self._transcript_write_binding
+            if root.store_key != native.store_key:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
+            if output_ref is not None:
+                result["output_ref"] = list(output_ref)
+            self._transcript_manifest(result)
+        elif source_pin.transcript is not None or binding_refs or output_ref is not None:
+            raise ValueError("an unsuccessful turn cannot install a native transcript")
+
+        async def write(connection: AsyncSession) -> bool:
+            return await self._finish_turn(
+                connection, key, generation=generation, turn_no=turn_no, state=state,
+                result=result, source_receipt=receipt, _expired=_expired,
+            )
+
+        try:
+            return await self._context.run_mutation(write, domain="session.finish")
+        except _TerminalFenceLost:
+            return False
+
+    async def publish_split_discard(
+        self, key: SessionTurnKey, *, turn_no: int, source: SplitStepSourceObservation,
+        result: JsonValue = None, _expired: bool = False,
+    ) -> bool:
+        """Let a confirmed Stop win without rewriting the already sealed source."""
+        if ((source.turn_id, source.session_id) != (key.turn_id, key.session_id)
+                or source.pin.terminal_state not in ("succeeded", "failed") or source.phase != "sealed"):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def write(connection: AsyncSession) -> bool:
+            return await self._finish_turn(
+                connection, key, generation=source.generation, turn_no=turn_no,
+                state="cancelled", result=result, source_receipt=source.pin.receipt_id.encode("utf-8"),
+                _expired=_expired,
+            )
+
+        try:
+            return await self._context.run_mutation(write, domain="session.finish")
+        except _TerminalFenceLost:
+            return False
+
+    async def observe_split_target(self, key: SessionTurnKey) -> _SplitTargetObservation | None:
+        """Reconcile the exact scoped target after an uncertain Conversation commit."""
+        from sqlalchemy import select
+
+        columns = self._turns.c
+        statement = select(columns.generation, columns.state, columns.split_source_receipt).where(
+            *(columns[name] == value for name, value in self._turn_values(key).items()),
+        )
+        async with self._context.engine.connect() as connection:
+            row = (await connection.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        generation, state, receipt = row
+        return _SplitTargetObservation(generation, state, None if receipt is None else receipt.decode("utf-8"))
 
     async def get_waiting_turn(self, key: SessionTurnKey) -> CanonicalDeferredFrontier | None:
         from sqlalchemy import and_, select
@@ -1097,14 +1238,15 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
     async def _take_over(
         self, session: AsyncSession, key: SessionTurnKey, *, generation: int,
-        lease_seconds: int, cancelling: bool,
+        lease_seconds: int, cancelling: bool, source_receipt: bytes | None = None,
     ) -> bool:
         if lease_seconds < 1:
             raise ValueError("the turn lease must be positive")
+        source = {} if source_receipt is None else {"split_source_receipt": source_receipt}
         result = await session.execute(self._turns.update().filter_by(
             **self._turn_values(key), generation=generation, state="cancelling" if cancelling else "accepted",
         ).where(self._turns.c.lease_until <= self._now).values(
-            generation=generation + 1, lease_until=self._now + lease_seconds,
+            generation=generation + 1, lease_until=self._now + lease_seconds, **source,
         ))
         return result.rowcount == 1
 
@@ -1124,6 +1266,62 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         acquired, = await self._recover_with_trace_frontier(claim, _trace_frontier)
         return acquired
+
+    async def split_target_lease(
+        self, key: SessionTurnKey, *, generation: int, cancelling: bool, expired: bool,
+    ) -> _SplitTargetObservation | None:
+        """Check the exact target phase and authoritative lease before fencing its source."""
+        from sqlalchemy import select
+
+        cols = self._turns.c
+        query = select(cols.state, cols.split_source_receipt, cols.created_at).where(
+            *(cols[name] == value for name, value in self._turn_values(key).items()),
+            cols.generation == generation, cols.state == ("cancelling" if cancelling else "accepted"),
+            cols.lease_until <= self._now if expired else cols.lease_until > self._now,
+        )
+        async with self._context.engine.connect() as connection:
+            row = (await connection.execute(query)).one_or_none()
+        if row is None:
+            return None
+        return _SplitTargetObservation(
+            generation, row.state,
+            None if row.split_source_receipt is None else row.split_source_receipt.decode("utf-8"),
+            row.created_at,
+        )
+
+    async def take_over_split_generation(
+        self, key: SessionTurnKey, *, generation: int, lease_seconds: int,
+        source: SplitStepSourceObservation,
+    ) -> tuple[bool, SessionInstructionFrontier | None]:
+        """Adopt the exact source seal only after the previous lease expired."""
+        if (source.turn_id != key.turn_id or source.session_id != key.session_id
+                or source.generation != generation or source.phase != "sealed"
+                or source.pin.terminal_state is not None or source.pin.checkpoint_id is None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def write(session: AsyncSession) -> tuple[bool, SessionInstructionFrontier | None]:
+            acquired = await self._take_over(
+                session, key, generation=generation, lease_seconds=lease_seconds, cancelling=False,
+                source_receipt=source.pin.receipt_id.encode("utf-8"),
+            )
+            return acquired, (await self._capture_instruction_frontier(session, key)) if acquired else None
+
+        return await self._context.run_mutation(write, domain="session.recover")
+
+    async def confirmed_split_regrant(
+        self, key: SessionTurnKey, *, generation: int, receipt_id: str,
+    ) -> tuple[bool, SessionInstructionFrontier | None]:
+        from sqlalchemy import select
+
+        cols = self._turns.c
+        statement = select(cols.request_json["instruction_frontier"]).where(
+            *(cols[name] == value for name, value in self._turn_values(key).items()),
+            cols.generation == generation, cols.state == "accepted", cols.lease_until > self._now,
+            cols.split_source_receipt == receipt_id.encode("utf-8"),
+        )
+        async with self._context.engine.connect() as connection:
+            row = (await connection.execute(statement)).one_or_none()
+        return (False, None) if row is None else (True, SessionInstructionFrontier.from_json(row[0]))
 
     def _require_checkpoint_store(self, step_store: SqlStepStore) -> None:
         if self._transcript_write_binding is None:

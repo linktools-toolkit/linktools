@@ -846,6 +846,17 @@ async def _build_local_components(
             execution_id, allow_cancelled=True,
         )
         run_store.bind_pending_producer_guard(backend.require_pending_producer)
+        split_sql_source = state._configured_split_step_source() if enable_turn_sessions else None
+
+        async def read_split_effects(turn_id):
+            return await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=tenant_id)
+
+        async def open_split_recovery_source():
+            from ._canonical_split_step import _CanonicalSplitStep
+
+            source, native, _, _ = await state._open_split_step_archive()
+            return _CanonicalSplitStep(state.session_turns, source, native, read_effects=read_split_effects)
+
         async def prepare_canonical_step(binding, key, generation):
             from ..capability.steps import AtomicStepPersistence
             from ..persistence import SqlStepStore
@@ -862,6 +873,33 @@ async def _build_local_components(
             if (type(native) is not AtomicStepPersistence or type(native.store) is not SqlStepStore
                     or native.store.store_key != SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical Step requires native SQL persistence")
+            turn_store = state.session_turns
+            selected_store = state.conversation.sessions.state_store
+            split_source = None
+            if native.store.storage_context.engine is not selected_store.storage_group.context.engine:
+                if split_sql_source is None:
+                    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
+                                  "Cross-store Step requires separate SQLite Conversation and Execution/Checkpoint databases")
+
+                from ..capability import ExecutionCapability
+                from ._canonical_split_step import _CanonicalSplitStep
+
+                compiled = binding.compiled_agent
+                if (compiled.selected_tools or compiled.selected_skills or compiled.selected_mcp
+                        or compiled.selected_subagents or compiled.selected_capabilities
+                        or binding.output_binding.mode != "text"
+                        or policy.durable_trace or policy.memory_scope is not None
+                        or any(type(leaf) not in (StepPersistence, StepPersistenceCapability, ExecutionCapability)
+                               for item in policy.capabilities for leaf in runtime_feature_leaves(item))):
+                    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
+                                  "Cross-store Step requires a terminal-only text agent")
+                selected_store = split_sql_source
+                if (native.store.storage_context is not selected_store.context
+                        or not native.store.backup_supported):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                split_source = _CanonicalSplitStep(
+                    turn_store, selected_store, native.store, read_effects=read_split_effects,
+                )
             tools = RuntimeToolOperationBridge(
                 state.checkpoint.tools, state.object_store(PersistenceDomain.CHECKPOINT),
                 namespace=namespace, tenant_id=tenant_id, execution_id=key.turn_id, agent_run_id=key.turn_id,
@@ -869,8 +907,8 @@ async def _build_local_components(
                 background_tasks=set(), fresh_execution=generation == 1,
             )
             store = RuntimeStepStore.for_canonical_turn(
-                native.store, tools, turn_store=state.session_turns, state_store=state.conversation.sessions.state_store,
-                key=key, generation=generation, run_id=key.turn_id,
+                native.store, tools, turn_store=turn_store, state_store=selected_store,
+                key=key, generation=generation, run_id=key.turn_id, split_source=split_source,
             )
             return replace(native, store=store, run_id=key.turn_id), tools
 
@@ -926,6 +964,8 @@ async def _build_local_components(
             )
         )
         if turn_runner is not None:
+            if split_sql_source is not None:
+                turn_runner._split_recovery_source = open_split_recovery_source
             from ..persistence.runs import ModelInteractionStateStepArchive
             from ._canonical_deferred_publication import bind_deferred_publication
 

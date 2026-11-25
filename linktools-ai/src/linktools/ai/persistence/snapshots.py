@@ -52,6 +52,8 @@ from ._ordinary_snapshot import (
 )
 from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
+from ._split_step_snapshot import (PairedSplitTerminalRestore, capture_split_source_pins,
+                                   require_no_unpaired_split_pins)
 from ..model.messages import canonical_structured_output, decode_model_message_payloads
 from ..model.attachments import read_attachment_payload, attachment_payload_objects
 from ._archive_closure import (
@@ -541,6 +543,7 @@ class _SnapshotExportSource:
     run_registrations: Mapping[str, RunRecord] | None = None
     ordinary_sessions: dict[str, list[dict[str, object]]] | None = None
     ordinary_binding_archive: str | None = None
+    split_step_terminals: Mapping[str, object] | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return self.archive_object_stores[domain]
@@ -562,6 +565,9 @@ class SnapshotResources:
     capability_stores: Mapping[str, StateStore] | None = None
     checkpoint_backup_source: Callable[[NativeStepSource], Awaitable["SqlStepStore"]] | None = None
     run_registrations: RunRegistrationStore | None = None
+    # Internal cutover gate: restore is selectable only with the paired
+    # exporter and a bound foreign transcript reader for this exact source.
+    _paired_split_snapshot_ready: bool = False
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return (self.archive_object_stores if self.archive_object_stores is not None else self.object_stores)[domain]
@@ -686,12 +692,27 @@ class RuntimeSnapshotOperations:
         native_payloads = {}
         ordinary_sessions = None
         ordinary_binding_archive = None
+        split_step_terminals = None
         readers = {}
         groups = {}
         for domain in sorted(self._resources.durable_domains, key=lambda value: value.value):
             store = self._resources.stores[domain]
             groups.setdefault(store.storage_group, []).append((domain, store))
-        for group, members in groups.items():
+        split_source_group = None
+        split_conversation_group = None
+        if self._resources._paired_split_snapshot_ready:
+            execution = self._resources.stores.get(PersistenceDomain.EXECUTION)
+            checkpoint = self._resources.stores.get(PersistenceDomain.CHECKPOINT)
+            conversation = self._resources.stores.get(PersistenceDomain.CONVERSATION)
+            if (all(isinstance(store, SqlStateStore) for store in (execution, checkpoint, conversation))
+                    and execution.storage_group is checkpoint.storage_group
+                    and execution.storage_group is not conversation.storage_group
+                    and {PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT,
+                         PersistenceDomain.CONVERSATION}.issubset(self._resources.durable_domains)):
+                split_source_group = execution.storage_group
+                split_conversation_group = conversation.storage_group
+        grouped = sorted(groups.items(), key=lambda item: item[0] is not split_conversation_group)
+        for group, members in grouped:
             if not isinstance(group, StateStorageGroup):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             opened = await group.open_archive()
@@ -716,15 +737,76 @@ class RuntimeSnapshotOperations:
                 await execution_bindings.initialize(create=False)
 
             async def capture_group(transaction: object) -> None:
-                nonlocal native, ordinary_sessions, ordinary_binding_archive
+                nonlocal native, ordinary_sessions, ordinary_binding_archive, split_step_terminals
                 roots = []
                 event_references = []
                 waiting_owner = None
+                if group is split_source_group:
+                    source_store = self._resources.stores[PersistenceDomain.EXECUTION]
+                    from ._step_store import SqlStepStore
+
+                    async def capture_source(tx: StateTransaction):
+                        if not isinstance(tx, SqlStateRowReader):
+                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                        scope = SqlStepStore.scope_key(namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
+                        table = group.metadata.tables["ai_step_runs"]
+                        pins = await capture_split_source_pins(
+                            tx, source_store.context, table, scope, accept=capture_budget.accept,
+                        )
+                        if not pins:
+                            return None
+                        if opened is None or native is None or native.store_key != scope or not native.backup_supported:
+                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                        backup = await native._capture_backup(
+                            tx, accept=capture_budget.accept, validate_messages=False, paired_split=True,
+                        )
+                        return pins, backup
+
+                    captured = await source_store.read(capture_source)
+                    target_rows = None if ordinary_sessions is None else decode_ordinary_snapshot(
+                        ordinary_sessions, tenant_id=self._resources.tenant_id, paired_split=True,
+                    )
+                    if captured is not None:
+                        pins, backup = captured
+                        scope = opened[0]
+                        split_step_terminals = {
+                            "source_group": scope, "pins": list(pins),
+                        }
+                        paired = PairedSplitTerminalRestore.decode(
+                            split_step_terminals, target_rows, {scope: backup},
+                            {scope: {"domain": PersistenceDomain.EXECUTION.value}},
+                            conversation_group=ordinary_binding_archive,
+                        )
+                        native_checkpoints[scope] = backup
+                        roots.extend(paired.roots)
+                        roots.extend(backup.message_roots(scope))
+                        for row in backup.runs:
+                            _retain_run_registration(run_registrations, _run_from_native_row(row))
+                    elif target_rows is not None and any(
+                        row.get("split_source_receipt") is not None for row in target_rows["turns"]
+                    ):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "Split Step target lost its source seal")
                 for domain, store in members:
+                    if group is not split_source_group and domain is PersistenceDomain.CHECKPOINT and isinstance(store, SqlStateStore):
+                        table = group.metadata.tables.get("ai_step_runs")
+                        if table is not None:
+                            from ._step_store import SqlStepStore
+
+                            async def require_closed_source(tx: StateTransaction):
+                                if not isinstance(tx, SqlStateRowReader):
+                                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                                await require_no_unpaired_split_pins(
+                                    tx, store.context, table, SqlStepStore.scope_key(
+                                        namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+                                    ),
+                                )
+
+                            await store.read(require_closed_source)
                     if domain is PersistenceDomain.CONVERSATION and isinstance(store, SqlStateStore):
                         captured_ordinary = await capture_ordinary_snapshot(
                             store, namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
                             accept=capture_budget.accept, page_size=capture_budget.page_size,
+                            paired_split=group is split_conversation_group,
                         )
                         if captured_ordinary["sessions"] or captured_ordinary["turns"]:
                             ordinary_sessions = captured_ordinary
@@ -734,7 +816,12 @@ class RuntimeSnapshotOperations:
                                 ordinary_binding_archive = opened[0]
                             if has_waiting_turns(captured_ordinary):
                                 waiting_owner = store
-                            roots.extend(ordinary_transcript_roots(captured_ordinary))
+                            if group is split_conversation_group:
+                                for row in captured_ordinary["turns"]:
+                                    if row["state"] == "succeeded" and row.get("split_source_receipt") is None:
+                                        roots.append(decode_session_transcript_root(row["result_json"]))
+                            else:
+                                roots.extend(ordinary_transcript_roots(captured_ordinary))
                     reader = _StateSnapshotReader(store,
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
                                           if domain is PersistenceDomain.TRACE else None),
@@ -942,6 +1029,7 @@ class RuntimeSnapshotOperations:
             native_rows=native_rows, native_checkpoints=native_checkpoints, native_projections=native_projections, native_payloads=native_payloads,
             run_registrations=run_registrations,
             ordinary_sessions=ordinary_sessions, ordinary_binding_archive=ordinary_binding_archive,
+            split_step_terminals=split_step_terminals,
             archive_object_stores=(self._resources.archive_object_stores
                                   if self._resources.archive_object_stores is not None
                                   else self._resources.object_stores),
@@ -1281,6 +1369,8 @@ async def _export_snapshot(
         }
     if source.ordinary_binding_archive is not None:
         manifest["ordinary_binding_archive"] = source.ordinary_binding_archive
+    if source.split_step_terminals is not None:
+        manifest["split_step_terminals"] = source.split_step_terminals
     for optional in ("native_messages", "native_checkpoints", "native_projections"):
         if not manifest[optional]:
             del manifest[optional]
@@ -1344,8 +1434,13 @@ async def restore_snapshot(
     if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
+    raw_split_pairs = manifest.get("split_step_terminals")
+    if "split_step_terminals" in manifest and raw_split_pairs is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     ordinary_sessions = (
-        decode_ordinary_snapshot(manifest["ordinary_sessions"], tenant_id=tenant_id) if format_version == 4 else None
+        decode_ordinary_snapshot(
+            manifest["ordinary_sessions"], tenant_id=tenant_id, paired_split=raw_split_pairs is not None,
+        ) if format_version == 4 else None
     )
     if ordinary_sessions is not None and (
         not ordinary_sessions["sessions"] or PersistenceDomain.CONVERSATION.value not in manifest["domains"]
@@ -1418,8 +1513,6 @@ async def restore_snapshot(
                 result = row["result_json"]
                 root = decode_session_transcript_root(result)
                 structured_turns.setdefault(root.group_id, []).append((root, result["output_ref"]))
-    if ordinary_group_ids and ordinary_group_ids != {ordinary_binding_archive}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for transcript_root in ordinary_roots:
         _validate_native_partition(transcript_root.store_key, namespace, tenant_id)
         closure = native_closures.get(transcript_root.group_id)
@@ -1449,6 +1542,16 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         for message_root in backup.message_roots(group_id):
             native_closures[group_id].mark(message_root.store_key, message_root.slices)
+    paired_split = PairedSplitTerminalRestore.decode(
+        raw_split_pairs, ordinary_sessions, native_checkpoints, native_entries,
+        conversation_group=ordinary_binding_archive,
+    )
+    local_ordinary_roots = tuple(root for root in ordinary_roots
+                                 if paired_split is None or root.group_id != paired_split.source_group)
+    if any(root.group_id != ordinary_binding_archive for root in local_ordinary_roots):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if paired_split is not None and set(ordinary_roots) - set(local_ordinary_roots) != set(paired_split.projected_roots):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     waiting_checkpoint_group = (
         require_waiting_checkpoints(ordinary_sessions, native_checkpoints)
         if ordinary_sessions is not None else None
@@ -1463,6 +1566,11 @@ async def restore_snapshot(
             for reference in ordinary_input_object_refs(ordinary_sessions, namespace=namespace, tenant_id=tenant_id)
         )
     required_checkpoint_groups = {waiting_checkpoint_group} if waiting_checkpoint_group is not None else set()
+    if paired_split is not None:
+        required_checkpoint_groups.add(paired_split.source_group)
+        entry_count += len(paired_split.pairs)
+        if entry_count > limits.max_entries:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
     decoded_domains: dict[
         PersistenceDomain,
         tuple[
@@ -1817,6 +1925,27 @@ async def restore_snapshot(
             if (not isinstance(checkpoint_store, SqlStateStore)
                     or checkpoint_store.storage_group is not conversation_store.storage_group):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        if paired_split is not None:
+            if not resources._paired_split_snapshot_ready:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Paired split Step restore is not active")
+            checkpoint_store = resources.stores.get(PersistenceDomain.CHECKPOINT)
+            if (not isinstance(execution_store, SqlStateStore) or not isinstance(checkpoint_store, SqlStateStore)
+                    or execution_store.storage_group is not checkpoint_store.storage_group
+                    or execution_store.storage_group is conversation_store.storage_group
+                    or not {PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT,
+                            PersistenceDomain.CONVERSATION}.issubset(decoded_domains)):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Split Step source and Conversation must retain their mapped stores")
+            # Native refs seen in Trace/custom owners cannot remap this split
+            # source into a third physical archive.
+            source_group = execution_store.storage_group
+            for domain, values in decoded_domains.items():
+                if resources.stores[domain].storage_group is source_group:
+                    continue
+                records, facts, operations, _sequences = values
+                for row in (*records, *facts, *operations):
+                    if any(ref.group_id == paired_split.source_group
+                           for ref in (*iter_native_message_roots(row.data), *iter_native_event_references(row.data))):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Split Step source cannot be copied to another archive")
         participants = (*resources.stores.values(), *(resources.capability_stores or {}).values())
         coowned = type(execution_store) is SqlStateStore and all(
             type(store) is SqlStateStore and store.storage_group is execution_store.storage_group
@@ -1877,6 +2006,10 @@ async def restore_snapshot(
 
         restored_native_backups = {}
         domain_items = tuple(decoded_domains.items())
+        split_source_restored = None
+        if paired_split is not None:
+            order = {PersistenceDomain.EXECUTION: 0, PersistenceDomain.CHECKPOINT: 1}
+            domain_items = tuple(sorted(domain_items, key=lambda item: order.get(item[0], 2)))
         if typed_sessions:
             domain_items = tuple(sorted(domain_items, key=lambda item: item[0] is not PersistenceDomain.CONVERSATION))
         for domain, values in domain_items:
@@ -1890,9 +2023,11 @@ async def restore_snapshot(
             domain_native_roots = tuple(root for value in reference_values
                                         for root in iter_native_message_roots(value))
             if domain is PersistenceDomain.CONVERSATION:
-                domain_native_roots += ordinary_roots
+                domain_native_roots += local_ordinary_roots
                 if ordinary_binding_archive is not None:
                     referenced_scopes.add(ordinary_binding_archive)
+            elif domain is PersistenceDomain.EXECUTION and paired_split is not None:
+                domain_native_roots += paired_split.roots
             event_groups = {ref.group_id for value in reference_values for ref in iter_native_event_references(value)}
             domain_checkpoints = {
                 key: backup for key, backup in native_checkpoints.items()
@@ -2042,6 +2177,10 @@ async def restore_snapshot(
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         if previous_backup is None:
                             await transaction.run_sql(store.context, lambda session: native_restore.restore_backup(session, backup))
+                    if paired_split is not None and domain is PersistenceDomain.EXECUTION:
+                        await transaction.run_sql(store.context, lambda session: paired_split.install_source(
+                            session, store.storage_group.metadata.tables["ai_step_runs"], target_group=target_scope,
+                        ))
                 state_facts = facts
                 store = resources.stores[domain]
                 if domain is PersistenceDomain.TRACE and isinstance(store, SqlStateStore):
@@ -2142,9 +2281,14 @@ async def restore_snapshot(
                 if restore_turn_rows is not None:
                     await transaction.run_sql(store.context, restore_turn_rows)
                 if domain is PersistenceDomain.CONVERSATION and ordinary_sessions is not None:
+                    ordinary_destinations = dict(native_mapping) if native_groups else {}
+                    if paired_split is not None:
+                        if split_source_restored is None:
+                            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        ordinary_destinations[paired_split.source_group] = split_source_restored
                     await restore_ordinary_snapshot(
                         store, transaction, namespace=resources.namespace, tenant_id=resources.tenant_id,
-                        rows=rekey_ordinary_transcripts(ordinary_sessions, native_mapping if native_groups else {}),
+                        rows=rekey_ordinary_transcripts(ordinary_sessions, ordinary_destinations),
                     )
                 if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
                     from ._model_interaction_store import ModelInteractionStateStepArchive
@@ -2170,6 +2314,8 @@ async def restore_snapshot(
                 else:
                     await resources.stores[domain].mutate(publish)
                 restored_native_backups.update({(target_scope, backup.store_key): backup for backup in domain_checkpoints.values()})
+                if paired_split is not None and domain is PersistenceDomain.EXECUTION:
+                    split_source_restored = target_scope
             finally:
                 if native_rows and isinstance(resources.stores[domain], SqlStateStore):
                     from ._step_store import SqlStepStore

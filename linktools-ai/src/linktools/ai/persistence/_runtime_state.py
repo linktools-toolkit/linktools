@@ -549,6 +549,8 @@ class Persistence:
     ) -> None:
         self._conversation = value.conversation
         self._session_turn_reader = value.session_turn_reader
+        if self._session_turn_reader is not None:
+            self._session_turn_reader._bind_split_transcript_reader(self._split_transcript_reader)
         self._execution = value.execution
         self._memory = value.memory
         self._artifact = value.artifact
@@ -653,6 +655,52 @@ class Persistence:
             return self._stores[PersistenceDomain.EXECUTION]
         return next((self._stores[domain] for domain in PersistenceDomain if domain in domains), None)
 
+    def _configured_split_step_source(self):
+        """Return the supported explicit two-database topology, never a fallback."""
+        from ._sql import SqlStateStore
+
+        self._require_ready()
+        source = self._stores[PersistenceDomain.EXECUTION]
+        checkpoint = self._stores[PersistenceDomain.CHECKPOINT]
+        conversation = self._stores[PersistenceDomain.CONVERSATION]
+        if (not isinstance(source, SqlStateStore) or not isinstance(checkpoint, SqlStateStore)
+                or not isinstance(conversation, SqlStateStore)
+                or checkpoint.storage_group is not source.storage_group
+                or conversation.storage_group is source.storage_group
+                or not {PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT, PersistenceDomain.CONVERSATION}
+                <= self.plan.durable_domains):
+            return None
+        source_engine, turn_engine = source.context.engine, conversation.context.engine
+        if (source_engine.dialect.name != "sqlite" or turn_engine.dialect.name != "sqlite"
+                or source_engine.url == turn_engine.url):
+            return None
+        return source
+
+    async def _open_split_step_archive(self):
+        from ._step_store import SqlStepStore
+
+        source = self._configured_split_step_source()
+        if source is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        group = source.storage_group
+        opened = group.opened_archive or await group.open_archive(create=False)
+        if opened is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        group_id, archive_store = opened
+        native = await self.checkpoint_backup_source(NativeStepSource(
+            group_id=group_id, store_key=SqlStepStore.scope_key(namespace=self.namespace, tenant_id=self.tenant_id),
+        ))
+        return source, native, group_id, archive_store
+
+    async def _split_transcript_reader(self):
+        from ._split_session_transcript import SplitSessionTranscriptReader
+
+        _, native, group_id, archive_store = await self._open_split_step_archive()
+        return SplitSessionTranscriptReader(
+            archive_store, group_id=group_id, store_key=native.store_key,
+            capture=native.capture_message_roots,
+        )
+
     async def checkpoint_backup_source(self, source: NativeStepSource) -> "SqlStepStore":
         """Resolve an admitted native owner in this Persistence's Execution group."""
         from ._sql import SqlStateStore
@@ -691,6 +739,7 @@ class Persistence:
             read_only=self.read_only,
             portable_export=not self.durable_capability_ids,
             checkpoint_backup_source=self.checkpoint_backup_source,
+            _paired_split_snapshot_ready=self._configured_split_step_source() is not None,
             run_registrations=self.run_store.run_registrations,
         )
 

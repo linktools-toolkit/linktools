@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from ..agent import AgentBinding
     from ..core import BudgetUsage, RunBudget
     from ._budget import RunBudgetContext
+    from ._canonical_split_step import _CanonicalSplitStep
     from ..model import CanonicalUserInput
     from ..capability.steps import AtomicStepPersistence
     from ._tool import RuntimeToolOperationBridge
@@ -95,6 +96,7 @@ class _AdmittedTurn:
     plan_store: PlanningStore | None = None
     budget: RunBudgetContext | None = None
     trace_enabled: bool = False
+    split_source: _CanonicalSplitStep | None = None
     trace_event_base: int = 0
     trace_interaction_base: int = 0
 
@@ -122,6 +124,7 @@ class _RegenerableTurnRunner:
         self._prepare_plan = prepare_plan
         self._prepare_budget = prepare_budget
         self._publish_deferred = None
+        self._split_recovery_source: Callable[[], Awaitable[_CanonicalSplitStep]] | None = None
         self._trace_archive: StateStepArchive | None = None
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
         self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
@@ -543,17 +546,30 @@ class _RegenerableTurnRunner:
             principal, AuthorizationAction.EXECUTION_CANCEL,
             ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, turn["request_json"]["principal"]["principal_id"]),
         )
-        if not await self._store.request_cancel(key):
+        split = turn["request_json"].get("split_step", False)
+        changed = await self._store.request_cancel(key)
+        if not changed and not (split and turn["state"] == "cancelling"):
             return False
         producer = self._producers.get(key)
         if producer is not None:
             producer.cancel()
-        else:
-            # A transport-routed cancellation may have no producer on this
-            # process to publish its eventual terminal frame. Tell current
-            # viewers to reconcile this exact committed turn.
+        elif changed:
             self._gap(key, cancelling=True)
-        self._notice_lifecycle(key, "cancelling", session["revision"])
+        if changed:
+            self._notice_lifecycle(key, "cancelling", session["revision"])
+        if producer is None and split:
+            if self._split_recovery_source is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            source = await self._split_recovery_source()
+            outcome, _, _ = await source.recover_open_turn(
+                key, generation=turn["generation"], turn_no=turn["turn_no"], lease_seconds=_LEASE_SECONDS,
+                cancelling=True, cancel_result={"error_code": ErrorCode.EXECUTION_CANCELLED.value},
+            )
+            if outcome == "settled":
+                self._gap(key)
+                self._notice_lifecycle(key, "terminal", session["revision"] + 1)
+            elif outcome != "not_acquired":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return True
 
     async def resume_deferred(
@@ -618,6 +634,34 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if ready is not None and admitted != principal:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            split_recovery = None
+            if request.get("split_step", False):
+                if self._split_recovery_source is None or ready is not None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                split_recovery = await self._split_recovery_source()
+                source = await split_recovery._read_pin(split_recovery._identity(key, generation))
+                cancelling = row["state"] == "cancelling"
+                cancel_result = {"error_code": ErrorCode.EXECUTION_CANCELLED.value} if cancelling else None
+                if source is not None and source.pin.terminal_state is not None:
+                    recovered = await split_recovery.recover_terminal(
+                        key, turn_no=row["turn_no"], source=source, cancel_result=cancel_result,
+                    )
+                elif cancelling:
+                    outcome, _, _ = await split_recovery.recover_open_turn(
+                        key, generation=generation, turn_no=row["turn_no"], lease_seconds=_LEASE_SECONDS,
+                        cancelling=True, require_effects_resolved=split_recovery.require_no_effects,
+                        cancel_result=cancel_result,
+                    )
+                    if outcome not in ("settled", "not_acquired"):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    recovered = outcome == "settled"
+                else:
+                    recovered = None
+                if recovered is not None:
+                    if recovered:
+                        self._gap(key)
+                        self._notice_lifecycle(key, "terminal", session["revision"] + 1)
+                    return recovered
             if row["state"] == "cancelling":
                 trace_enabled = request.get("trace", False)
                 trace_archive = self._trace_archive
@@ -696,6 +740,13 @@ class _RegenerableTurnRunner:
             contract = AgentBindingContract.from_payload(frozen_binding)
             binding = await resolver.restore(contract)
             native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, generation + 1)
+            split = (native_step[0].store._canonical_split_source
+                     if native_step is not None and isinstance(native_step[0].store, RuntimeStepStore) else None)
+            if (split_recovery is None) != (split is None):
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            if split is not None and (mode != "run" or planning or request.get("budgeted", False)
+                                      or request.get("trace", False)):
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             budget = (self._prepare_turn_budget(key, generation + 1, native_step)
                       if request.get("budgeted", False) else None)
             if planning and self._prepare_plan is None:
@@ -755,54 +806,75 @@ class _RegenerableTurnRunner:
                 steps = capability.store
                 if not isinstance(steps, RuntimeStepStore):
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                if ready is None:
-                    acquired, checkpoint, instruction_frontier = await self._store.take_over_with_checkpoint(
-                        key, generation=generation, lease_seconds=_LEASE_SECONDS, step_store=steps._store, **trace_recovery,
+                if split_recovery is not None:
+                    phase, split_resume, instruction_frontier = await split_recovery.recover_open_turn(
+                        key, generation=generation, turn_no=row["turn_no"], lease_seconds=_LEASE_SECONDS,
+                        cancelling=False, require_effects_resolved=split_recovery.require_no_effects,
                     )
-                else:
-                    acquired, checkpoint, instruction_frontier = await self._store.take_over_ready_checkpoint(
-                        ready, lease_seconds=_LEASE_SECONDS, step_store=steps._store, **trace_recovery,
-                    )
-                if not acquired:
-                    return False
-                if checkpoint is None:
-                    self._gap(key)
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                await steps.bind_canonical_resume(checkpoint, key=key, generation=generation + 1)
-                from ..model.messages import native_checkpoint_messages
-                from ..persistence.runs import NativeCheckpoint
-                checkpoint = NativeCheckpoint.decode(checkpoint)
-                output_retries_used = (checkpoint.output_retries_used if isinstance(checkpoint, NativeCheckpoint) else 0)
-                continuation = tuple(native_checkpoint_messages(checkpoint.messages, restore=True))
-                latest_response = next((i for i in range(len(continuation) - 1, -1, -1)
-                                        if isinstance(continuation[i], ModelResponse)), -1)
-                pending = {}
-                if latest_response >= 0:
-                    pending = {part.tool_call_id: part.tool_name for part in continuation[latest_response].parts
-                               if isinstance(part, ToolCallPart)}
-                    for message in continuation[latest_response + 1:]:
-                        if isinstance(message, ModelRequest):
-                            for part in message.parts:
-                                if isinstance(part, (ToolReturnPart, RetryPromptPart)):
-                                    pending.pop(part.tool_call_id, None)
-                if checkpoint.state != "complete" and not pending:
-                    self._gap(key)
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                if ready is None:
-                    deferred_results = await tools.resume_canonical_effects(pending)
-                else:
-                    if (checkpoint.state != "interrupted"
-                            or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
-                            or set(settled_results.approvals) & set(settled_results.calls)):
+                    if phase == "settled":
+                        # A concurrent producer sealed first; the adapter already
+                        # confirmed the exact canonical terminal receipt. Readers
+                        # project that durable state instead of inferring success.
                         self._gap(key)
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    for operation in (*settled_continuation.approvals, *settled_continuation.calls):
-                        if pending.get(operation.tool_call_id) != operation.tool_name:
+                        self._notice_lifecycle(key, "terminal", session["revision"] + 1)
+                        return True
+                    if phase == "not_acquired":
+                        return False
+                    if phase != "resumed" or split_resume is None:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    await steps.bind_canonical_resume(split_resume.checkpoint, key=key, generation=generation + 1)
+                    continuation = split_resume.messages
+                    output_retries_used = split_resume.output_retries_used
+                    completed_checkpoint = True
+                else:
+                    if ready is None:
+                        acquired, checkpoint, instruction_frontier = await self._store.take_over_with_checkpoint(
+                            key, generation=generation, lease_seconds=_LEASE_SECONDS, step_store=steps._store, **trace_recovery,
+                        )
+                    else:
+                        acquired, checkpoint, instruction_frontier = await self._store.take_over_ready_checkpoint(
+                            ready, lease_seconds=_LEASE_SECONDS, step_store=steps._store, **trace_recovery,
+                        )
+                    if not acquired:
+                        return False
+                    if checkpoint is None:
+                        self._gap(key)
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    await steps.bind_canonical_resume(checkpoint, key=key, generation=generation + 1)
+                    from ..model.messages import native_checkpoint_messages
+                    from ..persistence.runs import NativeCheckpoint
+                    checkpoint = NativeCheckpoint.decode(checkpoint)
+                    output_retries_used = (checkpoint.output_retries_used if isinstance(checkpoint, NativeCheckpoint) else 0)
+                    continuation = tuple(native_checkpoint_messages(checkpoint.messages, restore=True))
+                    latest_response = next((i for i in range(len(continuation) - 1, -1, -1)
+                                            if isinstance(continuation[i], ModelResponse)), -1)
+                    pending = {}
+                    if latest_response >= 0:
+                        pending = {part.tool_call_id: part.tool_name for part in continuation[latest_response].parts
+                                   if isinstance(part, ToolCallPart)}
+                        for message in continuation[latest_response + 1:]:
+                            if isinstance(message, ModelRequest):
+                                for part in message.parts:
+                                    if isinstance(part, (ToolReturnPart, RetryPromptPart)):
+                                        pending.pop(part.tool_call_id, None)
+                    if checkpoint.state != "complete" and not pending:
+                        self._gap(key)
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    if ready is None:
+                        deferred_results = await tools.resume_canonical_effects(pending)
+                    else:
+                        if (checkpoint.state != "interrupted"
+                                or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
+                                or set(settled_results.approvals) & set(settled_results.calls)):
+                            self._gap(key)
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    deferred_results = settled_results
-                if not pending and checkpoint.state == "complete":
-                    events = await steps.list_events(run_id=key.turn_id)
-                    completed_checkpoint = any(event.kind == "run_completed" for event in events)
+                        for operation in (*settled_continuation.approvals, *settled_continuation.calls):
+                            if pending.get(operation.tool_call_id) != operation.tool_name:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        deferred_results = settled_results
+                    if not pending and checkpoint.state == "complete":
+                        events = await steps.list_events(run_id=key.turn_id)
+                        completed_checkpoint = any(event.kind == "run_completed" for event in events)
             turn = _AdmittedTurn(
                 key, row["turn_no"], prompt, history,
                 _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding})),
@@ -815,7 +887,8 @@ class _RegenerableTurnRunner:
                 instruction_frontier=instruction_frontier,
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
                 mode=mode, planning=planning, plan_store=plan_store, budget=budget,
-                trace_enabled=trace_enabled, trace_event_base=trace_event_base, trace_interaction_base=trace_interaction_base,
+                trace_enabled=trace_enabled, trace_event_base=trace_event_base,
+                trace_interaction_base=trace_interaction_base, split_source=split,
             )
             self._admitted(turn)
             try:
@@ -1027,8 +1100,8 @@ class _RegenerableTurnRunner:
             row = await self._store.get_turn(turn.key)
             if row is not None and row["state"] == "cancelling" and row["generation"] == turn.generation:
                 code = ErrorCode.EXECUTION_CANCELLED.value
-                if await self._store.finish(
-                    turn.key, generation=turn.generation, turn_no=turn.number, state="cancelled",
+                if await self._finish_retained_turn(
+                    turn, state="cancelled",
                     result={"error_code": code}, **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "cancelled", code)),
                 ):
                     self._terminal(turn, "cancelled", error_code=code)
@@ -1050,6 +1123,10 @@ class _RegenerableTurnRunner:
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, 1)
+        split = (native_step[0].store._canonical_split_source
+                 if native_step is not None and isinstance(native_step[0].store, RuntimeStepStore) else None)
+        if split is not None and (budget is not None or planning or mode != "run"):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
         run_budget = None if budget is None else self._prepare_turn_budget(key, 1, native_step)
         if planning and self._prepare_plan is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1078,7 +1155,11 @@ class _RegenerableTurnRunner:
             "repository_instructions": None if repository_instructions is None else repository_instructions.to_payload(),
         }
         if trace_enabled:
+            if split is not None:
+                raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
             request["trace"] = True
+        if split is not None:
+            request["split_step"] = True
         if run_budget is not None:
             request["budgeted"] = True
         if explicit_agent_binding:
@@ -1159,7 +1240,7 @@ class _RegenerableTurnRunner:
             repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
             stored_input=request.get("input"),
             native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
-            budget=run_budget,
+            budget=run_budget, split_source=split,
         )
 
     @staticmethod
@@ -1272,6 +1353,24 @@ class _RegenerableTurnRunner:
 
         return {'_publish_trace': (stores, publish)}
 
+    async def _finish_retained_turn(
+        self, turn: _AdmittedTurn, *, state, result=None, transcript=None,
+        binding_refs=(), output_ref=None, **trace,
+    ) -> bool:
+        split = turn.split_source
+        if split is None:
+            options = ({"transcript": transcript, "binding_refs": binding_refs, "output_ref": output_ref}
+                       if state == "succeeded" else {"result": result})
+            return await self._store.finish(
+                turn.key, generation=turn.generation, turn_no=turn.number, state=state, **options, **trace,
+            )
+        if trace:
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        return await split.finish(
+            turn.key, generation=turn.generation, turn_no=turn.number, state=state,
+            result=result, transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
+        )
+
     async def settle(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
@@ -1380,6 +1479,10 @@ class _RegenerableTurnRunner:
                     plan_store=turn.plan_store, budget=turn.budget, **trace_opts,
                 )
                 if isinstance(outcome, DeferredToolRequests):
+                    if turn.split_source is not None:
+                        # A split turn cannot publish the colocated waiting receipt.
+                        # An unexpected deferred frontier must retain occupancy.
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     if turn.native_step is None or self._publish_deferred is None:
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     capability, tools = turn.native_step
@@ -1440,15 +1543,15 @@ class _RegenerableTurnRunner:
                     "Canonical turn failed: turn=%s code=%s cause=%s at=%s",
                     turn.key.turn_id, code, type(cause).__name__, location,
                 )
-            committed = await self._store.finish(
-                turn.key, generation=turn.generation, turn_no=turn.number, state="failed", result={"error_code": code},
+            committed = await self._finish_retained_turn(
+                turn, state="failed", result={"error_code": code},
                 **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "failed", code, captured=captured)),
             )
             if committed:
                 self._terminal(turn, "failed", error_code=code)
             return committed
-        committed = await self._store.finish(
-            turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded",
+        committed = await self._finish_retained_turn(
+            turn, state="succeeded",
             transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
             **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "succeeded", captured=captured)),
         )

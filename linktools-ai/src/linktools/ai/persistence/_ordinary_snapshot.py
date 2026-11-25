@@ -147,7 +147,7 @@ def _validate_text(value: object, width: int) -> str:
     return value
 
 
-def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list[dict[str, object]]]:
+def decode_ordinary_snapshot(value: object, *, tenant_id: str, paired_split: bool = False) -> dict[str, list[dict[str, object]]]:
     """Validate and decode before opening the destination; exclude live lease values."""
     if not isinstance(value, dict) or set(value) != {"sessions", "turns"}:
         raise _invalid()
@@ -162,10 +162,17 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
         if not isinstance(rows, list):
             raise _invalid()
         for wire in rows:
-            if not isinstance(wire, dict) or wire.keys() != set(fields):
+            has_split_receipt = section == "turns" and paired_split and isinstance(wire, dict) and "split_source_receipt" in wire
+            expected = {*fields, "split_source_receipt"} if has_split_receipt else set(fields)
+            if not isinstance(wire, dict) or wire.keys() != expected:
                 raise _invalid()
             row = dict(wire)
             try:
+                if has_split_receipt:
+                    if row["state"] not in _TERMINAL:
+                        raise _invalid()
+                    receipt = _validate_text(row["split_source_receipt"], 64)
+                    row["split_source_receipt"] = validate_resource_id(receipt).encode("utf-8")
                 if "binding_key" in row:
                     text = row["binding_key"]
                     if not isinstance(text, str) or len(text) != 64:
@@ -203,6 +210,10 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
                 result = row["result_json"]
                 number = row["turn_no"]
                 state = row["state"]
+                if paired_split and state in _ACTIVE:
+                    # Before the first source registration an active split turn
+                    # has no receipt. The paired profile never exports that gap.
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Paired split Step snapshots require terminal turns")
                 turn_id, request_key = row["turn_id"], row["request_key"]
                 if (session_id not in session_ids or turn_id in turn_ids or (session_id, request_key) in request_keys
                         or state not in (*_ACTIVE, *_TERMINAL)
@@ -292,7 +303,7 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str) -> dict[str, list
 
 async def capture_ordinary_snapshot(
     store: SqlStateStore, *, namespace: str, tenant_id: str, accept: Callable[[object], None],
-    page_size: Callable[[int], int],
+    page_size: Callable[[int], int], paired_split: bool = False,
 ) -> dict[str, list[dict[str, object]]]:
     """Collect the same read-transaction view used by the Conversation snapshot."""
     from sqlalchemy import select
@@ -309,6 +320,8 @@ async def capture_ordinary_snapshot(
             output: list[dict[str, object]] = []
             ordering = table.c.id
             extra = (ordering,)
+            if section == "turns" and "split_source_receipt" in table.c:
+                extra += (table.c.split_source_receipt,)
             after = None
             while True:
                 limit = page_size(16)
@@ -319,6 +332,10 @@ async def capture_ordinary_snapshot(
                 rows = await transaction.read_sql_rows(store.context, statement)
                 for row in rows:
                     wire = _encode_row({key: row[key] for key in fields}, binary)
+                    if section == "turns" and (receipt := row.get("split_source_receipt")) is not None:
+                        if not paired_split or row["state"] not in _TERMINAL:
+                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Split Step receipts require a paired terminal snapshot")
+                        wire["split_source_receipt"] = receipt.decode("utf-8")
                     accept(wire)
                     output.append(wire)
                 if len(rows) < limit:
@@ -328,7 +345,7 @@ async def capture_ordinary_snapshot(
         return result
 
     wire = await store.read(capture)
-    decode_ordinary_snapshot(wire, tenant_id=tenant_id)
+    decode_ordinary_snapshot(wire, tenant_id=tenant_id, paired_split=paired_split)
     return wire
 
 

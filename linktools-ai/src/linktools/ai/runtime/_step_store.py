@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from ..persistence.runs import RuntimeAgentRunStore
     from ..persistence.state import StateStore
     from ..persistence.turns import SessionTurnKey, SqlSessionTurns
+    from ._canonical_split_step import _CanonicalSplitStep
 
 
 class StepBoundaryCommitter(Protocol):
@@ -50,6 +51,7 @@ class RuntimeStepStore:
         self._working_set = working_set
         self._commit_boundary = commit_boundary
         self._canonical_turn_boundary = False
+        self._canonical_split_source: _CanonicalSplitStep | None = None
         self._interrupted_checkpoint: str | None = None
         self._resume_generation: int | None = None
         self._resume_step_base = 0
@@ -67,15 +69,26 @@ class RuntimeStepStore:
         turn_store: "SqlSessionTurns", state_store: "StateStore",
         key: "SessionTurnKey", generation: int, run_id: str,
         output_retries_used: Callable[[], int] | None = None,
+        split_source: "_CanonicalSplitStep | None" = None,
     ) -> "RuntimeStepStore":
-        """Publish native checkpoints under the canonical turn's existing source lease."""
+        """Publish checkpoints under the selected canonical turn authority."""
         group = state_store.storage_group
         context = getattr(group, "context", None)
         if context is None or native.storage_context.engine is not context.engine:
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Step and turn require one SQL transaction")
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Step and its write authority require one SQL transaction")
+        if run_id != key.turn_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if split_source is not None and (
+            split_source._turns is not turn_store or split_source._store is not state_store
+            or split_source._context is not native.storage_context
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
         async def guard(transaction):
-            await turn_store.guard_step_in_transaction(transaction, key, generation=generation)
+            if split_source is None:
+                await turn_store.guard_step_in_transaction(transaction, key, generation=generation)
+            else:
+                await split_source.guard(transaction, key, generation=generation)
 
         async def commit(*, run=None, events=(), snapshot=None):
             records = (() if run is None else (run,)) + tuple(events) + (() if snapshot is None else (snapshot,))
@@ -97,10 +110,13 @@ class RuntimeStepStore:
             async def write(transaction):
                 return await native.write_prepared_step(transaction.transaction(state_store), prepared, turn_guard=guard)
 
-            receipt = await group.mutate((state_store,), write)
-            # A provisional write or unknown commit must never seed native
-            # receipt caches. Only the existing mutation may confirm it.
-            native.confirm_prepared_step(receipt)
+            if split_source is None:
+                receipt = await group.mutate((state_store,), write)
+                # A provisional or unknown commit must not seed native caches.
+                native.confirm_prepared_step(receipt)
+            else:
+                # Split source owns initial adoption and cache confirmation.
+                receipt = await split_source.commit_step(prepared, key=key, generation=generation)
             if snapshot is not None and snapshot.state == "interrupted":
                 store._interrupted_checkpoint = snapshot.idempotency_key
             return receipt
@@ -112,6 +128,7 @@ class RuntimeStepStore:
         store = cls(native, tool_operations, commit_boundary=commit, native_boundary=True,
                     output_retries_used=output_retries_used)
         store._canonical_turn_boundary = True
+        store._canonical_split_source = split_source
         return store
 
     def require_interrupted_checkpoint(self) -> str:

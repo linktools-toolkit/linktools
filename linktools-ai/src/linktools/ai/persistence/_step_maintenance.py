@@ -279,6 +279,44 @@ async def purge_step_content(
             closure.mark(store_key, ranges)
         for snapshot in roots:
             closure.mark_snapshot(snapshot)
+        # Cross-store handoffs are retained by their source run, not by
+        # lease age or by scanning Conversation from this database.
+        runs = metadata.tables["ai_step_runs"]
+        has_runs = await session.run_sync(lambda sync: inspect(sync.connection()).has_table(runs.name))
+        pins = () if not has_runs else (await session.execute(select(
+            runs.c.run_id, runs.c.conversation_id, runs.c.turn_source_pin,
+        ).where(runs.c.store_locator == locator, runs.c.store_key == store_key,
+                runs.c.turn_source_phase.in_(("sealed", "published"))))).mappings()
+        from ._message_root import NativeMessageRoot
+        from ..steps import encode_native_replay_key
+        checkpoint_keys = []
+        for pin in pins:
+            try:
+                data = pin["turn_source_pin"]
+                if data["transcript"] is not None:
+                    root = NativeMessageRoot.from_json(data["transcript"])
+                    if root.group_id != group_id or root.store_key != store_key:
+                        raise ValueError("split transcript pin belongs to another store")
+                    closure.mark(store_key, root.slices)
+                if data["checkpoint_id"] is not None:
+                    checkpoint_keys.append((pin["run_id"], pin["conversation_id"],
+                                            encode_native_replay_key(data["checkpoint_id"])))
+            except (ValueError, KeyError, TypeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if checkpoint_keys:
+            from sqlalchemy import tuple_
+
+            if snapshots is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            identity = (snapshots.c.run_id, snapshots.c.conversation_id, snapshots.c.idempotency_key)
+            for offset in range(0, len(checkpoint_keys), 128):
+                batch = checkpoint_keys[offset:offset + 128]
+                retained = (await session.execute(select(*identity).where(
+                    snapshots.c.store_locator == locator, snapshots.c.store_key == store_key,
+                    snapshots.c.pruned.is_(False), tuple_(*identity).in_(batch),
+                ))).all()
+                if set(retained) != set(batch):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for root in owner_roots:
             if root.store_key == store_key:
                 closure.mark(store_key, root.slices)
