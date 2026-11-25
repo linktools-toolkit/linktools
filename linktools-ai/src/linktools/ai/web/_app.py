@@ -6,7 +6,7 @@ import asyncio
 import base64
 import json
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from contextlib import ExitStack, aclosing, nullcontext, suppress
+from contextlib import ExitStack, aclosing, asynccontextmanager, nullcontext, suppress
 from dataclasses import asdict, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -36,6 +36,7 @@ from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from ..execution import ExecutionObservationEvent
+    from ..runtime import TurnNoticeTransport
     from starlette.types import ASGIApp, Receive, Scope, Send
 
 _logger = environ.get_logger("ai.web")
@@ -1085,16 +1086,31 @@ def create_app(
     shutdown_event: asyncio.Event | None = None,
     session_notices: _SessionNoticeFeed | None = None,
     local_workspace: bool = False,
+    turn_notice_transport: "TurnNoticeTransport | None" = None,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
 
     Set shutdown_event before draining HTTP connections to close live observers
     without shutting down their Runtime. With no Runtime, mutations and live watches are disabled. Historical reads
     remain available without model credentials. Only an explicitly trusted local workspace can list ordinary sessions.
+    An optional host-owned turn notice transport is attached during ASGI lifespan.
     Host/Origin headers are not
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
+    lifespan = None
+    if turn_notice_transport is not None:
+        if runtime is None or not runtime.sessions.supports_turn_sessions:
+            raise ValueError("turn_notice_transport requires a Runtime with ordinary turn sessions")
+        bridge = runtime.sessions.bridge_turn_notices
+
+        @asynccontextmanager
+        async def turn_notice_lifespan(_app: Starlette) -> AsyncGenerator[None, None]:
+            async with bridge(turn_notice_transport):
+                yield
+
+        lifespan = turn_notice_lifespan
+
     console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices, local_workspace)
     app = Starlette(routes=[
         Route("/", _asset), Route("/assets/{name}", _asset),
@@ -1111,5 +1127,5 @@ def create_app(
         Route("/api/executions/{execution_id}/{kind}", console.detail),
         Route("/api/executions/{execution_id}/{action}", console.execution_action, methods=["POST"]),
         Route("/api/metrics", console.metric_query),
-    ], exception_handlers={AIError: _error, ValueError: _error, TypeError: _error, KeyError: _error, Exception: _error})
+    ], lifespan=lifespan, exception_handlers={AIError: _error, ValueError: _error, TypeError: _error, KeyError: _error, Exception: _error})
     return _LocalBoundary(app)
