@@ -100,7 +100,7 @@ def content_reference_statement(
         content.c.scan_kind == literal("k:archive_content", literal_execute=True),
         content.c.sort_prefix == func.substr(binary_identity, 1, 128), content.c.sort_key == binary_identity,
     ))
-    native = metadata.tables.get("ai_step_messages") if typed_payloads else None
+    native = metadata.tables.get("ai_messages") if typed_payloads else None
     native_nulls = (() if native is None else tuple(
         literal(None, type_=column.type).label("typed_" + column.name) for column in native.c))
     selections = [select(literal(0).label("source_kind"), *owner_columns, *native_nulls),
@@ -130,11 +130,11 @@ def content_reference_statement(
             extra.c.store_key == store_key,
             extra.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in keys)),
             extra.c.key.in_(tuple(keys))))
-    if native_root_paths and "ai_step_sequences" in metadata.tables:
+    if native_root_paths and "ai_message_sequences" in metadata.tables:
         from ..steps import native_store_key, native_store_locator
 
-        nodes = metadata.tables["ai_step_sequences"].alias("fixed_native_nodes")
-        messages = metadata.tables["ai_step_messages"].alias("fixed_native_messages")
+        nodes = metadata.tables["ai_message_sequences"].alias("fixed_native_nodes")
+        messages = metadata.tables["ai_messages"].alias("fixed_native_messages")
         source_columns = tuple(nodes.c[name] for name in (
             "sha256", "message_sha256", "tree_count", "left_sha256", "right_sha256", "next_sha256")) + tuple(
             messages.c[name] for name in ("message", "compression", "raw_size", "payload_json"))

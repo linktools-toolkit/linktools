@@ -349,7 +349,7 @@ async def _purge_unreferenced_objects(
             for name in names:
                 table = tables[name]
                 statement = select(table)
-                if name == "ai_step_messages":
+                if name == "ai_messages":
                     # Typed Step payload bytes share this physical relation but
                     # are owned and swept by ArchiveClosure, never Native GC.
                     native_partitions = await native_message_partitions(group.context, session, table)
@@ -358,7 +358,7 @@ async def _purge_unreferenced_objects(
                 result = await group.context.run_statement(session.execute(statement))
                 rows[name] = result.mappings().all()
         snapshots = rows.get("ai_step_snapshots", ())
-        sequences, messages = rows["ai_step_sequences"], rows["ai_step_messages"]
+        sequences, messages = rows["ai_message_sequences"], rows["ai_messages"]
         closure = NativeMessageClosure(sequences)
         for snapshot in snapshots:
             closure.mark_snapshot(snapshot)
@@ -637,8 +637,8 @@ async def _purge_unreferenced_objects(
 
         tables = native_message_sql_tables()
         unused = (
-            (tables["ai_step_sequences"], sequence_ids - closure.retained_sequences),
-            (tables["ai_step_messages"], bodies.keys() - closure.retained_messages),
+            (tables["ai_message_sequences"], sequence_ids - closure.retained_sequences),
+            (tables["ai_messages"], bodies.keys() - closure.retained_messages),
         )
         if not any(identities for _, identities in unused):
             continue

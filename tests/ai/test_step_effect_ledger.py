@@ -32,7 +32,7 @@ async def test_effect_ledger_is_the_only_physical_owner(tmp_path: Path, backend:
         if backend == "sqlite":
             async with store.context.engine.connect() as connection:
                 assert await connection.scalar(text("SELECT count(*) FROM ai_step_tool_operations")) == 1
-                assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
+                assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 1
                 assert await connection.scalar(text("SELECT count(*) FROM ai_state_records WHERE kind='tool_operation'")) == 0
         else:
             assert store.storage_group.opened_archive is not None

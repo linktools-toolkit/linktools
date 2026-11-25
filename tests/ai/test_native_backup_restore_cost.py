@@ -145,7 +145,7 @@ async def test_restore_rejects_corrupt_prefix_content_nodes_and_checkpoint_heade
     try:
         backup, _ = await _prefix_backup(store, 2)
         metadata = build_step_sql_metadata()
-        nodes, bodies = metadata.tables["ai_step_sequences"], metadata.tables["ai_step_messages"]
+        nodes, bodies = metadata.tables["ai_message_sequences"], metadata.tables["ai_messages"]
         async with store.storage_context.sessions() as session, session.begin():
             await _empty_owner(session, metadata)
             if damage == "early_body":

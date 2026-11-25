@@ -72,7 +72,7 @@ async def test_checkpoint_changes_share_message_bodies_and_restore_exact_state(a
             from linktools.ai.persistence._archive import ContentRecord
             from linktools.ai.persistence._payload import decode_payload_bytes
 
-            rows = (await connection.execute(text("SELECT * FROM ai_step_messages"))).mappings().all()
+            rows = (await connection.execute(text("SELECT * FROM ai_messages"))).mappings().all()
             assert len(rows) == len(messages)
             for row in rows:
                 body = ContentRecord.from_native_row(row)
@@ -84,7 +84,7 @@ async def test_checkpoint_changes_share_message_bodies_and_restore_exact_state(a
         if messages and not messages[-1].metadata.get("linktools.ai.checkpoint-state"):
             await cold.save_snapshot(replace(first, idempotency_key="ordinary"))
             async with engine.connect() as connection:
-                assert await connection.scalar(text("SELECT COUNT(*) FROM ai_step_messages")) == len(messages)
+                assert await connection.scalar(text("SELECT COUNT(*) FROM ai_messages")) == len(messages)
     finally:
         await cold.close()
 
@@ -189,5 +189,5 @@ async def test_decoded_checkpoint_rejects_invalid_retry_before_writing(atomic_st
     with pytest.raises(ValueError, match="checkpoint state is invalid"):
         await store.save_snapshot(invalid)
     async with engine.connect() as connection:
-        for table in ("ai_step_snapshots", "ai_step_sequences", "ai_step_messages"):
+        for table in ("ai_step_snapshots", "ai_message_sequences", "ai_messages"):
             assert await connection.scalar(text(f"SELECT COUNT(*) FROM {table}")) == 0

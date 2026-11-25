@@ -149,7 +149,7 @@ async def test_composed_transcript_archives_cache_verified_attachment_bytes(
             await repository.publish_native_archive(transaction, prepared, owner_written=True)
 
         await archive.state_store.mutate(publish)
-        table = build_step_sql_metadata().tables["ai_step_messages"]
+        table = build_step_sql_metadata().tables["ai_messages"]
         async with archive.state_store.context.engine.connect() as connection:
             rows = (await connection.execute(select(table).where(
                 table.c.store_key == chunk.content.store_key,

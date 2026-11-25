@@ -85,7 +85,7 @@ async def _stored_message_records(
     archive: StateStepArchive, root: ArchiveRoot | NativeMessageRoot, raw_ids: Sequence[str],
 ) -> tuple[ContentRecord, ...]:
     if isinstance(root, NativeMessageRoot):
-        table = build_step_sql_metadata().tables["ai_step_messages"]
+        table = build_step_sql_metadata().tables["ai_messages"]
         async with archive.state_store.context.engine.connect() as connection:
             bodies = (await connection.execute(select(table).where(
                 table.c.store_key == root.store_key, table.c.sha256.in_(raw_ids),

@@ -211,7 +211,7 @@ async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_rep
                                     messages=[ModelRequest(parts=[UserPromptPart("message")])])
 
     def fail_reference(connection, cursor, statement, parameters, context, many):
-        if statement.startswith("INSERT INTO ai_step_sequences"):
+        if statement.startswith("INSERT INTO ai_message_sequences"):
             raise RuntimeError("reference publication interrupted")
 
     try:
@@ -249,7 +249,7 @@ async def test_snapshot_pruning_and_body_lookup_stay_in_their_partition(tmp_path
         assert await stores[1].latest_snapshot(run_id="run") == first
         await stores[1].save_snapshot(second)
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_key = :scope"),
+            await connection.execute(text("DELETE FROM ai_messages WHERE store_key = :scope"),
                                      {"scope": stores[0]._store_key})
         with pytest.raises(ValueError, match="missing or corrupt"):
             await stores[0].latest_snapshot(run_id="run")
@@ -297,8 +297,8 @@ async def test_sql_large_message_round_trip_and_snapshot_deduplication(tmp_path:
         await store.save_snapshot(second)
         assert await store.latest_snapshot(run_id="run") == second
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == len(messages)
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == len(messages)
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == len(messages)
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == len(messages)
     finally:
         await store.close()
         await engine.dispose()
@@ -322,12 +322,12 @@ async def test_sql_corrupt_or_missing_message_reference_fails_closed(tmp_path: P
         snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[ModelResponse(parts=[TextPart("original")])])
         await store.save_snapshot(snapshot)
         async with engine.begin() as connection:
-            await connection.execute(text("UPDATE ai_step_messages SET message = :body"), {"body": "{}"})
+            await connection.execute(text("UPDATE ai_messages SET message = :body"), {"body": "{}"})
         with pytest.raises(ValueError, match="missing or corrupt"):
             await store.latest_snapshot(run_id="run")
         assert await store.list_snapshots(run_id="run") == []
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_sequences"))
+            await connection.execute(text("DELETE FROM ai_message_sequences"))
         with pytest.raises(ValueError, match="incomplete"):
             await store.latest_snapshot(run_id="run")
         assert await store.list_snapshots(run_id="run") == []

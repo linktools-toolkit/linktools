@@ -76,7 +76,7 @@ async def test_keyed_tool_payload_join_preserves_sources(tmp_path: Path, native:
     async with Persistence.open("native-result", tenant_id="tenant", storage=config) as state:
         engine = state.checkpoint.tools.state_store.storage_group.context.engine
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_key = :store"),
+            await connection.execute(text("DELETE FROM ai_messages WHERE store_key = :store"),
                                      {"store": (native_store_key if native else payload_store_key)("native-result", "tenant")})
         with pytest.raises(AIError) as missing:
             await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")
@@ -146,7 +146,7 @@ async def test_scoped_tool_join_preserves_empty_owners_order_and_limit(tmp_path:
         repository = state.checkpoint.tools
         if corruption == "missing":
             async with repository.state_store.storage_group.context.engine.begin() as connection:
-                await connection.execute(text("DELETE FROM ai_step_messages WHERE store_key = :store"),
+                await connection.execute(text("DELETE FROM ai_messages WHERE store_key = :store"),
                                          {"store": payload_store_key("list-join", "tenant")})
         else:
             from copy import deepcopy

@@ -89,7 +89,7 @@ async def test_archive_startup_rejects_content_without_its_owner(tmp_path: Path,
                     archive_scope_key("archive-startup", "default"), None, "archive_content",
                     content.identity.encode(), None, 0, None, 0, None, content.to_json(), payload_bytes=b"x",
                 )
-                await connection.execute(insert(group.metadata.tables["ai_step_messages"]).values(**payload_record_values(value)))
+                await connection.execute(insert(group.metadata.tables["ai_messages"]).values(**payload_record_values(value)))
             else:
                 await connection.execute(insert(table).values(store_key=STATE_GROUP_ARCHIVE_KEY, **_record_values(orphan)))
         with pytest.raises(AIError) as error:

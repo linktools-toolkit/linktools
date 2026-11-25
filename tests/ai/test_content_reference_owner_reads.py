@@ -132,7 +132,7 @@ async def test_cached_owner_reads_declared_payload_by_key_in_same_snapshot(tmp_p
 
         await owner.storage_group.read_many((owner, archive), read)
         assert len(statements) == 1
-        assert "FROM ai_step_messages" in statements[0]
+        assert "FROM ai_messages" in statements[0]
         assert "ai_state_records" not in statements[0]
 
 

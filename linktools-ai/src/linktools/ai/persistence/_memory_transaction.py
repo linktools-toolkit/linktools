@@ -152,7 +152,7 @@ class _MemoryTransaction:
         from ._record_owner import record_owner_table
         values = tuple(records)
         payload_keys = {record.key for record in values
-                        if record_owner_table(record.key, store_key=self._store_key) == "ai_step_messages"}
+                        if record_owner_table(record.key, store_key=self._store_key) == "ai_messages"}
         try:
             if len({record.key for record in values}) != len(values):
                 raise ValueError("insert_immutable_records contains duplicate keys")

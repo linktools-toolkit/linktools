@@ -135,9 +135,9 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         sql_unique(snapshots, "store_locator", "run_id", "idempotency_key")
         sql_query_index(snapshots, "store_locator", "run_id", "pruned")
 
-    if "ai_step_messages" not in metadata.tables:
+    if "ai_messages" not in metadata.tables:
         messages = table(
-            "ai_step_messages", "Immutable typed content bytes: native messages and accepted execution payloads in disjoint partitions.",
+            "ai_messages", "Immutable typed content bytes: native messages and accepted execution payloads in disjoint partitions.",
             partition(),
             digest("sha256", "SHA-256 of the canonical uncompressed bytes for the partition content type."),
             Column("message", sql_blob(), nullable=True, comment="Raw or compressed canonical content bytes, absent for native attachment manifests."),
@@ -150,9 +150,9 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         )
         sql_unique(messages, "store_locator", "sha256")
 
-    if "ai_step_sequences" not in metadata.tables:
+    if "ai_message_sequences" not in metadata.tables:
         sequences = table(
-            "ai_step_sequences", "Shared immutable message sequence nodes for native snapshots.",
+            "ai_message_sequences", "Shared immutable message sequence nodes for native snapshots.",
             partition(),
             digest("sha256", "SHA-256 of the immutable sequence node."),
             digest("message_sha256", "SHA-256 of the referenced upstream message JSON."),
@@ -179,7 +179,7 @@ def build_step_domain_sql_metadata(domains: "Iterable[PersistenceDomain]", *, me
     existing = set(metadata.tables)
     build_step_sql_metadata(metadata=metadata)
     if PersistenceDomain.CHECKPOINT not in selected:
-        keep = {"ai_step_runs", "ai_step_messages", "ai_step_sequences"}
+        keep = {"ai_step_runs", "ai_messages", "ai_message_sequences"}
         if selected.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}):
             keep.update({"ai_step_runs", "ai_step_events"})
         for name in set(metadata.tables) - existing - keep:
@@ -192,7 +192,7 @@ def native_message_sql_tables() -> "Mapping[str, Table]":
     """Reuse query descriptors without sharing mutable provisioner metadata."""
     tables = build_step_sql_metadata().tables
     return MappingProxyType({
-        name: tables[name] for name in ("ai_step_messages", "ai_step_sequences", "ai_step_snapshots")
+        name: tables[name] for name in ("ai_messages", "ai_message_sequences", "ai_step_snapshots")
     })
 
 

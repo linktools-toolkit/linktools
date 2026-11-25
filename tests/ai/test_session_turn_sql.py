@@ -62,7 +62,7 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
             table in statement for table in ("ai_sessions", "ai_session_turns", "ai_session_bindings")
         ):
             statements.append(verb)
-        if verb == "INSERT" and any(table in statement for table in ("ai_step_messages", "ai_step_sequences")):
+        if verb == "INSERT" and any(table in statement for table in ("ai_messages", "ai_message_sequences")):
             native_writes.append(statement)
 
     def on_commit(_conn):
@@ -155,7 +155,7 @@ async def test_takeover_fences_old_writer_and_cancel_precedes_success(store):
     assert await turns.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
     assert (await turns.get_turn(key))["state"] == "cancelled"
     async with engine.connect() as connection:
-        assert (await connection.execute(select(func.count()).select_from(metadata.tables["ai_step_sequences"]))).scalar_one() == 0
+        assert (await connection.execute(select(func.count()).select_from(metadata.tables["ai_message_sequences"]))).scalar_one() == 0
     assert await turns.read_context_range("chat", after=0, through=1) == ()
 
 
@@ -249,7 +249,7 @@ async def test_recent_context_reads_latest_positions_and_reuses_covered_history(
         if statement.lstrip().startswith(("SELECT", "WITH")):
             if "ai_session_turns" in statement:
                 reads.append(parameters)
-            if "ai_step_sequences" in statement and "ai_step_messages" in statement:
+            if "ai_message_sequences" in statement and "ai_messages" in statement:
                 body_reads.append(parameters)
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture)

@@ -92,7 +92,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                 async def insert(self, session, table, rows):
                     nonlocal injected
                     if (fault == "archive_collision" and terminal.get() and not injected
-                            and table.name == "ai_step_messages" and rows):
+                            and table.name == "ai_messages" and rows):
                         candidate = rows[0]
                         injected = True
                         # A cold publisher must compare the immutable winner before

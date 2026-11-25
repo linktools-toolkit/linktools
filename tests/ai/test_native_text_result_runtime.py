@@ -127,7 +127,7 @@ async def test_native_message_and_result_owner_rollback_together(tmp_path: Path,
             result = await original(transaction, candidate, pending_events=pending_events, result_source=result_source)
             assert result.execution.status is ExecutionStatus.SUCCEEDED
             async def count_messages(session: AsyncSession) -> int:
-                return (await session.execute(sql_text("SELECT count(*) FROM ai_step_messages WHERE store_key=:store"),
+                return (await session.execute(sql_text("SELECT count(*) FROM ai_messages WHERE store_key=:store"),
                     {"store": native_store_key("native-result", "tenant")})).scalar_one()
             assert await transaction.run_sql(repository.state_store.storage_group.context, count_messages) == 1
             failed += 1
@@ -139,7 +139,7 @@ async def test_native_message_and_result_owner_rollback_together(tmp_path: Path,
         assert failed == 1
         assert (await repository.get("execution", tenant_id="tenant")).status is ExecutionStatus.STARTED
         async with repository.state_store.storage_group.context.engine.connect() as connection:
-            assert (await connection.execute(sql_text("SELECT count(*) FROM ai_step_messages WHERE store_key=:store"),
+            assert (await connection.execute(sql_text("SELECT count(*) FROM ai_messages WHERE store_key=:store"),
                 {"store": native_store_key("native-result", "tenant")})).scalar_one() == 0
 
 
@@ -247,7 +247,7 @@ async def test_native_equality_check_reads_only_native_sources(tmp_path: Path, m
         # The narrow path still authenticates source bytes on every transaction.
         async with repository.state_store.storage_group.context.engine.begin() as connection:
             await connection.execute(sql_text(
-                "UPDATE ai_step_messages SET message = :body WHERE store_key = :store"),
+                "UPDATE ai_messages SET message = :body WHERE store_key = :store"),
                 {"body": b"corrupt", "store": native_store_key("native-result", "tenant")})
         with pytest.raises(AIError) as damaged:
             await repository.state_store.mutate(encode)

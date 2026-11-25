@@ -248,7 +248,7 @@ async def test_capture_binding_warm_and_cold_readonly_sql_budget(tmp_path: Path,
                 statements.clear()
                 assert (await service.read_agent(reference, principal=_PRINCIPAL)).binding == binding
                 assert dict(Counter(sql.split()[0].upper() for sql in statements)) == expected
-                assert not any(name in sql for sql in statements for name in ("ai_objects", "ai_step_messages"))
+                assert not any(name in sql for sql in statements for name in ("ai_objects", "ai_messages"))
         finally:
             event.remove(Engine, "before_cursor_execute", collect)
 

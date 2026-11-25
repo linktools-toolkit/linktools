@@ -63,8 +63,8 @@ async def test_partial_trace_snapshot_restores_native_bodies_and_rekeys_group(
 
             def capture(_connection, _cursor, statement, _parameters, context, _many):
                 if statement.startswith((
-                    "SELECT ai_step_sequences.store_key, ai_step_sequences.sha256, ai_step_sequences.message_sha256",
-                    "SELECT ai_step_messages.store_key, ai_step_messages.sha256, ai_step_messages.message",
+                    "SELECT ai_message_sequences.store_key, ai_message_sequences.sha256, ai_message_sequences.message_sha256",
+                    "SELECT ai_messages.store_key, ai_messages.sha256, ai_messages.message",
                 )):
                     reads.append((statement, context.cache_hit))
 

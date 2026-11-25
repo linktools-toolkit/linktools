@@ -194,13 +194,13 @@ async def test_display_cache_saves_body_sql_and_keeps_fresh_dependency_reads(tmp
         cold = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         cold_count = len(statements)
         if body:
-            assert any("ai_step_messages" in statement for statement in statements)
+            assert any("ai_messages" in statement for statement in statements)
         statements.clear()
         assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == cold
         # Warm reads retain authorization, execution and committed-turn checks,
         # but never hydrate transcript message bytes.
         assert len(statements) <= (5 if body else 3)
-        assert not any("ai_step_messages" in statement for statement in statements)
+        assert not any("ai_messages" in statement for statement in statements)
         assert cold_count > len(statements)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture)

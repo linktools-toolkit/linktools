@@ -8,7 +8,7 @@ their own retention semantics; changing physical placement does not remove them.
 
 ## Body encoding
 
-Native message bodies use `ai_step_messages.message` as raw or zlib-compressed
+Native message bodies use `ai_messages.message` as raw or zlib-compressed
 bytes. `compression` identifies the codec and `raw_size` bounds decompression.
 The existing canonical message SHA-256 remains the content identity. There is
 no second stored-body digest. Typed attachments retain their manifest in
@@ -19,7 +19,7 @@ preserve their exact original bytes, including non-JSON or already encoded
 bodies. They are not reserialized as model messages. Metadata-only reads do not
 hydrate these bodies.
 
-Accepted execution and tool payload bytes use the existing `ai_step_messages`
+Accepted execution and tool payload bytes use the existing `ai_messages`
 content owner in a separate typed partition. Other archive families use
 `ai_state_records.payload_bytes` with content metadata in `payload_json`; ordinary
 control payloads are stored as native JSON objects. Keeping body bytes separate
@@ -57,11 +57,11 @@ production DBA approval or a deployed migration.
 | `ai_metric_observations` | JSON measurements, facets and correlation remain available for SQL filtering and aggregation. |
 | `ai_step_runs` | Run lineage and shared metadata remain structured. |
 | `ai_step_events` | Event fields and native run references remain queryable; no second message body. |
-| `ai_step_messages` | Deduplicated Native and accepted execution/tool payload bytes in disjoint typed partitions; attachment manifests retain file references. |
+| `ai_messages` | Deduplicated Native and accepted execution/tool payload bytes in disjoint typed partitions; attachment manifests retain file references. |
 | `ai_step_run_admissions` | Domain membership and actual admitted projection differences, referencing canonical run registration. |
 | `ai_step_tool_operations` | Authoritative tool effect state, fencing and stable operation identity; payloads reference fixed content owners. |
 | `ai_trace_events` | Trace correlation and event fields or fixed Native event sources. |
-| `ai_step_sequences` | Immutable message-sequence links and counts, not copied bodies. |
+| `ai_message_sequences` | Immutable message-sequence links and counts, not copied bodies. |
 | `ai_step_snapshots` | Bounded descriptor and sequence root; the descriptor is not the whole conversation. |
 
 For the seven Runtime payload columns that store native JSON objects, see
@@ -129,8 +129,8 @@ portable restore preserves.
 | --- | --- |
 | `ai_step_events` | `body_sha256` authenticates the full managed lifecycle source; `fields_sha256` authenticates its metadata-free projection. |
 | `ai_step_snapshots` | `sequence_root` points at the immutable sequence; the bounded descriptor does not repeat the message bodies. |
-| `ai_step_messages` | The canonical uncompressed body digest identifies immutable bytes within the owning typed partition. |
-| `ai_step_sequences` | The structural digest identifies the ordered tree and its content/sequence links; repeated messages remain distinct occurrences. |
+| `ai_messages` | The canonical uncompressed body digest identifies immutable bytes within the owning typed partition. |
+| `ai_message_sequences` | The structural digest identifies the ordered tree and its content/sequence links; repeated messages remain distinct occurrences. |
 
 ContentArchive uses an explicit codec and raw-content digest for content
 identity. Its logical references retain namespace and tenant; a portable
@@ -222,7 +222,7 @@ and hot owner rows are the intended space benefit. A regression workload counts
 all record JSON and binary bytes for twenty repeated sub-64KiB Agent/Task bindings,
 including the archive row, rather than measuring only the shortened owner JSON.
 Its runtime results remain subject to CI; no production storage saving is claimed.
-Accepted execution/tool payload content physically reuses `ai_step_messages`.
+Accepted execution/tool payload content physically reuses `ai_messages`.
 The `agent_run` and `tool_operation` logical interfaces route to their Step
 owners, not generic record rows. Other archive families retain their existing
 owner; moving rows alone is not evidence of a smaller whole database.

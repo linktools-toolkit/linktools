@@ -115,7 +115,7 @@ async def test_retained_context_still_verifies_stored_bytes(tmp_path, retained):
         contents = await archive.transcript_repository.content_archive()
         content, = await _message_content_records(contents, (root,))
         if isinstance(root, NativeMessageRoot):
-            table = build_step_sql_metadata().tables['ai_step_messages']
+            table = build_step_sql_metadata().tables['ai_messages']
             async with contents.store.context.sessions() as sql, sql.begin():
                 changed = await sql.execute(table.update().where(
                     table.c.store_key == root.store_key, table.c.sha256 == content.raw_digest,

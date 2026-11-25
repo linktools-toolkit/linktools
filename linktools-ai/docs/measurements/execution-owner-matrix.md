@@ -12,7 +12,7 @@ The first-version code is published. Full CI, whole-change review and final
 matched cost verification remain separate and are not claimed complete here.
 
 - `agent_run` and `tool_operation` have Step-owned physical owners. Accepted
-  execution/tool payload bytes reuse `ai_step_messages`, not a parallel table.
+  execution/tool payload bytes reuse `ai_messages`, not a parallel table.
 - Exact fixed Native parts cover plain/text-list inputs, default text-object and
   structured outputs, canonical tool arguments and complete tool receipts.
   Attached receipts retain their original format, file references and paths.

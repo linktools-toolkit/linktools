@@ -106,7 +106,7 @@ async def capture_retention_root_evidence(
     """Read clock and existing roots; activate only after the observed owner CAS."""
     from sqlalchemy import and_, literal, select
 
-    sequences = native_message_sql_tables()["ai_step_sequences"]
+    sequences = native_message_sql_tables()["ai_message_sequences"]
     seed = select(literal(1).label("seed")).subquery()
     rows = tuple((await execute(select(audit_time.label("observed_at"), sequences.c.sha256).select_from(
         seed.outerjoin(sequences, and_(
@@ -136,7 +136,7 @@ async def resolve_targets(
 ) -> dict[str, int]:
     from sqlalchemy import select
     tables = native_message_sql_tables()
-    sequences, messages = tables["ai_step_sequences"], tables["ai_step_messages"]
+    sequences, messages = tables["ai_message_sequences"], tables["ai_messages"]
     table = messages if kind == "message" else sequences
     result = {}
     identities = tuple(sorted(set(identities)))
@@ -160,7 +160,7 @@ async def index_nodes(
     from sqlalchemy import literal, select, union_all
 
     tables = native_message_sql_tables()
-    sequence_table, message_table = tables["ai_step_sequences"], tables["ai_step_messages"]
+    sequence_table, message_table = tables["ai_message_sequences"], tables["ai_messages"]
     sequence_ids = tuple(sorted({
         identity for row in rows for identity in (row["sha256"], row["left_sha256"], row["right_sha256"], row["next_sha256"])
         if identity is not None

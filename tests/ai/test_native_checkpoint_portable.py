@@ -105,7 +105,7 @@ async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstone
     sequence_parameters = []
 
     def check_restore_binds(connection, cursor, statement, parameters, context, executemany):
-        if statement.startswith("INSERT INTO ai_step_sequences "):
+        if statement.startswith("INSERT INTO ai_message_sequences "):
             assert not executemany
             assert len(parameters) <= 999
             sequence_parameters.append(len(parameters))

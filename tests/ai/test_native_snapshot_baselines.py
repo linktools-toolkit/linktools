@@ -32,7 +32,7 @@ class _NativeWrites:
         self.identities: dict[str, list[str]] = defaultdict(list)
 
     def capture(self, _connection, _cursor, statement, parameters, _context, many) -> None:
-        for table in ("ai_step_messages", "ai_step_sequences"):
+        for table in ("ai_messages", "ai_message_sequences"):
             if statement.startswith("INSERT INTO " + table + " "):
                 self.identities[table].extend(
                     row["sha256"] for row in bound_insert_rows(statement, parameters, many)
@@ -43,7 +43,7 @@ async def _identities(engine) -> dict[str, set[str]]:
     tables = build_step_sql_metadata().tables
     async with engine.connect() as connection:
         return {name: set((await connection.execute(select(tables[name].c.sha256))).scalars())
-                for name in ("ai_step_messages", "ai_step_sequences")}
+                for name in ("ai_messages", "ai_message_sequences")}
 
 
 def _messages(count: int) -> list[ModelRequest]:
@@ -151,12 +151,12 @@ async def test_cold_snapshot_readback_seeds_first_continuation_without_old_rows(
             finally:
                 event.remove(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
             assert {name: len(values) for name, values in writes.identities.items()} == {
-                "ai_step_messages": 1, "ai_step_sequences": 1,
+                "ai_messages": 1, "ai_message_sequences": 1,
             }
             assert await native.latest_snapshot(run_id=run_id) == continued
             counts = await _identities(native.storage_context.engine)
             assert {name: len(values) for name, values in counts.items()} == {
-                "ai_step_messages": 9, "ai_step_sequences": 9,
+                "ai_messages": 9, "ai_message_sequences": 9,
             }
         finally:
             await native.close()

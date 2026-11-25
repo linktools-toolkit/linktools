@@ -91,7 +91,7 @@ def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
         return "ai_state_records"
     if len(parts) == 6 and parts[0] == "record" and parts[3:5] == ("archive", "archive_content"):
         if parts[5].rpartition(":")[0] == "execution-payload":
-            return ("ai_step_messages" if store_key == encode_key_components(("state-group-archive",), 128)
+            return ("ai_messages" if store_key == encode_key_components(("state-group-archive",), 128)
                     else "ai_state_records")
     if len(parts) >= 6 and parts[0] == "record":
         if parts[4] in _EXECUTION_ADDRESS_LENGTHS and (

@@ -108,7 +108,7 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
             assert scopes[domain_partition] == scopes[native_partition]
             # Native bodies use one bounded range query, not generic archive rows.
             native_reads = [statement for statement, _ in statements
-                            if "AI_STEP_MESSAGES" in statement.upper()
+                            if "AI_MESSAGES" in statement.upper()
                             and statement.lstrip().upper().startswith(("SELECT", "WITH"))]
             assert archive_records == []
             assert len(native_reads) == 1
@@ -712,7 +712,7 @@ async def test_owner_content_read_survives_concurrent_native_collection(
         # their native rows while the reader is between owner and body queries.
         async with engine.begin() as connection:
             for table in ("ai_state_facts", "ai_state_records", "ai_execution_records",
-                          "ai_step_sequences", "ai_step_messages"):
+                          "ai_message_sequences", "ai_messages"):
                 await connection.execute(text(f"DELETE FROM {table}"))
         collected.set()
         messages = await asyncio.wait_for(task, timeout=5)

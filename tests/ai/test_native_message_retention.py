@@ -110,7 +110,7 @@ async def test_cross_owner_message_roots_outlive_native_snapshot_pruning(tmp_pat
         await native.save_snapshot(old)
         async with engine.connect() as connection:
             first = await connection.scalar(select(table.c.sequence_root).where(table.c.store_key == native.store_key))
-            messages = build_step_sql_metadata().tables["ai_step_messages"]
+            messages = build_step_sql_metadata().tables["ai_messages"]
             body = (await connection.execute(select(messages))).mappings().one()
         # A typed manifest is stored as a JSON object, not an escaped JSON string.
         if object_backed:
@@ -266,9 +266,9 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
         nodes = [ImmutableSequenceNode(value.raw_digest) for value in (content, orphan)]
         async with engine.begin() as connection:
             for value, node in zip((content, orphan), nodes):
-                await connection.execute(metadata.tables["ai_step_messages"].insert().values(
+                await connection.execute(metadata.tables["ai_messages"].insert().values(
                     store_key=native.store_key, store_locator=native_store_locator(native.store_key), sha256=value.raw_digest, **value.to_native_values()))
-                await connection.execute(metadata.tables["ai_step_sequences"].insert().values(dict(_row(node, native.store_key), store_locator=native_store_locator(native.store_key))))
+                await connection.execute(metadata.tables["ai_message_sequences"].insert().values(dict(_row(node, native.store_key), store_locator=native_store_locator(native.store_key))))
         root = NativeMessageRoot(group_id, native.store_key, (NativeMessageSlice(nodes[0].identity, 1, 0, 1),))
         key = hashlib.sha256(b"native-only-owner").digest()
         record = StoredRecord(key, None, None, "test_owner", b'owner', None, 1, None, 0, None,
@@ -283,8 +283,8 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
             stores={domain: state}, object_stores={domain: objects}, exclusive=_Offline())
         assert protected.retained == candidates
         async with engine.connect() as connection:
-            for name, identity in (("ai_step_messages", content.raw_digest),
-                                   ("ai_step_sequences", nodes[0].identity)):
+            for name, identity in (("ai_messages", content.raw_digest),
+                                   ("ai_message_sequences", nodes[0].identity)):
                 table = metadata.tables[name]
                 assert (await connection.execute(select(table.c.sha256))).scalars().all() == [identity]
         assert await archive.read_payload_object(reference) == b"retained file"
@@ -304,7 +304,7 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ("ai_step_messages", "ai_step_sequences", "ai_step_snapshots"))
+@pytest.mark.parametrize("missing", ("ai_messages", "ai_message_sequences", "ai_step_snapshots"))
 async def test_native_gc_rejects_missing_required_physical_tables(tmp_path: Path, missing: str) -> None:
     from linktools.ai.persistence._step_maintenance import inspect_native_message_tables
     from linktools.ai.storage import create_sql_storage_context
@@ -393,7 +393,7 @@ async def test_attachment_manifest_inserts_respect_bound_byte_budget(tmp_path: P
     bound_sizes = []
 
     def observe(connection, cursor, statement, parameters, context, executemany):
-        if statement.lstrip().startswith("INSERT INTO ai_step_messages"):
+        if statement.lstrip().startswith("INSERT INTO ai_messages"):
             batches = parameters if executemany else (parameters,)
             bound_sizes.append(sum(
                 len(value.encode("utf-8")) if isinstance(value, str) else len(value)

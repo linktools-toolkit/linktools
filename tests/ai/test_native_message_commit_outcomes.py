@@ -270,7 +270,7 @@ async def test_bound_snapshot_media_and_text_metadata_roundtrip_through_payload_
             await writer.save_snapshot(snapshot)
             restored = await reader.latest_snapshot(run_id="media")
             assert encode_model_messages(restored.messages) == encode_model_messages(messages)
-            table = build_step_sql_metadata().tables["ai_step_messages"]
+            table = build_step_sql_metadata().tables["ai_messages"]
             async with writer.storage_context.sessions() as session:
                 row = (await session.execute(select(table))).mappings().one()
             content = ContentRecord.from_native_row(row)

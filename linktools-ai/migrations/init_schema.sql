@@ -257,7 +257,7 @@ CREATE TABLE ai_step_tool_operations (
 	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
 )ENGINE=InnoDB COMMENT='Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
-CREATE TABLE ai_step_messages (
+CREATE TABLE ai_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical uncompressed bytes for the partition content type.',
@@ -275,7 +275,7 @@ CREATE TABLE ai_step_messages (
 	UNIQUE KEY uk_store_locator_sha256 (store_locator, sha256)
 )ENGINE=InnoDB COMMENT='Immutable typed content bytes: native messages and accepted execution payloads in disjoint partitions.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
-CREATE TABLE ai_step_sequences (
+CREATE TABLE ai_message_sequences (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the immutable sequence node.',

@@ -479,8 +479,8 @@ def _payload_table(metadata: "MetaData") -> "Table":
     """Resolve the shared content owner without implicit schema provisioning."""
     from ._step_schema import build_step_sql_metadata
 
-    table = metadata.tables.get("ai_step_messages")
-    return build_step_sql_metadata().tables["ai_step_messages"] if table is None else table
+    table = metadata.tables.get("ai_messages")
+    return build_step_sql_metadata().tables["ai_messages"] if table is None else table
 
 
 class SqlStateStorageGroup:
@@ -2593,7 +2593,7 @@ class _SqlTransaction:
                 self._abort_mutation(error)
                 raise
             return
-        if owners == ("ai_step_messages",):
+        if owners == ("ai_messages",):
             try:
                 if len({record.key for record in values}) != len(values):
                     raise ValueError("duplicate payload keys")
@@ -2650,7 +2650,7 @@ class _SqlTransaction:
                 self._abort_mutation(error)
                 raise
             return
-        if owners == ("ai_step_messages",):
+        if owners == ("ai_messages",):
             try:
                 if len({record.key for record in values}) != len(values):
                     raise ValueError("duplicate payload keys")
@@ -2785,7 +2785,7 @@ class _SqlTransaction:
                 self._abort_mutation(error)
                 raise
             return
-        if owners == ("ai_step_messages",):
+        if owners == ("ai_messages",):
             try:
                 if len({item.record.key for item in values}) != len(values):
                     raise ValueError("duplicate payload replacements")
@@ -3030,7 +3030,7 @@ class _SqlTransaction:
             return
         if not unique_keys:
             return
-        if owners == ("ai_step_messages",):
+        if owners == ("ai_messages",):
             await self._delete_payload_records(unique_keys)
             return
         from sqlalchemy import delete, tuple_, update
@@ -3895,7 +3895,7 @@ class _SqlTransaction:
         return tuple(conditions)
 
     def _is_payload_key(self, key: bytes) -> bool:
-        return record_owner_table(key, store_key=self._store_key) == "ai_step_messages"
+        return record_owner_table(key, store_key=self._store_key) == "ai_messages"
 
     def _payload_owner(self):
         from ._step_payload_sql import StepPayloadSql

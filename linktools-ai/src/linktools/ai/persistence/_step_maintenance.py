@@ -48,21 +48,21 @@ async def inspect_native_message_tables(
     """
     from sqlalchemy import inspect
 
-    names = ("ai_step_snapshots", "ai_step_sequences", "ai_step_messages")
+    names = ("ai_step_snapshots", "ai_message_sequences", "ai_messages")
     async with context.engine.connect() as connection:
         present = await connection.run_sync(
             lambda connection: tuple(inspect(connection).has_table(name) for name in names),
         )
     actual = {name for name, exists in zip(names, present) if exists}
     required = set(names).intersection(expected.tables)
-    content = {"ai_step_sequences", "ai_step_messages"}
+    content = {"ai_message_sequences", "ai_messages"}
     if require_content:
         required.update(content)
-    if actual == {"ai_step_messages"} and required.issubset(actual):
+    if actual == {"ai_messages"} and required.issubset(actual):
         # Typed archive payloads share the message relation without owning a
         # Native sequence tree. Never skip a Native or malformed partition.
         from ._step_schema import native_message_sql_tables
-        table = native_message_sql_tables()["ai_step_messages"]
+        table = native_message_sql_tables()["ai_messages"]
         async with context.sessions() as session:
             await context.dialect.begin_consistent_read(session)
             if await native_message_partitions(context, session, table):
@@ -250,8 +250,8 @@ async def purge_step_content(
         context, metadata if group is None else group.metadata, require_content=True,
     )
     snapshots = metadata.tables["ai_step_snapshots"] if "ai_step_snapshots" in tables else None
-    sequences = metadata.tables["ai_step_sequences"]
-    messages = metadata.tables["ai_step_messages"]
+    sequences = metadata.tables["ai_message_sequences"]
+    messages = metadata.tables["ai_messages"]
 
     locator = native_store_locator(store_key)
 

@@ -33,7 +33,7 @@ from linktools.ai.persistence.codec import decode_record, encode_record
                                               (sqlite.dialect(), "BLOB")))
 def test_database_content_binary_columns_have_full_dialect_capacity(dialect, expected: str) -> None:
     records = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION})).tables["ai_state_records"]
-    messages = build_step_sql_metadata().tables["ai_step_messages"]
+    messages = build_step_sql_metadata().tables["ai_messages"]
     assert records.c.payload_bytes.type.compile(dialect=dialect) == expected
     assert messages.c.message.type.compile(dialect=dialect) == expected
     assert records.c.payload_json.type.compile(dialect=dialect) == "JSON"
@@ -120,7 +120,7 @@ async def test_native_body_stays_binary_through_publication_and_portable_boundar
             lambda session: native.publish_in_session(session, prepared, owner_inserted=True),
         )
         proof = native.confirm_committed(receipt)
-        table = build_step_sql_metadata().tables["ai_step_messages"]
+        table = build_step_sql_metadata().tables["ai_messages"]
         async with engine.connect() as connection:
             physical = dict((await connection.execute(select(table))).mappings().one())
             rows = (await connection.execute(native.range_query((proof.root,)).statement)).mappings().all()

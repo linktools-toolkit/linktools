@@ -75,7 +75,7 @@ async def test_terminal_shared_preparation_bounds_owner_reads_and_deduplicates_c
                 batches.append((first, second))
             finally:
                 event.remove(engine, "before_cursor_execute", capture)
-            assert all("ai_step_messages" not in sql and "ai_step_sequences" not in sql for sql in selected)
+            assert all("ai_messages" not in sql and "ai_message_sequences" not in sql for sql in selected)
         # Each owner captures its mutable head once; native content preparation
         # uses frozen bytes rather than querying prior message bodies.
         assert owner_reads == [(1, 1), (1, 1)]
@@ -265,7 +265,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
                 owner = runtime._run_store.read_store(domain)
                 content = await owner.transcript_repository.content_archive()
                 retained_scopes.add((id(owner.state_store.storage_group), content.scope_id))
-                table = build_step_sql_metadata().tables["ai_step_messages"]
+                table = build_step_sql_metadata().tables["ai_messages"]
                 async with owner.state_store.context.engine.connect() as connection:
                     assert (await connection.execute(select(table.c.id).where(
                         table.c.store_key == SqlStepStore.scope_key(

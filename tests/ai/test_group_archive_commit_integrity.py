@@ -77,7 +77,7 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
         native = step.transcript_repository._native_messages
         assert native is not None
         metadata = build_step_sql_metadata()
-        messages = metadata.tables["ai_step_messages"]
+        messages = metadata.tables["ai_messages"]
 
         async def native_snapshot() -> tuple[tuple[dict[str, object], ...], ...]:
             async with native.storage_context.engine.connect() as connection:

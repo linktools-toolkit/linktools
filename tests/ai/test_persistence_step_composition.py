@@ -258,17 +258,17 @@ async def test_native_factory_uses_execution_route_in_split_plan(tmp_path: Path)
             await native.close()
     with sqlite3.connect(execution) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {"ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_step_messages", "ai_step_sequences"} <= tables
+        assert {"ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_messages", "ai_message_sequences"} <= tables
         assert connection.execute("SELECT run_id FROM ai_step_runs").fetchall() == [("routed",)]
     with sqlite3.connect(conversation) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert {name for name in tables if name.startswith("ai_step_")} == {
-            "ai_step_runs", "ai_step_messages", "ai_step_sequences",
+            "ai_step_runs", "ai_messages", "ai_message_sequences",
             "ai_step_run_admissions", "ai_step_tool_operations",
         }
         assert connection.execute("SELECT * FROM ai_step_runs").fetchall() == []
-        assert connection.execute("SELECT * FROM ai_step_messages").fetchall() == []
-        assert connection.execute("SELECT * FROM ai_step_sequences").fetchall() == []
+        assert connection.execute("SELECT * FROM ai_messages").fetchall() == []
+        assert connection.execute("SELECT * FROM ai_message_sequences").fetchall() == []
         assert connection.execute("SELECT * FROM ai_step_run_admissions").fetchall() == []
         assert connection.execute("SELECT * FROM ai_step_tool_operations").fetchall() == []
 

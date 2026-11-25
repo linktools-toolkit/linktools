@@ -61,7 +61,7 @@ async def test_empty_context_batches_projection_and_head(
         assert sum(scope_key in parameters or scope_locator in parameters for _, parameters in cold_selects) == 0
         assert len(cold_selects) == 1
         assert not any(name in sql for sql, _ in cold_selects
-                       for name in ("ai_step_messages", "ai_step_sequences", "ai_objects"))
+                       for name in ("ai_messages", "ai_message_sequences", "ai_objects"))
         assert not any(sql.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"} for sql, _ in cold_queries)
         # Both alternatives now use the same established archive scope.
         assert await archive.state_store.storage_group.open_archive() is not None

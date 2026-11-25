@@ -54,14 +54,14 @@ class _Traffic:
     def capture(self, connection, cursor, statement, parameters, context, many) -> None:
         verb = statement.split()[0].upper()
         self.verbs["SELECT" if verb == "WITH" else verb] += 1
-        if verb in {"SELECT", "WITH"} and re.search(r"\bai_step_messages\.message\b", statement):
+        if verb in {"SELECT", "WITH"} and re.search(r"\bai_messages\.message\b", statement):
             self.body_reads += 1
         batches = parameters if many else (parameters,)
         self.bound_bytes += sum(len(value.encode("utf-8")) if isinstance(value, str) else len(value)
                                 for batch in batches
                                 for value in (batch.values() if isinstance(batch, dict) else batch)
                                 if isinstance(value, (str, bytes)))
-        for table in ("ai_step_messages", "ai_step_sequences"):
+        for table in ("ai_messages", "ai_message_sequences"):
             if statement.startswith("INSERT INTO " + table):
                 self.submitted_rows[table] += sum(
                     1 for _ in bound_insert_rows(statement, parameters, many)
@@ -119,7 +119,7 @@ async def test_frozen_append_prepares_only_delta_and_keeps_bounded_knowledge(tmp
         assert reused_evicted_frontier
         assert calls == 5
         assert traffic.body_reads == 0
-        assert traffic.submitted_rows == {"ai_step_messages": 5, "ai_step_sequences": 5}
+        assert traffic.submitted_rows == {"ai_messages": 5, "ai_message_sequences": 5}
         assert traffic.bound_bytes > 0
         assert len(content._known_messages) <= 2 and content._cache_bytes <= 4096
         assert len(content._known_nodes) <= 1
@@ -205,8 +205,8 @@ async def test_cold_duplicates_are_idempotent_without_body_reads(tmp_path: Path)
             prepared = await content.prepare_append(frozen, prepare_payload=_inline)
             content.confirm_committed(await _publish(native, content, prepared))
         assert traffic.body_reads == 0
-        assert traffic.submitted_rows["ai_step_messages"] == 2
-        assert traffic.submitted_rows["ai_step_sequences"] == 6
+        assert traffic.submitted_rows["ai_messages"] == 2
+        assert traffic.submitted_rows["ai_message_sequences"] == 6
         async with engine.connect() as connection:
             assert len((await connection.execute(select(content._messages))).all()) == 1
             assert len((await connection.execute(select(content._nodes))).all()) == 3
@@ -241,7 +241,7 @@ async def test_owner_conflicts_rollback_and_foreign_receipts_never_grant_candida
         assert not content._known_messages and not content._known_nodes
         receipt = await _publish(native, content, prepared)
         proof = content.confirm_committed(receipt)
-        assert traffic.submitted_rows["ai_step_messages"] == 2
+        assert traffic.submitted_rows["ai_messages"] == 2
         replay = await _publish(native, content, prepared, owner_inserted=False, confirmed_content=proof)
         assert replay.root is None
         with pytest.raises(ValueError, match="committed root"):

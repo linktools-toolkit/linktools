@@ -209,8 +209,8 @@ class NativeMessageContent:
             raise ValueError("native content cache limits must be nonnegative")
         self._context = context
         metadata = build_step_sql_metadata()
-        self._messages = metadata.tables["ai_step_messages"]
-        self._nodes = metadata.tables["ai_step_sequences"]
+        self._messages = metadata.tables["ai_messages"]
+        self._nodes = metadata.tables["ai_message_sequences"]
         self._generation = 0
         self._prepared: WeakSet[PreparedNativeMessages] = WeakSet()
         self._replacements: WeakKeyDictionary[PreparedNativeMessages, PreparedNativeMessages] = WeakKeyDictionary()

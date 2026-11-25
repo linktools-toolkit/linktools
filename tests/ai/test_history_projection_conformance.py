@@ -890,7 +890,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
             )
 
         if isinstance(chunk.content, NativeMessageRoot):
-            table = build_step_sql_metadata().tables["ai_step_messages"]
+            table = build_step_sql_metadata().tables["ai_messages"]
             async with contents.store.context.sessions() as sql, sql.begin():
                 result = await sql.execute(table.update().where(
                     table.c.store_key == chunk.content.store_key,

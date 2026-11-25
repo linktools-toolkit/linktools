@@ -2542,7 +2542,7 @@ async def _read_native_messages(
     async def read(transaction: StateTransaction) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         if not isinstance(transaction, SqlStateRowReader):
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        nodes = tables["ai_step_sequences"]
+        nodes = tables["ai_message_sequences"]
         columns = ("store_key", "sha256", "message_sha256", "tree_count",
                    "left_sha256", "right_sha256", "next_sha256")
         sequences = []
@@ -2569,7 +2569,7 @@ async def _read_native_messages(
             closure.mark(root.store_key, root.slices)
         sequences = [row for row in sequences if (row["store_key"], row["sha256"]) in closure.retained_sequences]
         messages = []
-        table = tables["ai_step_messages"]
+        table = tables["ai_messages"]
         for partition in partitions:
             identities = sorted(identity for scope, identity in closure.retained_messages if scope == partition)
             offset = 0
@@ -2600,7 +2600,7 @@ async def _insert_native_messages(
 
     async def insert(session: "AsyncSession") -> None:
         for sequences, messages in entries:
-            for name, rows in (("ai_step_messages", messages), ("ai_step_sequences", sequences)):
+            for name, rows in (("ai_messages", messages), ("ai_message_sequences", sequences)):
                 table = tables[name]
                 if not rows:
                     continue

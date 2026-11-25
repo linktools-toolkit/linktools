@@ -77,7 +77,7 @@ async def test_native_tool_readonly_snapshot_and_last_owner_collection(tmp_path:
                 await partition.mutate(lambda tx: tx.delete_fact_streams(owner))
         await state.purge_unreferenced_objects((), exclusive=Guard())
         async with store.storage_group.context.engine.connect() as connection:
-            assert await connection.scalar(text("select count(*) from ai_step_messages where store_key=:store"),
+            assert await connection.scalar(text("select count(*) from ai_messages where store_key=:store"),
                 {"store": native_store_key("native-result", "tenant")}) == 1
         assert (await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
         records = await store.read(lambda tx: tx.scan_records())
@@ -85,7 +85,7 @@ async def test_native_tool_readonly_snapshot_and_last_owner_collection(tmp_path:
         await store.mutate(lambda tx: tx.delete_records(keys))
         await state.purge_unreferenced_objects((), exclusive=Guard())
         async with store.storage_group.context.engine.connect() as connection:
-            assert await connection.scalar(text("select count(*) from ai_step_messages where store_key=:store"),
+            assert await connection.scalar(text("select count(*) from ai_messages where store_key=:store"),
                 {"store": native_store_key("native-result", "tenant")}) == 0
-            assert await connection.scalar(text("select count(*) from ai_step_sequences where store_key=:store"),
+            assert await connection.scalar(text("select count(*) from ai_message_sequences where store_key=:store"),
                 {"store": native_store_key("native-result", "tenant")}) == 0

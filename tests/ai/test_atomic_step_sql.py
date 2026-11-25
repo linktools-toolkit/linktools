@@ -113,7 +113,7 @@ async def test_compound_failure_rolls_back_every_record_and_body_receipt(atomic_
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
 
     def fail(connection, cursor, statement, parameters, context, many):
-        if statement.startswith("INSERT INTO ai_step_sequences "):
+        if statement.startswith("INSERT INTO ai_message_sequences "):
             raise RuntimeError("reference failed")
 
     event.listen(engine.sync_engine, "before_cursor_execute", fail)
@@ -206,8 +206,8 @@ async def test_parallel_compound_calls_preserve_native_keys_and_each_event_order
     for index in range(4):
         assert [item.kind for item in found if item.idempotency_key.startswith(f"{index}:")] == [item.kind for item in events]
     async with engine.connect() as connection:
-        assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
-        assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
+        assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 1
+        assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == 1
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_inflight_compound_group_is_invisible_to_cold_reader_and_cache(
 
     async def pause_after_bodies(session, statement, *args, **kwargs):
         result = await original(session, statement, *args, **kwargs)
-        if statement.is_insert and statement.table.name == "ai_step_messages":
+        if statement.is_insert and statement.table.name == "ai_messages":
             inserted.set()
             await release.wait()
         return result
@@ -524,20 +524,20 @@ async def test_pruned_headers_keep_replay_identity_without_body_retention_roots(
             messages=[ModelRequest(parts=[UserPromptPart("retained")])])
         await native.save_snapshot(last)
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 4
         # Pruning retires roots; only the explicit offline pass reclaims bodies.
         await native.purge_unreferenced_content(exclusive=_Offline())
         await native.close()
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 1 AND messages = '{}' AND sequence_root IS NULL")) == 2
         cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
         await cold.save_snapshot(replace(first, messages=[ModelRequest(parts=[UserPromptPart("different replay")])]))
         assert await cold.list_snapshots(run_id="run", include_interrupted=True) == [last]
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == 1
         await cold.close()
     finally:
         await native.close()

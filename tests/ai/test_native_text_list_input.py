@@ -73,8 +73,8 @@ async def test_text_list_input_readonly_snapshot_restores_and_rejects_missing_so
         assert reference is not None
         context = repository.state_store.storage_group.context
         async with context.engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_key=:store AND sha256 IN "
-                "(SELECT message_sha256 FROM ai_step_sequences WHERE store_key=:store AND sha256=:root)"),
+            await connection.execute(text("DELETE FROM ai_messages WHERE store_key=:store AND sha256 IN "
+                "(SELECT message_sha256 FROM ai_message_sequences WHERE store_key=:store AND sha256=:root)"),
                 {"store": reference.root.store_key, "root": reference.root.slices[0].first})
     async with Persistence.open("native-result", tenant_id="tenant", storage=PersistenceStorage.from_root(target), read_only=True) as state:
         with pytest.raises(AIError) as missing:
