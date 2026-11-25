@@ -830,6 +830,18 @@ class _Console:
 
         return _SSEStream(stream(), self._shutdown_event)
 
+    async def start_plan(self, request: Request) -> Response:
+        runtime = self.require_runtime()
+        payload = await _body(request)
+        request_id = _text(payload, "request_id")
+        request.state.operation_id = request_id
+        if environ.debug:
+            request.state.phase = "execution.plan"
+        execution = await runtime.agents.get(_text(payload, "agent_id", "default")).start_plan(
+            _text(payload, "prompt"), principal=self.principal, idempotency_key=request_id,
+        )
+        return _json({"execution_id": execution.execution_id}, 202)
+
     async def executions(self, request: Request) -> Response:
         if environ.debug:
             request.state.phase = "execution.list"
@@ -1092,6 +1104,7 @@ def create_app(
         Route("/api/session/events", console.session_events),
         Route("/api/session/{action}", console.session_action, methods=["POST"]),
         Route("/api/executions", console.executions),
+        Route("/api/executions/plan", console.start_plan, methods=["POST"]),
         Route("/api/executions/{execution_id}", console.execution),
         Route("/api/executions/{execution_id}/events", console.events),
         Route("/api/executions/{execution_id}/models-exact", console.model_batch),

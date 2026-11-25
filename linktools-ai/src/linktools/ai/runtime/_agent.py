@@ -390,6 +390,36 @@ class Agent(Generic[AppT]):
             raise_on_stream_error=raise_on_stream_error,
         )
 
+    async def start_plan(
+        self,
+        user_prompt: "UserPromptInput",
+        *,
+        files: Sequence[str] = (),
+        session_context: SessionContext = "all",
+        budget: RunBudget | None = None,
+        output: "type[BaseModel] | None" = None,
+        principal: "Principal | None" = None,
+        session_id: "str | None" = None,
+        idempotency_key: "str | None" = None,
+        thinking: "ThinkingValue | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
+    ) -> "Execution[AppT]":
+        """Start plan mode with plan-safe tools without waiting for completion."""
+        return await self.execution_port.start(
+            validate_user_input(user_prompt),
+            files=files,
+            session_context=session_context,
+            budget=budget,
+            output=output,
+            principal=principal,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+            mode="plan",
+            planning=True,
+            thinking=thinking,
+            correlation=correlation,
+        )
+
     async def plan(
         self,
         user_prompt: "UserPromptInput",
@@ -412,9 +442,8 @@ class Agent(Generic[AppT]):
         """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
         validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
                       raise_on_stream_error=raise_on_stream_error)
-        prompt = validate_user_input(user_prompt)
-        execution = await self.execution_port.start(
-            prompt,
+        execution = await self.start_plan(
+            user_prompt,
             files=files,
             session_context=session_context,
             budget=budget,
@@ -422,8 +451,6 @@ class Agent(Generic[AppT]):
             principal=principal,
             session_id=session_id,
             idempotency_key=idempotency_key,
-            mode="plan",
-            planning=True,
             thinking=thinking,
             correlation=correlation,
         )

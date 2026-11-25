@@ -18,7 +18,7 @@
     <section id="welcome" class="welcome"><h1>Your conversations</h1><p>Choose a conversation or start a new one.</p><button id="welcome-new" class="primary">New conversation</button></section>
     <nav id="conversation-nav" class="conversation-nav" aria-label="Conversation views" hidden><button id="chat-mode" class="active">Conversation</button><button id="native-mode">Model messages</button><button id="activity-mode">Activity</button><span id="reader-actions" class="reader-actions"></span></nav>
     <section id="conversation-view" class="workbench" hidden>
-      <aside id="execution-list" class="execution-list" aria-label="Execution browser" hidden><h1>Executions</h1><p class="muted">Browse runs and inspect their records</p></aside>
+      <aside id="execution-list" class="execution-list" aria-label="Execution browser" hidden><h1>Executions</h1><p class="muted">Browse runs and inspect their records</p><button id="open-plan" class="quiet" hidden>Run standalone plan</button></aside>
       <div id="conversation-column" class="conversation-column">
 
         <button id="turns-more" class="quiet" hidden>Load earlier turns</button><div id="conversation" class="conversation" aria-live="polite"></div>
@@ -39,6 +39,7 @@
   </main>
 </div>
 <dialog id="new-dialog"><form id="new-form"><h2>New conversation</h2><label id="agent-picker">Agent<select id="new-agent"></select></label><details id="new-options"><summary>Title & working directory</summary><label>Title<input id="new-title" value="New conversation" required maxlength="120"></label><label>Working directory (optional)<input id="new-cwd" placeholder="Workspace-relative path"></label></details><div class="dialog-actions"><button type="button" data-close="new-dialog" class="quiet">Cancel</button><button id="create-session" class="primary">Start conversation</button></div></form></dialog>
+<dialog id="plan-dialog"><form id="plan-form"><h2>Run standalone plan</h2><p class="hint">Starts a separate execution. It does not read or update a conversation.</p><label>Agent<select id="plan-agent"></select></label><label>Planning prompt<textarea id="plan-prompt" rows="4" required></textarea></label><p id="plan-error" role="alert" class="hint" hidden></p><div class="dialog-actions"><button type="button" data-close="plan-dialog" class="quiet">Cancel</button><button id="start-plan" class="primary">Run plan</button></div></form></dialog>
 <dialog id="settings-dialog"><div class="dialog-heading"><h2>Runtime & capabilities</h2><button data-close="settings-dialog" class="quiet" aria-label="Close settings">✕</button></div><p class="muted">Configured by the CLI; credentials stay on the server.</p><div id="settings-content"></div></dialog>
 <script type="module" src="/assets/app.js"></script>
 </body></html>

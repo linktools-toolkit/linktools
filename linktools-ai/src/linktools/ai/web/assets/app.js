@@ -123,6 +123,7 @@ function setDisabled() {
   renderCurrentState();
   const readonly=!state.config || state.config.read_only;
   document.querySelectorAll('[data-view]').forEach(node=>node.disabled=!state.config);
+  $('open-plan').hidden=readonly || !state.config?.turn_sessions;
   $('settings').disabled=!state.config;$('open-record').disabled=!state.config;
   $('open-recovery').disabled=readonly || !state.selectedExecution;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
@@ -2214,6 +2215,27 @@ async function sendMessage(event) {
     setDisabled();
   }
 }
+function openPlan() {
+  if(!state.config?.turn_sessions || state.config.read_only)return;
+  const dialog=$('plan-dialog');
+  dialog.dataset.attempt=crypto.randomUUID();
+  $('plan-error').hidden=true;$('start-plan').disabled=false;
+  dialog.showModal();$('plan-prompt').focus();
+}
+async function startPlan(event) {
+  event.preventDefault();
+  const dialog=$('plan-dialog'),attempt=dialog.dataset.attempt,button=$('start-plan');
+  const prompt=$('plan-prompt').value;
+  if(button.disabled || !prompt.trim())return;
+  const current=()=>dialog.open && dialog.dataset.attempt===attempt;
+  $('plan-error').hidden=true;button.disabled=true;
+  try {
+    const result=await mutate('/api/executions/plan',{agent_id:$('plan-agent').value || 'default',prompt});
+    if(current()){ $('plan-prompt').value='';dialog.close();navigate(null,result.execution_id); }
+  } catch(error) {
+    if(current()){ $('plan-error').textContent=error.message;$('plan-error').hidden=false; }
+  } finally {if(dialog.dataset.attempt===attempt)button.disabled=false;}
+}
 function openNew() {
   if(!state.config || state.config.read_only)return;
   $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();
@@ -2418,6 +2440,8 @@ async function bootstrap() {
     }
     if([...$('new-agent').options].some(option=>option.value==='default'))$('new-agent').value='default';
     document.querySelector('.composer-settings').prepend($('agent-picker'));
+    $('plan-agent').replaceChildren(...Array.from($('new-agent').options, option => option.cloneNode(true)));
+    $('plan-agent').value=$('new-agent').value;
   }
   if(state.config.read_only){connection('Read-only');notice('Read-only. Configure a model at startup to send messages.');}
   setDisabled();await loadList();await fromHash();
@@ -2438,11 +2462,12 @@ async function fromHash() {
   await openSelection(params.get('session'),params.get('execution'));
 }
 window.addEventListener('hashchange',()=>fromHash().catch(showError));window.addEventListener('beforeunload',stopStream);
+$('open-plan').onclick=openPlan;$('plan-form').onsubmit=startPlan;
 $('new-session').onclick=openNew;$('welcome-new').onclick=openNew;$('new-form').onsubmit=createSession;
 $('composer').onsubmit=sendMessage;$('prompt').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();$('composer').requestSubmit();}};
 $('menu').onclick=()=>{const open=$('menu').getAttribute('aria-expanded')!=='true';$('sidebar').classList.toggle('open',open);$('menu').setAttribute('aria-expanded',String(open));};
 $('sidebar-close').onclick=()=>closeSidebar(true);
-window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open)closeSidebar(true);});
+window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open && !$('plan-dialog').open)closeSidebar(true);});
 $('new-title').oninvalid=()=>$('new-options').open=true;
 $('detail-turn').onchange=()=>selectExecution($('detail-turn').value).catch(showError);
 async function openRecovery(active=false) {
