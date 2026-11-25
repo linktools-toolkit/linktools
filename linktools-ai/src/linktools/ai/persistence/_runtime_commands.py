@@ -2130,16 +2130,13 @@ class StateCommands:
 
     async def _require_cold_cancelled_graph_step(
         self, group: StateGroupTransaction, execution_id: str, *, tools: ToolRepositoryImpl,
-        native: "SqlStepStore", run_id: str, conversation_id: str,
+        native: "SqlStepStore", run_id: str, conversation_id: str, _write_if_missing: bool = False,
     ) -> None:
         from ..steps import NativeLifecycleEvent
 
         execution_tx = group.transaction(self._execution.state_store)
         key = (run_id, NativeLifecycleEvent.source_key())
         marker = (await native.read_fixed_events((key,), transaction=execution_tx)).get(key)
-        if (not isinstance(marker, NativeLifecycleEvent) or marker.outcome != "cancelled"
-                or marker.conversation_id != conversation_id):
-            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         unresolved = await group.transaction(tools.state_store).list_records(RecordQuery(
             kind="tool_operation", parent_key=tools._parent("tool_operation", "execution", (execution_id,)),
             states=frozenset({
@@ -2149,6 +2146,13 @@ class StateCommands:
         ))
         if unresolved:
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+        if marker is None and _write_if_missing:
+            await native._record_cold_cancelled_lifecycle(
+                execution_tx, run_id=run_id, conversation_id=conversation_id, occurred_at=await execution_tx.now(),
+            )
+        elif (not isinstance(marker, NativeLifecycleEvent) or marker.outcome != "cancelled"
+                or marker.conversation_id != conversation_id):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
 
     async def _claim_expired_linked_graph_cancellation(
         self, expected_execution: ExecutionRecord, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
@@ -2211,7 +2215,8 @@ class StateCommands:
                 assert cold_tools is not None
                 native, run_id, conversation_id = _cold_step
                 await self._require_cold_cancelled_graph_step(
-                    group, key.turn_id, tools=cold_tools, native=native, run_id=run_id, conversation_id=conversation_id,
+                    group, key.turn_id, tools=cold_tools, native=native, run_id=run_id,
+                    conversation_id=conversation_id, _write_if_missing=True,
                 )
             return rotated, generation + 1
 

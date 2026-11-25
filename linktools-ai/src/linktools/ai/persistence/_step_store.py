@@ -591,6 +591,52 @@ class SqlStepStore:
         await self._write_events(session, (event,), source=source, started=event)
         return self._with_terminal(source, event)
 
+    async def _record_cold_cancelled_lifecycle(
+        self, transaction: StateTransaction, *, run_id: str, conversation_id: str, occurred_at,
+    ) -> None:
+        """Append a real cold Stop event to an existing authenticated native run."""
+        from sqlalchemy import and_, func, select
+
+        if not isinstance(transaction, SqlStateTransaction):
+            raise TypeError("native SQL records require a SQL state transaction")
+        runs, events, checkpoints = (self._table(name) for name in ("runs", "events", "snapshots"))
+        start = events.alias("cold_cancel_native_start")
+        statement = select(
+            *runs.c, *(start.c[name].label("source_" + name) for name in _EVENT_SOURCE_COLUMNS),
+        ).select_from(runs.join(start, and_(
+            start.c.store_key == runs.c.store_key, start.c.store_locator == runs.c.store_locator,
+            start.c.run_id == runs.c.run_id, start.c.idempotency_key == runs.c.managed_start_key,
+        ))).where(*self._run_predicates(runs, run_id))
+
+        async def append(session: "AsyncSession") -> None:
+            row = (await session.execute(statement)).mappings().one_or_none()
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            try:
+                started = self.decode_started_source(
+                    {name: row["source_" + name] for name in _EVENT_SOURCE_COLUMNS}, run=row,
+                )
+                source = self._with_started(_RunFields.from_row(row, engine=self._context.engine), started)
+                if (started.kind != "run_started" or started.run_id != run_id
+                        or started.conversation_id != conversation_id
+                        or row["managed_start_key"] != encode_native_replay_key(started.idempotency_key)):
+                    raise ValueError("native managed start has another owner")
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            last_event, last_checkpoint = (await session.execute(select(
+                select(func.max(events.c.step_index)).where(*self._run_predicates(events, run_id)).scalar_subquery(),
+                select(func.max(checkpoints.c.step_index)).where(*self._run_predicates(checkpoints, run_id)).scalar_subquery(),
+            ))).one()
+            step = max(index for index in (started.step_index, last_event, last_checkpoint) if index is not None)
+            await self._write_lifecycle_event(session, NativeLifecycleEvent(
+                run_id=run_id, kind="run_failed", step_index=step, outcome="cancelled", timestamp=occurred_at,
+                conversation_id=started.conversation_id, parent_run_id=started.parent_run_id,
+                agent_name=started.agent_name, metadata=dict(started.metadata),
+                idempotency_key=NativeLifecycleEvent.source_key(),
+            ), source=source)
+
+        await transaction.run_sql(self._context, append)
+
     async def read_fixed_events(
         self, keys: Sequence[tuple[str, str]], *, transaction: SqlStateRowReader,
     ) -> dict[tuple[str, str], StepEvent]:
