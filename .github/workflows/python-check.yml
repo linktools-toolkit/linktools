@@ -149,7 +149,8 @@ jobs:
           status=0
           for package in "${packages[@]}"; do
             echo "::group::$package"
-            if python manage.py check "$package" --skip-compatibility --test-tier "$TEST_TIER"; then
+            check_log=$(mktemp)
+            if python manage.py check "$package" --skip-compatibility --test-tier "$TEST_TIER" >"$check_log" 2>&1; then
               code=0
               result=success
             else
@@ -157,6 +158,14 @@ jobs:
               result=failure
               status=1
             fi
+            if [ "$(wc -c < "$check_log")" -le 40960 ]; then
+              cat "$check_log"
+            else
+              head -c 8192 "$check_log"
+              printf '\n[Log exceeds 40 KiB; showing its start and final diagnostics.]\n'
+              tail -c 32768 "$check_log"
+            fi
+            rm -f "$check_log"
             echo '::endgroup::'
             printf '%s / Python %s / %s / %s: %s\n' "$package" "$PYTHON" "$GROUP" "$TEST_TIER" "$result" >> "$GITHUB_STEP_SUMMARY"
             if [ "$code" -ge 128 ]; then
