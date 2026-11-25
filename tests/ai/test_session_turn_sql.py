@@ -35,7 +35,7 @@ async def store(tmp_path):
 
 async def accept(turns: SqlSessionTurns, turn: str, *, revision: int = 0, through: int = 0, request: str = "send") -> bool:
     return await turns.accept(
-        SessionTurnKey("chat", turn), expected_revision=revision, context_through=through,
+        SessionTurnKey("chat", turn), expected_revision=revision, context_from=1, context_through=through,
         request_key=request, request={"input": turn}, lease_seconds=60,
     )
 
@@ -166,3 +166,54 @@ async def test_partition_and_session_must_match_exact_turn(store):
     assert await turns.get_turn(SessionTurnKey("other-chat", "turn")) is None
     assert not await other_tenant.request_cancel(SessionTurnKey("chat", "turn"))
     assert (await turns.get_turn(SessionTurnKey("chat", "turn")))["state"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_admission_pins_selected_history_range_even_when_empty(store):
+    _, _, turns = store
+    assert await accept(turns, "first")
+    assert await turns.finish(
+        SessionTurnKey("chat", "first"), generation=1, turn_no=1, state="succeeded", result={},
+    )
+    key = SessionTurnKey("chat", "second")
+    assert await turns.accept(
+        key, expected_revision=2, context_from=2, context_through=1,
+        request_key="second", request={}, lease_seconds=60,
+    )
+    admitted = await turns.get_turn(key)
+    assert (admitted["context_from"], admitted["context_through"], admitted["turn_no"]) == (2, 1, 2)
+    assert await turns.history("chat", after=admitted["context_from"] - 1,
+                               through=admitted["context_through"], limit=128) == ()
+
+
+@pytest.mark.asyncio
+async def test_recent_context_reads_latest_positions_and_reuses_covered_history(store):
+    engine, metadata, turns = store
+    for number in range(1, 131):
+        turn = f"turn-{number}"
+        assert await accept(turns, turn, revision=2 * (number - 1), through=number - 1, request=turn)
+        key = SessionTurnKey("chat", turn)
+        if number == 130:
+            assert await turns.request_cancel(key)
+        assert await turns.finish(
+            key, generation=1, turn_no=number, state="cancelled" if number == 130 else "succeeded", result={},
+        )
+
+    reads = []
+
+    def capture(_connection, _cursor, statement, parameters, *_rest):
+        if statement.startswith("SELECT"):
+            reads.append(parameters)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    at_129 = await turns.recent_context("chat", through=129)
+    assert [turn.turn_no for turn in at_129] == list(range(2, 130))
+    warm = await turns.recent_context("chat", through=130)
+    before_hit = len(reads)
+    assert await turns.recent_context("chat", through=130) == warm
+    assert before_hit == len(reads) == 2
+    fresh = SqlSessionTurns(create_sql_storage_context(engine), metadata, namespace="test", tenant_id="a")
+    assert await fresh.recent_context("chat", through=130) == warm
+    assert [turn.turn_no for turn in warm] == list(range(3, 130))
+    assert len(reads) == 3
+    assert reads[1][2:4] == (129, 130)

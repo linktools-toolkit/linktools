@@ -574,6 +574,7 @@ CREATE TABLE ai_session_turns (
 	turn_id VARBINARY(128) NOT NULL COMMENT 'Exact public turn identity.',
 	request_key VARBINARY(64) NOT NULL COMMENT 'Idempotency key scoped to the session.',
 	turn_no BIGINT NOT NULL COMMENT 'Sequential turn position within the session.',
+	context_from BIGINT NOT NULL COMMENT 'First selected context position, inclusive.',
 	context_through BIGINT NOT NULL COMMENT 'Finalized context boundary at admission.',
 	state VARCHAR(10) NOT NULL COMMENT 'Admission, cancellation or terminal state.',
 	generation BIGINT NOT NULL COMMENT 'Fencing generation of the accepted producer.',

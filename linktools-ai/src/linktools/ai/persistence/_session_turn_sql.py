@@ -4,9 +4,12 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from ..core import canonical_json_bytes
+from ..errors import AIError, ErrorCode
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
@@ -34,6 +37,25 @@ if TYPE_CHECKING:
 SESSION_TABLE = "ai_sessions"
 SESSION_TURN_TABLE = "ai_session_turns"
 TerminalState = Literal["succeeded", "failed", "cancelled"]
+_CONTEXT_POSITIONS = 128
+_HISTORY_CACHE_BYTES = 16 * 1024 * 1024
+_HISTORY_CACHE_SESSIONS = 32
+
+
+@dataclass(frozen=True, slots=True)
+class SessionContextTurn:
+    turn_no: int
+    request: JsonValue
+    result: JsonValue
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ContextWindow:
+    after: int
+    through: int
+    turns: tuple[SessionContextTurn, ...]
+    size: int
 
 
 def build_session_turn_sql_metadata(metadata: MetaData) -> None:
@@ -67,6 +89,7 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         key("turn_id", TURN_EXECUTION_MAX_BYTES, "Exact public turn identity."),
         key("request_key", TURN_REQUEST_MAX_BYTES, "Idempotency key scoped to the session."),
         Column("turn_no", BigInteger, nullable=False, comment="Sequential turn position within the session."),
+        Column("context_from", BigInteger, nullable=False, comment="First selected context position, inclusive."),
         Column("context_through", BigInteger, nullable=False, comment="Finalized context boundary at admission."),
         Column("state", String(10), nullable=False, comment="Admission, cancellation or terminal state."),
         Column("generation", BigInteger, nullable=False, comment="Fencing generation of the accepted producer."),
@@ -99,6 +122,8 @@ class SqlSessionTurns:
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
         self._now = sql_epoch_seconds()
+        self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
+        self._recent_bytes = 0
 
     @staticmethod
     def _key(value: str, size: int) -> bytes:
@@ -153,13 +178,66 @@ class SqlSessionTurns:
         async with self._context.engine.connect() as connection:
             return tuple((await connection.execute(statement)).mappings())
 
+    async def recent_context(self, session_id: str, *, through: int) -> tuple[SessionContextTurn, ...]:
+        """Read bounded candidates after the caller authorizes the current session head."""
+        from sqlalchemy import select
+
+        start = max(0, through - _CONTEXT_POSITIONS)
+        cached = self._recent.get(session_id)
+        if cached is not None and cached.after <= start <= cached.through <= through:
+            if cached.through == through:
+                self._recent.move_to_end(session_id)
+                return cached.turns
+            after = cached.through
+            turns = tuple(turn for turn in cached.turns if turn.turn_no > start)
+        else:
+            after = start
+            turns = ()
+        if after == through:
+            return turns
+
+        columns = self._turns.c
+        statement = select(columns.turn_no, columns.state, columns.request_json, columns.result_json).filter_by(
+            **self._session_values(session_id),
+        ).where(
+            columns.turn_no > after, columns.turn_no <= through,
+            columns.state.in_(("succeeded", "failed", "cancelled")),
+        ).order_by(columns.turn_no).limit(_CONTEXT_POSITIONS)
+        async with self._context.engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        if len(rows) != through - after:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The finalized session context range is incomplete")
+        turns += tuple(
+            SessionContextTurn(
+                row["turn_no"], row["request_json"], row["result_json"],
+                max(1024, len(canonical_json_bytes(row["request_json"])) + len(canonical_json_bytes(row["result_json"]))),
+            )
+            for row in rows if row["state"] == "succeeded"
+        )
+        size = sum(turn.size for turn in turns)
+        previous = self._recent.get(session_id)
+        if previous is None or previous.through <= through:
+            if previous is not None:
+                self._recent_bytes -= self._recent.pop(session_id).size
+            if size > _HISTORY_CACHE_BYTES:
+                return turns
+            while self._recent and (
+                self._recent_bytes + size > _HISTORY_CACHE_BYTES or len(self._recent) >= _HISTORY_CACHE_SESSIONS
+            ):
+                self._recent_bytes -= self._recent.popitem(last=False)[1].size
+            self._recent[session_id] = _ContextWindow(start, through, turns, size)
+            self._recent_bytes += size
+        return turns
+
     async def accept(
-        self, key: SessionTurnKey, *, expected_revision: int, context_through: int,
+        self, key: SessionTurnKey, *, expected_revision: int, context_from: int, context_through: int,
         request_key: str, request: JsonValue, lease_seconds: int,
     ) -> bool:
         """Claim and record a turn atomically; a uniqueness failure rolls back the claim."""
         if lease_seconds < 1:
             raise ValueError("the turn lease must be positive")
+        if not 1 <= context_from <= context_through + 1:
+            raise ValueError("invalid admitted session context range")
         session_key = self._session_values(key.session_id)
         turn_key = self._turn_values(key)
         encoded_request_key = self._key(request_key, TURN_REQUEST_MAX_BYTES)
@@ -173,7 +251,7 @@ class SqlSessionTurns:
                 return False
             await connection.execute(self._turns.insert().values(
                 **turn_key, request_key=encoded_request_key, turn_no=context_through + 1,
-                context_through=context_through, state="accepted", generation=1,
+                context_from=context_from, context_through=context_through, state="accepted", generation=1,
                 lease_until=self._now + lease_seconds, request_json=request,
             ))
             return True
