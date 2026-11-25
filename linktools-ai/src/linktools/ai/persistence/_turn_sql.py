@@ -316,32 +316,63 @@ class SqlTurnRows:
             a.c.receipt_id == turn_hex(proof.receipt_id, 32), a.c.receipt_kind == "claim",
         ).values(control_id=control_id)
 
+    def _active_standalone_anchor(
+        self, *, session_key: str, request_key: str, execution_id: str, fence: int,
+    ) -> tuple:
+        key = turn_hex(request_key, TURN_REQUEST_MAX_BYTES)
+        if not self.coowned or turn_session_address(session_key) != (STANDALONE, key):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        a = self._admission
+        return (
+            self._owns(a), a.c.session_kind == STANDALONE, a.c.session_key == key,
+            a.c.execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES),
+            a.c.route_kind == ACTIVE_REQUEST, a.c.route_key == key, a.c.standalone_idle.is_(False),
+            a.c.lease_fence == fence,
+        )
+
+    def revoke_published_standalone(
+        self, *, session_key: str, request_key: str, execution_id: str, token: str, fence: int,
+    ) -> "Update":
+        """Revoke the exact published Execution only when a live typed anchor binds it."""
+        from sqlalchemy import exists, or_, select
+
+        a, control = self._admission, self._control
+        anchor = select(1).where(
+            *self._active_standalone_anchor(
+                session_key=session_key, request_key=request_key, execution_id=execution_id, fence=fence,
+            ),
+            a.c.control_id == control.c.id,
+            a.c.receipt_kind.in_(("claim", "renew", "cancel")),
+            or_(a.c.receipt_kind != "claim", a.c.receipt_id == turn_hex(token, 32)),
+            or_(a.c.receipt_kind != "cancel", a.c.cancel_requested.is_(True)),
+        )
+        return self.control_guard(
+            session_key=session_key, execution_id=execution_id, token=token, fence=fence,
+            published_only=True, revoke=True,
+        ).where(exists(anchor))
+
     def park_standalone_anchor(
-        self, proof: SqlTurnProof, *, receipt: str, kind: "Literal['release', 'expire']",
-        clock: "ColumnElement | None" = None, sqlite: bool = False,
+        self, *, session_key: str, request_key: str, execution_id: str, fence: int,
+        receipt: str, kind: "Literal['release', 'expire']", clock: "ColumnElement", sqlite: bool = False,
     ) -> "Update":
         """After revoking exact control, retain the request address and receipt fence."""
         from sqlalchemy import exists, select, update
 
-        address = turn_session_address(proof.session_key)
-        key = turn_hex(proof.request_key, TURN_REQUEST_MAX_BYTES)
-        if not self.coowned or not proof.active or address != (STANDALONE, key):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        a, control = self._admission, self._control
-        owner = select(1).where(
-            control.c.id == a.c.control_id, self._execution_address(control, proof.execution_id),
-            control.c.turn_slot_kind == STANDALONE, control.c.turn_slot_key == key,
-            control.c.turn_fence == proof.fence, control.c.turn_token.is_(None),
+        active = self._active_standalone_anchor(
+            session_key=session_key, request_key=request_key, execution_id=execution_id, fence=fence,
         )
-        if clock is not None:
-            deadline_live = self._deadline_is_live(clock, sqlite=sqlite)
-            owner = owner.where(deadline_live if kind == "release" else ~deadline_live)
-        return update(a).where(
-            self._owns(a), a.c.session_kind == STANDALONE, a.c.session_key == key,
-            a.c.execution_id == self._key(proof.execution_id, TURN_EXECUTION_MAX_BYTES),
-            a.c.route_kind == ACTIVE_REQUEST, a.c.route_key == key, a.c.standalone_idle.is_(False),
-            a.c.lease_fence == proof.fence, exists(owner),
-        ).values(standalone_idle=True, control_id=None, receipt_id=turn_hex(receipt, 32), receipt_kind=kind)
+        a, control = self._admission, self._control
+        key = turn_hex(request_key, TURN_REQUEST_MAX_BYTES)
+        deadline_live = self._deadline_is_live(clock, sqlite=sqlite)
+        owner = select(1).where(
+            control.c.id == a.c.control_id, self._execution_address(control, execution_id),
+            control.c.turn_slot_kind == STANDALONE, control.c.turn_slot_key == key,
+            control.c.turn_fence == fence, control.c.turn_token.is_(None),
+            deadline_live if kind == "release" else ~deadline_live,
+        )
+        return update(a).where(*active, exists(owner)
+                               ).values(standalone_idle=True, control_id=None,
+                                        receipt_id=turn_hex(receipt, 32), receipt_kind=kind)
 
     def archive_standalone_anchor(self, proof: SqlTurnProof) -> "Update":
         """Move a parked prior execution to its receipt route before claiming the address."""

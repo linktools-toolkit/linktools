@@ -1685,7 +1685,9 @@ class _SqlTransaction:
         dialect = self._context.dialect
         clock = dialect.read_snapshot_time_expression()
         if (await self._execute(source.park_standalone_anchor(
-            proof, receipt=receipt, kind=kind, clock=clock, sqlite=dialect.single_writer,
+            session_key=proof.session_key, request_key=proof.request_key,
+            execution_id=proof.execution_id, fence=proof.fence,
+            receipt=receipt, kind=kind, clock=clock, sqlite=dialect.single_writer,
         ))).rowcount != 1:
             raise SqlTurnNotOwned()
 
@@ -1852,6 +1854,26 @@ class _SqlTransaction:
             raise StateTransactionNestingError("turn retirement requires its active mutation boundary")
         source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
         if coowned and session_key == f"request:{request_key}":
+            try:
+                revoked = (await self._execute(source.revoke_published_standalone(
+                    session_key=session_key, request_key=request_key, execution_id=execution_id,
+                    token=token, fence=fence,
+                ))).rowcount
+                if revoked == 1:
+                    dialect = self._context.dialect
+                    parked = await self._execute(source.park_standalone_anchor(
+                        session_key=session_key, request_key=request_key, execution_id=execution_id, fence=fence,
+                        receipt=receipt, kind="release", clock=dialect.read_snapshot_time_expression(),
+                        sqlite=dialect.single_writer,
+                    ))
+                    if parked.rowcount != 1:
+                        raise SqlTurnNotOwned()
+                    return True
+                if revoked != 0:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            except BaseException as error:
+                self._abort_mutation(error)
+                raise
             standalone = await self._capture_standalone_anchor(scope, execution_id=execution_id)
             if standalone is not None:
                 row, proof, observation = standalone
