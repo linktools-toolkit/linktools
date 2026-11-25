@@ -38,6 +38,7 @@ from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
 from ._run_registration import RunRegistrationStore, RunRegistrationReference, RunRegistrationCleanupResult
 from pydantic import TypeAdapter
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import RunRecord
 from ._native_event_reference import NativeEventReferences
 from ._sql import SqlStateStore
@@ -48,10 +49,10 @@ from ._turn_snapshot import (
 from ._turn_sql_schema import RUNTIME_TURN_SCOPE, unoccupied_turn_route
 from ._ordinary_snapshot import (
     capture_ordinary_snapshot, decode_ordinary_snapshot, has_waiting_turns, ordinary_input_object_refs,
-    ordinary_transcript_roots, rekey_ordinary_transcripts, require_waiting_checkpoints, restore_ordinary_snapshot,
+    ordinary_message_roots, rekey_ordinary_messages, require_waiting_checkpoints, restore_ordinary_snapshot,
 )
 from ._archive import archive_content_scope, ContentRecord
-from ._message_root import NativeMessageRoot
+from ._message_root import NativeMessageRoot, NativeUserInputReference
 from ._split_step_snapshot import (PairedSplitTerminalRestore, capture_split_source_pins,
                                    require_no_unpaired_split_pins)
 from ..model.messages import canonical_structured_output, decode_model_message_payloads
@@ -73,7 +74,7 @@ from .captures import (
 )
 from ._capability_marker import has_capability_partition_marker
 from ._plan import PersistenceDomain
-from ._session_transcript import decode_session_transcript_root
+from ._session_transcript import decode_session_input_reference, decode_session_transcript_root
 from .state import (
     STREAM_KEY_MAX_BYTES,
     validate_stream_key,
@@ -818,10 +819,10 @@ class RuntimeSnapshotOperations:
                                 waiting_owner = store
                             if group is split_conversation_group:
                                 for row in captured_ordinary["turns"]:
-                                    if row["state"] == "succeeded" and row.get("split_source_receipt") is None:
-                                        roots.append(decode_session_transcript_root(row["result_json"]))
+                                    if row.get("split_source_receipt") is None:
+                                        roots.extend(ordinary_message_roots({"turns": [row]}))
                             else:
-                                roots.extend(ordinary_transcript_roots(captured_ordinary))
+                                roots.extend(ordinary_message_roots(captured_ordinary))
                     reader = _StateSnapshotReader(store,
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
                                           if domain is PersistenceDomain.TRACE else None),
@@ -1310,7 +1311,7 @@ async def _export_snapshot(
                 accept(row)
         native_checkpoints.append({"group_id": group_id, **raw})
     if source.ordinary_sessions is not None:
-        for root in ordinary_transcript_roots(source.ordinary_sessions):
+        for root in ordinary_message_roots(source.ordinary_sessions):
             _validate_native_partition(root.store_key, source.namespace, source.tenant_id)
             native_roots.setdefault(root.group_id, []).append(root)
     native_messages = []
@@ -1504,11 +1505,17 @@ async def restore_snapshot(
                  "messages": [decode_native_message_row(row) for row in entry["messages"]]}
         native_closures[entry["group_id"]] = NativeMessageClosure(entry["sequences"])
         native_entries[entry["group_id"]] = entry
-    ordinary_roots = tuple(ordinary_transcript_roots(ordinary_sessions)) if ordinary_sessions is not None else ()
+    ordinary_roots = tuple(ordinary_message_roots(ordinary_sessions)) if ordinary_sessions is not None else ()
     ordinary_group_ids = {root.group_id for root in ordinary_roots}
     structured_turns: dict[str, list[tuple[NativeMessageRoot, list[int]]]] = {}
+    native_inputs: dict[str, list[NativeUserInputReference]] = {}
     if ordinary_sessions is not None:
         for row in ordinary_sessions["turns"]:
+            prompt = decode_session_input_reference(row["request_json"], row["turn_id"].decode("utf-8"))
+            if prompt is not None:
+                if prompt.root.group_id != ordinary_binding_archive or row.get("split_source_receipt") is not None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                native_inputs.setdefault(prompt.root.group_id, []).append(prompt)
             if row["state"] == "succeeded" and "output_ref" in row["result_json"]:
                 result = row["result_json"]
                 root = decode_session_transcript_root(result)
@@ -1636,6 +1643,17 @@ async def restore_snapshot(
                 checkpoint_payloads[(row["store_key"], row["sha256"])] = raw
         if group_id in native_checkpoints:
             _validate_native_checkpoint_payloads(native_checkpoints[group_id], closure, checkpoint_payloads)
+        for reference in native_inputs.get(group_id, ()):
+            root = reference.root
+            try:
+                (identity,) = closure.message_identities(root.store_key, root.slices)
+                _, (message,) = decode_model_message_payloads((checkpoint_payloads[(root.store_key, identity)],))
+                if (not isinstance(message, ModelRequest) or len(message.parts) != 1
+                        or not isinstance(message.parts[0], UserPromptPart)
+                        or not isinstance(message.parts[0].content, str)):
+                    raise ValueError("Graph input does not reference a singleton scalar prompt")
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         for transcript_root, output_ref in structured_turns.get(group_id, ()):
             try:
                 messages = decode_model_message_payloads(tuple(
@@ -2288,7 +2306,7 @@ async def restore_snapshot(
                         ordinary_destinations[paired_split.source_group] = split_source_restored
                     await restore_ordinary_snapshot(
                         store, transaction, namespace=resources.namespace, tenant_id=resources.tenant_id,
-                        rows=rekey_ordinary_transcripts(ordinary_sessions, ordinary_destinations),
+                        rows=rekey_ordinary_messages(ordinary_sessions, ordinary_destinations),
                     )
                 if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
                     from ._model_interaction_store import ModelInteractionStateStepArchive

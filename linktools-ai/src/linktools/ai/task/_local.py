@@ -13,6 +13,7 @@ from linktools.core import environ
 from ..core import (
     ExecutionStatus,
     JsonValue,
+    OperationLedgerRecord,
     Page,
     Principal,
     TaskStatus,
@@ -277,6 +278,7 @@ class _GraphRun:
     inflight: dict[str, "_InflightNode"] = field(default_factory=dict)
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     generation: int = 0
+    scheduler_generation: int = 0
     observation_backoff: float = 1.0
     failure: "AIError | None" = None
     closed: bool = False
@@ -286,6 +288,7 @@ class _GraphRun:
 class _LeaseState:
     lease: TaskLease
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    handed_off_execution_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -311,15 +314,14 @@ class _TaskNodeRunControlImpl:
         self._tenant_id = tenant_id
         self._on_activity = on_activity
         self._on_handoff = on_handoff
-        self._execution_id: str | None = None
 
     @property
     def execution_id(self) -> str | None:
-        return self._execution_id or self._lease_state.lease.execution_id
+        return self.handed_off_execution_id or self._lease_state.lease.execution_id
 
     @property
     def handed_off_execution_id(self) -> str | None:
-        return self._execution_id
+        return self._lease_state.handed_off_execution_id
 
     async def bind_execution(self, execution_id: str) -> None:
         if not isinstance(execution_id, str) or not execution_id.strip():
@@ -365,7 +367,7 @@ class _TaskNodeRunControlImpl:
                     },
                 ) from error
             lease = self._lease_state.lease
-            self._execution_id = execution_id
+            self._lease_state.handed_off_execution_id = execution_id
             self._on_handoff()
         _logger.info(
             "task execution handed off: graph=%s node=%s execution=%s fence=%s",
@@ -688,6 +690,7 @@ class LocalTaskGraphLauncher:
         execution_id: str,
         *,
         invoke_effects: bool = True,
+        cancel_authority: tuple[OperationLedgerRecord, Principal] | None = None,
     ) -> TaskGraphView:
         tenant_id = launch.principal.tenant_id
         graph_id = launch.graph_id
@@ -740,6 +743,7 @@ class LocalTaskGraphLauncher:
                     dependency_results,
                     state.execution_id,
                     dependency_states=dependency_states,
+                    cancel_authority=cancel_authority,
                 )
             )
 
@@ -902,11 +906,19 @@ class LocalTaskGraphLauncher:
             node_state.node_id: node_state
             for node_state in graph_state.node_states
         }
-        for node_id in tuple(run.inflight):
+        for node_id, inflight in tuple(run.inflight.items()):
             state = states.get(node_id)
             if state is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if state.status not in {
+            # A durable requeue supersedes the read-only waiter; it cannot
+            # occupy the scheduler slot needed to claim the next producer.
+            requeued_waiter = (
+                state.status is TaskStatus.READY
+                and state.execution_id is not None
+                and (inflight.lease_state is None
+                     or inflight.lease_state.handed_off_execution_id == state.execution_id)
+            )
+            if not requeued_waiter and state.status not in {
                 TaskStatus.CANCELLED,
                 TaskStatus.RECOVERY_REQUIRED,
                 TaskStatus.SUCCEEDED,
@@ -926,6 +938,7 @@ class LocalTaskGraphLauncher:
         launch: TaskGraphLaunch,
         *,
         invoke_effects: bool,
+        cancel_authority: tuple[OperationLedgerRecord, Principal] | None = None,
     ) -> TaskGraphView:
         graph_id = launch.graph_id
         tenant_id = launch.principal.tenant_id
@@ -966,6 +979,15 @@ class LocalTaskGraphLauncher:
                     node = definitions.get(node_state.node_id)
                     if node is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if invoke_effects and cancel_authority is not None:
+                        try:
+                            await self._runner.cancel(TaskNodeInvocation(
+                                node, graph_id, launch.principal, launch.correlation, {},
+                                node_state.execution_id, cancel_authority=cancel_authority,
+                            ))
+                        except TaskNodeRunError as error:
+                            if error.code is not ErrorCode.TASK_EFFECT_UNKNOWN:
+                                raise
                     await self._settle_bound_node(
                         settlement_run,
                         node,
@@ -1058,6 +1080,7 @@ class LocalTaskGraphLauncher:
                             dependency_results,
                             node_state.execution_id,
                             dependency_states=dependency_states,
+                            cancel_authority=cancel_authority,
                         )
                     )
                 except BaseException as error:  # noqa: BLE001
@@ -1205,6 +1228,14 @@ class LocalTaskGraphLauncher:
         run = self._graphs.get((tenant_id, graph_id))
         return run is not None and (not run.closed or run.failure is not None)
 
+    async def wake_owned_graph(self, graph_id: str, *, tenant_id: str) -> bool:
+        run = self._graphs.get((tenant_id, graph_id))
+        if run is None or run.closed or run.failure is not None:
+            return False
+        run.scheduler_generation += 1
+        await self._notify(run)
+        return True
+
     def graph_activity_generation(
         self,
         graph_id: str,
@@ -1262,6 +1293,7 @@ class LocalTaskGraphLauncher:
         observed_fingerprint: str | None = None
         try:
             while not run.closed:
+                scheduler_generation = run.scheduler_generation
                 # The next read already follows these completions. Completions
                 # during that read still require the refresh below.
                 completed = tuple(
@@ -1423,11 +1455,22 @@ class LocalTaskGraphLauncher:
                     capacity -= 1
                     await self._notify(run)
                 if inflight:
-                    done, _pending = await asyncio.wait(
-                        tuple(value.task for value in inflight.values()),
-                        timeout=run.observation_backoff,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
+                    async def wait_for_wake() -> None:
+                        async with run.condition:
+                            await run.condition.wait_for(
+                                lambda: run.scheduler_generation != scheduler_generation or run.closed,
+                            )
+
+                    wake = asyncio.create_task(wait_for_wake())
+                    try:
+                        done, _pending = await asyncio.wait(
+                            (*tuple(value.task for value in inflight.values()), wake),
+                            timeout=run.observation_backoff,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    finally:
+                        wake.cancel()
+                        await asyncio.gather(wake, return_exceptions=True)
                     if done:
                         run.observation_backoff = 1.0
                     else:
@@ -1436,7 +1479,7 @@ class LocalTaskGraphLauncher:
                             run.observation_backoff * 2,
                         )
                     continue
-                await self._wait_scheduler(run, states)
+                await self._wait_scheduler(run, states, scheduler_generation=scheduler_generation)
         except asyncio.CancelledError:
             raise
         except BaseException as error:  # noqa: BLE001
@@ -1523,6 +1566,8 @@ class LocalTaskGraphLauncher:
         self,
         run: _GraphRun,
         states: "tuple[TaskNodeView, ...]",
+        *,
+        scheduler_generation: int,
     ) -> None:
         now = datetime.now(timezone.utc)
         live_expiries = tuple(
@@ -1546,6 +1591,7 @@ class LocalTaskGraphLauncher:
                 await asyncio.wait_for(
                     run.condition.wait_for(
                         lambda: run.generation != generation
+                        or run.scheduler_generation != scheduler_generation
                         or run.closed
                         or run.failure is not None
                     ),

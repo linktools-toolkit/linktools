@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..agent import AgentBindingContract, bind_output
 from ..capability import AgentContext
-from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
+from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, UserContent
 
     from ..agent import AgentBinding
-    from ..core import BudgetUsage, RunBudget
+    from ..core import BudgetUsage, RunBudget, UsageMetrics
     from ._budget import RunBudgetContext
     from ._canonical_split_step import _CanonicalSplitStep
     from ..model import CanonicalUserInput
@@ -56,7 +56,10 @@ if TYPE_CHECKING:
     from ..persistence.turns import CanonicalDeferredFrontier, SqlSessionTurns
     from ..persistence.runs import StateStepArchive
     from ._canonical_trace_interactions import _CapturedTurnInteractions
-    from ..execution import PendingToolContinuation, PendingDeferredCall
+    from ..execution import ExecutionStartReservation, ExecutionStartReservationResult, PendingToolContinuation, PendingDeferredCall
+    from ..persistence.commands import StateCommands
+    from ..persistence._task_repository import TaskRepositoryImpl
+    from ..task import TaskGraphAdmission, TaskNodeInvocation
     from ._agent_binding_resolver import _AgentBindingResolver
     from ._agent_executor import AgentEmission, AgentExecutor, EventSink
 
@@ -101,6 +104,30 @@ class _AdmittedTurn:
     trace_interaction_base: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _AttachedGraphTurn:
+    key: SessionTurnKey
+    generation: int
+    number: int
+    prompt: str
+    history: tuple[ModelMessage, ...]
+    terminal_bytes: int
+    revision: int
+    cwd: str | None
+    context_from: int
+    context_through: int
+    session_metadata: ImmutableJsonMapping
+    session_context: SessionContext
+    attachments: Sequence[Mapping[str, JsonValue]] = ()
+    stored_input: JsonValue = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionTurnStartReceipt:
+    turn_id: str
+    replayed: bool
+
+
 class _RegenerableTurnRunner:
     def __init__(
         self, store: SqlSessionTurns, executor: AgentExecutor, *,
@@ -125,6 +152,7 @@ class _RegenerableTurnRunner:
         self._prepare_budget = prepare_budget
         self._publish_deferred = None
         self._split_recovery_source: Callable[[], Awaitable[_CanonicalSplitStep]] | None = None
+        self._cancel_graph_turn: Callable[[SessionTurnKey, Principal], Awaitable[bool]] | None = None
         self._prepare_split_wait_resume = None
         self._trace_archive: StateStepArchive | None = None
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
@@ -265,7 +293,7 @@ class _RegenerableTurnRunner:
             **({"phase": "cancelling"} if cancelling else {}),
         })
 
-    def _producer_stopped(self, turn: _AdmittedTurn) -> None:
+    def _producer_stopped(self, turn: _AdmittedTurn | _AttachedGraphTurn) -> None:
         # Local evidence only: the transport may not report this phase and
         # the existing lease remains the sole durable write authority.
         self._publish(turn.key.session_id, {
@@ -273,7 +301,7 @@ class _RegenerableTurnRunner:
             "generation": turn.generation,
         })
 
-    def _admitted(self, turn: _AdmittedTurn) -> None:
+    def _admitted(self, turn: _AdmittedTurn | _AttachedGraphTurn) -> None:
         self._publish(turn.key.session_id, {
             "type": "admitted", "turn_id": turn.key.turn_id, "turn_no": turn.number,
             "generation": turn.generation, "revision": turn.revision, "prompt": turn.prompt, "attachments": list(turn.attachments),
@@ -281,7 +309,7 @@ class _RegenerableTurnRunner:
         self._notice_lifecycle(turn.key, "admitted", turn.revision)
 
     def _terminal(
-        self, turn: _AdmittedTurn, state: str, *, output: JsonValue = None,
+        self, turn: _AdmittedTurn | _AttachedGraphTurn, state: str, *, output: JsonValue = None,
         messages: tuple[ModelMessage, ...] = (), error_code: str | None = None,
         activity: dict[str, JsonValue] | None = None,
     ) -> None:
@@ -398,7 +426,7 @@ class _RegenerableTurnRunner:
         correlation: CorrelationData | None = None,
         selected_binding: Callable[[], Awaitable[AgentBinding]] | None = None,
         mode: ExecutionMode = "run", planning: bool = False, budget: RunBudget | None = None,
-    ) -> str:
+    ) -> _SessionTurnStartReceipt:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -482,7 +510,7 @@ class _RegenerableTurnRunner:
 
         if session["active_turn_id"] is not None:
             if (identity := await replay()) is not None:
-                return identity
+                return _SessionTurnStartReceipt(identity, replayed=True)
             raise AIError(ErrorCode.SESSION_BUSY)
 
         key = SessionTurnKey(session_id, secrets.token_hex(16))
@@ -505,13 +533,13 @@ class _RegenerableTurnRunner:
                 session_context=session_context, mode=mode, planning=planning,
                 explicit_agent_binding=selected_binding is not None, budget=budget,
             ):
-                return key.turn_id
+                return _SessionTurnStartReceipt(key.turn_id, replayed=False)
         except (IntegrityError, AIError):
             if (identity := await replay()) is not None:
-                return identity
+                return _SessionTurnStartReceipt(identity, replayed=True)
             raise
         if (identity := await replay()) is not None:
-            return identity
+            return _SessionTurnStartReceipt(identity, replayed=True)
         raise AIError(ErrorCode.SESSION_CONFLICT)
 
     async def read_budget_usage(
@@ -555,6 +583,10 @@ class _RegenerableTurnRunner:
             principal, AuthorizationAction.EXECUTION_CANCEL,
             ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, turn["request_json"]["principal"]["principal_id"]),
         )
+        if turn["request_json"].get("graph_execution") == key.turn_id:
+            if self._cancel_graph_turn is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            return await self._cancel_graph_turn(key, principal)
         split = turn["request_json"].get("split_step", False)
         changed = (
             await self._store.request_split_wait_cancel(key, generation=turn["generation"])
@@ -642,6 +674,9 @@ class _RegenerableTurnRunner:
                 principal, AuthorizationAction.EXECUTION_RECOVER,
                 ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, admitted.principal_id),
             )
+            if request.get("graph_execution") == key.turn_id:
+                # Only task-owner recovery can restore the real execution and advance both leases.
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             generation = row["generation"]
             mode = request.get("mode", "run")
             planning = request.get("planning", False)
@@ -749,26 +784,12 @@ class _RegenerableTurnRunner:
             after = row["context_from"] - 1
             through = row["context_through"]
             session_context = request.get("session_context", "all")
-            if (not 0 <= through - after <= 128 or session_context not in ("all", "current_turn")
-                    or session_context == "current_turn" and after != through):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted context range is invalid")
             stored = self._stored_input(request)
-            remaining = _CONTEXT_BYTES - self._input_bytes(prompt, stored)
-            if remaining < 0:
-                raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
-            history: list[ModelMessage] = []
-            positions = await self._store.read_context_range(
-                key.session_id, through=through, after=after, lineage=lineage,
-                missing=ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            history = await self._read_admitted_history(
+                key, context_from=row["context_from"], context_through=row["context_through"],
+                lineage=lineage, session_context=session_context,
+                remaining=_CONTEXT_BYTES - self._input_bytes(prompt, stored),
             )
-            for position in positions:
-                prior = position.request
-                prior_input = self._stored_input(prior)
-                remaining -= self._input_bytes(prior["prompt"], prior_input) + position.transcript_bytes
-                if remaining < 0:
-                    raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
-                restored = await self._restore_prompt(prior["prompt"], prior_input)
-                history.extend(restore_turn_prompt(restored, position.messages))
             frozen_binding = row["binding_json"]
             if frozen_binding is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted Agent binding is unavailable")
@@ -1179,6 +1200,106 @@ class _RegenerableTurnRunner:
                 producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)
 
+    async def _read_admitted_history(
+        self, key: SessionTurnKey, *, context_from: int, context_through: int,
+        lineage: tuple[SessionTurnSegment, ...], session_context: SessionContext, remaining: int,
+    ) -> tuple[ModelMessage, ...]:
+        after = context_from - 1
+        if (not 0 <= context_through - after <= 128 or session_context not in ("all", "current_turn")
+                or session_context == "current_turn" and after != context_through):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted context range is invalid")
+        if remaining < 0:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+        history: list[ModelMessage] = []
+        positions = await self._store.read_context_range(
+            key.session_id, through=context_through, after=after, lineage=lineage,
+            missing=ErrorCode.STORAGE_RECOVERY_REQUIRED,
+        )
+        for position in positions:
+            prior = position.request
+            prior_input = self._stored_input(prior)
+            remaining -= self._input_bytes(prior["prompt"], prior_input) + position.transcript_bytes
+            if remaining < 0:
+                raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+            restored = await self._restore_prompt(prior["prompt"], prior_input)
+            history.extend(restore_turn_prompt(restored, position.messages))
+        return tuple(history)
+
+    async def _reserve_attached_graph_turn(
+        self, commands: StateCommands, reservation: ExecutionStartReservation, *,
+        session_id: str, session: Mapping[str, object], request_key: str, prompt: str, principal: Principal, tenant_id: str,
+        authorization: AuthorizationPolicy, task_repository: TaskRepositoryImpl,
+        task_admission: TaskGraphAdmission, task_invocation: TaskNodeInvocation,
+    ) -> tuple[ExecutionStartReservationResult, _AttachedGraphTurn | None]:
+        """Join an already prepared Graph reservation to one authorized native turn."""
+        execution = reservation.execution
+        lease = task_invocation.task_lease
+        if (lease is None or (lease.tenant_id, lease.graph_id, lease.node_id)
+                != (tenant_id, task_admission.graph_id, task_invocation.node.node_id)
+                or task_invocation.graph_id != task_admission.graph_id
+                or task_invocation.principal != principal or task_admission.principal != principal
+                or task_admission.budget_scope_id != execution.budget_scope_id
+                or task_admission.tool_effects != execution.tool_effects):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if (principal.tenant_id != tenant_id
+                or (principal.principal_id, principal.kind) != (execution.principal_id, execution.principal_kind)):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if (not execution.requires_task_invocation_capture or execution.session_id is not None
+                or execution.root_execution_id != execution.execution_id or execution.parent_execution_id is not None
+                or execution.input_context is not None or execution.repository_instructions is not None
+                or not isinstance(execution.binding, AgentBindingContract)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        key = SessionTurnKey(session_id, execution.execution_id)
+        await authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id),
+        )
+        if session["status"] != "open":
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+        lineage = decode_session_lineage(session["lineage_json"])
+        await self._authorize_lineage(lineage, principal=principal, tenant_id=tenant_id, authorization=authorization)
+        config = session["config_json"]
+        cwd = config.get("cwd")
+        if cwd is not None:
+            # Attaching a different workspace needs the original Graph instruction policy.
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        metadata = ImmutableJsonMapping(config.get("metadata", {}))
+        request: dict[str, JsonValue] = {
+            "prompt": prompt, "principal": asdict(principal), "thinking": execution.thinking,
+            "session_metadata": dict(metadata), "cwd": cwd,
+            "repository_instructions": None,
+        }
+        if execution.session_context == "current_turn":
+            request["session_context"] = "current_turn"
+        if execution.correlation:
+            request["correlation"] = dict(execution.correlation)
+        if execution.mode == "plan":
+            request["mode"] = "plan"
+        if execution.planning:
+            request["planning"] = True
+        through = session["last_turn_no"]
+        revision = session["revision"]
+        terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({
+            **request, "binding": execution.binding.to_payload(),
+        }))
+        if terminal_bytes < _TERMINAL_RESERVE:
+            raise AIError(ErrorCode.PROMPT_TOO_LARGE)
+        context_from, history = await self._admission_history(
+            key, through=through, lineage=lineage, session_context=execution.session_context,
+            remaining=_CONTEXT_BYTES - len(prompt.encode("utf-8")),
+        )
+        result = await commands._reserve_canonical_graph_start(
+            reservation, turns=self._store, key=key, expected_revision=revision,
+            context_from=context_from, context_through=through, request_key=request_key,
+            request=request, lease_seconds=_LEASE_SECONDS,
+            task_repository=task_repository, task_lease=lease,
+        )
+        if not result.created:
+            return result, None
+        return result, _AttachedGraphTurn(
+            key, 1, through + 1, prompt, tuple(history), terminal_bytes, revision + 1,
+            cwd, context_from, through, metadata, execution.session_context,
+        )
+
     async def admit(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: CanonicalUserInput, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
@@ -1275,7 +1396,30 @@ class _RegenerableTurnRunner:
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
-        remaining = _CONTEXT_BYTES - input_size
+        context_from, history = await self._admission_history(
+            key, through=through, lineage=lineage, session_context=session_context,
+            remaining=_CONTEXT_BYTES - input_size,
+        )
+
+        if not await self._store.accept(
+            key, expected_revision=revision, context_from=context_from, context_through=through,
+            request_key=request_key, request=request, binding=frozen_binding, lease_seconds=_LEASE_SECONDS,
+            **({} if run_budget is None else {"_budget": (run_budget.repository, budget)}),
+        ):
+            return None
+        return _AdmittedTurn(
+            key, through + 1, text,
+            history, terminal_bytes, revision + 1,
+            repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
+            stored_input=request.get("input"),
+            native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
+            budget=run_budget, split_source=split,
+        )
+
+    async def _admission_history(
+        self, key: SessionTurnKey, *, through: int, lineage: tuple[SessionTurnSegment, ...],
+        session_context: SessionContext, remaining: int,
+    ) -> tuple[int, list[ModelMessage]]:
         history: list[tuple[ModelMessage, ...]] = []
         context_from = through + 1
         candidates = (() if session_context == "current_turn"
@@ -1292,21 +1436,7 @@ class _RegenerableTurnRunner:
             history.append(restore_turn_prompt(restored, candidate.messages))
             remaining -= size
             context_from = candidate.turn_no
-
-        if not await self._store.accept(
-            key, expected_revision=revision, context_from=context_from, context_through=through,
-            request_key=request_key, request=request, binding=frozen_binding, lease_seconds=_LEASE_SECONDS,
-            **({} if run_budget is None else {"_budget": (run_budget.repository, budget)}),
-        ):
-            return None
-        return _AdmittedTurn(
-            key, through + 1, text,
-            [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
-            repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
-            stored_input=request.get("input"),
-            native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
-            budget=run_budget, split_source=split,
-        )
+        return context_from, [message for messages in reversed(history) for message in messages]
 
     @staticmethod
     def _stored_input(request: Mapping[str, JsonValue]) -> StoredUserInput | None:
@@ -1420,11 +1550,11 @@ class _RegenerableTurnRunner:
 
     async def _finish_retained_turn(
         self, turn: _AdmittedTurn, *, state, result=None, transcript=None,
-        binding_refs=(), output_ref=None, **trace,
+        binding_refs=(), output_ref=None, usage: UsageMetrics | None = None, **trace,
     ) -> bool:
         split = turn.split_source
         if split is None:
-            options = ({"transcript": transcript, "binding_refs": binding_refs, "output_ref": output_ref}
+            options = ({"transcript": transcript, "binding_refs": binding_refs, "output_ref": output_ref, "usage": usage}
                        if state == "succeeded" else {"result": result})
             return await self._store.finish(
                 turn.key, generation=turn.generation, turn_no=turn.number, state=state, **options, **trace,
@@ -1522,6 +1652,7 @@ class _RegenerableTurnRunner:
 
         structured = binding.output_binding.mode == "structured"
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
+        usage = None
         try:
             if turn.completed_checkpoint:
                 if turn.continuation is None:
@@ -1583,6 +1714,9 @@ class _RegenerableTurnRunner:
                         self._notice_lifecycle(turn.key, "waiting", turn.revision)
                     return committed
                 messages, output = outcome.messages, outcome.output
+                # Resumed checkpoints do not retain accounting for prior attempts.
+                if turn.split_source is None and turn.generation == 1 and turn.continuation is None:
+                    usage = outcome.usage
             frozen_spec = binding.binding_contract.agent_spec
             context_messages, transcript, binding_refs = prepare_native_turn_transcript(
                 model_prompt, turn.history, messages, output,
@@ -1593,6 +1727,8 @@ class _RegenerableTurnRunner:
             encoded_body = len(encode_model_messages(transcript))
             if output_ref is not None:
                 encoded_body += len(canonical_json_bytes({"output_ref": list(output_ref)}))
+            if usage is not None:
+                encoded_body += len(canonical_json_bytes({"usage": asdict(usage)}))
             encoded_refs = len(canonical_json_bytes([list(item) for item in binding_refs])) if binding_refs else 0
             if encoded_body + encoded_refs > turn.terminal_bytes:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
@@ -1623,7 +1759,7 @@ class _RegenerableTurnRunner:
             return committed
         committed = await self._finish_retained_turn(
             turn, state="succeeded",
-            transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
+            transcript=transcript, binding_refs=binding_refs, output_ref=output_ref, usage=usage,
             **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "succeeded", captured=captured)),
         )
         if committed:

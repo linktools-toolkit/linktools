@@ -557,6 +557,7 @@ class ExecutionContent:
 
     async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None,
                      result_source: NativeTextReference | None = None,
+                     _admitted_input_source: NativeUserInputReference | None = None,
                      observed_value: ExecutionRecord | None = None,
                      verified_native_previous: ExecutionRecord | None = None) -> JsonValue:
         """Publish new immutable bodies with the same transaction as their owner."""
@@ -607,7 +608,13 @@ class ExecutionContent:
                     or opened is None or result_source.root.group_id != opened[0]
                     or result_source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        input_source = None
+        input_source = _admitted_input_source
+        if input_source is not None:
+            opened = self._store.storage_group.opened_archive
+            if (previous is not None or opened is None or input_source.root.group_id != opened[0]
+                    or input_source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            validate_native_user_input(input_source, value.stored_user_input)
         if previous is not None:
             for path, payload in _payloads(previous):
                 if path == ("stored_user_input",):

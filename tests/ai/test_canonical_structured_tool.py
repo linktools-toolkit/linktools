@@ -7,10 +7,12 @@ import json
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.usage import RequestUsage
 
 from linktools.ai.capability import ExecutionCapability, FileSystemCapability
-from linktools.ai.core import TenantAuthorizationPolicy
+from linktools.ai.core import TenantAuthorizationPolicy, UsageMetrics
 from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.workspace import ToolPermissionPolicy, Workspace, WorkspacePolicy
 
@@ -37,12 +39,18 @@ async def test_read_only_structured_tool_result_survives_cold_context_not_public
                    if isinstance(part, ToolReturnPart) and part.tool_name == "read_file"]
         if not results:
             assert {tool.name for tool in info.function_tools} == {"read_file"}
-            return ModelResponse(parts=[ToolCallPart("read_file", {"path": "document.txt"}, tool_call_id="read-1")])
+            return ModelResponse(
+                parts=[ToolCallPart("read_file", {"path": "document.txt"}, tool_call_id="read-1")],
+                usage=RequestUsage(input_tokens=101, output_tokens=202),
+            )
         [content] = results
         assert isinstance(content, dict) and content["files"] == []
         assert content["texts"][0]["content"] == marker
         seen.append(content)
-        return ModelResponse(parts=[TextPart("Document inspected.")])
+        return ModelResponse(
+            parts=[TextPart("Document inspected.")],
+            usage=RequestUsage(input_tokens=303, output_tokens=404),
+        )
 
     async def continued(messages, _info):
         results = [part.content for message in messages for part in message.parts
@@ -85,6 +93,7 @@ async def test_read_only_structured_tool_result_survives_cold_context_not_public
         turn_id = await send(runtime, "Read the document.", "first")
         display = await runtime.history.turn_result("chat", turn_id, principal=principal)
         assert display["conversation_committed"]
+        assert "usage" not in display
         assert any(item["item_kind"] == "tool_call" and item["tool_call_id"] == "read-1" for item in display["items"])
         assert not any(item["item_kind"] == "tool_result" for item in display["items"])
         assert marker not in json.dumps(display)
@@ -96,5 +105,9 @@ async def test_read_only_structured_tool_result_survives_cold_context_not_public
         Persistence.open("structured-tool-context", storage=PersistenceStorage.from_root(root)) as state,
         Runtime.open(persistence=state, features=features(continued), authorization=WorkspaceAuthorization()) as runtime,
     ):
+        retained = await state.session_turns.get_history_turn(SessionTurnKey("chat", turn_id), lineage=())
+        assert retained["usage"] == UsageMetrics(
+            model_requests=2, tool_calls=1, input_tokens=404, output_tokens=606,
+        )
         await send(runtime, "Use the existing context.", "second")
     assert len(seen) == 2 and seen[0] == seen[1]

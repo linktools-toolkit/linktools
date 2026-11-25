@@ -29,6 +29,7 @@ class CancelExecutionResult:
 @dataclass(frozen=True, slots=True)
 class ExecutionHandle:
     execution_id: str
+    task_invocation_captured: bool = field(default=False, compare=False, repr=False)
 
 
 class _ExecutionViewSource(Protocol):

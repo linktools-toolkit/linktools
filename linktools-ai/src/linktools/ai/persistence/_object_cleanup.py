@@ -38,7 +38,7 @@ from ._execution_content import (expand_retained_execution_content, expand_nativ
 from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._step_schema import native_message_sql_tables
 from ._step_maintenance import inspect_native_message_tables, native_message_partitions
-from ._session_transcript import scan_ordinary_transcript_roots
+from ._session_transcript import decode_session_input_reference, scan_ordinary_message_roots
 from ._capability_marker import has_capability_partition_marker
 from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
                     execution_payload_slots, tool_payload_slots, native_user_input_reference,
@@ -224,12 +224,18 @@ async def _ordinary_input_object_keys(
         while True:
             rows = await transaction.read_sql_rows(
                 store.context,
-                select(columns.id, input_value.label("input")).where(
+                select(
+                    columns.id, columns.turn_id, input_value.label("input"),
+                    columns.request_json["graph_execution"].as_string().label("graph_execution"),
+                    columns.request_json["prompt"].as_string().label("prompt"),
+                ).where(
                     columns.scope_key == scope, columns.id > after,
                 ).order_by(columns.id).limit(_ORDINARY_ATTACHMENT_SCAN_PAGE),
             )
             for row in rows:
-                if row["input"] is None:
+                if row["input"] is None or decode_session_input_reference(
+                    row, row["turn_id"].decode("utf-8"),
+                ) is not None:
                     continue
                 admitted = decode_domain(row["input"], StoredUserInput)
                 for reference in admitted.payload.object_refs():
@@ -373,7 +379,7 @@ async def _purge_unreferenced_objects(
 
         names = await inspect_native_message_tables(group.context, group.metadata)
         if not names:
-            async for _ in scan_ordinary_transcript_roots(group):
+            async for _ in scan_ordinary_message_roots(group):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             continue
         tables = native_message_sql_tables()
@@ -398,7 +404,7 @@ async def _purge_unreferenced_objects(
             closure.mark_snapshot(snapshot)
         bodies = {(row["store_key"], row["sha256"]): row for row in messages}
         opened = await group.open_archive()
-        async for root in scan_ordinary_transcript_roots(group):
+        async for root in scan_ordinary_message_roots(group):
             if opened is None or root.group_id != opened[0]:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             closure.mark(root.store_key, root.slices)

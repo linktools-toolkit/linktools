@@ -260,8 +260,8 @@ async def purge_step_content(
 
     ordinary_ranges = []
     if group is not None:
-        from ._session_transcript import scan_ordinary_transcript_roots
-        async for root in scan_ordinary_transcript_roots(group):
+        from ._session_transcript import scan_ordinary_message_roots
+        async for root in scan_ordinary_message_roots(group):
             if root.group_id != group_id:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             if root.store_key == store_key:

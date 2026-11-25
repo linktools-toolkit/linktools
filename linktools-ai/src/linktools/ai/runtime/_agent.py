@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Agent and Session behavior with independently owned Execution handles."""
 
+import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
@@ -10,17 +11,19 @@ from pydantic import BaseModel
 from ..session import SessionContext
 from ..core import RunBudget, JsonValue, Page, Principal, ThinkingValue
 from ..observe import WaitResult
+from ..errors import AIError, ErrorCode
 from ..execution import Execution
 from ..observe.stream import validate_wait
 from ..execution import ExecutionInputContext
 from ..model import ModelBinding, UserPromptInput, validate_user_input
 from ..execution import ExecutionResult, ExecutionTreeEvent
-from ..session import SessionHistoryItem, SessionTurn, SessionView
+from ..session import CreateSessionRequest, SessionHistoryItem, SessionTurn, SessionView
 
 if TYPE_CHECKING:
     from .agent_execution import AgentExecutionPort
     from ..agent import CompiledAgent, AgentBinding, AgentBindingContract
     from ._runtime_service import Runtime
+    from ._native_session import _NativeSession, _NativeTurnResult
 
 AppT = TypeVar("AppT")
 
@@ -312,6 +315,13 @@ class Agent(Generic[AppT]):
             allow_skills=allow_skills,
         )
 
+    def _require_independent_execution(self, session_id: str | None) -> None:
+        if session_id is not None and self._runtime.sessions._uses_turn_sessions:
+            raise AIError(
+                ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                "SQL conversation turns use Runtime.sessions.start_turn with an explicit Agent",
+            )
+
     async def start(
         self,
         user_prompt: "UserPromptInput",
@@ -329,6 +339,7 @@ class Agent(Generic[AppT]):
         input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT]":
         """Start run mode; planning enables the planning capability without selecting plan mode."""
+        self._require_independent_execution(session_id)
         prompt = validate_user_input(user_prompt)
         return await self.execution_port.start(
             prompt,
@@ -405,6 +416,7 @@ class Agent(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         """Start plan mode with plan-safe tools without waiting for completion."""
+        self._require_independent_execution(session_id)
         return await self.execution_port.start(
             validate_user_input(user_prompt),
             files=files,
@@ -465,8 +477,13 @@ class Agent(Generic[AppT]):
         session_id: str,
         *,
         principal: "Principal | None" = None,
-    ) -> "Session[AppT]":
-        """Build a lazy definition-bound session handle without creating or checking a stored session."""
+    ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
+        """Build a lazy session handle without creating or checking a stored session."""
+        sessions = self._runtime.sessions
+        if sessions._uses_turn_sessions:
+            return sessions._bind_native_session(
+                session_id, principal=self._runtime._resolve_principal(principal), local_workspace=False,
+            )
         return Session(
             self._runtime,
             self.id,
@@ -487,7 +504,14 @@ class Agent(Generic[AppT]):
         cwd: "str | None" = None,
         metadata: "Mapping[str, JsonValue] | None" = None,
         idempotency_key: "str | None" = None,
-    ) -> "Session[AppT]":
+    ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
+        sessions = self._runtime.sessions
+        if sessions._uses_turn_sessions:
+            return await sessions.create(CreateSessionRequest(
+                self._runtime._resolve_principal(principal), session_id,
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
+                cwd=cwd, metadata={} if metadata is None else metadata,
+            ))
         await self._runtime._create_session_for_agent(
             self.id,
             session_id,

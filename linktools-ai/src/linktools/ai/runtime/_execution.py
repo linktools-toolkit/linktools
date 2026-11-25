@@ -8,10 +8,11 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from functools import wraps
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from linktools.core import environ
 
@@ -91,7 +92,7 @@ from ..storage import (
 )
 from ._conversation_service import ConversationService
 from ._execution_payload import _materialize_execution_payloads
-from ..inputs import ExecutionContextArchive
+from ..inputs import ExecutionContextArchive, PreparedExecutionContext
 from ..capability import ToolResponseFixture
 from ._tool_response_fixture import _load_tool_response_fixture
 from ._feature_policy import _runtime_feature_policy
@@ -154,6 +155,11 @@ if TYPE_CHECKING:
     from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
     from ..session import SessionRecord
     from ..spec import RepositoryInstructionResolver
+    from ..task import TaskGraphAdmission, TaskNodeInvocation
+
+_execution_cancel_actor: ContextVar[tuple[str, Principal] | None] = ContextVar(
+    "execution_cancel_actor", default=None,
+)
 
 _logger = environ.get_logger("ai.runtime.execution")
 
@@ -469,6 +475,20 @@ class DefaultExecutionService(TaskExecutionService):
         retained_publication: Callable[..., ExecutionTerminalPublication | None] | None = None,
     ) -> None:
         self._state = state
+        self._canonical_graph_session: Callable[[str, Principal], Awaitable[Mapping[str, object] | None]] | None = None
+        self._start_attached_graph: Callable[[
+            ExecutionRequest, ExecutionStartReservation, str, Mapping[str, object],
+            TaskGraphAdmission, TaskNodeInvocation, str | None,
+        ], Awaitable[ExecutionHandle]] | None = None
+        self._settle_cold_graph_cancel: Callable[[
+            ExecutionRecord, str, OperationLedgerRecord, Principal,
+        ], Awaitable[bool]] | None = None
+        self._is_linked_graph_turn: Callable[[ExecutionRecord, Principal], Awaitable[bool]] | None = None
+        self._resume_bound_graph_turn: Callable[[ExecutionRecord, TaskNodeInvocation], Awaitable[Literal["resumed", "waiting"] | None]] | None = None
+        self._queue_deferred_graph: Callable[[ExecutionRecord], Awaitable[bool]] | None = None
+        self._recover_undispatched_graph_turn: Callable[[
+            ExecutionRecord, TaskNodeInvocation, OperationLedgerRecord, Principal,
+        ], Awaitable[bool]] | None = None
         self._retained_publication = retained_publication
         self._object_store = object_store
         self._authorization = authorization
@@ -817,6 +837,26 @@ class DefaultExecutionService(TaskExecutionService):
             resolved_binding=resolved_binding,
         )
 
+    async def start_task_session(
+        self, binding_digest: str, request: ExecutionRequest, *, session_id: str,
+        task_admission: "TaskGraphAdmission", task_invocation: "TaskNodeInvocation",
+        dependency_hold_id: str | None = None, binding_contract: "AgentBindingContract | None" = None,
+        resolved_binding: AgentBinding | None = None, budget_scope_id: str | None = None,
+    ) -> ExecutionHandle | None:
+        """Dispatch an actual Task node to its canonical session, if present."""
+        detect = self._canonical_graph_session
+        session_row = None if detect is None else await detect(session_id, request.principal)
+        if session_row is None:
+            return None
+        if self._start_attached_graph is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        return await self._start(
+            binding_digest, request, scope="execution.run", prepare_local_stream=True,
+            dependency_hold_id=dependency_hold_id, requires_task_invocation_capture=True,
+            budget_scope_id=budget_scope_id, binding_contract=binding_contract, resolved_binding=resolved_binding,
+            graph_task=(session_id, session_row, task_admission, task_invocation),
+        )
+
     async def resolve_existing(
         self,
         binding_digest: str,
@@ -1110,6 +1150,7 @@ class DefaultExecutionService(TaskExecutionService):
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
         start_read: _SessionStartRead | None = None,
+        graph_task: "tuple[str, Mapping[str, object], TaskGraphAdmission, TaskNodeInvocation] | None" = None,
     ) -> ExecutionHandle:
         metric_delivery: _TerminalMetricDelivery | None = None
 
@@ -1144,7 +1185,7 @@ class DefaultExecutionService(TaskExecutionService):
                     binding_contract=binding_contract,
                     resolved_binding=resolved_binding,
                     capture_metric=capture_metric,
-                    start_read=start_read,
+                    start_read=start_read, graph_task=graph_task,
                 )
             async with self._session_guard(request.principal.tenant_id, session_id):
                 return await self._start_unlocked(
@@ -1202,6 +1243,7 @@ class DefaultExecutionService(TaskExecutionService):
         budget_scope_id: str | None = None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
         start_read: _SessionStartRead | None = None,
+        graph_task: "tuple[str, Mapping[str, object], TaskGraphAdmission, TaskNodeInvocation] | None" = None,
     ) -> ExecutionHandle:
         if budget_scope_id is not None and (
             not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
@@ -1286,7 +1328,7 @@ class DefaultExecutionService(TaskExecutionService):
         execution_id = self._operation_ids()
         if lineage_kind is not ExecutionLineageKind.SESSION_RESUME:
             await self._authorize_start_execution(request, execution_id)
-        if request.session_context != "all" and session_id is None:
+        if request.session_context != "all" and session_id is None and graph_task is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         self._validate_tool_response_mode(request.tool_response_ref, session_id=session_id, fixture=fixture)
         if budget_scope_id is not None:
@@ -1298,13 +1340,14 @@ class DefaultExecutionService(TaskExecutionService):
                 ),
             )
         idempotency_key = request.idempotency_key
-        existing = (start_read.identity if start_read is not None else await self._state.idempotency.get(
+        existing = (None if graph_task is not None else start_read.identity if start_read is not None
+                    else await self._state.idempotency.get(
             scope, idempotency_key, tenant_id=request.principal.tenant_id,
         ))
         request_digest = _request_digest(
             request,
             binding_digest,
-            session_id=session_id,
+            session_id=session_id if graph_task is None else graph_task[0],
             previous_execution_id=previous_execution_id,
             fork_base_execution_id=fork_base_execution_id,
             parent_execution_id=parent_execution_id,
@@ -1315,28 +1358,29 @@ class DefaultExecutionService(TaskExecutionService):
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
         )
-        pending_turns = self._runtime_bridge.pending_turns
-        pending_before_lookup = pending_turns.peek_request(
-            tenant_id=request.principal.tenant_id, scope=scope, idempotency_key=idempotency_key,
-        )
-        pending_turn = await pending_turns.lookup(
-            tenant_id=request.principal.tenant_id, scope=scope,
-            idempotency_key=idempotency_key, request_digest=request_digest,
-        )
-        if pending_turn is not None:
-            await self._validate_start_replay(
-                pending_turn.execution, binding, request,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-                budget_scope_id=budget_scope_id,
+        if graph_task is None:
+            pending_turns = self._runtime_bridge.pending_turns
+            pending_before_lookup = pending_turns.peek_request(
+                tenant_id=request.principal.tenant_id, scope=scope, idempotency_key=idempotency_key,
             )
-            return ExecutionHandle(pending_turn.execution.execution_id)
-        if existing is None and pending_before_lookup is not None:
-            # Settling a local pending turn can publish its durable identity.
-            existing = await self._state.idempotency.get(
-                scope,
-                idempotency_key,
-                tenant_id=request.principal.tenant_id,
+            pending_turn = await pending_turns.lookup(
+                tenant_id=request.principal.tenant_id, scope=scope,
+                idempotency_key=idempotency_key, request_digest=request_digest,
             )
+            if pending_turn is not None:
+                await self._validate_start_replay(
+                    pending_turn.execution, binding, request,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                )
+                return ExecutionHandle(pending_turn.execution.execution_id)
+            if existing is None and pending_before_lookup is not None:
+                # Settling a local pending turn can publish its durable identity.
+                existing = await self._state.idempotency.get(
+                    scope,
+                    idempotency_key,
+                    tenant_id=request.principal.tenant_id,
+                )
         if existing is not None:
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -1590,6 +1634,14 @@ class DefaultExecutionService(TaskExecutionService):
                 budget=request.budget,
                 parent_producer_generation=parent_producer_generation,
         )
+        if graph_task is not None:
+            start_attached = self._start_attached_graph
+            if start_attached is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            graph_session, session_row, admission, invocation = graph_task
+            return await start_attached(
+                request, proposed_reservation, graph_session, session_row, admission, invocation, dependency_hold_id,
+            )
         return await self._admit_execution_start(
             request, proposed_reservation, binding, session,
             prepare_local_stream=prepare_local_stream,
@@ -1769,22 +1821,14 @@ class DefaultExecutionService(TaskExecutionService):
             await asyncio.sleep(pause)
             pause = min(1.0, pause * 2)
 
-    async def _reserve_and_launch_start(
+    async def _prepare_execution_start_reservation(
         self,
         request: ExecutionRequest,
         proposed_reservation: ExecutionStartReservation,
-        binding: AgentBinding,
-        session: "SessionRecord | None",
         *,
-        prepare_local_stream: bool,
-        dependency_hold_id: str | None,
-        requires_task_invocation_capture: bool,
-        budget_scope_id: str | None,
-        capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
-        coordinated_receipt: ExecutionStartReservationResult | None = None,
-        authority: "ExecutionAuthority | None" = None,
-    ) -> ExecutionHandle:
-        if coordinated_receipt is None:
+        already_materialized: bool,
+    ) -> tuple[ExecutionStartReservation, PreparedExecutionContext | None]:
+        if not already_materialized:
             proposed_reservation = replace(proposed_reservation, execution=await _materialize_execution_payloads(
                 proposed_reservation.execution, input_materializer=self._input_materializer,
                 tenant_id=request.principal.tenant_id,
@@ -1800,6 +1844,26 @@ class DefaultExecutionService(TaskExecutionService):
             proposed_reservation = replace(proposed_reservation, execution=replace(
                 proposed_reservation.execution, input_context=prepared_context.reference,
             ))
+        return proposed_reservation, prepared_context
+
+    async def _reserve_and_launch_start(
+        self,
+        request: ExecutionRequest,
+        proposed_reservation: ExecutionStartReservation,
+        binding: AgentBinding,
+        session: "SessionRecord | None",
+        *,
+        prepare_local_stream: bool,
+        dependency_hold_id: str | None,
+        requires_task_invocation_capture: bool,
+        budget_scope_id: str | None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
+        coordinated_receipt: ExecutionStartReservationResult | None = None,
+        authority: "ExecutionAuthority | None" = None,
+    ) -> ExecutionHandle:
+        proposed_reservation, prepared_context = await self._prepare_execution_start_reservation(
+            request, proposed_reservation, already_materialized=coordinated_receipt is not None,
+        )
         reservation = coordinated_receipt
         child = proposed_reservation.execution
         parent_id = child.parent_execution_id
@@ -2752,12 +2816,60 @@ class DefaultExecutionService(TaskExecutionService):
     async def _cancel(self, execution_id: str, request: CancelExecutionRequest, *,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> CancelExecutionResult:
-        return await self._management.cancel_authorized(execution_id, request, capture_metric=capture_metric)
+        return await self.cancel_authorized(execution_id, request, capture_metric=capture_metric)
 
     async def cancel_authorized(self, execution_id: str, request: CancelExecutionRequest, *,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> CancelExecutionResult:
-        return await self._management.cancel_authorized(execution_id, request, capture_metric=capture_metric)
+        token = _execution_cancel_actor.set((execution_id, request.principal))
+        try:
+            return await self._management.cancel_authorized(execution_id, request, capture_metric=capture_metric)
+        finally:
+            _execution_cancel_actor.reset(token)
+
+    async def settle_bound_graph_cancel(
+        self, execution_id: str, *, node_id: str,
+        operation: OperationLedgerRecord, principal: Principal,
+    ) -> bool:
+        settle = self._settle_cold_graph_cancel
+        if settle is None:
+            return False
+        execution = await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_CANCEL)
+        return await settle(execution, node_id, operation, principal)
+
+    async def is_linked_graph_turn(self, execution_id: str, *, principal: Principal) -> bool:
+        resolve = self._is_linked_graph_turn
+        if resolve is None:
+            return False
+        execution = await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_RECOVER)
+        return await resolve(execution, principal)
+
+    async def reconcile_bound_graph_handoff(self, execution_id: str, *, principal: Principal) -> None:
+        queue = self._queue_deferred_graph
+        if queue is None:
+            return
+        execution = await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+        if execution.status is ExecutionStatus.WAITING_DEFERRED:
+            await queue(execution)
+
+    async def resume_bound_graph_turn(self, execution_id: str, *, task_invocation: "TaskNodeInvocation") -> Literal["resumed", "waiting"] | None:
+        resume = self._resume_bound_graph_turn
+        if resume is None:
+            return None
+        execution = await self.load_authorized(
+            execution_id, task_invocation.principal, AuthorizationAction.EXECUTION_READ,
+        )
+        return await resume(execution, task_invocation)
+
+    async def recover_bound_graph_turn(
+        self, execution_id: str, *, task_invocation: "TaskNodeInvocation",
+        recovery_operation: OperationLedgerRecord, principal: Principal,
+    ) -> bool:
+        recover = self._recover_undispatched_graph_turn
+        if recover is None:
+            return False
+        execution = await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_RECOVER)
+        return await recover(execution, task_invocation, recovery_operation, principal)
 
     async def recovery_effects(
         self,

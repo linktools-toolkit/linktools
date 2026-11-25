@@ -1238,7 +1238,7 @@ class _RecoveryCoordinator:
         )
 
     async def _load_deferred_results(
-        self, execution: ExecutionRecord, continuation: PendingToolContinuation,
+        self, execution: ExecutionRecord, continuation: PendingToolContinuation, *, settled_only: bool = False,
     ) -> tuple[DeferredToolResults, dict[str, _RepositoryInstructionApproval]] | None:
         deferred_results = DeferredToolResults()
         repository_approvals: dict[str, _RepositoryInstructionApproval] = {}
@@ -1284,9 +1284,10 @@ class _RecoveryCoordinator:
                 ApprovalStatus.DENIED,
                 ApprovalStatus.CANCELLED,
             }:
-                await self._port.settle_denied_tool_result(
-                    execution, continuation.source_agent_run_id, pending.tool_call_id, record,
-                )
+                if not settled_only:
+                    await self._port.settle_denied_tool_result(
+                        execution, continuation.source_agent_run_id, pending.tool_call_id, record,
+                    )
                 deferred_results.approvals[pending.tool_call_id] = ToolDenied(
                     message=record.decision_message or "The tool call was denied."
                 )
@@ -1316,9 +1317,10 @@ class _RecoveryCoordinator:
             if record.result_payload is None or record.resolution_kind is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result = await self._port.read_deferred_payload(record.result_payload)
-            await self._port.settle_external_tool_result(
-                execution, continuation.source_agent_run_id, pending.tool_call_id, record, result,
-            )
+            if not settled_only:
+                await self._port.settle_external_tool_result(
+                    execution, continuation.source_agent_run_id, pending.tool_call_id, record, result,
+                )
             if record.resolution_kind == "succeeded":
                 deferred_results.calls[pending.tool_call_id] = result
             elif record.resolution_kind == "retry":

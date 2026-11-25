@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from ..asset import AssetStoreReader
     from ..capability import AssetCapability
     from ._factory import _AgentLifecycle
+    from ._native_session import _NativeTurnRead
 from .agent_execution import AgentExecutionPort
 from ._agent import Agent, Session
 from ..execution import Execution
@@ -282,6 +283,7 @@ class Runtime(Generic[AppT]):
                         persistence=self._state, app=self.app, features=self._feature_source,
                         metrics=self._metrics_dataset, authorization=self._authorization,
                         auto_recover=self._auto_recover, lifecycle=self._agent_lifecycle,
+                        wake_graph=self._wake_owned_graph,
                     )
                     self._asset_sources = MappingProxyType(dict(components.asset_sources))
                     if components.metric_control is not None:
@@ -295,6 +297,7 @@ class Runtime(Generic[AppT]):
                         tree_streamer=components.tree_streamer, metric_control=components.metric_control,
                         _binding_resolver=components.binding_resolver, input_captures=components.input_captures,
                         memory_scope=components.memory_scope,
+                        native_turn_read=components.native_turn_read,
                     )
                 self._ready = True
             return self
@@ -316,6 +319,11 @@ class Runtime(Generic[AppT]):
                 _log_secondary_cleanup("runtime.body", cleanup_error)
                 raise exc from cleanup_error
             raise
+
+    async def _wake_owned_graph(self, graph_id: str, tenant_id: str) -> None:
+        for engine in tuple(self._task_engines):
+            if await engine.wake_owned_graph(graph_id, tenant_id=tenant_id):
+                return
 
     async def _bind_tasks(self, *definitions: Task[AppT, object] | TaskExpander) -> TaskEngine[AppT]:
         async with self._close_lock:
@@ -376,6 +384,7 @@ class Runtime(Generic[AppT]):
         _binding_resolver: "_AgentBindingResolver | None" = None,
         input_captures: "InputCaptures | None" = None,
         memory_scope: str | None = None,
+        native_turn_read: "_NativeTurnRead | None" = None,
     ) -> None:
         if any(
             value is None
@@ -410,6 +419,7 @@ class Runtime(Generic[AppT]):
             bind_session=self._session_handle, ensure_open=self._ensure_open,
             turn_runner=session.regenerable_turns if isinstance(session, RuntimeSessionService) else None,
             runtime=self,
+            native_turn_read=native_turn_read,
         )
         self._approvals = approval
         self._external_calls = external

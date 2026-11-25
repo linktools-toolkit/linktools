@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 from pydantic_ai.messages import ModelResponse
 
 from ..core import (
-    AuthorizationAction, AuthorizationPolicy, CursorSigner, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
-    ResourceRef, TenantAuthorizationPolicy, canonical_sha256, decode_cursor, encode_cursor,
+    AuthorizationAction, AuthorizationPolicy, CursorSigner, ExecutionStatus, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
+    ResourceRef, TenantAuthorizationPolicy, UsageMetrics, canonical_sha256, decode_cursor, encode_cursor,
     principal_identity_payload, validate_page_limit, validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
@@ -42,6 +42,15 @@ _STATUS = {
     "failed": "FAILED",
     "succeeded": "SUCCEEDED",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservedTurnResult:
+    key: SessionTurnKey
+    generation: int
+    status: ExecutionStatus
+    usage: UsageMetrics | None
+    view: dict[str, JsonValue]
 
 
 def _session_view(row: RowMapping) -> dict[str, JsonValue]:
@@ -314,14 +323,35 @@ class _OrdinarySessionHistory:
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
         producer_stopped_generation: int | None = None,
     ) -> dict[str, JsonValue]:
+        result = await self._read_turn_result(session_id, turn_id, principal=principal, local_workspace=local_workspace)
+        if (producer_stopped_generation is not None and result.generation == producer_stopped_generation
+                and result.status in (ExecutionStatus.PENDING_START, ExecutionStatus.CANCELLING)):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return result.view
+
+    async def _read_turn_result(
+        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
+        for_execution: bool = False,
+    ) -> _ObservedTurnResult:
         session = await self._session(session_id, principal, local_workspace=local_workspace)
         validate_resource_id(turn_id)
         lineage = await self._authorize_lineage(session, principal)
-        row = await self._store.get_history_turn(SessionTurnKey(session_id, turn_id), lineage=lineage)
+        row = await self._store.get_history_turn(
+            SessionTurnKey(session_id, turn_id), lineage=lineage, include_authority=for_execution,
+        )
         if row is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        # A fork may read an ancestor's committed turn. Keep its actual owner ID.
+        key = SessionTurnKey(row["session_key"].decode("utf-8"), row["turn_id"].decode("utf-8"))
+        usage = None
+        if for_execution:
+            owner = row["owner_principal_id"]
+            if not isinstance(owner, str) or not owner:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._authorization.authorize(
+                principal, AuthorizationAction.EXECUTION_READ,
+                ResourceRef(ResourceKind.EXECUTION, key.turn_id, self._tenant_id, owner),
+            )
+            usage = row.get("usage")
         view = _turn_view(row)
-        if (producer_stopped_generation is not None and row["generation"] == producer_stopped_generation
-                and view["status"] in ("PENDING_START", "CANCELLING")):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        return view
+        return _ObservedTurnResult(key, row["generation"], ExecutionStatus(view["status"]), usage, view)

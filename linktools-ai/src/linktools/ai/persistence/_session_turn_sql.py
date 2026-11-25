@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from threading import RLock
 from types import MappingProxyType
@@ -16,7 +16,7 @@ from weakref import finalize
 from ..agent import AgentBindingContract
 from ..core import ImmutableJsonMapping, canonical_json_bytes, canonical_sha256, deterministic_id, validate_idempotency_key
 from ..errors import AIError, ErrorCode
-from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart, UserPromptPart
 
 from ..model.messages import decode_model_messages, encode_model_messages
 from ..spec import RepositoryInstructions
@@ -38,18 +38,23 @@ from ._turn_sql_schema import (
     TURN_SESSION_MAX_BYTES,
 )
 from ._message_root import NativeMessageRoot
-from ._session_transcript import SESSION_TURN_TABLE
+from ._session_transcript import (
+    SESSION_TURN_TABLE,
+    decode_session_input_reference,
+    decode_session_turn_usage,
+    decode_session_transcript_root,
+)
 from .state import SqlStateRowReader, state_store_key
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData, RowMapping
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from ..core import JsonValue, RunBudget
+    from ..core import JsonValue, RunBudget, UsageMetrics
     from .contracts import BudgetRepository
     from ._archive import ContentArchive
     from ..execution import PendingToolContinuation
-    from .state import StateGroupTransaction, StateStore
+    from .state import StateGroupTransaction, StateStore, StateTransaction
     from ..storage import SqlStorageContext
     from ._split_step_source import SplitStepSourceObservation, SplitStepWaiting
     from ._step_store import SqlStepStore
@@ -293,25 +298,41 @@ class SqlSessionTurnReader:
             if not isinstance(owner, SqlStateRowReader):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             rows = await owner.read_sql_rows(self._context, statement)
-            successes = [row for row in rows[:body_limit] if row["state"] == "succeeded"]
+            selected = rows[:body_limit]
+            prompts = {}
+            for position, row in enumerate(selected):
+                value = row["stored_input"]
+                if not isinstance(value, Mapping) or "$native_user_input" not in value:
+                    continue
+                if row["split_source_receipt"] is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                reference = decode_session_input_reference(
+                    {"input": value, "prompt": row["prompt"], "graph_execution": row["graph_execution"]},
+                    row["turn_id"].decode("utf-8"),
+                )
+                if reference is not None:
+                    prompts[position] = reference
+            successes = [row for row in selected if row["state"] == "succeeded"]
             manifests = [self._transcript_manifest(row["result_json"]) for row in successes]
             local_positions = [
                 index for index, row in enumerate(successes) if row["split_source_receipt"] is None
             ]
-            if not manifests:
-                return rows, manifests, local_positions, (), None, {}
             foreign = [
                 (index, row, manifests[index][0]) for index, row in enumerate(successes)
                 if row["split_source_receipt"] is not None
             ]
             load = None
-            if local_positions:
+            roots = tuple(dict.fromkeys((
+                *(manifests[index][0] for index in local_positions),
+                *(reference.root for reference in prompts.values()),
+            )))
+            if roots:
                 if archive_store is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 archive = group.transaction(archive_store)
                 if not isinstance(archive, SqlStateRowReader):
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-                load = await capture(tuple(manifests[index][0] for index in local_positions), transaction=archive)
+                load = await capture(roots, transaction=archive)
             binding_keys = tuple(dict.fromkeys(
                 row["binding_key"] for row in rows[:body_limit]
                 if not display and row["state"] == "succeeded" and row["result_json"]["binding_refs"]
@@ -319,11 +340,12 @@ class SqlSessionTurnReader:
             if binding_keys and content_archive is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             bindings = await self._read_binding_payloads(content_archive, binding_keys)
-            return rows, manifests, local_positions, foreign, load, bindings
+            return rows, manifests, local_positions, foreign, load, bindings, roots, prompts
 
         members = (turn_store, archive_store) if archive_store not in (None, turn_store) else (turn_store,)
-        rows, manifests, local_positions, foreign, load, bindings = await group.read_many(members, read)
-        encoded_by_position = dict(zip(local_positions, () if load is None else await load(), strict=True))
+        rows, manifests, local_positions, foreign, load, bindings, roots, prompts = await group.read_many(members, read)
+        bodies = dict(zip(roots, () if load is None else await load(), strict=True))
+        encoded_by_position = {index: bodies[manifests[index][0]] for index in local_positions}
         if foreign:
             if self._split_transcript_source is None:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -344,6 +366,18 @@ class SqlSessionTurnReader:
         )
         projected = []
         for position, row in enumerate(rows):
+            if position in prompts:
+                from ..model import plain_text_input_content
+                from ._execution_content import restore_native_user_input
+
+                reference = prompts[position]
+                parts = bodies[reference.root]
+                if len(parts) != 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                prompt = plain_text_input_content(restore_native_user_input(reference, parts[0]))
+                if not isinstance(prompt, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                row = {**row, "prompt": prompt, "stored_input": None}
             if row["state"] != "succeeded" or (body_limit is not None and position >= body_limit):
                 projected.append(row)
                 continue
@@ -359,6 +393,18 @@ class SqlSessionTurnReader:
                 if len(parts) != 1:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 messages.append(parts[0])
+            if row["result_json"].get("graph_trace_suffix") is True:
+                if position not in prompts:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript lacks its admitted input")
+                first = messages[0]
+                if not isinstance(first, ModelRequest):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript has no request")
+                parts = [part for part in first.parts if isinstance(part, UserPromptPart)]
+                if len(parts) != 1 or parts[0].content != row["prompt"]:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript differs from its admitted input")
+                messages[0] = replace(first, parts=[
+                    replace(part, content="") if part is parts[0] else part for part in first.parts
+                ])
             if not display and refs:
                 spec = bindings[row["binding_key"]]["agent_spec"]
                 self._restore_binding_refs(messages, refs, spec["instructions"], spec["system_prompt"])
@@ -371,31 +417,8 @@ class SqlSessionTurnReader:
 
     @staticmethod
     def _transcript_manifest(result) -> tuple[NativeMessageRoot, tuple[tuple[int, int | None], ...]]:
-        try:
-            if not isinstance(result, Mapping) or not (
-                result.keys() == {"transcript", "binding_refs"}
-                or result.keys() == {"transcript", "binding_refs", "output_ref"}
-            ):
-                raise ValueError("invalid session transcript manifest")
-            root = NativeMessageRoot.from_json(result["transcript"])
-            refs = result["binding_refs"]
-            if not root.count or not isinstance(refs, list):
-                raise ValueError("invalid session transcript range")
-            seen = set()
-            parsed = []
-            for ref in refs:
-                if (not isinstance(ref, list) or len(ref) != 2 or type(ref[0]) is not int
-                        or not 0 <= ref[0] < root.count
-                        or (ref[1] is not None and (type(ref[1]) is not int or ref[1] < 0))):
-                    raise ValueError("invalid session transcript binding reference")
-                item = tuple(ref)
-                if item in seen:
-                    raise ValueError("duplicate session transcript binding reference")
-                seen.add(item)
-                parsed.append(item)
-            return root, tuple(parsed)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        root = decode_session_transcript_root(result)
+        return root, tuple((position, part) for position, part in result["binding_refs"])
 
     @staticmethod
     def _restore_binding_refs(messages, refs, instructions, system_prompt) -> None:
@@ -446,6 +469,33 @@ class SqlSessionTurnReader:
     async def get_turn(self, key: SessionTurnKey) -> RowMapping | None:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().filter_by(**self._turn_values(key)))).mappings().one_or_none()
+
+    async def _linked_graph_turn(
+        self, execution_id: str, *, transaction: StateTransaction | None = None,
+    ) -> tuple[SessionTurnKey, int] | None:
+        from sqlalchemy import select
+
+        if not 1 <= len(execution_id.encode("utf-8")) <= TURN_EXECUTION_MAX_BYTES:
+            return None
+        rows = self._turns.c
+        statement = select(
+            rows.session_key, rows.generation, rows.request_json["graph_execution"].as_string(),
+        ).where(rows.scope_key == self._scope, rows.turn_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES))
+
+        async def read(connection):
+            return (await connection.execute(statement)).one_or_none()
+
+        if transaction is None:
+            async with self._context.engine.connect() as connection:
+                linked = await read(connection)
+        else:
+            linked = await transaction.run_sql(self._context, read)
+        if linked is None or linked[2] is None:
+            return None
+        session_key, generation, graph_execution = linked
+        if graph_execution != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return SessionTurnKey(session_key.decode("utf-8"), execution_id), generation
 
     @staticmethod
     async def _read_binding_payloads(archive, keys: tuple[bytes, ...]) -> dict[bytes, dict]:
@@ -500,6 +550,7 @@ class SqlSessionTurnReader:
             columns.session_key, columns.generation, columns.split_source_receipt,
             columns.result_json, columns.request_json["prompt"].as_string().label("prompt"),
             columns.request_json["input"].label("stored_input"),
+            columns.request_json["graph_execution"].as_string().label("graph_execution"),
         )
         if observe_lease:
             statement = statement.add_columns((
@@ -508,7 +559,7 @@ class SqlSessionTurnReader:
         return statement
 
     async def get_history_turn(
-        self, key: SessionTurnKey, *, lineage: tuple[SessionTurnSegment, ...],
+        self, key: SessionTurnKey, *, lineage: tuple[SessionTurnSegment, ...], include_authority: bool = False,
     ) -> Mapping[str, object] | None:
         from sqlalchemy import and_, or_
 
@@ -526,8 +577,18 @@ class SqlSessionTurnReader:
             columns.turn_id == self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES),
             scope,
         )
+        if include_authority:
+            statement = statement.add_columns(
+                columns.request_json["principal"]["principal_id"].as_string().label("owner_principal_id"),
+            )
         rows = await self._read_transcripts(statement, display=True)
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        row = rows[0]
+        result = row["result_json"]
+        if row["state"] != "succeeded" or "usage" not in result:
+            return row
+        return {**row, "usage": decode_session_turn_usage(result["usage"])}
 
     async def find_request(self, session_id: str, request_key: str) -> Mapping[str, object] | None:
         from sqlalchemy import select
@@ -637,6 +698,7 @@ class SqlSessionTurnReader:
         statement = select(
             columns.turn_no, columns.state, prompt, stored_input, result, columns.binding_key, reset,
             columns.turn_id, columns.session_key, columns.generation, columns.split_source_receipt,
+            columns.request_json["graph_execution"].as_string().label("graph_execution"),
         ).where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
@@ -742,6 +804,7 @@ class _PreparedSessionTerminal:
     write: Callable[[AsyncSession], Awaitable[bool]]
     store: StateStore | None
     transcript: tuple[ContentArchive, PreparedArchive, NativeMessageRoot] | None
+    publish_transcript: bool = True
 
     @property
     def stores(self) -> tuple[StateStore, ...]:
@@ -967,12 +1030,13 @@ class SqlSessionTurns(SqlSessionTurnReader):
         result: JsonValue = None, transcript: "Sequence[ModelMessage] | None" = None,
         binding_refs: tuple[tuple[int, int | None], ...] = (),
         output_ref: tuple[int, int] | None = None,
+        usage: UsageMetrics | None = None,
         _publish_trace: tuple[tuple[StateStore, ...], Callable[[StateGroupTransaction], Awaitable[None]]] | None = None,
     ) -> bool:
         """Finalize and release using the same lock order as acceptance."""
         prepared = await self._prepare_finish(
             key, generation=generation, turn_no=turn_no, state=state, result=result,
-            transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
+            transcript=transcript, binding_refs=binding_refs, output_ref=output_ref, usage=usage,
         )
         try:
             if prepared.transcript is None and _publish_trace is None:
@@ -1000,6 +1064,8 @@ class SqlSessionTurns(SqlSessionTurnReader):
         self, key: SessionTurnKey, *, generation: int, turn_no: int, state: TerminalState,
         result: JsonValue, transcript: Sequence[ModelMessage] | None,
         binding_refs: tuple[tuple[int, int | None], ...], output_ref: tuple[int, int] | None,
+        usage: UsageMetrics | None = None,
+        _graph_trace_suffix: tuple[ContentArchive, PreparedArchive, NativeMessageRoot] | None = None,
     ) -> _PreparedSessionTerminal:
         """Prepare the caller's normalized suffix, without starting another mutation."""
         if state not in ("succeeded", "failed", "cancelled"):
@@ -1009,21 +1075,32 @@ class SqlSessionTurns(SqlSessionTurnReader):
         store = None if binding is None else binding[0]
         body = None
         if state == "succeeded":
-            if result is not None or not transcript:
-                raise ValueError("a successful session turn requires only its typed transcript")
+            if result is not None or bool(transcript) == (_graph_trace_suffix is not None):
+                raise ValueError("a successful session turn requires one transcript source")
             if binding is None:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             store, archive_provider, native = binding
             archive = await archive_provider(create=True)
             if archive.store.storage_group is not store.storage_group:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            content = PreparedArchive()
-            root = await native.prepare_archived_messages(transcript, content)
+            if _graph_trace_suffix is None:
+                content = PreparedArchive()
+                root = await native.prepare_archived_messages(transcript, content)
+            else:
+                source, content, root = _graph_trace_suffix
+                if (source.store is not archive.store or source.content_scope != archive.content_scope
+                        or binding_refs or root.count < 1):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                native._message_content.validate_root(root)
             body = (archive, content, root)
             result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
+            if _graph_trace_suffix is not None:
+                result["graph_trace_suffix"] = True
             if output_ref is not None:
                 result["output_ref"] = list(output_ref)
-        elif transcript is not None or binding_refs or output_ref is not None:
+            if usage is not None:
+                result["usage"] = asdict(usage)
+        elif transcript is not None or binding_refs or output_ref is not None or usage is not None or _graph_trace_suffix is not None:
             raise ValueError("an unsuccessful session turn cannot publish a transcript")
 
         async def write(connection: AsyncSession) -> bool:
@@ -1040,7 +1117,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
                 )
             return True
 
-        return _PreparedSessionTerminal(write, store, body)
+        return _PreparedSessionTerminal(write, store, body, publish_transcript=_graph_trace_suffix is None)
 
     async def _finish_in_group(
         self, transaction: StateGroupTransaction, prepared: _PreparedSessionTerminal,
@@ -1051,7 +1128,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         if not await transaction.transaction(store).run_sql(self._context, prepared.write):
             return False
-        if prepared.transcript is not None:
+        if prepared.transcript is not None and prepared.publish_transcript:
             archive, content, _ = prepared.transcript
             await archive.publish(transaction.transaction(archive.store), content)
         return True

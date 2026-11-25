@@ -520,6 +520,8 @@ class TaskLease:
     fence: int
     lease_expires_at: datetime
     execution_id: "str | None" = None
+    recovery_operation_id: "str | None" = field(default=None, repr=False)
+    recovery_actor: "Principal | None" = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _validate_task_id(self.graph_id)
@@ -534,6 +536,8 @@ class TaskLease:
             or not self.node_id.strip()
             or self.fence < 1
             or self.lease_expires_at.tzinfo is None
+            or (self.recovery_operation_id is None) != (self.recovery_actor is None)
+            or (self.recovery_actor is not None and self.recovery_actor.tenant_id != self.tenant_id)
             or (
                 self.execution_id is not None
                 and (
@@ -563,11 +567,16 @@ class TaskNodeView:
     error_origin: "str | None" = None
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
+    recovery_operation_id: "str | None" = field(default=None, repr=False)
+    recovery_actor: "Principal | None" = field(default=None, repr=False)
+
     def __post_init__(self) -> None:
         _validate_task_id(self.graph_id)
         _validate_task_id(self.node_id)
         for dependency in self.dependencies:
             _validate_task_id(dependency)
+        if (self.recovery_operation_id is None) != (self.recovery_actor is None):
+            raise ValueError("task recovery authority is incomplete")
         if self.owner is not None:
             try:
                 validate_lease_owner(self.owner)

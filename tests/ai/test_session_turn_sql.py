@@ -7,6 +7,7 @@ import asyncio
 import pytest
 import pytest_asyncio
 from linktools.ai.agent import AgentBindingContract, bind_output
+from linktools.ai.core import UsageMetrics
 from linktools.ai.spec import AgentSpec
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -59,6 +60,7 @@ async def accept(turns: SqlSessionTurns, turn: str, *, revision: int = 0, throug
 @pytest.mark.asyncio
 async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(store):
     engine, metadata, turns = store
+    usage = UsageMetrics(model_requests=1, input_tokens=13, output_tokens=5)
     assert "ai_session_bindings" not in metadata.tables
     statements = []
     binding_writes = []
@@ -91,7 +93,7 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
         assert statements == ["SELECT", "SELECT"] and commits == [(2, 0, 0)]
         commits.clear()
         assert await accept(turns, key.turn_id)
-        assert await turns.finish(key, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT)
+        assert await turns.finish(key, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT, usage=usage)
         assert statements == ["SELECT", "SELECT", "UPDATE", "INSERT", "UPDATE", "UPDATE"]
         assert len(binding_writes) == 1 and len(native_writes) == 2
         # Cold acceptance writes one immutable binding in its owner commit.
@@ -108,11 +110,12 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
     assert session["active_turn_id"] == b"second" and session["last_turn_no"] == 1
     turn = await turns.get_turn(key)
     assert turn["request_json"] == {"prompt": "turn"}
-    assert set(turn["result_json"]) == {"transcript", "binding_refs"}
+    assert set(turn["result_json"]) == {"transcript", "binding_refs", "usage"}
     root = NativeMessageRoot.from_json(turn["result_json"]["transcript"])
     assert root.count == 1 and turn["result_json"]["binding_refs"] == []
     published = await turns.get_history_turn(key, lineage=())
     assert published["messages"][0].parts[0].content == "two"
+    assert published["usage"] == usage
     replay = await turns.find_request("chat", "send")
     assert replay["turn_id"] == b"turn" and replay["agent_id"] == "test-agent"
     second = await turns.get_turn_for_recovery(SessionTurnKey("chat", "second"))

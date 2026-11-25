@@ -20,6 +20,7 @@ from ...core import (
     JsonValue,
     OperationKind,
     OperationLedgerInput,
+    OperationLedgerRecord,
     OperationStatus,
     ResourceKind,
     TaskStatus,
@@ -224,6 +225,8 @@ class AgentTaskRunner(Generic[AppT]):
             budget_scope_id=admission.budget_scope_id,
             tool_effects=admission.tool_effects,
             requires_task_invocation_capture=True,
+            task_invocation=invocation,
+            task_admission=admission,
             input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
         )
         self._execution_ports[execution.execution_id] = self.execution_port
@@ -663,6 +666,8 @@ class AgentTaskRunner(Generic[AppT]):
         idempotency_key: str,
     ) -> tuple[object, str]:
         hold_id = f"task:{invocation.graph_id}:{invocation.node.node_id}"
+        capture_confirmed = False
+        linked_waiting = False
         if invocation.execution_id is None:
             execution = await self._start_execution(
                 invocation,
@@ -675,6 +680,25 @@ class AgentTaskRunner(Generic[AppT]):
                 dependency_hold_id=hold_id,
             )
         else:
+            lease = invocation.task_lease
+            if lease is not None and lease.recovery_operation_id is not None:
+                operation = await self._persistence_owner.task.operations.get(
+                    lease.recovery_operation_id, tenant_id=lease.tenant_id,
+                )
+                if operation is None or lease.recovery_actor is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                capture_confirmed = await self.execution_port.recover_bound_graph_turn(
+                    invocation.execution_id, task_invocation=invocation,
+                    recovery_operation=operation, principal=lease.recovery_actor,
+                )
+                if not capture_confirmed:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            elif session_id is not None and lease is not None:
+                disposition = await self.execution_port.resume_bound_graph_turn(
+                    invocation.execution_id, task_invocation=invocation,
+                )
+                capture_confirmed = disposition == "resumed"
+                linked_waiting = disposition == "waiting"
             with self._node_executor().confirm_execution_result(invocation.execution_id):
                 execution = await self._get_execution(
                     invocation.execution_id,
@@ -695,7 +719,13 @@ class AgentTaskRunner(Generic[AppT]):
         elif current != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await control.handoff_execution(execution_id)
-        await self._capture_invocation(execution, execution_id, invocation)
+        capture_confirmed = capture_confirmed or execution.task_invocation_captured
+        if not capture_confirmed:
+            await self._capture_invocation(execution, execution_id, invocation)
+        if capture_confirmed or linked_waiting:
+            await self.execution_port.reconcile_bound_graph_handoff(
+                execution_id, principal=invocation.principal,
+            )
         return execution, execution_id
 
     async def _capture_invocation(
@@ -853,6 +883,15 @@ class AgentTaskRunner(Generic[AppT]):
     ) -> TaskNodeRunResult | None:
         del invocation, execution_id, resolution
         raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def settle_bound_graph_cancel(
+        self, invocation: TaskNodeInvocation, execution_id: str,
+        authority: tuple[OperationLedgerRecord, Principal],
+    ) -> bool:
+        operation, actor = authority
+        return await self.execution_port.settle_bound_graph_cancel(
+            execution_id, node_id=invocation.node.node_id, operation=operation, principal=actor,
+        )
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
         execution_id = invocation.execution_id

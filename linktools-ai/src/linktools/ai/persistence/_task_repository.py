@@ -5,7 +5,7 @@
 import asyncio
 import heapq
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import TypeVar
 
@@ -17,11 +17,13 @@ from ..core import (
     OperationLedgerInput,
     OperationLedgerRecord,
     OperationStatus,
+    Principal,
     Page,
     ResourceKind,
     ResourceRef,
     TaskStatus,
     canonical_sha256,
+    principal_identity_payload,
     validate_lease_owner,
     validate_lease_seconds,
 )
@@ -59,6 +61,7 @@ from .state import (
     StoredFact,
     StoredRecord,
     active_state_scope,
+    operation_key,
     stream_key,
 )
 from ._repository_common import decode_operation as _decode_operation
@@ -370,6 +373,18 @@ def _validate_expansion(
 
 
 
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskGraphCancelOwner:
+    """An authorized cancel operation's exact target, never a runnable task lease."""
+
+    node_id: str
+    operation: OperationLedgerRecord
+
+    @property
+    def tenant_id(self) -> str:
+        return self.operation.tenant_id
 
 
 class TaskRepositoryImpl(RepositoryBase):
@@ -1356,6 +1371,90 @@ class TaskRepositoryImpl(RepositoryBase):
 
         return await self.state_store.read(read)
 
+    async def _guard_graph_recovery_operation_in_transaction(
+        self, transaction: StateTransaction, graph_id: str, operation: OperationLedgerRecord,
+    ) -> None:
+        if (operation.tenant_id != self._tenant_id or operation.resource_id != graph_id
+                or operation.execution_id is not None or operation.resource_kind is not ResourceKind.TASK_GRAPH
+                or operation.operation_kind is not OperationKind.TASK_RECOVER
+                or operation.status not in {OperationStatus.RUNNING, OperationStatus.SUCCEEDED}):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        op_key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation.operation_id)
+        stored = await transaction.get_operation(op_key)
+        if stored is None or _decode_operation(
+            stored, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
+        ) != operation:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        if not await transaction.replace_operation(stored, expected_state=operation.status.value):
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+    async def _guard_recovering_bound_execution_in_transaction(
+        self, transaction: StateTransaction, lease: TaskLease, operation: OperationLedgerRecord,
+        *, execution_id: str,
+    ) -> None:
+        if (lease.fence < 2 or lease.recovery_operation_id != operation.operation_id or lease.recovery_actor is None
+                or operation.request_digest != canonical_sha256({
+                    "action": "task.recover", "principal": principal_identity_payload(lease.recovery_actor),
+                    "graph_id": lease.graph_id,
+                })):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        await self._guard_graph_recovery_operation_in_transaction(transaction, lease.graph_id, operation)
+        await self._guard_bound_execution_in_transaction(transaction, lease, execution_id=execution_id)
+
+    async def _guard_cancelled_execution_in_transaction(
+        self, transaction: StateTransaction, owner: _TaskGraphCancelOwner, *, execution_id: str,
+    ) -> None:
+        operation = owner.operation
+        if (operation.tenant_id != self._tenant_id
+                or operation.operation_kind is not OperationKind.TASK_CANCEL
+                or operation.resource_kind is not ResourceKind.TASK_GRAPH
+                or operation.execution_id not in {None, execution_id}
+                or operation.status not in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        graph_id = operation.resource_id
+        op_key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation.operation_id)
+        stored = await transaction.get_operation(op_key)
+        if stored is None or _decode_operation(
+            stored, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
+        ) != operation:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        node_key = self._state_key(graph_id, owner.node_id)
+        node_record = await transaction.get_record(node_key)
+        if node_record is None:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        self._validate_state_record(node_record, graph_id, owner.node_id)
+        node = await self._decode(node_record, TaskNodeView)
+        if (node.graph_id != graph_id or node.node_id != owner.node_id or node.execution_id != execution_id
+                or node.status not in {TaskStatus.RUNNING, TaskStatus.RECOVERY_REQUIRED}):
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        if node.status is TaskStatus.RUNNING and (
+                node.lease_expires_at is None or node.lease_expires_at > await transaction.now()):
+            raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
+        if not await transaction.replace_operation(stored, expected_state=operation.status.value):
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        if await transaction.guard_record_revision(node_key, expected_storage_revision=node_record.storage_revision) is None:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+    async def _guard_bound_execution_in_transaction(
+        self, transaction: StateTransaction, lease: TaskLease, *, execution_id: str,
+    ) -> None:
+        """Fence dispatch against the current, already-bound task producer."""
+        _validate_task_lease_scope(lease, self._tenant_id)
+        if lease.execution_id not in {None, execution_id}:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        key = self._state_key(lease.graph_id, lease.node_id)
+        record = await transaction.get_record(key)
+        if record is None:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        self._validate_state_record(record, lease.graph_id, lease.node_id)
+        node = await self._decode(record, TaskNodeView)
+        _require_live_task_lease(node, lease, await transaction.now())
+        if (node.execution_id != execution_id or node.recovery_operation_id != lease.recovery_operation_id
+                or node.recovery_actor != lease.recovery_actor):
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        if await transaction.guard_record_revision(key, expected_storage_revision=record.storage_revision) is None:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+
     async def bind_execution(
         self,
         lease: TaskLease,
@@ -1570,6 +1669,28 @@ class TaskRepositoryImpl(RepositoryBase):
 
         return await self._mutate_with_event_retry(mutate)
 
+
+    async def _mark_bound_graph_deferred_ready_in_transaction(
+        self, transaction: StateTransaction, *, graph_id: str, node_id: str, expected_fence: int, execution_id: str,
+    ) -> None:
+        """Queue the exact passive node only after the paired deferred receipts were proved."""
+        if type(expected_fence) is not int or expected_fence < 1:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        graph_key = self._graph_key(graph_id)
+        node_key = self._state_key(graph_id, node_id)
+        records = await transaction.get_records((graph_key, node_key))
+        graph_record, node_record = records.get(graph_key), records.get(node_key)
+        if graph_record is None or node_record is None:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        self._validate_graph_record(graph_record, graph_id)
+        self._validate_state_record(node_record, graph_id, node_id)
+        node = await self._decode(node_record, TaskNodeView)
+        if (node.graph_id != graph_id or node.node_id != node_id or node.execution_id != execution_id
+                or node.status is not TaskStatus.WAITING or node.fence != expected_fence
+                or node.owner is not None or node.lease_expires_at is not None):
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        value = replace(node, status=TaskStatus.READY, occupies_concurrency=False, next_attempt_at=None)
+        await self._update_node_in_transaction(transaction, node, value, node_record, graph_record)
 
     async def requeue_waiting_retry(
         self,
@@ -1857,11 +1978,23 @@ class TaskRepositoryImpl(RepositoryBase):
         *,
         tenant_id: str,
         cancel_requested: bool = False,
+        recovery_operation: OperationLedgerRecord | None = None,
+        recovery_actor: Principal | None = None,
+        linked_execution_ids: frozenset[str] = frozenset(),
     ) -> TaskGraphView:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if not isinstance(cancel_requested, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        if linked_execution_ids and (
+                cancel_requested or recovery_operation is None or recovery_actor is None
+                or recovery_actor.tenant_id != tenant_id
+                or recovery_operation.request_digest != canonical_sha256({
+                    "action": "task.recover", "principal": principal_identity_payload(recovery_actor),
+                    "graph_id": graph_id,
+                })):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
         async def mutate(transaction: StateTransaction) -> TaskGraphView:
             before = await self._event_state_in_transaction(transaction, graph_id)
@@ -1877,6 +2010,12 @@ class TaskRepositoryImpl(RepositoryBase):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if cancel_requested:
                 return before.graph
+            if linked_execution_ids:
+                assert recovery_operation is not None
+                await self._guard_graph_recovery_operation_in_transaction(transaction, graph_id, recovery_operation)
+                eligible = {node.execution_id for node in before.node_states if node.status is TaskStatus.RECOVERY_REQUIRED}
+                if not linked_execution_ids <= eligible:
+                    raise AIError(ErrorCode.TASK_FENCE_STALE)
             cleared = tuple(
                 (
                     replace(
@@ -1899,6 +2038,9 @@ class TaskRepositoryImpl(RepositoryBase):
                         error_digest=None,
                         error_origin=None,
                         safe_error_details={},
+                        recovery_operation_id=(recovery_operation.operation_id
+                            if node.execution_id in linked_execution_ids and recovery_operation is not None else None),
+                        recovery_actor=recovery_actor if node.execution_id in linked_execution_ids else None,
                     )
                     if (
                         node.status is TaskStatus.RECOVERY_REQUIRED
@@ -1940,7 +2082,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 graph_id,
                 tenant_id=tenant_id,
             )
-            if converged and (
+            if not linked_execution_ids and converged and (
                 view.status is TaskStatus.RECOVERY_REQUIRED
                 if cancel_requested
                 else view.status is not TaskStatus.RECOVERY_REQUIRED
@@ -2615,6 +2757,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 expected_fence,
                 expires,
                 value.execution_id,
+                value.recovery_operation_id,
+                value.recovery_actor,
             )
 
         try:
@@ -2638,6 +2782,8 @@ class TaskRepositoryImpl(RepositoryBase):
                     current.fence,
                     current.lease_expires_at,
                     current.execution_id,
+                    current.recovery_operation_id,
+                    current.recovery_actor,
                 )
             if current.status in _TERMINAL_TASK_STATUSES or current.status is TaskStatus.RECOVERY_REQUIRED:
                 raise AIError(ErrorCode.TASK_NOT_READY) from error

@@ -60,8 +60,9 @@ from ._service import DefaultExecutionHistoryService, _read_model_interaction_up
 from ..core import token_seed
 from ._transient import TransientExecutionHistoryStore
 from ._session_display_cache import SessionDisplayCache
-from ._ordinary_sessions import SessionTurnTraceItem, _OrdinarySessionHistory
-from ..persistence.turns import SqlSessionTurnReader
+from ._ordinary_sessions import SessionTurnTraceItem, _ObservedTurnResult, _OrdinarySessionHistory
+from ..persistence.turns import SessionTurnKey, SqlSessionTurnReader
+
 from ..persistence.state import active_state_scope
 from ._session_timeline import (
     SessionTimelineTranscriptStore,
@@ -303,6 +304,9 @@ class _HistorySubscription:
                 self._released(self)
 
 
+_BoundTurnRead = Callable[[SessionTurnKey, Principal, bool], Awaitable[_ObservedTurnResult]]
+
+
 class History:
     """Stable read-only composition for persisted execution projections."""
 
@@ -330,6 +334,7 @@ class History:
         cache: CacheBackend | None = None,
         session_turn_reader: SqlSessionTurnReader | None = None,
         session_trace_source: StateStepArchive | None = None,
+        _bind_runtime_turn_read: Callable[[_BoundTurnRead], None] | None = None,
     ) -> None:
         self._service = service
         self._subscriptions: set[_HistorySubscription] = set()
@@ -360,6 +365,8 @@ class History:
             None if session_turn_reader is None or authorization is None or self._session_cursor_signer is None
             else _OrdinarySessionHistory(session_turn_reader, tenant_id, authorization, self._session_cursor_signer)
         )
+        if _bind_runtime_turn_read is not None and self._ordinary_sessions is not None:
+            _bind_runtime_turn_read(self._read_runtime_turn)
         self._display_cache = (
             None if conversation is None or executions is None or self._session_cursor_signer is None
             else SessionDisplayCache(conversation, executions, session_transcript_store,
@@ -429,6 +436,14 @@ class History:
         return await self._require_ordinary_sessions().turn_result(
             session_id, turn_id, principal=principal, local_workspace=local_workspace,
             producer_stopped_generation=producer_stopped_generation,
+        )
+
+    async def _read_runtime_turn(
+        self, key: SessionTurnKey, principal: Principal, local_workspace: bool,
+    ) -> _ObservedTurnResult:
+        return await self._require_ordinary_sessions()._read_turn_result(
+            key.session_id, key.turn_id, principal=principal, local_workspace=local_workspace,
+            for_execution=True,
         )
 
     async def read_model_interactions(

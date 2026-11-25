@@ -2,11 +2,15 @@
 # -*- coding: utf-8 -*-
 """Committed Session history projection and continuation behavior."""
 
+import asyncio
+
 from linktools.ai.persistence import Persistence
+from linktools.ai.capability import ExecutionCapability
 from datetime import datetime, timezone
 
 import pytest
 from linktools.ai.core import (
+    ExecutionStatus,
     HmacCursorSigner,
     canonical_sha256,
     Principal,
@@ -17,7 +21,8 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.session import ForkSessionRequest
+from linktools.ai.session import CreateSessionRequest, ForkSessionRequest
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.history._projection import StepSessionHistoryReader
 from linktools.ai.runtime._session import RuntimeSessionService
@@ -41,6 +46,8 @@ from linktools.ai.persistence._step_contracts import (
     AgentRunRecord,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
+
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 
 def _session(session_id: str = "session") -> SessionRecord:
@@ -469,34 +476,46 @@ async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path)
 
 @pytest.mark.asyncio
 async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
+    class _HostAuthorization(TenantAuthorizationPolicy):
+        """Use the same explicit host policy for production and reopened reads."""
+
+    async def model(_messages, _info):
+        return ModelResponse(parts=[TextPart("SQL")])
+
+    namespace = "session-history-sql"
+    principal = Principal("owner", "tenant")
+    features = RuntimeFeatures(namespace)
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("default", allow_tools=(), allow_capabilities=())
+    model_features(_Models(_UsageFunctionModel(model)), features)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
-    await provision_database(engine)
-    state = PersistenceStorage.sql(engine)
-    state = Persistence(state)
-    await state.initialize(namespace="session-history-sql", tenant_id="tenant")
     try:
-        await state.conversation.sessions.create(_session())
-        agent_run_id = "session-history-sql-run"
-        await _materialize(state, agent_run_id, ("SQL",))
-        await _advance(state, None, ConversationCursor(agent_run_id))
-        before_close = await _service(state).history(
-            "session",
-            principal=Principal("owner", "tenant"),
-        )
-        await state.close()
+        await provision_database(engine)
+        storage = PersistenceStorage.sql(engine)
+        async with (
+            Persistence.open(namespace, storage=storage, tenant_id=principal.tenant_id) as state,
+            Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
+        ):
+            created = await runtime.sessions.create(CreateSessionRequest(principal, "session", "create"))
+            session = await runtime.sessions.get(created.session_id, principal=principal)
+            async with asyncio.timeout(5), session.start("question", agent=runtime.agents.get(), idempotency_key="turn") as (turn, frames):
+                terminal = [frame async for frame in frames][-1]
+                assert terminal["type"] == "terminal" and terminal["state"] == "succeeded"
+                result = await turn.result()
+            assert result.key == turn.key and result.status is ExecutionStatus.SUCCEEDED
+            assert result.view["output"] == {"text": "SQL"}
+            before_close = await session.timeline()
+            assert len(before_close["items"]) == 1
+            assert before_close["items"][0]["turn_id"] == result.key.turn_id
 
         reopened = PersistenceStorage.sql(engine)
-        reopened = Persistence(reopened)
-        await reopened.initialize(namespace="session-history-sql", tenant_id="tenant")
-        try:
-            after_reopen = await _service(reopened).history(
-                "session",
-                principal=Principal("owner", "tenant"),
-            )
-            assert after_reopen == before_close
-        finally:
-            await reopened.close()
+        async with (
+            Persistence.open(namespace, storage=reopened, tenant_id=principal.tenant_id) as state,
+            Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
+        ):
+            session = await runtime.sessions.get("session", principal=principal)
+            assert await session.timeline() == before_close
+            reopened_result = await runtime.history.turn_result("session", result.key.turn_id, principal=principal)
+            assert reopened_result["conversation_committed"] and reopened_result["output"] == {"text": "SQL"}
     finally:
-        if state.ready:
-            await state.close()
         await engine.dispose()

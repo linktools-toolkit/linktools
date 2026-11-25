@@ -1311,7 +1311,7 @@ class TaskNodeExecutor(Generic[AppT]):
         self,
         graph_id: str,
         request: RecoverGraphRequest,
-    ) -> None:
+    ) -> frozenset[str]:
         tenant_id = request.principal.tenant_id
         header = await self._task_state.get_header(graph_id, tenant_id=tenant_id)
         if header is None:
@@ -1397,9 +1397,22 @@ class TaskNodeExecutor(Generic[AppT]):
                 continue
             candidates.append((node, node_state, execution, agent_runner))
 
+        linked = set()
         for node, node_state, execution, agent_runner in candidates:
             node_state = await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
             await agent_runner.bind_existing_execution(execution.execution_id, admission.principal)
+            if await agent_runner.execution_port.is_linked_graph_turn(
+                execution.execution_id, principal=request.principal,
+            ):
+                deadline = agent_runner.deadline_policy(node, execution.started_at, self._budget_scopes.get(graph_id))
+                if (node_state.status is not TaskStatus.RECOVERY_REQUIRED
+                        or deadline is not None and deadline[0] <= datetime.now(timezone.utc)
+                        or execution.status is not ExecutionStatus.STARTED
+                        or execution.producer_generation != 0 or execution.agent_run_seq != 0
+                        or execution.producer_claim_id is not None):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                linked.add(execution.execution_id)
+                continue
             if not await agent_runner.recover_bound_execution(
                 execution, graph_id=graph_id, node=node, node_state=node_state,
                 request=request,
@@ -1413,6 +1426,7 @@ class TaskNodeExecutor(Generic[AppT]):
             if latest.status is ExecutionStatus.RECOVERY_REQUIRED:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
+        return frozenset(linked)
 
     async def _validate_recovery_node_binding(
         self,
@@ -2608,12 +2622,6 @@ class TaskNodeExecutor(Generic[AppT]):
         }:
             return
         execution_cancelled = execution_view.status is ExecutionStatus.CANCELLED
-        if execution_view.status is ExecutionStatus.RECOVERY_REQUIRED:
-            raise TaskNodeRunError(
-                ErrorCode.TASK_EFFECT_UNKNOWN,
-                execution_id,
-            )
-
         task_id, task_revision, body = _parse_node(node, request=False)
         handler = self._handler(
             task_id,
@@ -2622,6 +2630,15 @@ class TaskNodeExecutor(Generic[AppT]):
             node_id=node.node_id,
             request=False,
         )
+        if (isinstance(handler, _TaskRunnerAdapter) and isinstance(handler.runner, AgentTaskRunner)
+                and invocation.cancel_authority is not None):
+            if await handler.runner.settle_bound_graph_cancel(
+                invocation, execution_id, invocation.cancel_authority,
+            ):
+                return
+        if execution_view.status is ExecutionStatus.RECOVERY_REQUIRED:
+            raise TaskNodeRunError(ErrorCode.TASK_EFFECT_UNKNOWN, execution_id)
+
         if isinstance(handler, _TaskRunnerAdapter):
             if execution_cancelled and isinstance(
                 handler.runner,

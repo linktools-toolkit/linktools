@@ -77,6 +77,7 @@ from ..core import (
     ImmutableJsonMapping,
     OperationLedgerInput,
     OperationLedgerRecord,
+    Principal,
     OperationStatus,
     Page,
     ResourceKind,
@@ -2110,6 +2111,9 @@ class TaskRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         cancel_requested: bool = False,
+        recovery_operation: OperationLedgerRecord | None = None,
+        recovery_actor: Principal | None = None,
+        linked_execution_ids: frozenset[str] = frozenset(),
     ) -> TaskGraphView: ...
     async def requeue_recovery(
         self,

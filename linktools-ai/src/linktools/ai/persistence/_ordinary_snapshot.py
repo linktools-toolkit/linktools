@@ -19,7 +19,7 @@ from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, 
 from ..model import StoredUserInput
 from ..steps import NATIVE_STORE_KEY_MAX_BYTES, encode_native_replay_key
 from ._message_root import NativeMessageRoot
-from ._session_transcript import decode_session_transcript_root
+from ._session_transcript import decode_session_input_reference, decode_session_transcript_root
 from ..storage import ObjectRef
 from .codec import decode_domain
 from .objects import ObjectKeyFactory
@@ -89,7 +89,10 @@ def ordinary_input_object_refs(
     keys = ObjectKeyFactory(namespace)
     for row in rows["turns"]:
         manifest = row["request_json"].get("input")
-        if manifest is None:
+        turn_id = row["turn_id"]
+        if isinstance(turn_id, bytes):
+            turn_id = turn_id.decode("utf-8")
+        if manifest is None or decode_session_input_reference(row["request_json"], turn_id) is not None:
             continue
         for reference in decode_domain(manifest, StoredUserInput).payload.object_refs():
             if (reference.store_id != RUNTIME_OBJECT_STORE_ID
@@ -99,29 +102,42 @@ def ordinary_input_object_refs(
 
 
 
-def ordinary_transcript_roots(
+def ordinary_message_roots(
     rows: Mapping[str, list[dict[str, object]]],
 ) -> Iterator[NativeMessageRoot]:
     for row in rows["turns"]:
+        turn_id = row["turn_id"]
+        if isinstance(turn_id, bytes):
+            turn_id = turn_id.decode("utf-8")
+        reference = decode_session_input_reference(row["request_json"], turn_id)
+        if reference is not None:
+            yield reference.root
         if row["state"] == "succeeded":
             yield decode_session_transcript_root(row["result_json"])
 
 
-def rekey_ordinary_transcripts(
+def rekey_ordinary_messages(
     rows: Mapping[str, list[dict[str, object]]], group_ids: Mapping[str, str],
 ) -> dict[str, list[dict[str, object]]]:
+    def rekey(root: NativeMessageRoot) -> NativeMessageRoot:
+        if root.group_id not in group_ids:
+            raise _invalid()
+        return replace(root, group_id=group_ids[root.group_id])
+
     def move(row: dict[str, object]) -> dict[str, object]:
+        request = row["request_json"]
+        reference = decode_session_input_reference(request, row["turn_id"].decode("utf-8"))
+        if reference is not None:
+            row = {**row, "request_json": {
+                **request, "input": replace(reference, root=rekey(reference.root)).to_json(),
+            }}
         if row["state"] != "succeeded":
             return row
         result = row["result_json"]
-        root = decode_session_transcript_root(result)
-        if root.group_id not in group_ids:
-            raise _invalid()
         return {**row, "result_json": {
-            **result, "transcript": replace(root, group_id=group_ids[root.group_id]).to_json(),
+            **result, "transcript": rekey(decode_session_transcript_root(result)).to_json(),
         }}
     return {**rows, "turns": [move(row) for row in rows["turns"]]}
-
 
 
 def _timestamp(value: datetime) -> datetime:
@@ -235,6 +251,8 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str, paired_split: boo
                     if frontier is not None:
                         SessionInstructionFrontier.from_json(frontier)
                     principal = Principal(**request["principal"])
+                    if decode_session_input_reference(request, turn_id.decode("utf-8")) is not None and has_split_receipt:
+                        raise _invalid()
                 except (TypeError, ValueError, KeyError, AIError) as error:
                     raise _invalid() from error
                 if principal.tenant_id != tenant_id:

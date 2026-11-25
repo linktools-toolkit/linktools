@@ -209,6 +209,9 @@ class _TaskRepository(Protocol):
         *,
         tenant_id: str,
         cancel_requested: bool = False,
+        recovery_operation: OperationLedgerRecord | None = None,
+        recovery_actor: Principal | None = None,
+        linked_execution_ids: frozenset[str] = frozenset(),
     ) -> TaskGraphView: ...
 
     async def requeue_recovery(
@@ -817,10 +820,15 @@ class DefaultTaskGraphService(TaskGraphService):
         cancel_requested = bool(graph_cancel_operations)
         if graph_cancel_operations:
             if not _terminal(view.status):
+                cold_owner = next((
+                    item for item in graph_cancel_operations
+                    if item.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}
+                ), None)
                 await self._cleanup_graph_runtime(
                     view,
                     request.principal,
                     invoke_effects=True,
+                    cancel_authority=None if cold_owner is None else (cold_owner, request.principal),
                 )
                 refreshed = await self._persistence.tasks.get_graph(
                     graph_id,
@@ -889,6 +897,11 @@ class DefaultTaskGraphService(TaskGraphService):
                         node_state.node_id,
                         execution_id,
                         invoke_effects=True,
+                        cancel_authority=(
+                            (cancel_operation, request.principal)
+                            if cancel_operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}
+                            else None
+                        ),
                     )
                     graph_state = await self._persistence.tasks.graph_state(
                         graph_id,
@@ -926,6 +939,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 if settled_cancel.status is not OperationStatus.SUCCEEDED:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
 
+        linked_executions: frozenset[str] = frozenset()
         try:
             admission = None
             if (
@@ -951,7 +965,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 )
 
             if admission is not None and self._bound_execution_recovery is not None:
-                await self._bound_execution_recovery.recover_bound_executions(
+                linked_executions = await self._bound_execution_recovery.recover_bound_executions(
                     graph_id,
                     request,
                 )
@@ -975,6 +989,11 @@ class DefaultTaskGraphService(TaskGraphService):
                     graph_id,
                     tenant_id=tenant_id,
                     cancel_requested=cancel_requested,
+                    **({
+                        "recovery_operation": operation,
+                        "recovery_actor": request.principal,
+                        "linked_execution_ids": linked_executions,
+                    } if linked_executions else {}),
                 )
             except AIError as error:
                 if error.code is not ErrorCode.TASK_NOT_READY:
@@ -2317,6 +2336,7 @@ class DefaultTaskGraphService(TaskGraphService):
                     view,
                     request.principal,
                     invoke_effects=True,
+                    cancel_authority=(operation, request.principal),
                 )
                 reloaded = await self._persistence.tasks.get_graph(
                     graph_id,
@@ -2504,6 +2524,7 @@ class DefaultTaskGraphService(TaskGraphService):
         principal: Principal,
         *,
         invoke_effects: bool = True,
+        cancel_authority: tuple[OperationLedgerRecord, Principal] | None = None,
     ) -> None:
         if self._launcher is None:
             return
@@ -2521,6 +2542,7 @@ class DefaultTaskGraphService(TaskGraphService):
             await self._launcher.settle_cancel(
                 launch,
                 invoke_effects=invoke_effects,
+                cancel_authority=cancel_authority,
             )
         except asyncio.CancelledError:
             raise

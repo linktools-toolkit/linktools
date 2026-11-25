@@ -6,14 +6,14 @@ from __future__ import annotations
 import secrets
 from collections.abc import Mapping, Sequence, Callable, Awaitable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 from pydantic import BaseModel
 from linktools.core import environ
 from ..agent import AgentBinding, AgentBindingContract, AgentCompiler, CompiledAgent, OutputBinding, bind_output
 from ..session import SessionContext, normalize_session_context
 from ..capability import MemoryCapability
 from ._capabilities import runtime_feature_leaves
-from ..core import (BudgetUsage, OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
+from ..core import (BudgetUsage, OperationLedgerInput, OperationLedgerRecord, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
                     normalize_thinking, overlay_correlation, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
 from ..execution import (ExecutionHandle, Execution, ExecutionInputContext, ExecutionRequest,
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from ._execution import DefaultExecutionService
     from ..execution import ExecutionRecord
     from ..session import SessionService
-    from ..task import TaskNodeInvocation
+    from ..task import TaskGraphAdmission, TaskNodeInvocation
     from ..inputs import InputCaptures
     from ..persistence import Persistence
 
@@ -125,6 +125,37 @@ class AgentExecutionPort(Generic[AppT]):
 
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
         return self._service.runtime_backend().owns_execution(execution_id, tenant_id=tenant_id)
+
+    async def settle_bound_graph_cancel(
+        self, execution_id: str, *, node_id: str, operation: OperationLedgerRecord, principal: Principal,
+    ) -> bool:
+        self._operations.ensure_open()
+        return await self._service.settle_bound_graph_cancel(
+            execution_id, node_id=node_id, operation=operation, principal=principal,
+        )
+
+    async def is_linked_graph_turn(self, execution_id: str, *, principal: Principal) -> bool:
+        self._operations.ensure_open()
+        return await self._service.is_linked_graph_turn(execution_id, principal=principal)
+
+    async def recover_bound_graph_turn(
+        self, execution_id: str, *, task_invocation: TaskNodeInvocation,
+        recovery_operation: OperationLedgerRecord, principal: Principal,
+    ) -> bool:
+        self._operations.ensure_open()
+        return await self._service.recover_bound_graph_turn(
+            execution_id, task_invocation=task_invocation, recovery_operation=recovery_operation, principal=principal,
+        )
+
+    async def reconcile_bound_graph_handoff(self, execution_id: str, *, principal: Principal) -> None:
+        self._operations.ensure_open()
+        await self._service.reconcile_bound_graph_handoff(execution_id, principal=principal)
+
+    async def resume_bound_graph_turn(
+        self, execution_id: str, *, task_invocation: TaskNodeInvocation,
+    ) -> Literal["resumed", "waiting"] | None:
+        self._operations.ensure_open()
+        return await self._service.resume_bound_graph_turn(execution_id, task_invocation=task_invocation)
 
     async def recover_bound_execution(
         self, execution: ExecutionRecord, *, recovery_operation: OperationLedgerInput,
@@ -282,6 +313,8 @@ class AgentExecutionPort(Generic[AppT]):
         tool_effects: ToolEffects = "live",
         session_context: SessionContext = "all",
         _resume: Callable[..., Awaitable[ExecutionHandle]] | None = None,
+        task_invocation: TaskNodeInvocation | None = None,
+        task_admission: TaskGraphAdmission | None = None,
     ) -> "Execution[AppT]":
         self._operations.ensure_open()
         normalize_session_context(session_context)
@@ -331,31 +364,44 @@ class AgentExecutionPort(Generic[AppT]):
                 resolved_binding=binding,
             )
         else:
-            resume_request = ResumeSessionRequest(
-                principal=resolved_principal,
-                user_prompt=request.user_prompt,
-                idempotency_key=request.idempotency_key,
-                memory_scope=request.memory_scope,
-                mode=request.mode,
-                planning=request.planning,
-                thinking=request.thinking,
-                correlation=effective_correlation,
-                files=request.files,
-                budget=request.budget,
-                tool_effects=request.tool_effects,
-                session_context=request.session_context,
-            )
-            handle = await (_resume or self._sessions.resume)(
-                compiled_agent.spec.id,
-                binding.binding_digest,
-                session_id,
-                resume_request,
-                binding_contract=binding.binding_contract,
-                resolved_binding=binding,
-                dependency_hold_id=dependency_hold_id,
-                budget_scope_id=budget_scope_id,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-            )
+            handle = None
+            if task_invocation is not None and task_admission is not None:
+                handle = await self._service.start_task_session(
+                    binding.binding_digest,
+                    request,
+                    session_id=session_id,
+                    task_invocation=task_invocation,
+                    task_admission=task_admission,
+                    dependency_hold_id=dependency_hold_id,
+                    resolved_binding=binding,
+                    budget_scope_id=budget_scope_id,
+                )
+            if handle is None:
+                resume_request = ResumeSessionRequest(
+                    principal=resolved_principal,
+                    user_prompt=request.user_prompt,
+                    idempotency_key=request.idempotency_key,
+                    memory_scope=request.memory_scope,
+                    mode=request.mode,
+                    planning=request.planning,
+                    thinking=request.thinking,
+                    correlation=effective_correlation,
+                    files=request.files,
+                    budget=request.budget,
+                    tool_effects=request.tool_effects,
+                    session_context=request.session_context,
+                )
+                handle = await (_resume or self._sessions.resume)(
+                    compiled_agent.spec.id,
+                    binding.binding_digest,
+                    session_id,
+                    resume_request,
+                    binding_contract=binding.binding_contract,
+                    resolved_binding=binding,
+                    dependency_hold_id=dependency_hold_id,
+                    budget_scope_id=budget_scope_id,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s "
             "mode=%s planning=%s thinking=%s",
@@ -370,6 +416,7 @@ class AgentExecutionPort(Generic[AppT]):
             handle.execution_id,
             resolved_principal,
             self.watch_tree,
+            task_invocation_captured=handle.task_invocation_captured,
         )
 
 

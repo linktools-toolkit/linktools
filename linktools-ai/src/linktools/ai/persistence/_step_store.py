@@ -1729,11 +1729,10 @@ class SqlStepStore:
                 if len(cache) > self._max_cached_messages:
                     cache.popitem(last=False)
 
-    async def capture_turn_checkpoint(
+    async def _capture_turn_checkpoint_row(
         self, session: "AsyncSession", *, run_id: str, conversation_id: str,
-        replay_key: str | None = None,
-    ) -> Callable[[], Awaitable[ContinuableSnapshot]] | None:
-        """Capture the exact retained checkpoint in the turn owner's transaction."""
+        replay_key: str | None,
+    ):
         from sqlalchemy import false, select
 
         table = self._table("snapshots")
@@ -1751,6 +1750,56 @@ class SqlStepStore:
             sequence = self.snapshot_message_sequence(row)
         except ValueError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return row, sequence
+
+    async def _require_same_native_message_occurrences(
+        self, transaction: SqlStateRowReader, left: NativeMessageRoot, right: NativeMessageRoot,
+    ) -> None:
+        """Prove the same scoped ordered content without selecting message bodies."""
+        self._message_content.validate_root(left)
+        self._message_content.validate_root(right)
+        if left.count != right.count or (left.group_id, left.store_key) != (right.group_id, right.store_key):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if left == right:
+            return
+        roots = (left, right)
+        try:
+            query = self._message_content.range_query(roots, _identities_only=True)
+            if query is None:
+                raise ValueError("native occurrence roots are missing")
+            rows = await transaction.read_sql_rows(self._context, query.statement)
+            expected, actual = await self._message_content.hydrate_ranges(roots, rows, _identities_only=True)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if expected != actual:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+    async def _capture_complete_turn_checkpoint_root(
+        self, session: "AsyncSession", *, run_id: str, conversation_id: str, replay_key: str,
+    ) -> NativeMessageRoot:
+        """Read the already-published exact official Step snapshot root only."""
+        selected = await self._capture_turn_checkpoint_row(
+            session, run_id=run_id, conversation_id=conversation_id, replay_key=replay_key,
+        )
+        if selected is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        row, sequence = selected
+        if row["state"] != "complete" or not sequence.count:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return self.message_root(sequence)
+
+    async def capture_turn_checkpoint(
+        self, session: "AsyncSession", *, run_id: str, conversation_id: str,
+        replay_key: str | None = None,
+        source: Callable[[NativeMessageRoot, str, int], None] | None = None,
+    ) -> Callable[[], Awaitable[ContinuableSnapshot]] | None:
+        """Capture the exact retained checkpoint in the turn owner's transaction."""
+        selected = await self._capture_turn_checkpoint_row(
+            session, run_id=run_id, conversation_id=conversation_id, replay_key=replay_key,
+        )
+        if selected is None:
+            return None
+        row, sequence = selected
         query = self._message_content.range_query((sequence,))
         rows = () if query is None else (await session.execute(query.statement)).mappings().all()
 
@@ -1766,6 +1815,8 @@ class SqlStepStore:
             integrity = hashlib.sha256(raw).hexdigest(), len(raw)
             self._remember_message_proof(self._message_content.adopt_read(readback), integrity=integrity)
             self._seed_snapshot_baseline(run_id, readback.root, integrity)
+            if source is not None:
+                source(self.message_root(readback.root), *integrity)
             return snapshot
 
         return hydrate

@@ -32,6 +32,7 @@ from ..capability import (
     tool_class_from_metadata,
 )
 from ._lifecycle import _RuntimeCloseCoordinator
+from ._native_session import _NativeTurnRead
 from ._feature_policy import _RuntimeFeaturePolicy, _runtime_feature_policy
 from ._features import (
     RuntimeFeatures,
@@ -40,10 +41,15 @@ from ._features import (
 )
 from ..core import (
     CommitPolicy,
+    ExecutionStatus,
     AuthorizationAction,
     AuthorizationPolicy,
     HmacCursorSigner,
     PromptLimits,
+    Principal,
+    ResourceKind,
+    ResourceRef,
+    agent_conversation_id,
     TenantAuthorizationPolicy,
 )
 from ..errors import AIError, ErrorCode
@@ -73,7 +79,7 @@ from ..execution.coordinator import ExecutionStreamCoordinator
 from ..execution.events import DefaultEventService, LiveExecutionEventBroker
 from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
-from ..execution import ExecutionRecord
+from ..execution import CancelExecutionRequest, ExecutionRecord
 from ..execution.stream import SharedStreamPublisher
 from ..execution.tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ..history import StepExecutionHistoryReader, StepSessionHistoryReader
@@ -130,6 +136,7 @@ class _RuntimeComponents:
     metric_control: MetricsService | None
     binding_resolver: _AgentBindingResolver
     history: object
+    native_turn_read: _NativeTurnRead | None
     input_captures: InputCaptures
     memory_scope: str | None
     asset_sources: Mapping[str, AssetStoreReader]
@@ -208,6 +215,7 @@ async def compose_runtime_components(
     auto_recover: bool = False,
     authorization: AuthorizationPolicy | None = None,
     lifecycle: "_AgentLifecycle | None" = None,
+    wake_graph: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> _RuntimeComponents:
     """Open host resources and resolve declarations when they are used."""
     if not isinstance(persistence, Persistence) or not persistence.ready:
@@ -452,6 +460,7 @@ async def compose_runtime_components(
             session_execution_ready=session_capability.enabled,
             auto_recover=auto_recover,
             tool_responses=tool_responses,
+            wake_graph=wake_graph,
         )
         _logger.info("runtime feature source opened: group=%s", None if captured is None else captured.group_id)
         return components
@@ -615,6 +624,7 @@ async def _build_local_components(
     session_execution_ready: bool,
     auto_recover: bool,
     tool_responses: ToolResponseFixture | None,
+    wake_graph: Callable[[str, str], Awaitable[None]] | None,
 ) -> _RuntimeComponents:
     metric_buffer: MetricsService | None = None
     metric_source_namespace: str | None = None
@@ -1024,6 +1034,121 @@ async def _build_local_components(
                 turn_runner._trace_archive = trace_archive
 
             bind_deferred_publication(turn_runner, state.session_turns, state.checkpoint)
+
+            async def start_attached_graph(
+                request, reservation, session_id, session_row, task_admission, task_invocation, dependency_hold_id,
+            ):
+                from ..persistence._task_repository import TaskRepositoryImpl
+
+                task_repository = state.task.tasks
+                if type(task_repository) is not TaskRepositoryImpl:
+                    raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+                return await backend._start_attached_graph(
+                    request, reservation, session_id=session_id, session_row=session_row, runner=turn_runner,
+                    authorization=authorization, task_repository=task_repository,
+                    task_admission=task_admission, task_invocation=task_invocation,
+                    dependency_hold_id=dependency_hold_id, record_task_invocation=input_captures.record_invocation,
+                )
+
+            execution._start_attached_graph = start_attached_graph
+
+            async def cancel_graph_turn(key, principal: Principal) -> bool:
+                result = await execution.cancel(
+                    key.turn_id, CancelExecutionRequest(principal, secrets.token_hex(16)),
+                )
+                return result.cancelled
+
+            turn_runner._cancel_graph_turn = cancel_graph_turn
+        if state.session_turns is not None:
+            async def canonical_graph_session(session_id: str, principal: Principal):
+                await authorization.authorize(
+                    principal, AuthorizationAction.SESSION_READ,
+                    ResourceRef(ResourceKind.SESSION, session_id, tenant_id),
+                )
+                return await state.session_turns.get_session(session_id)
+
+            execution._canonical_graph_session = canonical_graph_session
+
+            async def resolve_graph_cancel_link(record: ExecutionRecord, principal: Principal | None):
+                if not record.requires_task_invocation_capture or record.session_id is not None:
+                    return None
+                linked = await state.session_turns._linked_graph_turn(record.execution_id)
+                if linked is None:
+                    return None
+                key, generation = linked
+                if principal is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                await authorization.authorize(
+                    principal, AuthorizationAction.SESSION_READ,
+                    ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id),
+                )
+                return state.session_turns, key, generation
+
+            backend._resolve_graph_cancel_link = resolve_graph_cancel_link
+
+            async def has_graph_execution_link(execution_id: str) -> bool:
+                return await state.session_turns._linked_graph_turn(execution_id) is not None
+
+            backend._has_graph_execution_link = has_graph_execution_link
+
+            async def is_linked_graph_turn(record: ExecutionRecord, principal: Principal) -> bool:
+                return await resolve_graph_cancel_link(record, principal) is not None
+
+            execution._is_linked_graph_turn = is_linked_graph_turn
+
+            async def settle_cold_graph_cancel(record, node_id, operation, principal) -> bool:
+                from ..persistence._task_repository import TaskRepositoryImpl
+
+                linked = await resolve_graph_cancel_link(record, principal)
+                if linked is None:
+                    return False
+                turns, key, generation = linked
+                if record.status is ExecutionStatus.CANCELLED:
+                    return True
+                if record.status is not ExecutionStatus.CANCELLING or backend.worker_installed(record.execution_id):
+                    return False
+                turn = await turns.get_turn(key)
+                if turn is None or turn["generation"] != generation or turn["state"] != "cancelling":
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                task_repository = state.task.tasks
+                if type(task_repository) is not TaskRepositoryImpl:
+                    raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+                finished = await backend._settle_cold_graph_cancel(
+                    record, turns=turns, key=key, generation=generation, turn_no=turn["turn_no"],
+                    task_repository=task_repository, node_id=node_id, operation=operation,
+                )
+                if finished.status is not ExecutionStatus.CANCELLED:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                if turn_runner is not None:
+                    turn_runner._gap(key)
+                    session_row = await turns.get_session(key.session_id)
+                    if session_row is not None:
+                        turn_runner._notice_lifecycle(key, "terminal", session_row["revision"])
+                return True
+
+            execution._settle_cold_graph_cancel = settle_cold_graph_cancel
+
+            async def recover_undispatched_graph_turn(record, invocation, operation, principal) -> bool:
+                from ..persistence._task_repository import TaskRepositoryImpl
+
+                linked = await resolve_graph_cancel_link(record, principal)
+                if linked is None:
+                    return False
+                if turn_runner is None:
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                task_repository = state.task.tasks
+                if type(task_repository) is not TaskRepositoryImpl:
+                    raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+                handle = await backend._recover_undispatched_attached_graph(
+                    record, runner=turn_runner, authorization=authorization, task_repository=task_repository,
+                    task_invocation=invocation, recovery_operation=operation,
+                    record_task_invocation=input_captures.record_invocation,
+                )
+                if handle is None or handle.execution_id != record.execution_id:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                return True
+
+            execution._recover_undispatched_graph_turn = recover_undispatched_graph_turn
         session = RuntimeSessionService(
             state.conversation,
             state.execution.executions,
@@ -1063,6 +1188,88 @@ async def _build_local_components(
             prepare_pending_capture=prepare_pending_capture,
         )
         backend.bind_recovery_relaunch_guard(TaskRecoveryGuard(state, input_captures))
+        if state.session_turns is not None:
+            def graph_wait_proof(record, turns, key, generation, turn, lease):
+                from ..persistence._runtime_commands import _GraphDeferredWait
+                from ..persistence._step_store import SqlStepStore
+                from ..persistence._task_repository import TaskRepositoryImpl
+                from ._regenerable_turn import _TURN_BYTES
+
+                task_repository, step_store = state.task.tasks, run_store.step_store
+                if type(task_repository) is not TaskRepositoryImpl or type(step_store) is not SqlStepStore:
+                    raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+                return _GraphDeferredWait(
+                    turns, key, generation, step_store,
+                    agent_conversation_id(namespace=namespace, tenant_id=tenant_id, execution_id=record.execution_id),
+                    turn["result_json"]["checkpoint_id"], task_repository, lease, _TURN_BYTES,
+                )
+
+            async def queue_deferred_graph(record: ExecutionRecord) -> bool:
+                from ..task import TaskStatus
+
+                if not record.requires_task_invocation_capture or record.session_id is not None:
+                    return False
+                turns = state.session_turns
+                link = await turns._linked_graph_turn(record.execution_id)
+                if link is None:
+                    return False
+                key, generation = link
+                turn = await turns.get_turn(key)
+                if turn is None or turn["generation"] != generation:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if turn["state"] not in {"waiting", "ready"}:
+                    return True
+                principal = Principal(record.principal_id, tenant_id, record.principal_kind)
+                captured = await input_captures.read_invocation_node(record.execution_id, principal=principal)
+                if captured is None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                graph_id, node = captured
+                if turn["state"] == "ready":
+                    if wake_graph is not None:
+                        await wake_graph(graph_id, tenant_id)
+                    return True
+                proof = graph_wait_proof(record, turns, key, generation, turn, None)
+                node_states = await proof.task_repository.get_node_states(graph_id, (node.node_id,), tenant_id=tenant_id)
+                if len(node_states) != 1 or node_states[0].execution_id != record.execution_id:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                task = node_states[0]
+                if task.status is not TaskStatus.WAITING:
+                    return True
+                queued = await backend._runtime_commands._mark_canonical_graph_deferred_ready(
+                    record, graph=proof, _queued_task=(graph_id, node.node_id, task.fence),
+                )
+                if queued and wake_graph is not None:
+                    await wake_graph(graph_id, tenant_id)
+                return True
+
+            backend._queue_deferred_graph = execution._queue_deferred_graph = queue_deferred_graph
+            if turn_runner is not None:
+                async def resume_bound_graph_turn(record, invocation):
+                    if record.status is not ExecutionStatus.WAITING_DEFERRED:
+                        return None
+                    linked = await resolve_graph_cancel_link(record, invocation.principal)
+                    if linked is None:
+                        return None
+                    turns, key, generation = linked
+                    turn = await turns.get_turn(key)
+                    if turn is None or turn["generation"] != generation:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    if turn["state"] == "waiting":
+                        return "waiting"
+                    if turn["state"] != "ready":
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    if invocation.task_lease is None:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    proof = graph_wait_proof(record, turns, key, generation, turn, invocation.task_lease)
+                    handle = await backend._resume_ready_attached_graph(
+                        record, runner=turn_runner, authorization=authorization, graph=proof,
+                        task_invocation=invocation, recovery_operation=None,
+                    )
+                    if handle is None or handle.execution_id != record.execution_id:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    return "resumed"
+
+                execution._resume_bound_graph_turn = resume_bound_graph_turn
         session_deferred = None
         if turn_runner is not None:
             from ._canonical_deferred_resume import canonical_deferred_commands
@@ -1117,10 +1324,17 @@ async def _build_local_components(
             token_seed=runtime_token_seed,
             cursor_signer=HmacCursorSigner("artifact", runtime_token_seed),
         )
+        native_turn_read: _NativeTurnRead | None = None
+
+        def bind_native_turn_read(read: _NativeTurnRead) -> None:
+            nonlocal native_turn_read
+            native_turn_read = read
+
         history = _borrowed_runtime_history(
             history_service, tenant_id=tenant_id, state=state, run_store=run_store,
             authorization=authorization, artifact=artifact,
             enable_turn_sessions=enable_turn_sessions,
+            bind_native_turn_read=bind_native_turn_read,
             pending_session_execution=(
                 None if pending_observer is None else pending_observer.read_session_execution
             ),
@@ -1171,6 +1385,7 @@ async def _build_local_components(
         metric_control=metric_buffer,
         binding_resolver=binding_resolver,
         history=history,
+        native_turn_read=native_turn_read,
         input_captures=input_captures,
         memory_scope=memory_scope,
         asset_sources=dict(asset_sources),
@@ -1186,6 +1401,7 @@ def _borrowed_runtime_history(
     authorization: object,
     artifact: DefaultArtifactService,
     enable_turn_sessions: bool,
+    bind_native_turn_read: Callable[[_NativeTurnRead], None],
     pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
     pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
 ) -> "History":
@@ -1198,6 +1414,7 @@ def _borrowed_runtime_history(
         sessions=state.conversation.sessions,
         session_turn_reader=state.session_turn_reader if enable_turn_sessions else None,
         session_trace_source=trace_archive if isinstance(trace_archive, StateStepArchive) else None,
+        _bind_runtime_turn_read=bind_native_turn_read,
         conversation=state.conversation,
         session_transcript_store=run_store.conversation_persistence,
         pending_session_execution=pending_session_execution,

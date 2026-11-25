@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar
 from ._record_query import ExecutionRecoveryCandidateQuery
-from ._message_root import NativeTextReference, NativeMessageRoot
+from ._message_root import NativeTextReference, NativeMessageRoot, NativeUserInputReference
 from linktools.core import environ
 from ..core import (
     ExecutionEventType,
@@ -1171,15 +1171,20 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return await self._reserve_start(reservation, input_context_write=input_context_write, authority=authority)
 
     async def reserve_started(
-        self, reservation: ExecutionStartReservation, *, authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
+        self, reservation: ExecutionStartReservation, *,
+        authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
+        _admitted_input_source: NativeUserInputReference | None = None,
     ) -> ExecutionStartReservationResult:
         """Insert a new admitted owner once inside the caller's group transaction."""
-        return await self._reserve_start(reservation, started=True, authority=authority)
+        return await self._reserve_start(
+            reservation, started=True, authority=authority, _admitted_input_source=_admitted_input_source,
+        )
 
     async def _reserve_start(
         self, reservation: ExecutionStartReservation, *, started: bool = False,
         input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
+        _admitted_input_source: NativeUserInputReference | None = None,
     ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
@@ -1267,6 +1272,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 idempotency = replace(idempotency, status=IdempotencyStatus.STARTED, updated_at=now)
             execution_record = await self._stored_content(
                 "execution", (execution.execution_id,), execution, state=execution.status.value,
+                _admitted_input_source=_admitted_input_source,
             )
             idempotency_record = self._idempotency._stored(
                 "idempotency", identity, idempotency, state=idempotency.status.value,

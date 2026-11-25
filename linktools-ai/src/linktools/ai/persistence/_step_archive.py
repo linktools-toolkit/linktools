@@ -158,6 +158,8 @@ class _ProjectionOffset:
     observation_flush_interval: float | None = None
     observation_execution_id: str | None = None
     observation_producer_generation: int | None = None
+    graph_step_source: tuple[int, NativeMessageRoot, MessageSnapshot] | None = None
+    graph_resumed_source: tuple[int, NativeMessageRoot, MessageSnapshot] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1771,6 +1773,7 @@ class StateStepArchive(AgentRunStore):
     async def prepare_captured_projection(
         self, captured: CapturedExecutionProjection, *, baseline: ContextProjection | None,
         confirmed_interactions: Sequence[ModelInteractionRecord] = (),
+        native_alias: tuple[NativeMessageRoot, MessageSnapshot] | None = None,
     ) -> tuple[PreparedAgentRunCheckpointBatch, PreparedTranscriptObservation | None,
                tuple[ModelInteractionRecord, ...], PreparedArchive, ExecutionRunSealHead]:
         """Prepare one projection, sharing only same-owner captured source facts."""
@@ -1778,7 +1781,12 @@ class StateStepArchive(AgentRunStore):
         self._ensure_open()
         run = captured.run
         prepared_archive = PreparedArchive()
-        source = await self._capture_projection_source(captured, prepared_archive)
+        alias_arguments = ({} if native_alias is None else {
+            "native_alias": native_alias, "partial_native_alias": True,
+        })
+        source = await self._capture_projection_source(
+            captured, prepared_archive, **({} if native_alias is None else {"native_alias": native_alias}),
+        )
         records = None if source is None else source[0]
         observation = None
         if captured.transcript is not None:
@@ -1787,7 +1795,7 @@ class StateStepArchive(AgentRunStore):
                     run.agent_run_id, captured.transcript.messages,
                     first_message_index=captured.base_message_index,
                     pending=captured.transcript.pending, pending_keys=captured.transcript.pending_keys,
-                    archive=prepared_archive,
+                    archive=prepared_archive, **alias_arguments,
                 )
             else:
                 load_observation = source[2]
@@ -1825,7 +1833,8 @@ class StateStepArchive(AgentRunStore):
         return all(getattr(getattr(self, method.__name__), "__func__", None) is method for method in methods)
 
     async def _capture_projection_source(
-        self, captured: CapturedExecutionProjection, prepared_archive: PreparedArchive,
+        self, captured: CapturedExecutionProjection, prepared_archive: PreparedArchive, *,
+        native_alias: tuple[NativeMessageRoot, MessageSnapshot] | None = None,
     ) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, int],
                Callable[[], Awaitable[PreparedTranscriptObservation]] | None] | None:
         if (not self._uses_default_preparation(_PROJECTION_DEFAULTS)
@@ -1851,6 +1860,9 @@ class StateStepArchive(AgentRunStore):
                     first_message_index=captured.base_message_index,
                     pending=captured.transcript.pending, pending_keys=captured.transcript.pending_keys,
                     archive=prepared_archive, head_record=records.get(self._history.head_key(owner_id)),
+                    **({} if native_alias is None else {
+                        "native_alias": native_alias, "partial_native_alias": True,
+                    }),
                 )
             return records, counts, observation
 
@@ -1876,12 +1888,16 @@ class StateStepArchive(AgentRunStore):
         return records, await transaction.get_sequences(sequences)
 
     async def capture_terminal_projection_preparations(
-        self, projections: Sequence[ExecutionProjectionBatch],
+        self, projections: Sequence[ExecutionProjectionBatch], *,
+        native_alias: tuple[str, NativeMessageRoot, Sequence[ModelMessage]] | None = None,
     ) -> tuple[Mapping[str, ExecutionRunSealHead], tuple[
         Callable[[AgentRunRecord], Awaitable[tuple[PreparedAgentRunCheckpointBatch,
             PreparedTranscriptObservation | None, PreparedArchive]]], ...]]:
         """Capture a sealed batch's sources, then prepare each run outside the snapshot."""
         owner_ids = tuple(projection.run.agent_run_id for projection in projections)
+        if native_alias is not None and owner_ids.count(native_alias[0]) != 1:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        aliases = {} if native_alias is None else {native_alias[0]: native_alias[1:]}
         archives = tuple(PreparedArchive() for _ in projections)
         records = None
         observations = {}
@@ -1902,6 +1918,7 @@ class StateStepArchive(AgentRunStore):
                             pending=projection.transcript.pending, pending_keys=projection.transcript.pending_keys,
                             archive=archive, head_record=captured_records.get(
                                 self._history.head_key(projection.run.agent_run_id)),
+                            **({} if (alias := aliases.get(projection.run.agent_run_id)) is None else {"native_alias": alias}),
                         )
                 return captured_records, heads
 
@@ -1923,6 +1940,7 @@ class StateStepArchive(AgentRunStore):
                             first_message_index=projection.base_message_index,
                             pending=projection.transcript.pending, pending_keys=projection.transcript.pending_keys,
                             archive=archive,
+                            **({} if (alias := aliases.get(run.agent_run_id)) is None else {"native_alias": alias}),
                         )
                     else:
                         observation = await observations[index]()

@@ -750,6 +750,9 @@ def _encode_v1_task_node_view(
             dict(value.safe_error_details), codec, persisted=persisted
         ),
     }
+    if value.recovery_operation_id is not None:
+        fields["recovery_operation_id"] = _encode_domain(value.recovery_operation_id, codec, persisted=persisted)
+        fields["recovery_actor"] = _encode_domain(value.recovery_actor, codec, persisted=persisted)
     if not persisted:
         fields.update(
             dependencies=_encode_domain(
