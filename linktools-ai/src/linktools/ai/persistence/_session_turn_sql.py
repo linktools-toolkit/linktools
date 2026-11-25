@@ -13,7 +13,7 @@ from weakref import finalize
 
 from ..core import canonical_json_bytes, canonical_sha256, semantic_json_sha256, validate_idempotency_key
 from ..errors import AIError, ErrorCode
-from ..model import ordinary_transcript_size
+from ..model.ordinary_transcript import ordinary_transcript_size
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,

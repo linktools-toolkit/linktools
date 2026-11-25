@@ -14,7 +14,7 @@ from ._ordinary_lineage import decode_session_lineage, fork_segments
 from ._session_turn_sql import SESSION_BINDING_TABLE, SESSION_TABLE, SESSION_TURN_TABLE
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
-from ..model import decode_ordinary_transcript
+from ..model.ordinary_transcript import decode_ordinary_transcript
 from ..storage import ObjectRef
 from .codec import decode_domain
 from .objects import ObjectKeyFactory

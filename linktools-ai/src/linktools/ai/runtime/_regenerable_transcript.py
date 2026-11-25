@@ -15,7 +15,7 @@ from pydantic_ai.messages import (
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ..model import decode_ordinary_transcript, encode_ordinary_transcript
+from ..model.ordinary_transcript import decode_ordinary_transcript, encode_ordinary_transcript
 
 
 def encode_regenerable_turn(

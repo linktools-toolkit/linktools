@@ -24,6 +24,7 @@ from ._archive_closure import (
     ArchiveClosure, NativeMessageClosure, iter_archive_content_refs, iter_archive_roots,
     iter_native_message_roots, require_known_retention, validate_native_message_content,
 )
+from ._object_key import ObjectKeyFactory
 from ._payload import decode_payload_bytes
 from ._tool_operation_content import expand_tool_content, expand_native_tool_content
 from ._native_tool_result import restore_native_tool_result_payload
@@ -184,7 +185,6 @@ async def _ordinary_input_object_keys(
     from ..execution import StoredUserInput
     from ._session_turn_sql import SESSION_TURN_TABLE
     from .codec import decode_domain
-    from .objects import ObjectKeyFactory
     from .state import state_store_key
 
     columns = store.storage_group.metadata.tables[SESSION_TURN_TABLE].c
@@ -350,8 +350,6 @@ async def _purge_unreferenced_objects(
     foreign_ordinary_candidates: set[str] = set()
     conversation = stores.get(PersistenceDomain.CONVERSATION)
     if isinstance(conversation, SqlStateStore):
-        from .objects import ObjectKeyFactory
-
         object_keys = ObjectKeyFactory(namespace)
         local_ordinary_candidates: set[str] = set()
         for domain, reference in selected:

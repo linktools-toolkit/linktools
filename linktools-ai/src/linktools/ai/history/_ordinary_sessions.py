@@ -19,7 +19,7 @@ from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import StoredUserInput
 from ..persistence.codec import decode_domain
-from ..model import decode_ordinary_transcript
+from ..model.ordinary_transcript import decode_ordinary_transcript
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
 from ._session_timeline import _project_turn_tool_process, _timeline_items
 
