@@ -5,15 +5,17 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from threading import RLock
 from typing import TYPE_CHECKING, Literal
 from weakref import finalize
 
 from ..core import canonical_json_bytes, canonical_sha256, semantic_json_sha256, validate_idempotency_key
 from ..errors import AIError, ErrorCode
-from ..model.ordinary_transcript import ordinary_transcript_size
+from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
+
+from ..model.messages import decode_model_messages, encode_model_messages
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
@@ -29,7 +31,8 @@ from ._turn_sql_schema import (
     TURN_REQUEST_MAX_BYTES,
     TURN_SESSION_MAX_BYTES,
 )
-from .state import state_store_key
+from ._message_root import NativeMessageRoot
+from .state import SqlStateRowReader, state_store_key
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData, RowMapping
@@ -67,11 +70,9 @@ def _release_context_budget(budget: _ContextBudget) -> None:
 class SessionContextTurn:
     turn_no: int
     request: JsonValue
-    result: JsonValue
+    messages: tuple[ModelMessage, ...]
     size: int
     transcript_bytes: int
-    instructions: list[str] | None
-    system_prompt: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,9 +160,124 @@ class SqlSessionTurnReader:
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
         self._bindings = metadata.tables[SESSION_BINDING_TABLE]
+        self._transcript_source = None
         self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
         self._recent_budget = _ContextBudget()
         self._recent_finalizer = finalize(self, _release_context_budget, self._recent_budget)
+
+    def bind_transcript_reader(self, conversation_store, archive_provider, capture) -> None:
+        """Bind native transcript reads to the same SQL snapshot as turn metadata."""
+        self._transcript_source = conversation_store, archive_provider, capture
+
+    async def _read_transcripts(self, statement, *, display: bool, body_limit: int | None = None) -> tuple[Mapping[str, object], ...]:
+        if self._transcript_source is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        turn_store, archive_provider, capture = self._transcript_source
+        group = turn_store.storage_group
+        opened_archive = group.opened_archive or await group.open_archive(create=False)
+        archive_store = None if opened_archive is None else (await archive_provider()).store
+        if archive_store is not None and archive_store.storage_group is not group:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def read(group):
+            owner = group.transaction(turn_store)
+            if not isinstance(owner, SqlStateRowReader):
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            rows = await owner.read_sql_rows(self._context, statement)
+            manifests = [
+                self._transcript_manifest(row["result_json"])
+                for row in rows[:body_limit] if row["state"] == "succeeded"
+            ]
+            if not manifests:
+                return rows, manifests, None
+            if archive_store is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            archive = group.transaction(archive_store)
+            if not isinstance(archive, SqlStateRowReader):
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            load = await capture(tuple(root for root, _ in manifests), transaction=archive)
+            return rows, manifests, load
+
+        members = (turn_store, archive_store) if archive_store not in (None, turn_store) else (turn_store,)
+        rows, manifests, load = await group.read_many(members, read)
+        loaded = iter(zip(manifests, () if load is None else await load(), strict=True))
+        projected = []
+        for position, row in enumerate(rows):
+            if row["state"] != "succeeded" or (body_limit is not None and position >= body_limit):
+                projected.append(row)
+                continue
+            try:
+                (root, refs), encoded = next(loaded)
+            except (StopIteration, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if len(encoded) != root.count:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            messages = []
+            for body in encoded:
+                parts = decode_model_messages(body)
+                if len(parts) != 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                messages.append(parts[0])
+            if not display:
+                self._restore_binding_refs(messages, refs, row["instructions"], row["system_prompt"])
+            projected.append({**row, "messages": tuple(messages)})
+        try:
+            next(loaded, None)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return tuple(projected)
+
+    @staticmethod
+    def _transcript_manifest(result) -> tuple[NativeMessageRoot, tuple[tuple[int, int | None], ...]]:
+        try:
+            if not isinstance(result, Mapping) or result.keys() != {"transcript", "binding_refs"}:
+                raise ValueError("invalid session transcript manifest")
+            root = NativeMessageRoot.from_json(result["transcript"])
+            refs = result["binding_refs"]
+            if not root.count or not isinstance(refs, list):
+                raise ValueError("invalid session transcript range")
+            seen = set()
+            parsed = []
+            for ref in refs:
+                if (not isinstance(ref, list) or len(ref) != 2 or type(ref[0]) is not int
+                        or not 0 <= ref[0] < root.count
+                        or (ref[1] is not None and (type(ref[1]) is not int or ref[1] < 0))):
+                    raise ValueError("invalid session transcript binding reference")
+                item = tuple(ref)
+                if item in seen:
+                    raise ValueError("duplicate session transcript binding reference")
+                seen.add(item)
+                parsed.append(item)
+            return root, tuple(parsed)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    @staticmethod
+    def _restore_binding_refs(messages, refs, instructions, system_prompt) -> None:
+        static_instructions = None
+        for position, part_index in refs:
+            current = messages[position]
+            if not isinstance(current, ModelRequest):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if part_index is None:
+                if current.instructions is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if static_instructions is None:
+                    if not isinstance(instructions, list) or not all(isinstance(line, str) for line in instructions):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    static_instructions = "\n".join(instructions)
+                    if not static_instructions:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                messages[position] = replace(current, instructions=static_instructions)
+                continue
+            if part_index >= len(current.parts) or not isinstance(system_prompt, str) or not system_prompt:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            part = current.parts[part_index]
+            if not isinstance(part, SystemPromptPart) or part.content != "" or part.dynamic_ref is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            parts = list(current.parts)
+            parts[part_index] = replace(part, content=system_prompt)
+            messages[position] = replace(current, parts=parts)
 
     @staticmethod
     def _key(value: str, size: int) -> bytes:
@@ -212,7 +328,7 @@ class SqlSessionTurnReader:
 
     async def get_history_turn(
         self, key: SessionTurnKey, *, lineage: tuple[SessionTurnSegment, ...],
-    ) -> RowMapping | None:
+    ) -> Mapping[str, object] | None:
         from sqlalchemy import and_, or_
 
         columns = self._turns.c
@@ -229,8 +345,8 @@ class SqlSessionTurnReader:
             columns.turn_id == self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES),
             scope,
         )
-        async with self._context.engine.connect() as connection:
-            return (await connection.execute(statement)).mappings().one_or_none()
+        rows = await self._read_transcripts(statement, display=True)
+        return rows[0] if rows else None
 
     async def find_request(self, session_id: str, request_key: str) -> RowMapping | None:
         from sqlalchemy import select
@@ -263,7 +379,8 @@ class SqlSessionTurnReader:
     async def turn_page(
         self, session_id: str, *, through: int, limit: int,
         lineage: tuple[SessionTurnSegment, ...] = (),
-    ) -> tuple[RowMapping, ...]:
+        body_limit: int | None = None,
+    ) -> tuple[Mapping[str, object], ...]:
         columns = self._turns.c
         statement = self._history_view_select().where(
             columns.scope_key == self._scope,
@@ -271,8 +388,7 @@ class SqlSessionTurnReader:
                               after=0, through=through),
             columns.state.in_(("succeeded", "failed", "cancelled")),
         ).order_by(columns.turn_no.desc()).limit(limit)
-        async with self._context.engine.connect() as connection:
-            return tuple((await connection.execute(statement)).mappings())
+        return await self._read_transcripts(statement, display=True, body_limit=body_limit)
 
     async def recent_context(
         self, session_id: str, *, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
@@ -315,44 +431,40 @@ class SqlSessionTurnReader:
         stored_input = type_coerce(
             case((succeeded, columns.request_json["input"])), columns.request_json.type,
         ).label("stored_input")
-        needs_instructions = columns.result_json["instructions_from_binding"].as_boolean().is_(True)
-        needs_system_prompt = columns.result_json["system_prompt_from_binding"].as_boolean().is_(True)
+        has_refs = columns.result_json["binding_refs"][0].as_string().is_not(None)
         binding_json = self._bindings.c.binding_json
         instructions = type_coerce(case((
-            needs_instructions, binding_json[("agent_spec", "instructions")],
+            has_refs, binding_json[("agent_spec", "instructions")],
         )), binding_json.type).label("instructions")
         system_prompt = case((
-            needs_system_prompt, binding_json[("agent_spec", "system_prompt")].as_string(),
+            has_refs, binding_json[("agent_spec", "system_prompt")].as_string(),
         )).label("system_prompt")
         statement = select(
             columns.turn_no, columns.state, prompt, stored_input, result, instructions, system_prompt,
-        ).select_from(self._bound_turns(extra=succeeded & (needs_instructions | needs_system_prompt))).where(
+        ).select_from(self._bound_turns(extra=succeeded & has_refs)).where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
                               after=after, through=through),
             columns.state.in_(("succeeded", "failed", "cancelled")),
         ).order_by(columns.turn_no).limit(_CONTEXT_POSITIONS)
-        async with self._context.engine.connect() as connection:
-            rows = (await connection.execute(statement)).mappings().all()
+        rows = await self._read_transcripts(statement, display=False)
         if len(rows) != through - after:
             raise AIError(missing, "The finalized session context range is incomplete")
         return tuple(
             self._context_turn(
-                row["turn_no"], row["prompt"], row["stored_input"], row["result_json"],
-                instructions=row["instructions"], system_prompt=row["system_prompt"],
+                row["turn_no"], row["prompt"], row["stored_input"], row["messages"],
             )
             for row in rows if row["state"] == "succeeded"
         )
 
     @staticmethod
     def _context_turn(
-        turn_no: int, prompt: str, stored_input: JsonValue, result: JsonValue, *,
-        instructions: list[str] | None, system_prompt: str | None,
+        turn_no: int, prompt: str, stored_input: JsonValue, messages: Sequence[ModelMessage],
     ) -> SessionContextTurn:
         request = {"prompt": prompt, **({"input": stored_input} if stored_input is not None else {})}
-        transcript_bytes = ordinary_transcript_size(result, instructions=instructions, system_prompt=system_prompt)
+        transcript_bytes = len(encode_model_messages(messages))
         size = max(1024, len(canonical_json_bytes(request)) + transcript_bytes)
-        return SessionContextTurn(turn_no, request, result, size, transcript_bytes, instructions, system_prompt)
+        return SessionContextTurn(turn_no, request, tuple(messages), size, transcript_bytes)
 
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],
@@ -398,10 +510,15 @@ class SqlSessionTurns(SqlSessionTurnReader):
         super().__init__(context, metadata, namespace=namespace, tenant_id=tenant_id)
         self._now = sql_epoch_seconds()
         self._committed_bindings: OrderedDict[bytes, None] = OrderedDict()
+        self._transcript_write_binding = None
+
+    def bind_transcript_writer(self, store, archive_provider, native) -> None:
+        """Bind the canonical turn to its existing same-group Native body writer."""
+        self._transcript_write_binding = (store, archive_provider, native)
 
     def note_terminal_context(
         self, key: SessionTurnKey, *, turn_no: int, prompt: str | None, stored_input: JsonValue,
-        result: JsonValue, succeeded: bool, instructions: list[str] | None = None, system_prompt: str | None = None,
+        messages: Sequence[ModelMessage], succeeded: bool,
     ) -> None:
         """Advance coverage only over a known committed adjacent position."""
         cached = self._recent.get(key.session_id)
@@ -418,7 +535,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
             if prompt is None:
                 return
             turns += (self._context_turn(
-                turn_no, prompt, stored_input, result, instructions=instructions, system_prompt=system_prompt,
+                turn_no, prompt, stored_input, messages,
             ),)
         self._remember_context(key.session_id, after=after, through=turn_no, turns=turns)
 
@@ -539,7 +656,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
         return accepted
 
     async def finish(
-        self, key: SessionTurnKey, *, generation: int, turn_no: int, state: TerminalState, result: JsonValue,
+        self, key: SessionTurnKey, *, generation: int, turn_no: int, state: TerminalState,
+        result: JsonValue = None, transcript: "Sequence[ModelMessage] | None" = None,
+        binding_refs: tuple[tuple[int, int | None], ...] = (),
     ) -> bool:
         """Finalize and release using the same lock order as acceptance."""
         class FenceLost(Exception):
@@ -548,6 +667,23 @@ class SqlSessionTurns(SqlSessionTurnReader):
         if state not in ("succeeded", "failed", "cancelled"):
             raise ValueError("invalid terminal state")
         turn_key = self._turn_values(key)
+        if state == "succeeded":
+            from ._archive import PreparedArchive
+
+            if result is not None or not transcript:
+                raise ValueError("a successful session turn requires only its typed transcript")
+            if self._transcript_write_binding is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            store, archive_provider, native = self._transcript_write_binding
+            archive = await archive_provider(create=True)
+            group = store.storage_group
+            if archive.store.storage_group is not group:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            prepared = PreparedArchive()
+            root = await native.prepare_archived_messages(transcript, prepared)
+            result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
+        elif transcript is not None or binding_refs:
+            raise ValueError("an unsuccessful session turn cannot publish a transcript")
 
         async def write(connection: AsyncSession) -> bool:
             released = await connection.execute(self._sessions.update().filter_by(
@@ -566,7 +702,27 @@ class SqlSessionTurns(SqlSessionTurnReader):
             return True
 
         try:
-            return await self._context.run_mutation(write, domain="session.finish")
+            if state != "succeeded":
+                return await self._context.run_mutation(write, domain="session.finish")
+
+            async def publish(transaction) -> bool:
+                from ._native_content_index import stage_owner
+
+                async def write_owner(session: AsyncSession) -> bool:
+                    if not await write(session):
+                        return False
+                    stage_owner(
+                        session, SESSION_TURN_TABLE, self._scope,
+                        (turn_key["session_key"], turn_key["turn_id"]), root,
+                    )
+                    return True
+
+                if not await transaction.transaction(store).run_sql(self._context, write_owner):
+                    return False
+                await archive.publish(transaction.transaction(archive.store), prepared)
+                return True
+
+            return await group.mutate(tuple(dict.fromkeys((store, archive.store))), publish)
         except FenceLost:
             return False
 

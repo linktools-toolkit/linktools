@@ -62,13 +62,13 @@ async def _claim(execution, conversation, *, split, execution_id, owner_id, toke
 
 
 async def _read(execution, *, split, route, identity):
-    return await execution.read(lambda tx: tx._read_native_execution_receipt(
+    return await execution.read(lambda _: execution._turn_transaction()._read_native_execution_receipt(
         _SCOPE, route=route, identity=identity, split=split,
     ))
 
 
 async def _confirm(execution, *, split, execution_id, receipt, kind="claim"):
-    return await execution.read(lambda tx: tx._confirm_native_execution_receipt(
+    return await execution.read(lambda _: execution._turn_transaction()._confirm_native_execution_receipt(
         _SCOPE, execution_id=execution_id, receipt=receipt, kind=kind, split=split,
     ))
 

@@ -9,6 +9,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    SystemPromptPart,
     UserContent,
     UserPromptPart,
 )
@@ -24,16 +25,54 @@ def encode_regenerable_turn(
     instructions: tuple[str, ...] = (), system_prompt: str = "",
 ) -> JsonValue:
     """Keep the message envelope, substituting the admitted prompt only on read."""
+    return encode_ordinary_transcript(
+        _canonical_delta(prompt, history, messages, output),
+        instructions=instructions, system_prompt=system_prompt,
+    )
+
+
+def prepare_native_turn_transcript(
+    prompt: str | Sequence[UserContent], history: Sequence[ModelMessage],
+    messages: Sequence[ModelMessage], output: JsonValue, *,
+    instructions: tuple[str, ...], system_prompt: str,
+) -> tuple[tuple[ModelMessage, ...], tuple[ModelMessage, ...], tuple[tuple[int, int | None], ...]]:
+    """Use typed placeholders so immutable native messages are valid model values."""
+    delta = _canonical_delta(prompt, history, messages, output)
+    static_instructions = "\n".join(instructions)
+    omit_instructions = len(static_instructions.encode("utf-8")) >= 128
+    omit_system = len(system_prompt.encode("utf-8")) >= 128
+    refs: list[tuple[int, int | None]] = []
+    normalized: list[ModelMessage] = []
+    for index, message in enumerate(delta):
+        if isinstance(message, ModelRequest):
+            if omit_instructions and message.instructions == static_instructions:
+                message = replace(message, instructions=None)
+                refs.append((index, None))
+            if omit_system:
+                parts = None
+                for position, part in enumerate(message.parts):
+                    if isinstance(part, SystemPromptPart) and part.dynamic_ref is None and part.content == system_prompt:
+                        if parts is None:
+                            parts = list(message.parts)
+                        parts[position] = replace(part, content="")
+                        refs.append((index, position))
+                if parts is not None:
+                    message = replace(message, parts=parts)
+        normalized.append(message)
+    return delta, tuple(normalized), tuple(refs)
+
+
+def _canonical_delta(
+    prompt: str | Sequence[UserContent], history: Sequence[ModelMessage],
+    messages: Sequence[ModelMessage], output: JsonValue,
+) -> tuple[ModelMessage, ...]:
     prefix = len(history)
     if tuple(messages[:prefix]) != tuple(history):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable run replaced its context")
     suffix = tuple(messages[prefix:])
     if not suffix or reply_from_turn(suffix) != output:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Terminal output cannot be projected from the transcript")
-    return encode_ordinary_transcript(
-        (_substitute_input(suffix[0], prompt, ""), *suffix[1:]),
-        instructions=instructions, system_prompt=system_prompt,
-    )
+    return (_substitute_input(suffix[0], prompt, ""), *suffix[1:])
 
 
 def decode_regenerable_turn(
@@ -41,6 +80,12 @@ def decode_regenerable_turn(
     instructions: list[str] | None = None, system_prompt: str | None = None,
 ) -> tuple[ModelMessage, ...]:
     messages = decode_ordinary_transcript(payload, instructions=instructions, system_prompt=system_prompt)
+    return restore_turn_prompt(prompt, messages)
+
+
+def restore_turn_prompt(
+    prompt: str | Sequence[UserContent], messages: Sequence[ModelMessage],
+) -> tuple[ModelMessage, ...]:
     if not messages:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn messages are missing")
     restored = prompt if isinstance(prompt, str) else list(prompt)

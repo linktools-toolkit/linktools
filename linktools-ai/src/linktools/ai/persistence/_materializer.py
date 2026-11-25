@@ -277,6 +277,15 @@ async def materialize_runtime_storage(
     )
     register_cleanup((run_store.preflight_close, run_store.close))
     await run_store.initialize()
+    if session_turn_reader is not None:
+        transcript = run_store.conversation_persistence.archive.transcript_repository
+        native = transcript._native_messages
+        if native is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "SQL session turns require native message storage")
+        conversation_store = stores[PersistenceDomain.CONVERSATION]
+        session_turn_reader.bind_transcript_reader(conversation_store, transcript.content_archive, native.capture_message_roots)
+        if isinstance(session_turn_reader, SqlSessionTurns):
+            session_turn_reader.bind_transcript_writer(conversation_store, transcript.content_archive, native)
     retention = RuntimeRetentionController(
         conversation=repositories.conversation,
         execution=repositories.execution,

@@ -19,7 +19,6 @@ from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import StoredUserInput
 from ..persistence.codec import decode_domain
-from ..model.ordinary_transcript import decode_ordinary_transcript
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
 from ._session_timeline import _project_turn_tool_process, _timeline_items
 
@@ -59,7 +58,7 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
     items: list[JsonValue] = []
     process: list[JsonValue] = []
     if state == "succeeded":
-        messages = decode_ordinary_transcript(result, display=True)
+        messages = row["messages"]
         if not messages or not isinstance(messages[-1], ModelResponse) or messages[-1].text is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = {"text": messages[-1].text}
@@ -199,7 +198,7 @@ class _OrdinarySessionHistory:
         })
         before = self._cursor_position(cursor, kind, digest)
         through = row["last_turn_no"] if before is None else min(row["last_turn_no"], before - 1)
-        turns = () if through == 0 else await self._store.turn_page(session_id, through=through, limit=limit + 1, lineage=lineage)
+        turns = () if through == 0 else await self._store.turn_page(session_id, through=through, limit=limit + 1, lineage=lineage, body_limit=limit)
         next_cursor = self._next_cursor(turns[limit - 1]["turn_no"], kind, digest) if len(turns) > limit else None
         return {
             "session": _session_view(row),

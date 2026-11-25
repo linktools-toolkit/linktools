@@ -27,7 +27,7 @@ from ..persistence.turns import SessionTurnKey, SessionTurnSegment, decode_sessi
 from ..session import ToolProcessItem, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta
-from ._regenerable_transcript import decode_regenerable_turn, encode_regenerable_turn
+from ._regenerable_transcript import prepare_native_turn_transcript, restore_turn_prompt
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, UserContent
@@ -200,15 +200,13 @@ class _RegenerableTurnRunner:
 
     def _terminal(
         self, turn: _AdmittedTurn, state: str, *, output: JsonValue = None,
-        result: JsonValue = None, error_code: str | None = None,
-        instructions: list[str] | None = None, system_prompt: str | None = None,
+        messages: tuple[ModelMessage, ...] = (), error_code: str | None = None,
         activity: dict[str, JsonValue] | None = None,
     ) -> None:
         succeeded = state == "succeeded"
         self._store.note_terminal_context(
             turn.key, turn_no=turn.number, prompt=turn.prompt if succeeded else None,
-            stored_input=turn.stored_input if succeeded else None, result=result, succeeded=succeeded,
-            instructions=instructions, system_prompt=system_prompt,
+            stored_input=turn.stored_input if succeeded else None, messages=messages, succeeded=succeeded,
         )
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
@@ -502,9 +500,7 @@ class _RegenerableTurnRunner:
                 if remaining < 0:
                     raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
                 restored = await self._restore_prompt(prior["prompt"], prior_input)
-                history.extend(decode_regenerable_turn(
-                    restored, position.result, instructions=position.instructions, system_prompt=position.system_prompt,
-                ))
+                history.extend(restore_turn_prompt(restored, position.messages))
             frozen_binding = row["binding_json"]
             if frozen_binding is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted Agent binding is unavailable")
@@ -761,9 +757,7 @@ class _RegenerableTurnRunner:
             if size > remaining:
                 break
             restored = await self._restore_prompt(candidate_prompt, stored)
-            history.append(decode_regenerable_turn(
-                restored, candidate.result, instructions=candidate.instructions, system_prompt=candidate.system_prompt,
-            ))
+            history.append(restore_turn_prompt(restored, candidate.messages))
             remaining -= size
             context_from = candidate.turn_no
 
@@ -803,7 +797,8 @@ class _RegenerableTurnRunner:
         process: Mapping[str, ToolProcessItem] | None = None,
     ) -> bool:
         """Execute after durable admission and publish only if this producer still owns the turn."""
-        result: JsonValue
+        from ..model.messages import encode_model_messages
+
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
         try:
             outcome = await self._executor.execute_regenerable(
@@ -812,11 +807,14 @@ class _RegenerableTurnRunner:
                 workspace=self._workspace, repository_instructions=turn.repository_instructions,
             )
             frozen_spec = binding.binding_contract.agent_spec
-            result = encode_regenerable_turn(
+            context_messages, transcript, binding_refs = prepare_native_turn_transcript(
                 model_prompt, turn.history, outcome.messages, outcome.output,
                 instructions=frozen_spec.instructions, system_prompt=frozen_spec.system_prompt,
             )
-            if len(canonical_json_bytes(result)) > turn.terminal_bytes:
+            # Charge actual encoded message bytes and binding ref positions.
+            encoded_body = len(encode_model_messages(transcript))
+            encoded_refs = len(canonical_json_bytes([list(item) for item in binding_refs])) if binding_refs else 0
+            if encoded_body + encoded_refs > turn.terminal_bytes:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         except Exception as error:
             code = error.code.value if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR.value
@@ -827,7 +825,8 @@ class _RegenerableTurnRunner:
                 self._terminal(turn, "failed", error_code=code)
             return committed
         committed = await self._store.finish(
-            turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded", result=result,
+            turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded",
+            transcript=transcript, binding_refs=binding_refs,
         )
         if committed:
             activity = None
@@ -843,10 +842,6 @@ class _RegenerableTurnRunner:
                             items.append({"item_kind": "tool_call", "tool_call_id": part.tool_call_id})
                 activity = {"items": items, "process": [asdict(item) for item in process.values()]}
             self._terminal(
-                turn, "succeeded", output=outcome.output, result=result, activity=activity,
-                instructions=list(frozen_spec.instructions)
-                if isinstance(result, dict) and result.get("instructions_from_binding") else None,
-                system_prompt=frozen_spec.system_prompt
-                if isinstance(result, dict) and result.get("system_prompt_from_binding") else None,
+                turn, "succeeded", output=outcome.output, messages=context_messages, activity=activity,
             )
         return committed

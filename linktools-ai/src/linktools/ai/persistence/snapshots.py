@@ -46,7 +46,10 @@ from ._turn_snapshot import (
     strict_session_snapshot_record,
 )
 from ._turn_sql_schema import RUNTIME_TURN_SCOPE
-from ._ordinary_snapshot import capture_ordinary_snapshot, decode_ordinary_snapshot, ordinary_input_object_refs, restore_ordinary_snapshot
+from ._ordinary_snapshot import (
+    capture_ordinary_snapshot, decode_ordinary_snapshot, ordinary_input_object_refs,
+    ordinary_transcript_roots, rekey_ordinary_transcripts, restore_ordinary_snapshot,
+)
 from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
 from ..model.messages import decode_model_message_payloads
@@ -721,6 +724,7 @@ class RuntimeSnapshotOperations:
                         )
                         if captured_ordinary["sessions"] or captured_ordinary["turns"]:
                             ordinary_sessions = captured_ordinary
+                            roots.extend(ordinary_transcript_roots(captured_ordinary))
                     reader = _StateSnapshotReader(store,
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
                                           if domain is PersistenceDomain.TRACE else None),
@@ -1171,6 +1175,10 @@ async def _export_snapshot(
             for row in raw[name]:
                 accept(row)
         native_checkpoints.append({"group_id": group_id, **raw})
+    if source.ordinary_sessions is not None:
+        for root in ordinary_transcript_roots(source.ordinary_sessions):
+            _validate_native_partition(root.store_key, source.namespace, source.tenant_id)
+            native_roots.setdefault(root.group_id, []).append(root)
     native_messages = []
     for group_id, roots in native_roots.items():
         owner = (source.native_rows or {}).get(group_id)
@@ -1344,6 +1352,16 @@ async def restore_snapshot(
                  "messages": [decode_native_message_row(row) for row in entry["messages"]]}
         native_closures[entry["group_id"]] = NativeMessageClosure(entry["sequences"])
         native_entries[entry["group_id"]] = entry
+    ordinary_roots = tuple(ordinary_transcript_roots(ordinary_sessions)) if ordinary_sessions is not None else ()
+    ordinary_group_ids = {root.group_id for root in ordinary_roots}
+    if len(ordinary_group_ids) > 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    for root in ordinary_roots:
+        _validate_native_partition(root.store_key, namespace, tenant_id)
+        closure = native_closures.get(root.group_id)
+        if closure is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        closure.mark(root.store_key, root.slices)
     raw_checkpoints = manifest.get("native_checkpoints", [])
     if not isinstance(raw_checkpoints, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1433,7 +1451,7 @@ async def restore_snapshot(
             encoded = await _read_content_payload(content, resolve)
             _validate_archive_content(content, encoded)
             native_encoded_payloads[group_id][(row["store_key"], row["sha256"])] = encoded
-            if group_id in native_checkpoints:
+            if group_id in native_checkpoints or group_id in ordinary_group_ids:
                 raw = decode_payload_bytes(encoded, codec=content.compression,
                                            raw_digest=content.raw_digest, raw_size=content.raw_size)
                 decode_model_message_payloads((raw,))
@@ -1764,6 +1782,8 @@ async def restore_snapshot(
                 referenced_scopes.update(scope for scope, _, _ in iter_archive_content_refs(value))
             domain_native_roots = tuple(root for value in reference_values
                                         for root in iter_native_message_roots(value))
+            if domain is PersistenceDomain.CONVERSATION:
+                domain_native_roots += ordinary_roots
             event_groups = {ref.group_id for value in reference_values for ref in iter_native_event_references(value)}
             domain_checkpoints = {key: backup for key, backup in native_checkpoints.items()
                                   if native_entries[key]["domain"] == domain.value or key in event_groups}
@@ -2009,7 +2029,7 @@ async def restore_snapshot(
                 if domain is PersistenceDomain.CONVERSATION and ordinary_sessions is not None:
                     await restore_ordinary_snapshot(
                         store, transaction, namespace=resources.namespace, tenant_id=resources.tenant_id,
-                        rows=ordinary_sessions,
+                        rows=rekey_ordinary_transcripts(ordinary_sessions, native_mapping if native_groups else {}),
                     )
                 if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
                     from ._model_interaction_store import ModelInteractionStateStepArchive

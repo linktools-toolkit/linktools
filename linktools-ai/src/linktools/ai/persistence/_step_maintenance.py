@@ -190,6 +190,15 @@ async def purge_step_content(
 
     locator = native_store_locator(store_key)
 
+    ordinary_ranges = []
+    if group is not None:
+        from ._ordinary_snapshot import scan_ordinary_transcript_roots
+        async for root in scan_ordinary_transcript_roots(group):
+            if root.group_id != group_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if root.store_key == store_key:
+                ordinary_ranges.append(root.slices)
+
     async def mutate(session: "AsyncSession") -> StepContentCleanupResult:
         roots = [] if snapshots is None else (await session.execute(select(
             snapshots.c.store_key, snapshots.c.sequence_root, snapshots.c.messages, snapshots.c.pruned,
@@ -199,6 +208,8 @@ async def purge_step_content(
             sequences.c.left_sha256, sequences.c.right_sha256, sequences.c.next_sha256,
         ).where(sequences.c.store_locator == locator, sequences.c.store_key == store_key))).mappings().all()
         closure = NativeMessageClosure(rows)
+        for ranges in ordinary_ranges:
+            closure.mark(store_key, ranges)
         for snapshot in roots:
             closure.mark_snapshot(snapshot)
         for root in owner_roots:

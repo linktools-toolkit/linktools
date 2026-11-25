@@ -58,8 +58,10 @@ def stage_owner(
     data: object | None, *, state: object = None, inserting: bool = False,
 ) -> None:
     from ._archive_closure import iter_native_message_roots
+    from ._message_root import NativeMessageRoot
 
-    roots = () if data is None else tuple(iter_native_message_roots(data))
+    roots = ((data,) if isinstance(data, NativeMessageRoot)
+             else () if data is None else tuple(iter_native_message_roots(data)))
     session.info.setdefault(_PENDING, {})[(kind, store, tuple(identity))] = roots
 
 
