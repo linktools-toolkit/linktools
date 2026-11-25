@@ -60,6 +60,7 @@ from ...task import (
     TaskResultRecord,
     TaskResultRef,
     TaskNodeResultRef,
+    TaskInvocationInputContract,
     TaskInvocationInputRef,
     TaskRef,
 )
@@ -1584,7 +1585,10 @@ class TaskNodeExecutor(Generic[AppT]):
                     },
                 )
 
-    async def _restore_invocation(self, invocation: TaskNodeInvocation) -> TaskNodeInvocation:
+    async def _restore_invocation(
+        self, invocation: TaskNodeInvocation,
+    ) -> tuple[TaskNodeInvocation, TaskInvocationInputContract | None]:
+        contract = None
         if invocation.node.input_capture is not None:
             if self._input_captures is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1617,7 +1621,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 effect_policy=node.effect_policy, reconcile=node.reconcile,
                 dependency_policy=node.dependency_policy, failure_policy=node.failure_policy)
             invocation = replace(invocation, node=restored, input_capture=node.input_capture)
-        return invocation
+        return invocation, contract
 
     @contextmanager
     def confirm_execution_result(self, execution_id: str) -> Iterator[None]:
@@ -1643,7 +1647,7 @@ class TaskNodeExecutor(Generic[AppT]):
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
         original_invocation = invocation
-        invocation = await self._restore_invocation(invocation)
+        invocation, captured_input = await self._restore_invocation(invocation)
         node = invocation.node
         graph_id = invocation.graph_id
         principal = invocation.principal
@@ -1658,10 +1662,16 @@ class TaskNodeExecutor(Generic[AppT]):
             node_id=node.node_id,
             request=False,
         )
+        if captured_input is None and invocation.input_capture is not None:
+            if self._input_captures is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            captured_input = await self._input_captures.read_task(invocation.input_capture, principal=principal)
         if isinstance(handler, _TaskRunnerAdapter):
-            if invocation.input_capture is not None:
-                contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
-                invocation = replace(invocation, dependency_states={**invocation.dependency_states, **{item.name: item.state for item in contract.dependencies}})
+            if captured_input is not None:
+                invocation = replace(invocation, dependency_states={
+                    **invocation.dependency_states,
+                    **{item.name: item.state for item in captured_input.dependencies},
+                })
             if isinstance(handler.runner, AgentTaskRunner):
                 runner_result = await handler.runner.run(
                     invocation, control=control, budget_scope=self._budget_scopes.get(graph_id),
@@ -1682,10 +1692,9 @@ class TaskNodeExecutor(Generic[AppT]):
             for name, reference in node.input_refs.items()
             if isinstance(reference, TaskNodeResultRef)
         }}
-        if invocation.input_capture is not None:
-            contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
-            dependency_states = {**dependency_states, **{item.name: item.state for item in contract.dependencies}}
-            for item in contract.dependencies:
+        if captured_input is not None:
+            dependency_states = {**dependency_states, **{item.name: item.state for item in captured_input.dependencies}}
+            for item in captured_input.dependencies:
                 if item.state.status is TaskStatus.SUCCEEDED:
                     dependencies[item.name] = TaskDependency(item.source_ref.node_id, item.body_digest, item.execution_id, invocation.input_capture, item.name)
         binding = _task_binding(node, handler, task_id, task_revision)
@@ -2560,7 +2569,7 @@ class TaskNodeExecutor(Generic[AppT]):
 
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
-        invocation = await self._restore_invocation(invocation)
+        invocation, _ = await self._restore_invocation(invocation)
         graph_id = invocation.graph_id
         node = invocation.node
         principal = invocation.principal
