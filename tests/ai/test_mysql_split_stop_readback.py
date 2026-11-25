@@ -15,6 +15,7 @@ from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistencePlan, PersistenceStorage
 from linktools.ai.persistence._session_turn_sql import SessionTurnKey
 from linktools.ai.persistence._split_step_source import SqlSplitStepSource
+from linktools.ai.persistence._step_schema import build_step_domain_sql_metadata
 from linktools.ai.runtime._canonical_split_step import _CanonicalSplitStep
 from linktools.ai.storage import StorageRoute
 
@@ -49,7 +50,12 @@ async def test_mysql_split_stop_reads_back_duplicate_in_fresh_transaction(_mysql
         assert turns is not None
         native = await state.create_step_store()
         stack.push_async_callback(native.close)
-        owner = _CanonicalSplitStep(turns, state._stores[PersistenceDomain.EXECUTION], native)
+        source_store = state._stores[PersistenceDomain.EXECUTION]
+        # The physical schema is provisioned above; bind its native descriptors
+        # for this fixture without enabling the runtime's MySQL split route.
+        build_step_domain_sql_metadata((PersistenceDomain.CHECKPOINT,), metadata=source_store.storage_group.metadata)
+        source_store.storage_group.bind_native_partition(native.store_key)
+        owner = _CanonicalSplitStep(turns, source_store, native)
         await turns.create(key.session_id, config={})
         assert await accept(turns, key.turn_id)
         assert await turns.request_cancel(key)
