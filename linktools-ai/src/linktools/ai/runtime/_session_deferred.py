@@ -10,7 +10,7 @@ from typing import TypeVar
 from ..core import AuthorizationAction, AuthorizationPolicy, Principal, ResourceKind, ResourceRef
 from ..errors import AIError, ErrorCode
 from ..execution import PendingToolContinuation
-from ..persistence._session_turn_sql import CanonicalDeferredFrontier, SessionTurnKey, SqlSessionTurns
+from ..persistence.turns import CanonicalDeferredFrontier, SessionTurnKey, SqlSessionTurns
 from ..persistence.state import StateStore
 
 _Result = TypeVar("_Result")

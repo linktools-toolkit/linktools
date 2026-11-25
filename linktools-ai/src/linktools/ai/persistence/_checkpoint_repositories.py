@@ -50,6 +50,7 @@ from .state import (
     StateTransaction,
     StoredRecord,
     active_state_scope,
+    active_state_transaction,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -610,6 +611,18 @@ class ToolRepositoryImpl(_RepositoryBase):
             value = None if record is None else await self._decode(record, ToolOperationRecord)
             return value
         return await self._read_content(read)
+
+    async def settle_deferred_result(
+        self, expected: ToolOperationRecord, *,
+        result_payload: StoredPayload | None, error_code: str | None, error_payload: StoredPayload | None,
+    ) -> ToolOperationRecord:
+        """Settle only inside the waiting turn's already-held receipt transaction."""
+        transaction = active_state_transaction(self.state_store, writable=True)
+        if transaction is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return await self.settle_deferred_result_in_transaction(
+            transaction, expected, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+        )
 
     async def settle_deferred_result_in_transaction(
         self, transaction: StateTransaction, expected: ToolOperationRecord, *,

@@ -40,16 +40,18 @@ from ..model.messages import decode_model_messages, encode_model_messages
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ..model.attachments import read_attachment_payload, store_attachment_payload
 from ..persistence import NativeToolErrorReference, PersistenceDomain, SqlStepStore
-from ..persistence.state import Observed, active_state_transaction
+from ..persistence.state import Observed
 from ..persistence.contracts import ToolOperationAdmission
 from ..spec import CapabilityRef
 from ..persistence.durability import CommitObservation, DurableCommitState, await_owned_task, run_durable_commit
-from ..persistence.contracts import ApprovalRecord, ExternalCallRecord, ToolOperationRecord, decode_tool_operation_failure, deferred_resource_id
+from ..persistence.contracts import (
+    ApprovalRecord, ExternalCallRecord, ToolOperationRecord, ToolStateRepository,
+    decode_tool_operation_failure, deferred_resource_id,
+)
 from ..execution import tool_operation_id, TOOL_OPERATION_ID_METADATA_KEY
 
 if TYPE_CHECKING:
     from ..execution import ExecutionRecord, PendingDeferredCall
-    from ..persistence._checkpoint_repositories import ToolRepositoryImpl
     from ..persistence.state import StateStore, StateTransaction
     from ..persistence.turns import SessionTurnKey
 
@@ -57,13 +59,12 @@ _logger = environ.get_logger("ai.runtime.tool")
 
 
 async def settle_canonical_deferred_leaf(
-    repository: "ToolRepositoryImpl", *, checkpoint_objects: ObjectStore, namespace: str, tenant_id: str,
+    repository: ToolStateRepository, *, checkpoint_objects: ObjectStore, namespace: str, tenant_id: str,
     turn_id: str, generation: int, pending: "PendingDeferredCall", resolution: ApprovalRecord | ExternalCallRecord,
     external_value: object = None,
 ) -> ToolOperationRecord:
     """Publish a resolved leaf in the already-held waiting-turn receipt boundary."""
-    transaction = active_state_transaction(repository.state_store, writable=True)
-    if transaction is None or resolution.execution_id != turn_id:
+    if resolution.execution_id != turn_id:
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
     if isinstance(resolution, ApprovalRecord):
@@ -114,8 +115,8 @@ async def settle_canonical_deferred_leaf(
             ToolCallRetry(value) if kind == "retry" else ToolCallFailed(value),
         )
 
-    return await repository.settle_deferred_result_in_transaction(
-        transaction, current, result_payload=result, error_code=error_code, error_payload=error_payload,
+    return await repository.settle_deferred_result(
+        current, result_payload=result, error_code=error_code, error_payload=error_payload,
     )
 
 
@@ -446,11 +447,10 @@ class RuntimeToolOperationBridge:
         prepare_event: Callable[[StepEvent], StepEvent],
     ) -> None:
         """Bind leaf ownership to an admitted canonical turn, not an Execution producer."""
-        from ..persistence._checkpoint_repositories import ToolRepositoryImpl
 
         repository = self._repository
         group = state_store.storage_group
-        if (type(repository) is not ToolRepositoryImpl or repository.state_store.storage_group is not group
+        if (not isinstance(repository, ToolStateRepository) or repository.state_store.storage_group is not group
                 or self._execution_id != key.turn_id or self._pending_tools is not None
                 or self._terminal_commands is not None or self._producer_generation is not None
                 or self._decisions or self._native_step_store is not None):

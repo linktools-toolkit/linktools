@@ -4,11 +4,11 @@
 
 from datetime import datetime, timezone
 
+from ..core import ApprovalStatus, ExternalCallStatus, ToolOperationStatus
 from ..errors import AIError, ErrorCode
 from ..execution import PendingDeferredCall, PendingToolContinuation
 from ..persistence.contracts import (
-    ApprovalRecord, ApprovalStatus, ExternalCallRecord, ExternalCallStatus,
-    ToolOperationStatus, deferred_resource_id,
+    ApprovalRecord, ExternalCallRecord, deferred_resource_id,
 )
 
 

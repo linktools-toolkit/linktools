@@ -24,8 +24,7 @@ from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
-from ..persistence._session_turn_sql import SessionInstructionFrontier
-from ..persistence.turns import SessionTurnKey, SessionTurnSegment, decode_session_lineage
+from ..persistence.turns import SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
 from ..session import ToolProcessItem, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta
@@ -47,8 +46,7 @@ if TYPE_CHECKING:
     from ..inputs import ExecutionInputMaterializer
     from ..spec import RepositoryInstructionResolver
     from ..workspace import Workspace
-    from ..persistence.turns import SqlSessionTurns
-    from ..persistence._session_turn_sql import CanonicalDeferredFrontier
+    from ..persistence.turns import CanonicalDeferredFrontier, SqlSessionTurns
     from ..execution import PendingToolContinuation, PendingDeferredCall
     from ._agent_binding_resolver import _AgentBindingResolver
     from ._agent_executor import AgentEmission, AgentExecutor, EventSink

@@ -7,9 +7,10 @@ from collections.abc import Mapping
 from pydantic_ai.tools import DeferredToolResults, ToolApproved, ToolDenied
 
 from ..capability import PydanticToolControlCapability
+from ..core import ApprovalStatus, ExternalCallStatus
 from ..errors import AIError, ErrorCode
 from ..execution import PendingDeferredCall, PendingToolContinuation
-from ..persistence.contracts import ApprovalStatus, ExternalCallStatus, deferred_resource_id
+from ..persistence.contracts import deferred_resource_id
 from ._session_deferred import SessionDeferredCommands
 from ._tool import settle_canonical_deferred_leaf
 
