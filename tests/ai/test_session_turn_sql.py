@@ -61,8 +61,9 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
     event.listen(engine.sync_engine, "before_cursor_execute", on_sql)
     event.listen(engine.sync_engine, "commit", on_commit)
     assert await turns.get_session("chat") is not None
-    assert await turns.history("chat", through=0, limit=1) == ()
     key = SessionTurnKey("chat", "turn")
+    assert await turns.get_history_turn(key, lineage=()) is None
+    assert await turns.read_context_range("chat", after=0, through=0) == ()
     assert await accept(turns, key.turn_id)
     assert await turns.finish(key, generation=1, turn_no=1, state="succeeded", result={"answer": "two"})
     assert statements == ["SELECT", "SELECT", "UPDATE", "INSERT", "INSERT", "UPDATE", "UPDATE"]
@@ -73,7 +74,7 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
 
     session = await turns.get_session("chat")
     assert session["active_turn_id"] == b"second" and session["last_turn_no"] == 1
-    turn, = await turns.history("chat", through=1, limit=2)
+    turn = await turns.get_turn(key)
     assert turn["request_json"] == {"input": "turn"}
     assert turn["result_json"] == {"answer": "two"}
     replay = await turns.find_request("chat", "send")
@@ -130,7 +131,7 @@ async def test_takeover_fences_old_writer_and_cancel_precedes_success(store):
     assert (await turns.get_session("chat"))["active_turn_id"] == b"turn"
     assert await turns.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
     assert (await turns.get_turn(key))["state"] == "cancelled"
-    assert await turns.history("chat", through=1, limit=2, only_success=True) == ()
+    assert await turns.read_context_range("chat", after=0, through=1) == ()
 
 
 @pytest.mark.asyncio
@@ -162,9 +163,9 @@ async def test_reopened_store_recovers_expired_cancellation_once(store):
         assert await restarted.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
         assert not await restarted.finish(key, generation=2, turn_no=1, state="cancelled", result=None)
 
-        visible, = await restarted.history("chat", through=1, limit=2)
+        visible = await restarted.get_history_turn(key, lineage=())
         assert (visible["turn_id"], visible["state"], visible["result_json"]) == (b"turn", "cancelled", None)
-        assert await restarted.history("chat", through=1, limit=2, only_success=True) == ()
+        assert await restarted.read_context_range("chat", after=0, through=1) == ()
         assert await accept(restarted, "next", revision=2, through=1, request="new")
     finally:
         await restarted_engine.dispose()
@@ -195,8 +196,9 @@ async def test_admission_pins_selected_history_range_even_when_empty(store):
     )
     admitted = await turns.get_turn(key)
     assert (admitted["context_from"], admitted["context_through"], admitted["turn_no"]) == (2, 1, 2)
-    assert await turns.history("chat", after=admitted["context_from"] - 1,
-                               through=admitted["context_through"], limit=128) == ()
+    assert await turns.read_context_range(
+        "chat", after=admitted["context_from"] - 1, through=admitted["context_through"],
+    ) == ()
 
 
 @pytest.mark.asyncio

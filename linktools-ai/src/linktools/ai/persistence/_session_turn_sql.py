@@ -243,24 +243,6 @@ class SqlSessionTurnReader:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(statement)).mappings().one_or_none()
 
-    async def history(
-        self, session_id: str, *, through: int, limit: int, after: int = 0, only_success: bool = False,
-        lineage: tuple[SessionTurnSegment, ...] = (),
-    ) -> tuple[RowMapping, ...]:
-        from sqlalchemy import select
-
-        if not 1 <= limit or not 0 <= after <= through:
-            raise ValueError("invalid session turn history range")
-        columns = self._turns.c
-        statement = select(self._turns).where(
-            columns.scope_key == self._scope,
-            lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
-                              after=after, through=through),
-            columns.state.in_(("succeeded",) if only_success else ("succeeded", "failed", "cancelled")),
-        ).order_by(columns.turn_no).limit(limit)
-        async with self._context.engine.connect() as connection:
-            return tuple((await connection.execute(statement)).mappings())
-
     async def session_page(
         self, *, session_ids: Sequence[str] | None, before: int | None, limit: int,
     ) -> tuple[RowMapping, ...]:

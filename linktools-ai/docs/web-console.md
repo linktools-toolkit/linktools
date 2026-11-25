@@ -61,6 +61,13 @@ single-file text preview; it does not enable bulk reads, file attachments
 returned by a tool, dynamically loaded skills, or shell commands. The console
 shows the tool status and public preview, not raw parameters or results.
 
+Explicit recovery of an ordinary turn regenerates from the accepted prompt,
+frozen Agent binding and input attachments. It does not replay an unfinished
+workspace tool result: a new authorized listing or text read sees the current
+workspace, subject to the same policy and limits. Published turns and admitted
+attachment bytes do not change. Use strict execution when identical prior tool
+results must be continued rather than regenerated.
+
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file
 `.linktools/config.yaml`, shared by `ai-run`, `ai-acp`, and `ai-web`:
