@@ -193,7 +193,7 @@ class SqlSessionTurnReader:
 
     async def recent_context(self, session_id: str, *, through: int) -> tuple[SessionContextTurn, ...]:
         """Read bounded candidates after the caller authorizes the current session head."""
-        from sqlalchemy import select
+        from sqlalchemy import case, select, type_coerce
 
         start = max(0, through - _CONTEXT_POSITIONS)
         cached = self._recent.get(session_id)
@@ -210,7 +210,10 @@ class SqlSessionTurnReader:
             return turns
 
         columns = self._turns.c
-        statement = select(columns.turn_no, columns.state, columns.request_json, columns.result_json).filter_by(
+        succeeded = columns.state == "succeeded"
+        prompt = case((succeeded, columns.request_json["prompt"].as_string())).label("prompt")
+        result = type_coerce(case((succeeded, columns.result_json)), columns.result_json.type).label("result_json")
+        statement = select(columns.turn_no, columns.state, prompt, result).filter_by(
             **self._session_values(session_id),
         ).where(
             columns.turn_no > after, columns.turn_no <= through,
@@ -222,8 +225,8 @@ class SqlSessionTurnReader:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The finalized session context range is incomplete")
         turns += tuple(
             SessionContextTurn(
-                row["turn_no"], row["request_json"], row["result_json"],
-                max(1024, len(canonical_json_bytes(row["request_json"])) + len(canonical_json_bytes(row["result_json"]))),
+                row["turn_no"], {"prompt": row["prompt"]}, row["result_json"],
+                max(1024, len(canonical_json_bytes(row["prompt"])) + len(canonical_json_bytes(row["result_json"]))),
             )
             for row in rows if row["state"] == "succeeded"
         )
