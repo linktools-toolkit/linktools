@@ -117,7 +117,7 @@ from ._step_archive import (
     StateStepArchive,
 )
 from ._repository_common import operation_identity_matches, validate_recovery_operation
-from .state import Observed, GroupRecordReader, RecordQuery, StateGroupTransaction, StateStore, StateTransaction, StoredRecord
+from .state import Observed, GroupRecordReader, RecordQuery, StateGroupTransaction, StateStore, StateTransaction, StoredRecord, state_store_key
 
 _logger = environ.get_logger("ai.runtime.state.commands")
 
