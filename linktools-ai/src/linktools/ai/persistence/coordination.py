@@ -144,7 +144,9 @@ class PendingTurnCoordination:
         source = self._state_authority
         identity = dict(session_key=session_key, request_key=request_key, request_digest=request_digest,
                         execution_id=execution_id, owner_id=owner_id)
-        if source is not None and source._native_execution_receipts and session_key.startswith("session:"):
+        if source is not None:
+            # State coordination selects native SESSION, STANDALONE or
+            # split regrant; non-SQL state still uses its own enter semantics.
             return source._enter_existing(self._scope, **identity)
         return self.enter(**identity)
 

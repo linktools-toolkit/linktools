@@ -25,7 +25,7 @@ CREATE TABLE ai_state_records (
 	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.',
 	scan_kind VARCHAR(34) NOT NULL COMMENT 'Write-through kind and execution recovery candidate projection; never domain authority.',
 	strict_turn_execution_id VARBINARY(128) NULL COMMENT 'Unpublished strict conversation turn owner, distinct from business session state.',
-	strict_turn_fence BIGINT NULL COMMENT 'Strict conversation generation; NULL outside coowned Runtime.',
+	strict_turn_fence BIGINT NULL COMMENT 'Fencing generation for a same-group strict conversation; NULL has no such ownership.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),

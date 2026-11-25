@@ -58,7 +58,7 @@ class SplitSessionTurnTransactions:
         else:
             raise ValueError("invalid split session route")
         return select(
-            table.c.id, table.c.key, table.c.key_locator, table.c.kind,
+            table.c.id, table.c.key, table.c.key_locator, table.c.kind, table.c.scan_kind,
             table.c.turn_slot_kind, table.c.turn_slot_key, table.c.turn_occupied_route, table.c.turn_request_route,
             table.c.turn_receipt, table.c.turn_token, table.c.turn_fence, table.c.turn_expiry,
             table.c.turn_revision, clock.label("observed_at"),
@@ -171,7 +171,7 @@ class SplitSessionTurnTransactions:
 
     async def claim(self, *, session_key, request_key, request_digest, execution_id, owner_id, token, duration):
         from datetime import timedelta
-        from sqlalchemy import select, true
+        from sqlalchemy import or_, select, true
         from ..errors import AIError, ErrorCode
         from ._execution_authority import ExecutionAuthority
         from ._record_owner import EXECUTION_SHELL_KIND
@@ -214,6 +214,12 @@ class SplitSessionTurnTransactions:
             return None
         if previous is not None and previous.request_key == request_key and previous.request_digest != request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if (previous is not None and previous.execution_id != execution_id
+                and row["kind"] == "execution" and row["scan_kind"] != "e:0"):
+            # Keep the local anchor recoverable until the published execution
+            # has finished its separate Conversation handoff. Otherwise a new
+            # request can archive it, then fail to acquire Conversation.
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         if row["candidate_id"] is not None and (
             previous is None or previous.execution_id != execution_id
             or row["kind"] != EXECUTION_SHELL_KIND or previous.request_key != request_key
@@ -237,7 +243,10 @@ class SplitSessionTurnTransactions:
                 await self._advance(self._fence(row, previous, revision=revision).values(turn_revision=revision + 1))
                 revision += 1
             if previous is not None and previous.execution_id != execution_id:
-                retire = self._fence(row, previous, revision=revision)
+                retire = self._fence(row, previous, revision=revision).where(or_(
+                    table.c.kind == EXECUTION_SHELL_KIND,
+                    (table.c.kind == "execution") & (table.c.scan_kind == "e:0"),
+                ))
                 extras = {}
                 if observation is not None:
                     retire = retire.where(await self._deadline(live=False))

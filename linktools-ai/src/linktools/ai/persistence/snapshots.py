@@ -1690,22 +1690,23 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         execution_store = resources.stores.get(PersistenceDomain.EXECUTION)
         conversation_store = resources.stores.get(PersistenceDomain.CONVERSATION)
+        participants = (*resources.stores.values(), *resources.capability_stores.values())
+        coowned = type(execution_store) is SqlStateStore and all(
+            type(store) is SqlStateStore and store.storage_group is execution_store.storage_group
+            for store in participants
+        )
         typed_sessions = any(
             record.kind == "turn_slot" and record.data.get("session_record") is True
             for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
         )
-        if typed_sessions:
-            if (not isinstance(execution_store, SqlStateStore) or not isinstance(conversation_store, SqlStateStore)
-                    or execution_store.storage_group is not conversation_store.storage_group
-                    or PersistenceDomain.CONVERSATION not in decoded_domains):
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Strict session occupancy requires one SQL transaction group")
+        if typed_sessions and (not coowned or PersistenceDomain.CONVERSATION not in decoded_domains):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Strict session occupancy requires one SQL transaction group")
         split_sessions = any(
             record.kind == "turn_admission" and record.data.get("split_session") is True
             for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
         )
-        if split_sessions and (not isinstance(execution_store, SqlStateStore) or conversation_store is None
-                or execution_store.storage_group is conversation_store.storage_group):
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Split session occupancy requires independent transaction groups")
+        if split_sessions and (type(execution_store) is not SqlStateStore or coowned):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Split session occupancy requires independent storage participants")
         pending_references = any(pending_operation_reference(payload) is not None
             for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
             if record.kind == "execution"
