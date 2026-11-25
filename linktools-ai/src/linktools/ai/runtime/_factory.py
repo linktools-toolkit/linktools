@@ -872,7 +872,7 @@ async def _build_local_components(
                 native.store, tools, turn_store=state.session_turns, state_store=state.conversation.sessions.state_store,
                 key=key, generation=generation, run_id=key.turn_id,
             )
-            return replace(native, store=store), tools
+            return replace(native, store=store, run_id=key.turn_id), tools
 
         def prepare_canonical_plan(key, generation):
             from ..capability.planning import PlanningStore

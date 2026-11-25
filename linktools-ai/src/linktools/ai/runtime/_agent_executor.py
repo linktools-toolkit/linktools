@@ -929,7 +929,8 @@ class AgentExecutor:
                                 if scope.replace_history_system_prompt else scope.history
                             ) or None,
                             conversation_id=scope.agent_conversation_id,
-                            run_id=scope.agent_run_id,
+                            run_id=(None if scope.canonical_step is not None and user_prompt is None
+                                    else scope.agent_run_id),
                             usage_limits=usage_limits,
                             usage=run_usage,
                             capabilities=capabilities,

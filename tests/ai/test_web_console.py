@@ -1494,6 +1494,9 @@ async def test_local_chat_streams_public_progress_then_reads_committed_turn_afte
                     while True:
                         frame = await frames.get()
                         assert frame["turn_id"] == turn_id
+                        if frame["type"] == "terminal":
+                            pytest.fail(f"Turn ended before first text delta: state={frame.get('state')}, "
+                                        f"code={frame.get('error_code')}")
                         if frame["type"] == "progress":
                             saw_running |= frame["item"]["kind"] == "model" and frame["item"]["status"] == "RUNNING"
                         if frame["type"] == "delta":
