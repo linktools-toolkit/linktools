@@ -4,6 +4,8 @@
 import re
 from typing import TYPE_CHECKING
 
+from linktools.types import MISSING
+
 from ._base import Integration
 from ..errors import ContainerError
 
@@ -52,14 +54,14 @@ class Nginx(Integration):
         return self
 
     @classmethod
-    def root_domain(cls, config: "ConfigResolver", *, required: bool = False) -> "Optional[str]":
-        """Return the configured DNS root, distinct from nginx routing placeholders."""
+    def root_domain(cls, config: "ConfigResolver", *, default: str = MISSING) -> str:
+        """Return the configured DNS root or the explicit fallback."""
         root = config.get("NGINX_ROOT_DOMAIN")
         if cls._is_dns_root(root):
             return root
-        if required:
-            raise ContainerError("Configure NGINX_ROOT_DOMAIN with a DNS domain for HTTPS.")
-        return None
+        if default is not MISSING:
+            return default
+        raise ContainerError("Configure NGINX_ROOT_DOMAIN with a DNS domain for HTTPS.")
 
     @classmethod
     def certificate_domain(cls, value: str) -> "Optional[str]":

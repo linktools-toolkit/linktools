@@ -23,7 +23,7 @@ class Container(BaseContainer):
     @cached_property
     def fields(self) -> "dict[str, Any]":
         def get_base_dn(cfg: "ConfigResolver") -> str:
-            domain = Nginx.root_domain(cfg) or "example.org"
+            domain = Nginx.root_domain(cfg, default="example.org")
             parts = domain.split(".")
             return ",".join(f"dc={part}" for part in parts)
 

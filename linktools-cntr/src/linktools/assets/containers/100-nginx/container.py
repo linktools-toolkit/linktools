@@ -215,9 +215,7 @@ class Container(BaseContainer):
 
     @cached_property
     def acme_primary_domain(self) -> str:
-        domain = Nginx.root_domain(self.config, required=True)
-        assert domain is not None
-        return domain
+        return Nginx.root_domain(self.config)
 
     @cached_property
     def acme_ssl_domains(self) -> "list[str]":
@@ -250,7 +248,7 @@ class Container(BaseContainer):
         import tempfile
         if context.target_services is not None and "nginx" not in context.target_services:
             return
-        if self.get_config("NGINX_WILDCARD_DOMAIN") and Nginx.root_domain(self.config) is None:
+        if self.get_config("NGINX_WILDCARD_DOMAIN") and not Nginx.root_domain(self.config, default=""):
             raise ContainerError("Wildcard domain is enabled; configure NGINX_ROOT_DOMAIN with a DNS domain.")
         domain = self.acme_primary_domain if self.get_config("NGINX_HTTPS_ENABLE", type=bool) else None
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:

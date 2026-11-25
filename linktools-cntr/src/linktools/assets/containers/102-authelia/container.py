@@ -159,9 +159,7 @@ class Container(BaseContainer):
 
     @cached_property
     def root_domain(self) -> str:
-        root = Nginx.root_domain(self.config, required=True)
-        assert root is not None
-        return root
+        return Nginx.root_domain(self.config)
 
     @cached_property
     def acl_config(self) -> str:
