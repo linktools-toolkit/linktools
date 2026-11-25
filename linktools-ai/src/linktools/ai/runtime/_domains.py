@@ -286,14 +286,28 @@ class RuntimeSessions(Generic[AppT]):
         self._runtime = runtime
 
     @property
+    def _uses_turn_sessions(self) -> bool:
+        """Built-in clients route by the configured writable Conversation store.
+
+        Missing host authorization disables access, not the storage choice.
+        Step is selected per admitted Agent and must never select a session store.
+        """
+        return self._runtime is not None and self._runtime._state.session_turns is not None
+
+    @property
     def supports_turn_sessions(self) -> bool:
+        """Whether this host composed an authorized native turn runner."""
         return self._turn_runner is not None and self._runtime is not None
 
     def _require_turn_sessions(self) -> "tuple[_RegenerableTurnRunner, Runtime[AppT]]":
         self._ensure_open()
         runner, runtime = self._turn_runner, self._runtime
         if runner is None or runtime is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                safe_details={"reason": "turn_session_authorization_not_configured"
+                              if self._uses_turn_sessions else "turn_session_storage_not_configured"},
+            )
         return runner, runtime
 
     async def create_turn_session(
@@ -442,7 +456,7 @@ class RuntimeSessions(Generic[AppT]):
         runner, _ = self._require_turn_sessions()
         validate_resource_id(session_id)
         validate_resource_id(turn_id)
-        if type(revision) is not int or revision < 1 or phase not in ("admitted", "terminal", "cancelling"):
+        if type(revision) is not int or revision < 1 or phase not in ("admitted", "terminal", "cancelling", "waiting"):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         runner.invalidate_session(session_id, turn_id, revision=revision, phase=phase)
 

@@ -32,12 +32,12 @@ class TurnNotice:
     session_id: str
     turn_id: str
     revision: int
-    phase: Literal["admitted", "terminal", "cancelling"]
+    phase: Literal["admitted", "terminal", "cancelling", "waiting"]
 
     def __post_init__(self) -> None:
         validate_resource_id(self.session_id)
         validate_resource_id(self.turn_id)
-        if type(self.revision) is not int or self.revision < 1 or self.phase not in ("admitted", "terminal", "cancelling"):
+        if type(self.revision) is not int or self.revision < 1 or self.phase not in ("admitted", "terminal", "cancelling", "waiting"):
             raise ValueError("invalid turn notice")
 
 

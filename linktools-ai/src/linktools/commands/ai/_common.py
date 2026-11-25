@@ -244,7 +244,7 @@ class _LocalSessionFeed:
                 self.runtime.sessions.supports_turn_sessions
                 and value.get("namespace") == self.runtime.namespace
                 and value.get("tenant_id") == self.runtime.tenant_id
-                and phase in ("admitted", "cancelling", "terminal")
+                and phase in ("admitted", "cancelling", "terminal", "waiting")
                 and isinstance(session_id, str) and isinstance(turn_id, str)
                 and type(revision) is int and revision >= 1
             ):

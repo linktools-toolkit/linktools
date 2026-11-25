@@ -406,15 +406,20 @@ class SqlSessionTurnReader:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(statement)).mappings().one_or_none()
 
-    def _history_view_select(self):
+    def _history_view_select(self, *, observe_lease: bool = False):
         from sqlalchemy import select
 
         columns = self._turns.c
-        return select(
+        statement = select(
             columns.turn_id, columns.turn_no, columns.state, columns.created_at, columns.updated_at,
             columns.result_json, columns.request_json["prompt"].as_string().label("prompt"),
             columns.request_json["input"].label("stored_input"),
         )
+        if observe_lease:
+            statement = statement.add_columns((
+                columns.state.in_(("accepted", "cancelling")) & (columns.lease_until <= sql_epoch_seconds())
+            ).label("needs_recovery"))
+        return statement
 
     async def get_history_turn(
         self, key: SessionTurnKey, *, lineage: tuple[SessionTurnSegment, ...],
@@ -430,7 +435,7 @@ class SqlSessionTurnReader:
                 lineage_predicate(columns, b"", lineage, after=0, through=lineage[-1].through),
             ),
         )
-        statement = self._history_view_select().where(
+        statement = self._history_view_select(observe_lease=True).where(
             columns.scope_key == self._scope,
             columns.turn_id == self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES),
             scope,

@@ -178,7 +178,11 @@ function setDisabled() {
     $('open-recovery').hidden=true;$('inspector-toggle').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
     $('cancel').hidden=readonly || !turn;$('cancel').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
     $('cancel').setAttribute('aria-label','Stop current turn');
-    if(turn && sessionWatch?.ready){$('current-status').hidden=false;$('current-status').textContent='Turn in progress';}
+    if(turn && sessionWatch?.ready){
+      const waiting=state.turns.some(row=>row.turn_id===turn && row.status==='WAITING_DEFERRED');
+      $('current-status').hidden=false;
+      $('current-status').textContent=waiting?'Waiting for approval or tool results':'Turn in progress';
+    }
   } else {$('open-recovery').hidden=false;$('inspector-toggle').hidden=false;}
 
 }
@@ -355,6 +359,14 @@ function ordinaryTurnNode(turn, previous=null) {
   const parts=(turn.conversation_committed?turn.interruptedPreview:turn.liveParts) || [];
   for(const part of parts){
     if(part.tool){appendTool(part.tool);continue;}
+    if(part.progress){
+      const status=processToolStatus[part.progress.status];
+      const card=thinkingMessage('Model request',status);
+      card.classList.toggle('process-running',part.progress.status==='RUNNING');
+      showProcessElapsed(card,part.progress.elapsed_ms);
+      answers.append(card);
+      continue;
+    }
     const text=element('div','message ordinary-live',part.text);
     answers.append(text);
     if(!turn.conversation_committed && part===parts.at(-1))node.liveAnswer=text;
@@ -365,7 +377,8 @@ function ordinaryTurnNode(turn, previous=null) {
   for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
   node.append(answers);
   if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
-  if(turn.status!=='SUCCEEDED')node.append(element('div','turn-heading',turn.status));
+  if(turn.status!=='SUCCEEDED')node.append(element('div','turn-heading',
+    turn.status==='WAITING_DEFERRED'?'Waiting for approval or tool results':turn.status));
   return node;
 }
 function patchOrdinaryTurn(turn) {
@@ -457,7 +470,16 @@ function watchOrdinarySession(id) {
       const row=state.turns.find(item=>item.turn_id===turnId);
       patchOrdinaryTurn(!row && !turn.conversation_committed && read.overflow
         ? {...turn,liveGeneration:read.generation,liveParts:[],previewGap:read.generation} : turn);
-      if(!turn.conversation_committed)for(const frame of read.frames || [])applyPreview(frame);
+      if(!turn.conversation_committed){
+        for(const frame of read.frames || [])applyPreview(frame);
+        const waiting=read.waiting;
+        const shown=state.turns.find(item=>item.turn_id===turnId);
+        if(waiting && shown && (shown.liveGeneration || 0)<=waiting.generation
+          && waiting.revision>=(watch.snapshot?.revision ?? -1)){
+          patchOrdinaryTurn({...shown,status:'WAITING_DEFERRED'});
+          setDisabled();
+        }
+      }
     }).catch(error=>{
       if(current() && watch.activeRead===read && activeTurn()===turnId
         && !state.turns.some(row=>row.turn_id===turnId))showError(error);
@@ -469,6 +491,20 @@ function watchOrdinarySession(id) {
     if(!turn || turn.liveGeneration>frame.generation || turn.previewGap===frame.generation)return;
     const reset=turn.liveGeneration!==frame.generation;
     if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];turn.previewGap=null;}
+    if(frame.type==='preview_reset'){
+      turn.liveParts=turn.liveParts.filter(part=>part.modelKey!==frame.model_key || part.attempt!==frame.attempt);
+      patchOrdinaryTurn(turn);
+      return;
+    }
+    if(frame.type==='progress'){
+      const item=frame.item;
+      if(item?.kind!=='model' || typeof item.key!=='string'
+        || !['RUNNING','SUCCEEDED','FAILED','CANCELLED'].includes(item.status))return;
+      const previous=turn.liveParts.find(part=>part.progress?.key===item.key);
+      if(previous)previous.progress=item;else turn.liveParts.push({progress:item});
+      patchOrdinaryTurn(turn);
+      return;
+    }
     if(frame.type==='tool'){
       const item=frame.item;
       if(item?.kind!=='tool' || typeof item.key!=='string' || !Object.hasOwn(processToolStatus,item.status))return;
@@ -485,9 +521,12 @@ function watchOrdinarySession(id) {
     }
     if(typeof frame.text!=='string' || frame.delta_kind!=='text' || !frame.text)return;
     let part=turn.liveParts.at(-1);
-    if(!part || part.tool){part={text:''};turn.liveParts.push(part);}
+    if(!part || typeof part.text!=='string' || part.modelKey!==frame.model_key || part.attempt!==frame.attempt){
+      part={text:frame.text,modelKey:frame.model_key,attempt:frame.attempt};turn.liveParts.push(part);
+      patchOrdinaryTurn(turn);
+      return;
+    }
     part.text+=frame.text;
-    if(reset)patchOrdinaryTurn(turn);
     if(!watch.paint)watch.paint=requestAnimationFrame(()=>{
       watch.paint=null;
       if(!current())return;
@@ -495,7 +534,7 @@ function watchOrdinarySession(id) {
       const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
       const node=[...$('conversation').children].find(item=>item.dataset.turn===active);
       const tail=row?.liveParts?.at(-1);
-      if(node?.liveAnswer && tail && !tail.tool){node.liveAnswer.hidden=!tail.text;node.liveAnswer.textContent=tail.text;}
+      if(node?.liveAnswer && typeof tail?.text==='string'){node.liveAnswer.hidden=!tail.text;node.liveAnswer.textContent=tail.text;}
     });
   }
   source.addEventListener('session_error',event=>{
@@ -532,7 +571,7 @@ function watchOrdinarySession(id) {
       if(reconnected){
         const discarded=watch.activeRead;
         watch.lostRead=discarded?.overflow ? {id:discarded.id,generation:discarded.generation} : null;
-        watch.activeRead=null;watch.cancelRead=null;
+        watch.activeRead=null;watch.phaseRead=null;
       }
       watch.readActive();
       if(watch.committedThrough!==null && watch.snapshot?.last_turn_no>watch.committedThrough)
@@ -540,16 +579,21 @@ function watchOrdinarySession(id) {
       return;
     }
     if(frame.type==='gap'){
-      if(frame.phase==='cancelling' && frame.turn_id && frame.turn_id===activeTurn()){
+      if(['cancelling','waiting'].includes(frame.phase) && frame.turn_id && frame.turn_id===activeTurn()){
         const turnId=frame.turn_id;
-        if(watch.cancelRead===turnId)return;
-        watch.cancelRead=turnId;
+        const before=state.turns.find(row=>row.turn_id===turnId);
+        const status=frame.phase==='waiting'?'WAITING_DEFERRED':'CANCELLING';
+        if(before?.status===status || watch.phaseRead?.turnId===turnId && watch.phaseRead.status===status)return;
+        const read={turnId,status,generation:before?.liveGeneration};
+        watch.phaseRead=read;
         void api(sessionURL(id,'',{turn_id:turnId})).then(turn=>{
-          if(!current() || activeTurn()!==turnId
-            || state.turns.some(row=>row.turn_id===turnId && row.conversation_committed))return;
-          if(turn.status==='CANCELLING'){patchOrdinaryTurn(turn);setDisabled();}
-          else return catchUpOrdinary(watch);
-        }).catch(error=>{if(current() && activeTurn()===turnId)showError(error);});
+          const row=state.turns.find(item=>item.turn_id===turnId);
+          if(!current() || watch.phaseRead!==read || activeTurn()!==turnId || row?.conversation_committed
+            || (before && row?.liveGeneration!==read.generation))return;
+          if(turn.status===status){patchOrdinaryTurn(turn);setDisabled();}
+          else if(turn.conversation_committed || frame.phase==='cancelling')return catchUpOrdinary(watch);
+        }).catch(error=>{if(current() && activeTurn()===turnId)showError(error);})
+          .finally(()=>{if(watch.phaseRead===read)watch.phaseRead=null;});
       } else void catchUpOrdinary(watch).catch(showError);
       return;
     }
@@ -564,7 +608,16 @@ function watchOrdinarySession(id) {
       const preview=row?.liveGeneration===frame.generation && !missingPreview ? {}
         : {liveGeneration:frame.generation,liveParts:[],previewGap:missingPreview?frame.generation:null};
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,...preview});
-    } else if(frame.type==='delta' || frame.type==='tool'){
+    } else if(frame.type==='waiting'){
+      const row=state.turns.find(item=>item.turn_id===frame.turn_id);
+      if(activeTurn()!==frame.turn_id || row?.conversation_committed
+        || (row?.liveGeneration || 0)>frame.generation || frame.revision<(watch.snapshot?.revision ?? -1))return;
+      if(row)patchOrdinaryTurn({...row,status:'WAITING_DEFERRED'});
+      else {
+        watch.readActive();
+        if(watch.activeRead?.id===frame.turn_id)watch.activeRead.waiting=frame;
+      }
+    } else if(['delta','tool','progress','preview_reset'].includes(frame.type)){
       if(state.turns.some(row=>row.turn_id===frame.turn_id)){
         applyPreview(frame);
       } else if(activeTurn()===frame.turn_id){
@@ -600,8 +653,12 @@ function watchOrdinarySession(id) {
       // Keep this browser's preview only. A failed turn does not prove that a
       // running tool failed, so preserve completed rows and mark open ones interrupted.
       const interruptedPreview=interruptions
-        ? previous?.interruptedPreview || previous?.liveParts?.map(part=>part.tool?.status==='RUNNING'
-          ? {tool:{...part.tool,status:status==='CANCELLED'?'CANCELLED':'INTERRUPTED'}} : part) : null;
+        ? previous?.interruptedPreview || previous?.liveParts?.map(part=>{
+          const interrupted=status==='CANCELLED'?'CANCELLED':'INTERRUPTED';
+          if(part.tool?.status==='RUNNING')return {tool:{...part.tool,status:interrupted}};
+          if(part.progress?.status==='RUNNING')return {progress:{...part.progress,status:interrupted}};
+          return part;
+        }) : null;
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status,
         user_input:ordinaryInput(frame.prompt,frame.attachments),items,process,liveParts:[],previewGap:null,interruptedPreview,
         output:frame.output,error_code:frame.error_code,conversation_committed:true});

@@ -1734,19 +1734,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 value = replace(value, active_execution_id=occupancy.execution_id)
         return record, value, occupancy
 
-    async def replace_strict_turn_session_in_transaction(
-        self, transaction: StateTransaction, *, record: StoredRecord, occupancy: StrictSessionTurn,
-        updated: SessionRecord,
-    ) -> None:
-        """Persist business fields, leaving the occupancy owner untouched."""
-        if (occupancy.fence is None or record.storage_revision != occupancy.storage_revision
-                or updated.active_execution_id not in (None, occupancy.execution_id)):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        physical = replace(updated, active_execution_id=None)
-        await self._replace_observed(
-            transaction, _projected_record(self, record, physical), record.storage_revision,
-        )
-
     def session_record_key(self, session_id: str) -> bytes:
         return self._key("session", (session_id,))
 

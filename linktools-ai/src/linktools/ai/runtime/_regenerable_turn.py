@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..agent import AgentBindingContract
 from ..capability import AgentContext
-from ..core import AuthorizationAction, ExecutionDeltaType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
+from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
@@ -129,6 +129,10 @@ class _RegenerableTurnRunner:
         key = SessionTurnKey(session_id, turn_id)
         if phase == "cancelling":
             self._remote_cancel(key)
+            return
+        if phase == "waiting":
+            # A remote carrier is advisory, never a source of occupancy.
+            self._publish(session_id, {"type": "gap", "turn_id": turn_id, "phase": "waiting"})
             return
         if session_id not in self._observers or revision <= self._observed_revisions.get(session_id, -1):
             return
@@ -760,22 +764,74 @@ class _RegenerableTurnRunner:
     ) -> None:
         process: dict[str, ToolProcessItem] = {}
 
+        fields = {"turn_id": turn.key.turn_id, "turn_no": turn.number,
+                  "generation": turn.generation, "revision": turn.revision}
+
+        attempts: dict[str, int] = {}
+
+        def model_key(position: Mapping[str, JsonValue]) -> str | None:
+            run, request = position.get("agent_run_seq"), position.get("model_request_seq")
+            if type(run) is int and run > 0 and type(request) is int and request > 0:
+                return f"model:{run}:{request}"
+            return None
+
+        def reset_preview(key: str, attempt: int) -> None:
+            self._publish(turn.key.session_id, {
+                **fields, "type": "preview_reset", "model_key": key, "attempt": attempt,
+            })
+
         async def emit(emission: AgentEmission) -> None:
             if isinstance(emission, LiveDelta) and emission.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
+                position = emission.position or {}
+                key = model_key(position)
+                attempt = position.get("stream_attempt_seq")
+                scope: dict[str, JsonValue] = {}
+                if key is not None and type(attempt) is int and attempt > 0:
+                    previous = attempts.get(key)
+                    if previous is not None and previous > attempt:
+                        await event_sink(emission)
+                        return
+                    if previous is not None and previous < attempt:
+                        reset_preview(key, previous)
+                    attempts[key] = attempt
+                    scope = {"model_key": key, "attempt": attempt}
                 self._publish(turn.key.session_id, {
-                    "type": "delta", "turn_id": turn.key.turn_id, "turn_no": turn.number,
-                    "generation": turn.generation, "revision": turn.revision,
-                    "delta_kind": "text", "text": emission.content,
+                    **fields, **scope, "type": "delta", "delta_kind": "text", "text": emission.content,
                 })
             elif isinstance(emission, DurableBoundary):
                 item = project_tool_process_event(emission.event_type.value, emission.payload)
                 if item is not None:
-                    item = replace(item, error_message=None)
+                    # Model-facing tool feedback can contain private result data.
+                    # Keep the typed public status/reason and never forward that text.
+                    error_code = item.error_code
+                    if item.status == "FAILED" and error_code is None:
+                        error_code = ErrorCode.TOOL_EXECUTION_FAILED
+                    item = replace(item, error_code=error_code, error_message=None)
                     process[item.key] = item
                     self._publish(turn.key.session_id, {
-                        "type": "tool", "turn_id": turn.key.turn_id, "turn_no": turn.number,
-                        "generation": turn.generation, "revision": turn.revision, "item": asdict(item),
+                        **fields, "type": "tool", "item": asdict(item),
                     })
+                elif isinstance(emission.payload, Mapping) and emission.event_type in {
+                    ExecutionEventType.MODEL_REQUEST_STARTED, ExecutionEventType.MODEL_REQUEST_FINISHED,
+                }:
+                    # Only actual provider request lifecycle and timing are public
+                    # here; never forward usage, request/response, or thinking parts.
+                    payload = emission.payload
+                    key = model_key(payload)
+                    status, duration = payload.get("status"), payload.get("duration_ns")
+                    if (key is not None
+                            and (status == "RUNNING" if emission.event_type is ExecutionEventType.MODEL_REQUEST_STARTED
+                                 else status in ("SUCCEEDED", "FAILED", "CANCELLED"))):
+                        if status != "RUNNING":
+                            attempt = attempts.pop(key, None)
+                            if status != "SUCCEEDED" and attempt is not None:
+                                reset_preview(key, attempt)
+                        elapsed = ({"elapsed_ms": duration // 1_000_000}
+                                   if status != "RUNNING" and type(duration) is int and duration >= 0 else {})
+                        self._publish(turn.key.session_id, {
+                            **fields, "type": "progress",
+                            "item": {"kind": "model", "key": key, "status": status, **elapsed},
+                        })
             await event_sink(emission)
 
         producer = asyncio.create_task(self.settle(
@@ -1010,8 +1066,11 @@ class _RegenerableTurnRunner:
                         outcome = replace(outcome, metadata=metadata)
                     committed = await self._publish_deferred(turn, checkpoint_id, tools, outcome)
                     if committed:
-                        self._gap(turn.key)
-                        self._notice_lifecycle(turn.key, "admitted", turn.revision)
+                        self._publish(turn.key.session_id, {
+                            "type": "waiting", "turn_id": turn.key.turn_id, "turn_no": turn.number,
+                            "generation": turn.generation, "revision": turn.revision,
+                        })
+                        self._notice_lifecycle(turn.key, "waiting", turn.revision)
                     return committed
                 messages, output = outcome.messages, outcome.output
             frozen_spec = binding.binding_contract.agent_spec

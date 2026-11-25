@@ -29,6 +29,8 @@ _TURN_PAGE_MAX = 64
 
 _STATUS = {
     "accepted": "PENDING_START",
+    "waiting": "WAITING_DEFERRED",
+    "ready": "WAITING_DEFERRED",
     "cancelling": "CANCELLING",
     "cancelled": "CANCELLED",
     "failed": "FAILED",
@@ -79,7 +81,7 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
     return {
         "turn_id": row["turn_id"].decode("utf-8"),
         "turn_no": row["turn_no"],
-        "status": _STATUS[state],
+        "status": "RECOVERY_REQUIRED" if row.get("needs_recovery") else _STATUS[state],
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
         "user_input": {"version": 1, "prompt": row["prompt"], "files": [], "attachments": attachments},
