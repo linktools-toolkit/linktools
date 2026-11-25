@@ -297,6 +297,63 @@ async def test_recent_context_reads_latest_positions_and_reuses_covered_history(
 
 
 @pytest.mark.asyncio
+async def test_context_reset_is_committed_success_only_in_warm_and_cold_history(store):
+    engine, metadata, turns = store
+
+    async def publish(number, *, state="succeeded", reset=False):
+        key = SessionTurnKey("chat", f"context-{number}")
+        request = {"prompt": key.turn_id}
+        if reset:
+            request["session_context"] = "current_turn"
+        assert await turns.accept(
+            key, expected_revision=2 * (number - 1),
+            context_from=number if reset else 1, context_through=number - 1,
+            request_key=key.turn_id, request=request, binding=_BINDING, lease_seconds=60,
+        )
+        messages = (ModelResponse(parts=[TextPart(f"reply-{number}")]),) if state == "succeeded" else ()
+        assert await turns.finish(
+            key, generation=1, turn_no=number, state=state,
+            transcript=messages or None, result=None if messages else {"error_code": "MODEL_ERROR"},
+        )
+        turns.note_terminal_context(
+            key, turn_no=number, prompt=key.turn_id, stored_input=None,
+            messages=messages, succeeded=bool(messages), reset_context=reset,
+        )
+        return key
+
+    first = await publish(1)
+    await publish(2, state="failed", reset=True)
+    await publish(3)
+
+    def cold_reader():
+        reader = SqlSessionTurns(create_sql_storage_context(engine), metadata, namespace="test", tenant_id="a")
+        reader.bind_transcript_reader(*turns._transcript_source)
+        return reader
+
+    before_reset = await turns.recent_context("chat", through=3)
+    assert [turn.turn_no for turn in before_reset] == [1, 3]
+    assert await cold_reader().recent_context("chat", through=3) == before_reset
+
+    reset = await publish(4, reset=True)
+    await publish(5, state="failed", reset=True)
+    await publish(6)
+
+    after_reset = await turns.recent_context("chat", through=6)
+    assert [(turn.turn_no, turn.reset_context) for turn in after_reset] == [(4, True), (6, False)]
+    assert await cold_reader().recent_context("chat", through=6) == after_reset
+
+    # Reset changes the model's default candidates, not exact replay windows or
+    # the ability to read public history from before the reset.
+    assert [turn.turn_no for turn in await turns.read_context_range("chat", after=0, through=6)] == [1, 3, 4, 6]
+    admitted = await turns.get_turn(reset)
+    assert admitted["context_from"] == admitted["context_through"] + 1
+    assert await turns.read_context_range(
+        "chat", after=admitted["context_from"] - 1, through=admitted["context_through"],
+    ) == ()
+    assert (await turns.get_history_turn(first, lineage=()))["messages"][0].text == "reply-1"
+
+
+@pytest.mark.asyncio
 async def test_runtime_uses_its_conversation_route_for_new_turn_storage(tmp_path):
     from linktools.ai.core import AuthorizationAction, Principal, ResourceKind, TenantAuthorizationPolicy
     from linktools.ai.errors import AIError, ErrorCode
