@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import CapabilityContribution, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, CapabilityContribution, StepPersistenceCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
@@ -32,7 +32,7 @@ async def test_split_declarative_approval_requires_a_trusted_resolution(tmp_path
     calls: list[str] = []
     requests = 0
 
-    def lookup(value: str) -> str:
+    def lookup(_context: AgentContext[None], value: str) -> str:
         calls.append(value)
         return value
 
