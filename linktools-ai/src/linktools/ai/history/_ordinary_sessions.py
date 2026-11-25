@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 from pydantic_ai.messages import ModelResponse
@@ -21,7 +21,7 @@ from ..model import StoredUserInput
 from ..persistence.codec import decode_domain
 from ..model import decode_ordinary_transcript
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
-from ._session_timeline import _timeline_items
+from ._session_timeline import _project_turn_tool_process, _timeline_items
 
 if TYPE_CHECKING:
     from sqlalchemy import RowMapping
@@ -57,12 +57,21 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
     result = row["result_json"]
     output = None
     items: list[JsonValue] = []
+    process: list[JsonValue] = []
     if state == "succeeded":
         messages = decode_ordinary_transcript(result, display=True)
         if not messages or not isinstance(messages[-1], ModelResponse) or messages[-1].text is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = {"text": messages[-1].text}
-        items = [asdict(item) for item in _timeline_items(messages)]
+        items = [
+            asdict(replace(item, content=None) if item.item_kind == "tool_call" else item)
+            for item in _timeline_items(messages)
+            if item.item_kind != "tool_result"
+        ]
+        process = [
+            asdict(replace(item, error_message=None))
+            for item in _project_turn_tool_process(messages)
+        ]
     stored_input = row["stored_input"]
     attachments = [] if stored_input is None else [
         {key: item.get(key) for key in ("attachment_id", "source", "media_type", "size", "position")}
@@ -77,7 +86,7 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
         "user_input": {"version": 1, "prompt": row["prompt"], "files": [], "attachments": attachments},
         "conversation_committed": state in ("succeeded", "failed", "cancelled"),
         "items": items,
-        "process": [],
+        "process": process,
         "output": output,
         "error_code": result.get("error_code") if isinstance(result, Mapping) else None,
         "safe_error_details": {},
