@@ -447,6 +447,9 @@ class AgentExecutor:
         trace_interaction_base: int = 0,
         trace_boundary: Callable[[StagingAgentRunStore], Awaitable[None]] | None = None,
         trace_auto_flush: bool = False,
+        mode: ExecutionMode = "run",
+        planning: bool = False,
+        plan_store: PlanningStore | None = None,
     ) -> AgentExecutionOutcome:
         """Run a plain turn with no durable recorder or execution handoff."""
         if context.session_id is None:
@@ -458,6 +461,8 @@ class AgentExecutor:
         self.require_regenerable(
             binding, canonical_step=canonical_step is not None, canonical_trace=trace_boundary is not None,
         )
+        if planning and plan_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         staging = StagingAgentRunStore()
         store = RuntimeAgentRunStore(
             staging,
@@ -503,6 +508,8 @@ class AgentExecutor:
                 trace_interaction_base=trace_interaction_base,
                 trace_boundary=None if trace_boundary is None else flush_trace, trace_auto_flush=trace_auto_flush,
                 tool_effects="read_only" if canonical_step is None else "live",
+                mode=mode, planning=planning,
+                plan_store_resolver=None if plan_store is None else lambda _ctx: plan_store,
                 memory_store=memory_store, memory_tool_names=memory_names if memory_store is not None else (),
             ))
             if isinstance(outcome, DeferredToolRequests) and canonical_step is None:

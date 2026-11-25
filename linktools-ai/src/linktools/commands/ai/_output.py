@@ -76,7 +76,7 @@ async def _emit_session_result(
     try:
         with TurnObserver(runtime, session_id, principal, local_workspace=True, preview=not as_json) as observer:
             turn_id = await runtime.sessions.start_turn(
-                session_id, prompt, agent_id="default", principal=principal,
+                session_id, prompt, agent="default", principal=principal,
                 idempotency_key=uuid4().hex, thinking=thinking,
             )
             async for frame in observer.events(turn_id):

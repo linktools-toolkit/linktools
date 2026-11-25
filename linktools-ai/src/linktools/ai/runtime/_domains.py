@@ -392,13 +392,30 @@ class RuntimeSessions(Generic[AppT]):
         )
 
     async def start_turn(
-        self, session_id: str, prompt: str, *, agent_id: str, principal: Principal,
+        self, session_id: str, prompt: str, *, agent: str | Agent[AppT], principal: Principal,
         idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
         session_context: SessionContext = "all",
+        planning: bool = False,
         output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> str:
+        from ._agent import Agent
+
         runner, runtime = self._require_turn_sessions()
+        selected_binding = None
+        if isinstance(agent, Agent):
+            if agent.runtime is not runtime:
+                raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+            agent_id = agent.id
+
+            async def resolve_selected_binding():
+                port = agent.execution_port
+                return await port._resolve_start_binding(output, captured=port.captured)
+            selected_binding = resolve_selected_binding
+        elif isinstance(agent, str):
+            agent_id = agent
+        else:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "agent"})
         resolver = runtime._binding_resolver
         if resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -413,7 +430,8 @@ class RuntimeSessions(Generic[AppT]):
             tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
             resolver=resolver, request_key=idempotency_key, limits=PromptLimits(),
             event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking), files=files, output=output,
-            session_context=normalize_session_context(session_context),
+            session_context=normalize_session_context(session_context), selected_binding=selected_binding,
+            planning=planning,
             correlation=overlay_correlation(runtime.correlation, correlation),
         )
 

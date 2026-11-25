@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable plan projection over the existing optimistic state store."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from ..core.planning import PlanItem, PlanOwnerKind
 
 from linktools.core import environ
@@ -31,6 +31,7 @@ class PlanStateStore:
         tenant_id: str,
         owner_kind: PlanOwnerKind,
         owner_id: str,
+        _before_edit: Callable[[StateTransaction], Awaitable[None]] | None = None,
     ) -> None:
         if (
             not isinstance(owner_kind, str)
@@ -41,6 +42,7 @@ class PlanStateStore:
             raise ValueError("plan owner is invalid")
         validate_resource_id(owner_id)
         self._store = store
+        self._before_edit = _before_edit
         validate_tenant_id(tenant_id)
         self._owner_kind = owner_kind
         self._owner_id = owner_id
@@ -100,6 +102,8 @@ class PlanStateStore:
             transaction: StateTransaction,
         ) -> tuple[list[PlanItem], list[PlanItem], int]:
             nonlocal observed
+            if self._before_edit is not None:
+                await self._before_edit(transaction)
             current = await transaction.get_record(self._key)
             current_items, current_revision = _decode_payload(current)
             values = _validated_items(edit(list(current_items)))
@@ -127,7 +131,9 @@ class PlanStateStore:
         try:
             return await self._store.mutate(mutate)
         except AIError as error:
-            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or observed is None:
+            # A later generation may have written identical items. In a
+            # fenced edit, value equality cannot prove this write committed.
+            if self._before_edit is not None or error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or observed is None:
                 raise
             current, revision = await self._read_plan()
             if current == observed[1]:

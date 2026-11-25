@@ -73,7 +73,7 @@ async def test_canonical_trace_is_authorized_and_cursor_keeps_captured_head(tmp_
         await runtime.sessions.create_turn_session("chat", principal=principal)
         await runtime.sessions.create_turn_session("other", principal=principal)
         turn_id = await runtime.sessions.start_turn(
-            "chat", "question", agent_id="default", principal=principal, idempotency_key="start",
+            "chat", "question", agent="default", principal=principal, idempotency_key="start",
         )
         source = _TraceSource(turn_id)
         source.record(1)

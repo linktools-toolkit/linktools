@@ -44,7 +44,8 @@ if TYPE_CHECKING:
     from ..agent import AgentBinding
     from ..capability.steps import AtomicStepPersistence
     from ._tool import RuntimeToolOperationBridge
-    from ..core import AuthorizationPolicy, CorrelationData, PromptLimits, ThinkingValue
+    from ..capability.planning import PlanningStore
+    from ..core import AuthorizationPolicy, CorrelationData, ExecutionMode, PromptLimits, ThinkingValue
     from ..inputs import ExecutionInputMaterializer
     from ..spec import RepositoryInstructionResolver
     from ..workspace import Workspace
@@ -86,6 +87,9 @@ class _AdmittedTurn:
     instruction_frontier: SessionInstructionFrontier | None = None
     completed_checkpoint: bool = False
     output_retries_used: int = 0
+    mode: ExecutionMode = "run"
+    planning: bool = False
+    plan_store: PlanningStore | None = None
     trace_enabled: bool = False
     trace_event_base: int = 0
     trace_interaction_base: int = 0
@@ -100,6 +104,7 @@ class _RegenerableTurnRunner:
         instruction_resolver_for: Callable[[RepositoryInstructions], RepositoryInstructionResolver],
         prepare_step: Callable[[AgentBinding, SessionTurnKey, int], Awaitable[
             tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None]] | None = None,
+        prepare_plan: Callable[[SessionTurnKey, int], PlanningStore] | None = None,
     ) -> None:
         self._store = store
         self._executor = executor
@@ -109,6 +114,7 @@ class _RegenerableTurnRunner:
         self._instruction_resolver = instruction_resolver
         self._instruction_resolver_for = instruction_resolver_for
         self._prepare_step = prepare_step
+        self._prepare_plan = prepare_plan
         self._publish_deferred = None
         self._trace_archive: StateStepArchive | None = None
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
@@ -365,6 +371,8 @@ class _RegenerableTurnRunner:
         request_key: str, prompt: str, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
         files: Sequence[str] = (), session_context: SessionContext = "all", output: type[BaseModel] | None = None,
         correlation: CorrelationData | None = None,
+        selected_binding: Callable[[], Awaitable[AgentBinding]] | None = None,
+        mode: ExecutionMode = "run", planning: bool = False,
     ) -> str:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
@@ -385,7 +393,18 @@ class _RegenerableTurnRunner:
 
         files = normalize_input_files(files)
         output_binding = bind_output(output)
+        if mode not in ("run", "plan") or type(planning) is not bool:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        planning = planning or mode == "plan"
         effective_correlation = {} if correlation is None else dict(correlation)
+        resolved_binding = None
+
+        async def bind() -> AgentBinding:
+            nonlocal resolved_binding
+            if resolved_binding is None:
+                resolved_binding = (await resolver.resolve_agent(agent_id, output=output_binding)
+                                    if selected_binding is None else await selected_binding())
+            return resolved_binding
 
         async def replay() -> str | None:
             prior = await self._store.find_request(session_id, request_key)
@@ -407,10 +426,14 @@ class _RegenerableTurnRunner:
                 or request["thinking"] != thinking or prior_files != normalized_files
                 or request.get("session_context", "all") != session_context
                 or request.get("correlation", {}) != effective_correlation
+                or request.get("mode", "run") != mode or request.get("planning", False) != planning
                 or prior["agent_id"] != agent_id
-                or prior["output_mode"] != output_binding.mode
-                or prior["output_schema"] != output_binding.schema_definition
+                or (prior.get("binding_digest") is not None) != (selected_binding is not None)
+                or (selected_binding is None and (prior["output_mode"] != output_binding.mode
+                                                 or prior["output_schema"] != output_binding.schema_definition))
             ):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            if selected_binding is not None and prior["binding_digest"] != (await bind()).binding_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return identity
 
@@ -424,7 +447,7 @@ class _RegenerableTurnRunner:
             principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id),
         )
         files = await self._input_materializer.canonicalize_files(files) if files else ()
-        binding = await resolver.resolve_agent(agent_id, output=output_binding)
+        binding = await bind()
         config = session["config_json"]
         cwd = config.get("cwd")
         context = AgentContext(
@@ -436,10 +459,11 @@ class _RegenerableTurnRunner:
                 key, revision=session["revision"], through=session["last_turn_no"],
                 request_key=request_key, prompt=prompt, binding=binding, context=context,
                 limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
-                session_context=session_context,
+                session_context=session_context, mode=mode, planning=planning,
+                explicit_agent_binding=selected_binding is not None,
             ):
                 return key.turn_id
-        except IntegrityError:
+        except (IntegrityError, AIError):
             if (identity := await replay()) is not None:
                 return identity
             raise
@@ -534,6 +558,10 @@ class _RegenerableTurnRunner:
                 ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, admitted.principal_id),
             )
             generation = row["generation"]
+            mode = request.get("mode", "run")
+            planning = request.get("planning", False)
+            if mode not in ("run", "plan") or type(planning) is not bool or mode == "plan" and not planning:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if ready is not None and admitted != principal:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             if row["state"] == "cancelling":
@@ -614,6 +642,9 @@ class _RegenerableTurnRunner:
             contract = AgentBindingContract.from_payload(frozen_binding)
             binding = await resolver.restore(contract)
             native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, generation + 1)
+            if planning and self._prepare_plan is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            plan_store = self._prepare_plan(key, generation + 1) if planning else None
             canonical_trace = self._require_turn_trace(binding, canonical_step=native_step is not None)
             if canonical_trace != request.get("trace", False):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -727,6 +758,7 @@ class _RegenerableTurnRunner:
                 deferred_approvals=() if settled_continuation is None else settled_continuation.approvals,
                 instruction_frontier=instruction_frontier,
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
+                mode=mode, planning=planning, plan_store=plan_store,
                 trace_enabled=trace_enabled, trace_event_base=trace_event_base, trace_interaction_base=trace_interaction_base,
             )
             self._admitted(turn)
@@ -774,7 +806,8 @@ class _RegenerableTurnRunner:
         prompt: str, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue, cwd: str | None = None,
         files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
-        session_context: SessionContext = "all",
+        session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
+        explicit_agent_binding: bool = False,
     ) -> bool:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
@@ -787,7 +820,8 @@ class _RegenerableTurnRunner:
                 turn = await self.admit(
                     key, revision=revision, through=through, request_key=request_key,
                     prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
-                    session_context=session_context,
+                    session_context=session_context, mode=mode, planning=planning,
+                    explicit_agent_binding=explicit_agent_binding,
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
@@ -955,10 +989,14 @@ class _RegenerableTurnRunner:
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: str, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
         cwd: str | None = None, files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
-        session_context: SessionContext = "all",
+        session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
+        explicit_agent_binding: bool = False,
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, 1)
+        if planning and self._prepare_plan is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        plan_store = self._prepare_plan(key, 1) if planning else None
         trace_enabled = self._require_turn_trace(binding, canonical_step=native_step is not None)
         self._executor.require_regenerable(
             binding, canonical_step=native_step is not None, canonical_trace=trace_enabled,
@@ -981,10 +1019,16 @@ class _RegenerableTurnRunner:
         }
         if trace_enabled:
             request["trace"] = True
+        if explicit_agent_binding:
+            request["explicit_agent_binding"] = True
         if session_context == "current_turn":
             request["session_context"] = session_context
         if context.correlation:
             request["correlation"] = dict(context.correlation)
+        if mode == "plan":
+            request["mode"] = mode
+        if planning:
+            request["planning"] = True
         model_prompt = None
         attachments = ()
         input_size = len(prompt.encode("utf-8"))
@@ -1036,7 +1080,7 @@ class _RegenerableTurnRunner:
             [message for messages in reversed(history) for message in messages], terminal_bytes, revision + 1,
             repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
             stored_input=request.get("input"),
-            native_step=native_step, trace_enabled=trace_enabled,
+            native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
         )
 
     @staticmethod
@@ -1236,7 +1280,8 @@ class _RegenerableTurnRunner:
                     tool_operations=None if turn.native_step is None else turn.native_step[1],
                     generation=turn.generation, continuation=turn.continuation,
                     deferred_tool_results=turn.deferred_results, deferred_approvals=turn.deferred_approvals,
-                    output_retries_used=turn.output_retries_used, **trace_opts,
+                    output_retries_used=turn.output_retries_used, mode=turn.mode, planning=turn.planning,
+                    plan_store=turn.plan_store, **trace_opts,
                 )
                 if isinstance(outcome, DeferredToolRequests):
                     if turn.native_step is None or self._publish_deferred is None:

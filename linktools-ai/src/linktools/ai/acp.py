@@ -348,7 +348,7 @@ class ACPAgent:
                     self._runtime, session_id, self._principal, local_workspace=self._local_workspace,
                 ) as observer:
                     execution_id = await self._runtime.sessions.start_turn(
-                        session_id, "".join(parts), agent_id="default",
+                        session_id, "".join(parts), agent="default",
                         principal=self._principal, idempotency_key=request_id,
                     )
                     admitted.set_result(execution_id)

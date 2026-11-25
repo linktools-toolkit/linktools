@@ -332,6 +332,7 @@ class LocalExecutionBackend:
         agent_run_lifecycle: _AgentRunLifecycle,
         memory_store_factory: "Callable[[str, str, str], MemoryStore] | None" = None,
         conversation_durable: bool = False,
+        canonical_turns: bool = False,
         input_materializer: ExecutionInputMaterializer | None = None,
         subagent_dispatcher: "_SubagentDispatcher | None" = None,
         live_broker: "LiveExecutionEventBroker | None" = None,
@@ -421,6 +422,7 @@ class LocalExecutionBackend:
         execution_repository: ExecutionRepository = self._execution.executions
         session_repository: SessionRepository = self._conversation.sessions
         self._session_state_store = session_repository.state_store
+        self._canonical_turns = canonical_turns
         self._execution_state_store = execution_repository.state_store
         self._runtime_commands = StateCommands(
             execution_repository,
@@ -4855,17 +4857,22 @@ class LocalExecutionBackend:
                 input_context=accepted_context,
                 original_input=stored_user_input_view(original_input),
             )
-            plan_store = PlanningStore(PlanStateStore(
-                self._session_state_store
-                if current.session_id is not None
-                else self._execution_state_store,
-                namespace=self._namespace,
-                tenant_id=self._tenant_id,
-                owner_kind="session" if current.session_id is not None else "execution",
-                owner_id=current.session_id or current.execution_id,
-            ))
             deferred_capability_refs: dict[str, CapabilityRef] = {}
             try:
+                if self._canonical_turns and current.session_id is not None and (request.planning or request.mode == "plan"):
+                    raise AIError(
+                        ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                        "SQL session planning must use Runtime.sessions.start_turn(planning=True)",
+                    )
+                plan_store = PlanningStore(PlanStateStore(
+                    self._session_state_store
+                    if current.session_id is not None
+                    else self._execution_state_store,
+                    namespace=self._namespace,
+                    tenant_id=self._tenant_id,
+                    owner_kind="session" if current.session_id is not None else "execution",
+                    owner_id=current.session_id or current.execution_id,
+                ))
                 result = await self._executor.execute(
                     _AgentRunScope(
                         binding=binding,

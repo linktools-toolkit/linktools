@@ -216,7 +216,7 @@ def _native_web_turn_owner(database: Path, channel) -> None:
             principal = runtime.default_principal
             await runtime.sessions.create_turn_session("session", principal=principal, idempotency_key="create")
             turn_id = await runtime.sessions.start_turn(
-                "session", "original prompt", agent_id="default", principal=principal, idempotency_key="send",
+                "session", "original prompt", agent="default", principal=principal, idempotency_key="send",
             )
             await entered.wait()
             channel.send(turn_id)

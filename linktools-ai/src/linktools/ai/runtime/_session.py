@@ -114,8 +114,9 @@ class _SessionTranscriptStore(Protocol):
 
 
 class _SessionExecutionAdapter:
-    def __init__(self, execution: _SessionExecutionService) -> None:
+    def __init__(self, execution: _SessionExecutionService, *, canonical_turns: bool = False) -> None:
         self._execution = execution
+        self._canonical_turns = canonical_turns
         self.start_read: _SessionStartRead | None = None
 
     async def start_for_session(self, agent_id: str, binding_digest: str, session_id: str,
@@ -126,6 +127,11 @@ class _SessionExecutionAdapter:
                                 dependency_hold_id: str | None = None,
                                 requires_task_invocation_capture: bool = False,
                                 budget_scope_id: str | None = None) -> ExecutionHandle:
+        if self._canonical_turns and (request.planning or request.mode == "plan"):
+            raise AIError(
+                ErrorCode.CAPABILITY_POLICY_CONFLICT,
+                "SQL session planning must use Runtime.sessions.start_turn(planning=True)",
+            )
         execution_request = ExecutionRequest(
             user_prompt=request.user_prompt, principal=request.principal,
             idempotency_key=request.idempotency_key, memory_scope=request.memory_scope,
@@ -191,7 +197,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             adapter = self._execution
             read_session = self._read_session
             if isinstance(execution, DefaultExecutionService):
-                adapter = _SessionExecutionAdapter(execution)
+                adapter = _SessionExecutionAdapter(execution, canonical_turns=self._canonical_turns)
                 async def read_session(identity: str, *, tenant_id: str) -> SessionRecord | None:
                     adapter.start_read = await execution._read_session_start(
                         identity, idempotency_key, tenant_id=tenant_id)
@@ -216,7 +222,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         execution = self._admission_execution
         if not isinstance(execution, DefaultExecutionService):
             return await super()._resume(agent_id, binding_digest, session_id, request, **kwargs)
-        adapter = _SessionExecutionAdapter(execution)
+        adapter = _SessionExecutionAdapter(execution, canonical_turns=self._canonical_turns)
         async def read_session(identity: str, *, tenant_id: str) -> SessionRecord | None:
             adapter.start_read = await execution._read_session_start(identity, request.idempotency_key, tenant_id=tenant_id)
             return adapter.start_read.session
@@ -270,6 +276,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         *,
         history_reader: SessionHistoryReader,
         regenerable_turns: "_RegenerableTurnRunner | None" = None,
+        canonical_turns: bool = False,
         enabled: bool = True,
         current_policy: Callable[[], Awaitable[_RuntimeFeaturePolicy]] | None = None,
         transcript_store: "_SessionTranscriptStore | None" = None,
@@ -288,6 +295,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         self._change_subscriptions: set[Callable[[], None]] = set()
         self._current_policy = current_policy
         self._admission_execution = execution
+        self._canonical_turns = canonical_turns
         self._runtime_conversation = conversation
         self._runtime_executions = executions
         self._runtime_authorization = authorization
@@ -298,7 +306,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         self._local_waiter = local_waiter
         self._capture_terminal_publication = capture_terminal_publication
         super().__init__(
-            conversation, executions, authorization, _SessionExecutionAdapter(execution), cursor_signer,
+            conversation, executions, authorization, _SessionExecutionAdapter(execution, canonical_turns=self._canonical_turns), cursor_signer,
             enabled=enabled, release_terminal=release_terminal,
             canonicalize_path=None if workspace_access is None else workspace_access.canonicalize_path,
             pending_session_execution=pending_session_execution,

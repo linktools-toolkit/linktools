@@ -101,10 +101,12 @@ opaque `next_cursor`. Step selection belongs to the Agent's capabilities and
 does not select another session or timeline. The session does not store an
 Agent or application owner; the host policy authorizes the session.
 
-The bound Session API shown above has a distinct contract, including a bound
-Agent, structured output, planning, and execution handles. Do not substitute
-one API for the other for those features. Independent Agent and Task work still
-use their execution APIs.
+Enable the planning capability for a writable SQL session with
+`runtime.sessions.start_turn(..., planning=True)`. The plan belongs to the
+session, and only the current turn producer can update it. A bound legacy
+session cannot start a second planning writer. To run an independent,
+plan-only execution, call `Agent.start_plan(...)` without a session ID.
+Non-SQL sessions retain their bound Session and execution-handle contract.
 
 ## Task and graph semantics stay with Task
 

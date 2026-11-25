@@ -545,7 +545,7 @@ class _Console:
                 if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
                     raise ValueError("files must be a list of workspace-relative paths")
                 turn_id = await runtime.sessions.start_turn(
-                    session_id, _text(payload, "prompt"), agent_id=_text(payload, "agent_id", "default"),
+                    session_id, _text(payload, "prompt"), agent=_text(payload, "agent_id", "default"),
                     principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"), files=files,
                 )
                 return _json({"turn_id": turn_id}, 202)

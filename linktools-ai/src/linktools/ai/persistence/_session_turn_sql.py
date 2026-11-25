@@ -478,7 +478,7 @@ class SqlSessionTurnReader:
         required = ("prompt", "principal", "thinking")
         optional = ("input", "session_context", "correlation")
         statement = select(
-            columns.turn_id, columns.binding_key,
+            columns.turn_id, columns.binding_key, request["explicit_agent_binding"].as_boolean().label("explicit_agent_binding"),
             *(request[name].label(name) for name in (*required, *optional)),
         )
         row = await self._read_bound_turn(statement.where(
@@ -496,6 +496,8 @@ class SqlSessionTurnReader:
             },
             "agent_id": binding["agent_spec"]["id"], "output_mode": binding["output_mode"],
             "output_schema": binding["output_schema"],
+            **({"binding_digest": AgentBindingContract.from_payload(binding).binding_digest}
+               if row["explicit_agent_binding"] is True else {}),
         }
 
     async def session_page(

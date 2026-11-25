@@ -225,6 +225,42 @@ class AgentExecutionPort(Generic[AppT]):
     ) -> ModelInteractionSubscription | None:
         return await self._history_reader().subscribe_model_interactions(execution_id, principal=principal)
 
+    async def _resolve_start_binding(
+        self, output: "type[BaseModel] | OutputBinding | None", *, captured: bool,
+    ) -> AgentBinding:
+        if not captured and self.resolve_current is not None:
+            agent_id = self.agent_id if self.compiled is None else self.compiled.spec.id
+            if agent_id is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            binding = await self.resolve_current(agent_id, self.derivations, output)
+        else:
+            compiled_agent = self.compiled
+            if not captured:
+                if compiled_agent is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                binding = self._compiler.bind(compiled_agent, output=output)
+            else:
+                binding = (
+                    await self.restore_binding(self.binding_contract)
+                    if self.restore_binding is not None
+                    else self._compiler.restore(self.binding_contract,
+                                               model=None if compiled_agent is None else compiled_agent.model)
+                )
+                if output is not None:
+                    output_binding = output if isinstance(output, OutputBinding) else bind_output(output)
+                    binding = replace(
+                        binding,
+                        output_binding=output_binding,
+                        binding_contract=replace(
+                            binding.binding_contract,
+                            output_mode=output_binding.mode,
+                            output_schema=output_binding.schema_definition,
+                        ),
+                    )
+            if not captured or self.restore_binding is None:
+                binding = await self.resolve_binding(binding)
+        return binding
+
     async def start(
         self,
         user_prompt: CanonicalUserInput,
@@ -259,37 +295,7 @@ class AgentExecutionPort(Generic[AppT]):
         effective_correlation = overlay_correlation(self.correlation, correlation)
         resolved_files = normalize_input_files(files)
         captured = self.captured or requires_task_invocation_capture
-        if not captured and self.resolve_current is not None:
-            agent_id = self.agent_id if self.compiled is None else self.compiled.spec.id
-            if agent_id is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            binding = await self.resolve_current(agent_id, self.derivations, output)
-        else:
-            compiled_agent = self.compiled
-            if not captured:
-                if compiled_agent is None:
-                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                binding = self._compiler.bind(compiled_agent, output=output)
-            else:
-                binding = (
-                    await self.restore_binding(self.binding_contract)
-                    if self.restore_binding is not None
-                    else self._compiler.restore(self.binding_contract,
-                                               model=None if compiled_agent is None else compiled_agent.model)
-                )
-                if output is not None:
-                    output_binding = output if isinstance(output, OutputBinding) else bind_output(output)
-                    binding = replace(
-                        binding,
-                        output_binding=output_binding,
-                        binding_contract=replace(
-                            binding.binding_contract,
-                            output_mode=output_binding.mode,
-                            output_schema=output_binding.schema_definition,
-                        ),
-                    )
-            if not captured or self.restore_binding is None:
-                binding = await self.resolve_binding(binding)
+        binding = await self._resolve_start_binding(output, captured=captured)
         compiled_agent = binding.compiled_agent
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
             compiled_agent,

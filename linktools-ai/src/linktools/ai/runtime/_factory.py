@@ -784,6 +784,7 @@ async def _build_local_components(
             run_store,
             executor,
             catalog,
+            canonical_turns=state.session_turns is not None,
             archive_objects=state.archive_object_store(PersistenceDomain.EXECUTION),
             archive_object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
             asset_sources=asset_sources,
@@ -873,6 +874,19 @@ async def _build_local_components(
             )
             return replace(native, store=store), tools
 
+        def prepare_canonical_plan(key, generation):
+            from ..capability.planning import PlanningStore
+            from ..persistence.planning import PlanStateStore
+
+            async def guard(transaction):
+                await state.session_turns.guard_step_in_transaction(transaction, key, generation=generation)
+
+            return PlanningStore(PlanStateStore(
+                state.conversation.sessions.state_store,
+                namespace=namespace, tenant_id=tenant_id,
+                owner_kind="session", owner_id=key.session_id, _before_edit=guard,
+            ))
+
         turn_runner = (
             None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(
                 state.session_turns, executor, workspace=workspace,
@@ -884,7 +898,7 @@ async def _build_local_components(
                     object_key_factory=object_key_factory,
                 ),
                 instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
-                prepare_step=prepare_canonical_step,
+                prepare_step=prepare_canonical_step, prepare_plan=prepare_canonical_plan,
             )
         )
         if turn_runner is not None:
@@ -906,7 +920,7 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
-            regenerable_turns=turn_runner,
+            regenerable_turns=turn_runner, canonical_turns=state.session_turns is not None,
             enabled=session_execution_ready,
             current_policy=current_policy,
             cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if all(

@@ -53,7 +53,7 @@ async def test_canonical_deferred_outcome_uses_original_turn_and_pending_leaf(
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("chat", principal=principal)
         turn_id = await runtime.sessions.start_turn(
-            "chat", "question", agent_id="default", principal=principal, idempotency_key="original",
+            "chat", "question", agent="default", principal=principal, idempotency_key="original",
         )
         key = SessionTurnKey("chat", turn_id)
         turns = persistence.session_turns
