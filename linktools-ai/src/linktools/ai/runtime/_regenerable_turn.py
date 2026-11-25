@@ -87,6 +87,8 @@ class _RegenerableTurnRunner:
         self._observers: dict[str, set[Callable[[dict[str, JsonValue]], None]]] = {}
         self._lifecycle_observers: set[Callable[[dict[str, JsonValue]], None]] = set()
         self._observed_revisions: dict[str, int] = {}
+        self._cancel_notices: dict[SessionTurnKey, asyncio.Task[None]] = {}
+        self._observed_cancellation: dict[str, str] = {}
 
     def observe_lifecycle(self, callback: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
         """Offer only committed turn identifiers and revisions to a host carrier."""
@@ -99,11 +101,38 @@ class _RegenerableTurnRunner:
         self._lifecycle_observers.add(listener)
         return lambda: self._lifecycle_observers.discard(listener)
 
-    def invalidate_session(self, session_id: str, turn_id: str, *, revision: int) -> None:
+    def invalidate_session(self, session_id: str, turn_id: str, *, revision: int, phase: str = "admitted") -> None:
+        key = SessionTurnKey(session_id, turn_id)
+        if phase == "cancelling":
+            self._remote_cancel(key)
+            return
         if session_id not in self._observers or revision <= self._observed_revisions.get(session_id, -1):
             return
         self._observed_revisions[session_id] = revision
-        self._gap(SessionTurnKey(session_id, turn_id))
+        self._gap(key)
+
+    def _remote_cancel(self, key: SessionTurnKey) -> None:
+        if self._closed:
+            return
+        if (key.session_id in self._observers
+                and self._observed_cancellation.get(key.session_id) != key.turn_id):
+            self._observed_cancellation[key.session_id] = key.turn_id
+            self._gap(key)
+        producer = self._producers.get(key)
+        if producer is None or producer.done() or producer.cancelling() or key in self._cancel_notices:
+            return
+
+        async def confirm() -> None:
+            try:
+                row = await self._store.get_turn(key)
+                if row is not None and row["state"] == "cancelling" and self._producers.get(key) is producer:
+                    producer.cancel()
+            except Exception as error:
+                _logger.warning("Remote cancellation confirmation failed: %s", type(error).__name__)
+
+        task = asyncio.create_task(confirm(), name="linktools-remote-turn-cancel")
+        self._cancel_notices[key] = task
+        task.add_done_callback(lambda _: self._cancel_notices.pop(key, None))
 
     def invalidate_observed_sessions(self) -> None:
         """Ask current viewers to reconcile after known advisory-channel loss."""
@@ -112,7 +141,10 @@ class _RegenerableTurnRunner:
 
     def _notice_lifecycle(self, key: SessionTurnKey, phase: str, revision: int) -> None:
         if key.session_id in self._observers:
-            self._observed_revisions[key.session_id] = max(revision, self._observed_revisions.get(key.session_id, -1))
+            if phase == "cancelling":
+                self._observed_cancellation[key.session_id] = key.turn_id
+            else:
+                self._observed_revisions[key.session_id] = max(revision, self._observed_revisions.get(key.session_id, -1))
         for callback in tuple(self._lifecycle_observers):
             try:
                 callback({
@@ -142,6 +174,7 @@ class _RegenerableTurnRunner:
             if not listeners and self._observers.get(session_id) is listeners:
                 self._observers.pop(session_id, None)
                 self._observed_revisions.pop(session_id, None)
+                self._observed_cancellation.pop(session_id, None)
 
         return close
 
@@ -376,6 +409,12 @@ class _RegenerableTurnRunner:
         producer = self._producers.get(key)
         if producer is not None:
             producer.cancel()
+        else:
+            # A transport-routed cancellation may have no producer on this
+            # process to publish its eventual terminal frame. Tell current
+            # viewers to reconcile this exact committed turn.
+            self._gap(key)
+        self._notice_lifecycle(key, "cancelling", session["revision"])
         return True
 
     async def recover_session_turn(
@@ -497,9 +536,15 @@ class _RegenerableTurnRunner:
                 stored_input=request.get("input"),
             )
             self._admitted(turn)
-            await self._settle_with_lease(
-                turn, binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=request["thinking"],
-            )
+            try:
+                await self._settle_with_lease(
+                    turn, binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=request["thinking"],
+                )
+            except Exception:
+                # Recovery already changed the producer generation; the
+                # browser must not keep waiting on that generation silently.
+                self._gap(key)
+                raise
             return True
 
         task = self._spawn_owned(recover, name="linktools-recover-regenerable-turn")
@@ -587,7 +632,8 @@ class _RegenerableTurnRunner:
             _OBSERVER_SLOTS.release(count)
         self._observers.clear()
         self._observed_revisions.clear()
-        tasks = tuple(self._tasks)
+        self._observed_cancellation.clear()
+        tasks = (*self._tasks, *self._cancel_notices.values())
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

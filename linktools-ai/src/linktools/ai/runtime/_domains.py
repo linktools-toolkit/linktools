@@ -435,14 +435,16 @@ class RuntimeSessions(Generic[AppT]):
         runner, _ = self._require_turn_sessions()
         return runner.observe_lifecycle(callback)
 
-    def invalidate_turn_session(self, session_id: str, turn_id: str, *, revision: int) -> None:
+    def invalidate_turn_session(
+        self, session_id: str, turn_id: str, *, revision: int, phase: str = "admitted",
+    ) -> None:
         """Notify any local observers to re-read the authoritative session."""
         runner, _ = self._require_turn_sessions()
         validate_resource_id(session_id)
         validate_resource_id(turn_id)
-        if type(revision) is not int or revision < 1:
+        if type(revision) is not int or revision < 1 or phase not in ("admitted", "terminal", "cancelling"):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        runner.invalidate_session(session_id, turn_id, revision=revision)
+        runner.invalidate_session(session_id, turn_id, revision=revision, phase=phase)
 
     @asynccontextmanager
     async def bridge_turn_notices(self, transport: TurnNoticeTransport) -> AsyncIterator[None]:
@@ -452,7 +454,7 @@ class RuntimeSessions(Generic[AppT]):
 
         def receive(notice: TurnNotice) -> None:
             if notice.scope == scope:
-                runner.invalidate_session(notice.session_id, notice.turn_id, revision=notice.revision)
+                runner.invalidate_session(notice.session_id, notice.turn_id, revision=notice.revision, phase=notice.phase)
 
         def gap(affected: TurnNoticeScope) -> None:
             if affected == scope:

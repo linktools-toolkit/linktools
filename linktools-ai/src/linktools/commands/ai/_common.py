@@ -239,15 +239,16 @@ class _LocalSessionFeed:
         # revision, occupancy, or terminal state as authoritative.
         if value.get("kind") == "ordinary_turn":
             session_id, turn_id, revision = value.get("session_id"), value.get("turn_id"), value.get("revision")
+            phase = value.get("phase")
             if (
                 self.runtime.sessions.supports_turn_sessions
                 and value.get("namespace") == self.runtime.namespace
                 and value.get("tenant_id") == self.runtime.tenant_id
-                and value.get("phase") in ("admitted", "terminal")
+                and phase in ("admitted", "cancelling", "terminal")
                 and isinstance(session_id, str) and isinstance(turn_id, str)
                 and type(revision) is int and revision >= 1
             ):
-                self.runtime.sessions.invalidate_turn_session(session_id, turn_id, revision=revision)
+                self.runtime.sessions.invalidate_turn_session(session_id, turn_id, revision=revision, phase=phase)
             return
         kind, session_id, execution_id = value.get("kind"), value.get("session_id"), value.get("execution_id")
         if not isinstance(session_id, str) or not session_id or not isinstance(execution_id, str) or not execution_id:
