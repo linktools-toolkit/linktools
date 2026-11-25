@@ -447,12 +447,15 @@ function watchOrdinarySession(id) {
   watch.readActive=()=>{
     const turnId=activeTurn();
     if(!turnId || watch.activeRead?.id===turnId || state.turns.some(row=>row.turn_id===turnId))return;
-    const read={id:turnId,frames:[],units:0,generation:0};
+    const lost=watch.lostRead?.id===turnId ? watch.lostRead : null;
+    const read={id:turnId,frames:[],units:0,generation:lost?.generation || 0,overflow:Boolean(lost)};
     watch.activeRead=read;
     void api(sessionURL(id,'',{turn_id:turnId})).then(turn=>{
       if(!current() || watch.activeRead!==read || activeTurn()!==turnId
         || state.turns.some(row=>row.turn_id===turnId && row.conversation_committed))return;
-      patchOrdinaryTurn(turn);
+      const row=state.turns.find(item=>item.turn_id===turnId);
+      patchOrdinaryTurn(!row && !turn.conversation_committed && read.overflow
+        ? {...turn,liveGeneration:read.generation,liveParts:[],previewGap:read.generation} : turn);
       if(!turn.conversation_committed)for(const frame of read.frames || [])applyPreview(frame);
     }).catch(error=>{
       if(current() && watch.activeRead===read && activeTurn()===turnId
@@ -460,10 +463,11 @@ function watchOrdinarySession(id) {
     }).finally(()=>{read.frames=null;});
   };
   function applyPreview(frame) {
+    if(activeTurn()!==frame.turn_id)return;
     const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
-    if(!turn || turn.liveGeneration>frame.generation)return;
+    if(!turn || turn.liveGeneration>frame.generation || turn.previewGap===frame.generation)return;
     const reset=turn.liveGeneration!==frame.generation;
-    if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];}
+    if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];turn.previewGap=null;}
     if(frame.type==='tool'){
       const item=frame.item;
       if(item?.kind!=='tool' || typeof item.key!=='string' || !Object.hasOwn(processToolStatus,item.status))return;
@@ -502,7 +506,17 @@ function watchOrdinarySession(id) {
         ? 'Too many conversations are being watched. Close another conversation or try Refresh.' : code);
     } catch {notice('Conversation unavailable');}
   });
-  source.onerror=()=>{if(current()){watch.ready=false;setDisabled();}};
+  source.onerror=()=>{
+    if(!current())return;
+    watch.ready=false;
+    const active=activeTurn();
+    const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
+    if(row?.liveGeneration && row.previewGap!==row.liveGeneration)
+      patchOrdinaryTurn({...row,liveParts:[],previewGap:row.liveGeneration});
+    const read=watch.activeRead;
+    if(read?.id===active && read.frames?.length){read.frames=[];read.overflow=true;}
+    setDisabled();
+  };
   source.addEventListener('turn',event=>{
     if(!current())return;
     let frame;try {frame=JSON.parse(event.data);}catch{return;}
@@ -514,7 +528,11 @@ function watchOrdinarySession(id) {
         if(state.session && watch.snapshot.revision>=state.session.revision)Object.assign(state.session,watch.snapshot);
       }
       setDisabled();renderList();
-      if(reconnected)watch.activeRead=null;
+      if(reconnected){
+        const discarded=watch.activeRead;
+        watch.lostRead=discarded?.overflow ? {id:discarded.id,generation:discarded.generation} : null;
+        watch.activeRead=null;
+      }
       watch.readActive();
       if(watch.committedThrough!==null && watch.snapshot?.last_turn_no>watch.committedThrough)
         void catchUpOrdinary(watch).catch(showError);
@@ -523,8 +541,15 @@ function watchOrdinarySession(id) {
     if(frame.type==='gap'){void catchUpOrdinary(watch).catch(showError);return;}
     if(!frame.turn_id)return;
     if(frame.type==='admitted'){
+      const row=state.turns.find(item=>item.turn_id===frame.turn_id);
+      const bufferedGeneration=watch.activeRead?.id===frame.turn_id ? watch.activeRead.generation : 0;
+      if(row?.conversation_committed || Math.max(row?.liveGeneration || 0,bufferedGeneration)>frame.generation
+        || frame.revision<(watch.snapshot?.revision ?? -1) && activeTurn()!==frame.turn_id)return;
       ordinaryOccupancy(watch,frame.revision,frame.turn_id);
-      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false});
+      const missingPreview=bufferedGeneration===frame.generation && watch.activeRead?.overflow;
+      const preview=row?.liveGeneration===frame.generation && !missingPreview ? {}
+        : {liveGeneration:frame.generation,liveParts:[],previewGap:missingPreview?frame.generation:null};
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,...preview});
     } else if(frame.type==='delta' || frame.type==='tool'){
       if(state.turns.some(row=>row.turn_id===frame.turn_id)){
         applyPreview(frame);
@@ -532,29 +557,34 @@ function watchOrdinarySession(id) {
         watch.readActive();
         const read=watch.activeRead;
         if(read?.id!==frame.turn_id || read.generation>frame.generation || !read.frames)return;
-        if(read.generation!==frame.generation){read.generation=frame.generation;read.frames=[];read.units=0;}
-        // Limit temporary browser memory while the exact pending-turn read
-        // is in flight. On overflow wait for the authoritative terminal.
+        if(read.generation!==frame.generation){
+          read.generation=frame.generation;read.frames=[];read.units=0;read.overflow=false;
+        }
+        if(read.overflow)return;
+        // Do not show a disconnected tail as a complete text segment.
         if(read.frames.length>=128 || read.units+event.data.length>64*1024){
-          read.frames=null;
+          read.frames=[];read.overflow=true;
         } else {
           read.frames.push(frame);read.units+=event.data.length;
         }
       }
       return;
     } else if(frame.type==='terminal'){
+      const previous=state.turns.find(row=>row.turn_id===frame.turn_id);
+      const bufferedGeneration=watch.activeRead?.id===frame.turn_id ? watch.activeRead.generation : 0;
+      if(Math.max(previous?.liveGeneration || 0,bufferedGeneration)>frame.generation)return;
       ordinaryOccupancy(watch,frame.revision,null,frame.turn_no);
       if(frame.turn_no===(watch.committedThrough ?? 0)+1)watch.committedThrough=frame.turn_no;
       const status=ordinaryStatus(frame.status ?? frame.state),items=frame.items || [],process=frame.process || [];
-      const previous=state.turns.find(row=>row.turn_id===frame.turn_id);
-      const interruptions=(status==='FAILED' || status==='CANCELLED') && !items.length && !process.length;
+      const interruptions=(status==='FAILED' || status==='CANCELLED') && !items.length && !process.length
+        && previous?.liveGeneration===frame.generation;
       // Keep this browser's preview only. A failed turn does not prove that a
       // running tool failed, so preserve completed rows and mark open ones interrupted.
       const interruptedPreview=interruptions
         ? previous?.interruptedPreview || previous?.liveParts?.map(part=>part.tool?.status==='RUNNING'
           ? {tool:{...part.tool,status:status==='CANCELLED'?'CANCELLED':'INTERRUPTED'}} : part) : null;
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status,
-        user_input:ordinaryInput(frame.prompt,frame.attachments),items,process,liveParts:[],interruptedPreview,
+        user_input:ordinaryInput(frame.prompt,frame.attachments),items,process,liveParts:[],previewGap:null,interruptedPreview,
         output:frame.output,error_code:frame.error_code,conversation_committed:true});
     }
     renderList();setDisabled();
