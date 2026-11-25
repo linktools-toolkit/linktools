@@ -23,9 +23,10 @@ class Container(BaseContainer):
     @cached_property
     def fields(self) -> "dict[str, Any]":
         def get_base_dn(cfg: "ConfigResolver") -> str:
-            domain = Nginx.root_domain(cfg, default="example.org")
-            parts = domain.split(".")
-            return ",".join(f"dc={part}" for part in parts)
+            domain = cfg.get("NGINX_ROOT_DOMAIN")
+            if not Nginx.is_dns_domain(domain):
+                domain = "example.org"
+            return ",".join(f"dc={part}" for part in domain.split("."))
 
         return dict(
             LLDAP_TAG="stable",

@@ -159,7 +159,8 @@ class Container(BaseContainer):
 
     @cached_property
     def acl_config(self) -> str:
-        root = Nginx.root_domain(self.config)
+        root = self.get_config("NGINX_ROOT_DOMAIN")
+        Nginx.validate_https_domain(root)
         policy = "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor"
         rules = list(self.acl_rules)
         rules.append({

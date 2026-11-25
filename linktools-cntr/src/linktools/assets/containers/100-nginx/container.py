@@ -214,14 +214,11 @@ class Container(BaseContainer):
         return "".join(values)
 
     @cached_property
-    def acme_primary_domain(self) -> str:
-        return Nginx.root_domain(self.config)
-
-    @cached_property
     def acme_ssl_domains(self) -> "list[str]":
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return []
-        domain = self.acme_primary_domain
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
+        Nginx.validate_https_domain(domain)
         result = [domain, f"*.{domain}"]
         for site in self.sites.values():
             if not site.enabled or not site.https:
@@ -248,9 +245,12 @@ class Container(BaseContainer):
         import tempfile
         if context.target_services is not None and "nginx" not in context.target_services:
             return
-        if self.get_config("NGINX_WILDCARD_DOMAIN") and not Nginx.root_domain(self.config, default=""):
+        root_domain = self.get_config("NGINX_ROOT_DOMAIN")
+        if self.get_config("NGINX_WILDCARD_DOMAIN") and not Nginx.is_dns_domain(root_domain):
             raise ContainerError("Wildcard domain is enabled; configure NGINX_ROOT_DOMAIN with a DNS domain.")
-        domain = self.acme_primary_domain if self.get_config("NGINX_HTTPS_ENABLE", type=bool) else None
+        domain = root_domain if self.get_config("NGINX_HTTPS_ENABLE", type=bool) else None
+        if domain is not None:
+            Nginx.validate_https_domain(domain)
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
@@ -418,6 +418,8 @@ class Container(BaseContainer):
         for site in self.sites.values():
             if site.enabled:
                 active.append(site.resolve())
+        if any(site.https for site in active):
+            Nginx.validate_https_domain(self.get_config("NGINX_ROOT_DOMAIN"))
         defaults = {}
         for site in active:
             if not site.default_server:

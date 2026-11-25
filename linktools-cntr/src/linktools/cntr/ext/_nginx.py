@@ -4,8 +4,6 @@
 import re
 from typing import TYPE_CHECKING
 
-from linktools.types import MISSING
-
 from ._base import Integration
 from ..errors import ContainerError
 
@@ -54,14 +52,10 @@ class Nginx(Integration):
         return self
 
     @classmethod
-    def root_domain(cls, config: "ConfigResolver", *, default: str = MISSING) -> str:
-        """Return the configured DNS root or the explicit fallback."""
-        root = config.get("NGINX_ROOT_DOMAIN")
-        if cls._is_dns_root(root):
-            return root
-        if default is not MISSING:
-            return default
-        raise ContainerError("Configure NGINX_ROOT_DOMAIN with a DNS domain for HTTPS.")
+    def validate_https_domain(cls, value: str) -> None:
+        """Reject routing placeholders and non-DNS names before TLS configuration."""
+        if not cls.is_dns_domain(value):
+            raise ContainerError("Configure NGINX_ROOT_DOMAIN with a DNS domain for HTTPS.")
 
     @classmethod
     def certificate_domain(cls, value: str) -> "Optional[str]":
@@ -69,12 +63,13 @@ class Nginx(Integration):
         if not value:
             return None
         name = value[2:] if value.startswith("*.") else value
-        if not cls._is_dns_root(name):
+        if not cls.is_dns_domain(name):
             raise ContainerError("Invalid nginx certificate domain: {!r}".format(value))
         return value
 
     @classmethod
-    def _is_dns_root(cls, value: object) -> bool:
+    def is_dns_domain(cls, value: object) -> bool:
+        """Distinguish DNS names from defaults and other HTTP routing names."""
         labels = value.split(".") if isinstance(value, str) and len(value) <= 253 else ()
         return (len(labels) > 1 and not labels[-1].isdigit() and
                 all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels))
@@ -88,7 +83,7 @@ class Nginx(Integration):
             if not container.containers["nginx"].enable:
                 return ""
             root = config.get("NGINX_ROOT_DOMAIN")
-            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool) or not cls._is_dns_root(root):
+            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool) or not cls.is_dns_domain(root):
                 return root
             if name is None:
                 return f"{container.name}.{root}"
