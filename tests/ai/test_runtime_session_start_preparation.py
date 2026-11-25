@@ -428,18 +428,26 @@ async def test_session_start_identity_capture_is_call_local_and_invalidated_by_s
     from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 
     captures = []
-    original_identity = DefaultExecutionService._request_identity
+    refreshes = []
+    original_capture = DefaultExecutionService._read_session_start
+    original_refresh = DefaultExecutionService._load_session
     original_settle = _PendingExecutionTurns.settle_session
 
-    async def read_identity(self, *args, **kwargs):
-        captures.append(kwargs.get("captured"))
-        return await original_identity(self, *args, **kwargs)
+    async def read_capture(self, *args, **kwargs):
+        capture = await original_capture(self, *args, **kwargs)
+        captures.append(capture)
+        return capture
+
+    async def read_fresh_session(self, session_id, **kwargs):
+        refreshes.append(session_id)
+        return await original_refresh(self, session_id, **kwargs)
 
     async def settle(self, *args, **kwargs):
         result = await original_settle(self, *args, **kwargs)
         return settled or result
 
-    monkeypatch.setattr(DefaultExecutionService, "_request_identity", read_identity)
+    monkeypatch.setattr(DefaultExecutionService, "_read_session_start", read_capture)
+    monkeypatch.setattr(DefaultExecutionService, "_load_session", read_fresh_session)
     monkeypatch.setattr(_PendingExecutionTurns, "settle_session", settle)
     features = _features(_answer)
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
@@ -449,15 +457,13 @@ async def test_session_start_identity_capture_is_call_local_and_invalidated_by_s
             target = await runtime.agents.get().create_session("session")
             handle = await target.start("question", idempotency_key="request")
             await handle.wait(timeout_seconds=5)
-            assert captures
-            if settled:
-                assert captures[0] is None
-            else:
-                assert captures[0] is not None and captures[0].identity is None
-            captures.clear()
+            assert len(captures) == 1 and captures[0].identity is None
+            assert refreshes == (["session"] if settled else [])
+            first_capture = captures.pop()
+            refreshes.clear()
             replay = await target.start("question", idempotency_key="request")
             assert replay.execution_id == handle.execution_id
-            if not settled:
-                assert captures[0] is not None
-                assert captures[0].identity is not None
-                assert captures[0].identity.resource_id == handle.execution_id
+            assert len(captures) == 1 and captures[0] is not first_capture
+            assert captures[0].identity is not None
+            assert captures[0].identity.resource_id == handle.execution_id
+            assert refreshes == (["session"] if settled else [])

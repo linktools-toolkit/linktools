@@ -1019,6 +1019,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     backend = object.__new__(LocalExecutionBackend)
     backend._execution_buffer = None
     backend._tenant_id = "tenant"
+    backend._turn_owners = {}
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()

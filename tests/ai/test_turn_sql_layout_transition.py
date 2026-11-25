@@ -39,7 +39,7 @@ async def _stores(path, *, split):
 async def _declare_session(state, conversation, *, split):
     now = datetime.now(timezone.utc)
     await state.conversation.sessions.create(
-        SessionRecord("s", "owner", SessionStatus.OPEN, 0, None, {}, now, now, None, None, "agent", tenant_id=_SCOPE.tenant_id)
+        SessionRecord("s", "owner", SessionStatus.OPEN, 0, None, {}, now, now, None, None, "agent")
     )
     if not split:
         table = conversation.storage_group.metadata.tables["ai_state_records"]

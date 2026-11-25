@@ -1319,7 +1319,7 @@ class StateCommands:
             return
         execution, identity = reservation.execution, reservation.idempotency
         if (authority is None or session is None or type(self._conversation) is not SessionRepositoryImpl
-                or session.session_id != execution.session_id or session.tenant_id != self._tenant_id
+                or session.session_id != execution.session_id
                 or authority.execution_id != execution.execution_id or authority.slot != f"session:{session.session_id}"
                 or (authority.scope.namespace, authority.scope.tenant_id) != (self._namespace, self._tenant_id)
                 or request_key != canonical_sha256([identity.scope, identity.idempotency_key])):
