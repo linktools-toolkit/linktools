@@ -60,7 +60,8 @@ async def test_canonical_budget_guards_effect_and_replayed_request_does_not_debi
         assert terminal["state"] == ("succeeded" if limit else "failed"), terminal["result_json"]
         if not limit:
             assert terminal["result_json"]["error_code"] == ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value
-        usage = await persistence.execution.budgets.read("turn:" + turn_id)
+        usage = await runtime.sessions.budget_usage("chat", turn_id, principal=principal)
+        assert usage is not None
         assert usage.limits == limits and usage.tool_calls == limit
         assert usage.model_requests == len(model_requests)
         assert invocations == ([turn_id] if limit else [])
@@ -82,6 +83,9 @@ async def test_canonical_budget_guards_effect_and_replayed_request_does_not_debi
                     "chat", "work", agent="default", principal=principal, idempotency_key="same-send", budget=changed,
                 )
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-        assert await persistence.execution.budgets.read("turn:" + turn_id) == usage
+        assert await runtime.sessions.budget_usage("chat", turn_id, principal=principal) == usage
+        with pytest.raises(AIError) as denied:
+            await runtime.sessions.budget_usage("other-chat", turn_id, principal=principal)
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert len(model_requests) == observed_requests
         assert invocations == ([turn_id] if limit else [])

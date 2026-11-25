@@ -8,6 +8,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from dataclasses import fields
 from datetime import datetime, timezone
 from collections.abc import Callable
 from pathlib import Path
@@ -50,8 +51,17 @@ def _baseline(block: object) -> dict[str, object]:
     return {"part_kind": "instruction-baseline", "instructions": [block]}
 
 
-def _delta() -> dict[str, object]:
-    return {"part_kind": "instruction-delta", "id": "capability:catalog:details", "content": "replacement", "base_hash": _HASH}
+_DELTA_HAS_AUTHORITY = any(field.name == "authority" for field in fields(InstructionDeltaPart))
+
+
+def _delta(*, authority: str = "operator") -> dict[str, object]:
+    part = {
+        "part_kind": "instruction-delta", "id": "capability:catalog:details",
+        "content": "replacement", "base_hash": _HASH,
+    }
+    if _DELTA_HAS_AUTHORITY:
+        part["authority"] = authority
+    return part
 
 
 @pytest.mark.parametrize("source", [None, AgentInstructionSource(), ToolsetInstructionSource("tools"),
@@ -79,6 +89,7 @@ def test_instruction_window_round_trip_preserves_order_identity_and_termination(
 
 
 @pytest.mark.parametrize("part", [_baseline(_block()), _baseline(_block(digest=True)), _delta(),
+                                  *([_delta(authority="user"), _delta(authority="none")] if _DELTA_HAS_AUTHORITY else []),
                                   {"part_kind": "instruction-baseline", "instructions": []}])
 def test_instruction_window_reader_preserves_supported_parts(part: dict[str, object]) -> None:
     restored, = decode_model_messages(_wire(part))

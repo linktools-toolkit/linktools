@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, UserContent
 
     from ..agent import AgentBinding
-    from ..core import RunBudget
+    from ..core import BudgetUsage, RunBudget
     from ._budget import RunBudgetContext
     from ..model import CanonicalUserInput
     from ..capability.steps import AtomicStepPersistence
@@ -501,6 +501,29 @@ class _RegenerableTurnRunner:
         if (identity := await replay()) is not None:
             return identity
         raise AIError(ErrorCode.SESSION_CONFLICT)
+
+    async def read_budget_usage(
+        self, key: SessionTurnKey, *, principal: Principal, tenant_id: str, authorization: AuthorizationPolicy,
+    ) -> BudgetUsage | None:
+        if principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id),
+        )
+        turn = await self._store.get_turn(key)
+        if turn is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        request = turn["request_json"]
+        await authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_READ,
+            ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, request["principal"]["principal_id"]),
+        )
+        if not request.get("budgeted", False):
+            return None
+        if self._prepare_budget is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        budget = self._prepare_budget(key, turn["generation"])
+        return await budget.repository.read(budget.scope_id)
 
     async def cancel_session_turn(
         self, key: SessionTurnKey, *, principal: Principal, tenant_id: str, authorization: AuthorizationPolicy,

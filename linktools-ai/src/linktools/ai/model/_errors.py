@@ -80,7 +80,12 @@ def model_binding_error(
             "status_code": error.status_code,
         }
     elif isinstance(error, ModelAPIError):
-        code = ErrorCode.MODEL_API_ERROR
+        if isinstance(error, UnexpectedModelBehavior):
+            # A provider can return an unusable response without a transport failure.
+            code = ErrorCode.MODEL_RESPONSE_INVALID
+            retryable = False
+        else:
+            code = ErrorCode.MODEL_API_ERROR
         details = {"model_name": error.model_name}
     else:
         provider_errors = []

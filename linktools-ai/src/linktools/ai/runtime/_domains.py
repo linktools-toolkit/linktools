@@ -438,6 +438,16 @@ class RuntimeSessions(Generic[AppT]):
             correlation=overlay_correlation(runtime.correlation, correlation),
         )
 
+    async def budget_usage(self, session_id: str, turn_id: str, *, principal: Principal) -> BudgetUsage | None:
+        """Read the admitted budget and current accounting for one native turn."""
+        runner, runtime = self._require_turn_sessions()
+        validate_resource_id(session_id)
+        validate_resource_id(turn_id)
+        return await runner.read_budget_usage(
+            SessionTurnKey(session_id, turn_id), principal=principal,
+            tenant_id=runtime.tenant_id, authorization=runtime._authorization,
+        )
+
     async def cancel_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
         runner, runtime = self._require_turn_sessions()
         validate_resource_id(session_id)

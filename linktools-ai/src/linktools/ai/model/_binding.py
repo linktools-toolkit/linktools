@@ -13,7 +13,7 @@ from typing import ClassVar, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from linktools.core import environ
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior, UserError
 from pydantic_ai import exceptions as sdk_errors
 from pydantic_ai.models import Model, ModelMessage, ModelRequestContext, ModelRequestParameters, ModelResponse, ModelSettings, StreamedResponse, RunContext as PydanticRunContext
 from pydantic_ai.models.wrapper import WrapperModel
@@ -376,7 +376,8 @@ class _RetryingModel(WrapperModel):
 def _retryable_model_error(error: ModelAPIError, *, allow_stream_retry: bool = False) -> bool:
     # Do not reinterpret an explicit permanent failure or an expired deadline
     # as a transient HTTP status, including quota errors carried by HTTP 429.
-    if ((error.in_stream and not allow_stream_retry)
+    if (isinstance(error, UnexpectedModelBehavior)
+        or (error.in_stream and not allow_stream_retry)
         or _is_quota_error(error) or _is_context_window_error(error)
         or isinstance(error, sdk_errors.ModelRequestTimeout)):
         return False

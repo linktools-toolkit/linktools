@@ -126,6 +126,7 @@ def test_run_command_history_is_readable_after_command_close(
     import asyncio
     import json
     import linktools.commands.ai.run as run_command
+    from linktools.ai.core import TenantAuthorizationPolicy
     from linktools.ai.history import History
     from linktools.commands.ai._common import _load_workspace, _local_runtime_storage
 
@@ -140,7 +141,11 @@ def test_run_command_history_is_readable_after_command_close(
 
     async def inspect() -> None:
         workspace = _load_workspace(str(tmp_path))
-        async with Persistence.open('default', storage=_local_runtime_storage(workspace), tenant_id="default", read_only=True) as history_persistence_129, History.open(persistence=history_persistence_129) as history:
+        async with (
+            Persistence.open('default', storage=_local_runtime_storage(workspace), tenant_id='default', read_only=True) as persistence,
+            History.open(persistence=persistence, authorization=TenantAuthorizationPolicy('default')) as history,
+        ):
+            assert history.has_turn_sessions
             async with client(create_app(history=history, local_workspace=True)) as http:
                 params = {"session_id": "default", "turn_id": result["turn_id"]}
                 response = await http.get("/api/session", params=params)
