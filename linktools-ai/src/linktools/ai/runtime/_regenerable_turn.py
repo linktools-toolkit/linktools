@@ -67,7 +67,7 @@ class _RegenerableTurnRunner:
 
         def close() -> None:
             listeners.discard(callback)
-            if not listeners:
+            if not listeners and self._observers.get(session_id) is listeners:
                 self._observers.pop(session_id, None)
 
         return close
@@ -78,6 +78,9 @@ class _RegenerableTurnRunner:
                 callback(frame)
             except Exception as error:
                 _logger.error("Session turn observer failed: %s", type(error).__name__)
+
+    def _gap(self, key: SessionTurnKey) -> None:
+        self._publish(key.session_id, {"type": "gap", "turn_id": key.turn_id})
 
     def _admitted(self, turn: _AdmittedTurn) -> None:
         self._publish(turn.key.session_id, {
@@ -347,6 +350,7 @@ class _RegenerableTurnRunner:
                 if not accepted.done():
                     accepted.set_exception(error)
                 else:
+                    self._gap(key)
                     _logger.error("Regenerable turn producer stopped: turn=%s error=%s", key.turn_id, type(error).__name__)
 
         task = asyncio.create_task(produce(), name="linktools-regenerable-turn")
@@ -412,8 +416,11 @@ class _RegenerableTurnRunner:
                     result={"error_code": code},
                 ):
                     self._terminal(turn, "cancelled", error_code=code)
+                    return
+            self._gap(turn.key)
         finally:
-            self._producers.pop(turn.key, None)
+            if self._producers.get(turn.key) is producer:
+                self._producers.pop(turn.key, None)
             if not producer.done():
                 producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)

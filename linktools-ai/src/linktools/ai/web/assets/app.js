@@ -361,21 +361,36 @@ function ordinaryOccupancy(watch, revision, turn, lastTurn) {
 }
 async function catchUpOrdinary(watch) {
   if(watch.catchUp)return watch.catchUp;
+  const current=()=>sessionWatch===watch && state.selectedSession===watch.id;
   const read=(async()=>{
+    // Keep a completed pre-gap watermark, not the highest received event:
+    // a terminal frame can overtake the history read during reconnection.
+    const after=watch.committedThrough;
     const payload=await readSession(watch.id);
-    if(sessionWatch!==watch || state.selectedSession!==watch.id)return;
-    if(!acceptSession(payload))return;
-    for(const turn of payload.timeline?.items || []) {
-      if(!state.turns.some(row=>row.turn_id===turn.turn_id && row.conversation_committed))patchOrdinaryTurn(turn);
+    if(!current() || !acceptSession(payload))return;
+    const through=payload.session.last_turn_no;
+    let timeline=payload.timeline;
+    for(;;){
+      const items=timeline?.items || [];
+      for(const turn of items){
+        if((after===null || turn.turn_no>after)
+          && !state.turns.some(row=>row.turn_id===turn.turn_id && row.conversation_committed))patchOrdinaryTurn(turn);
+      }
+      if(after===null && !state.hasEarlierTurns){
+        state.turnCursor=timeline?.next_cursor || null;
+        $('turns-more').hidden=!state.turnCursor;
+      }
+      const cursor=timeline?.next_cursor;
+      if(after===null || !cursor || !items.length || items[0].turn_no<=after+1)break;
+      const earlier=await api(sessionURL(watch.id,'',{limit:'50',cursor}));
+      if(!current())return;
+      timeline=earlier.timeline;
     }
-    if(!state.hasEarlierTurns){
-      state.turnCursor=payload.timeline?.next_cursor || null;
-      $('turns-more').hidden=!state.turnCursor;
-    }
+    if(Number.isSafeInteger(through))watch.committedThrough=Math.max(watch.committedThrough ?? 0,through);
     const active=state.session?.active_turn_id;
     if(active && !state.turns.some(row=>row.turn_id===active)) {
       const turn=await api(sessionURL(watch.id,'',{turn_id:active}));
-      if(sessionWatch===watch && state.selectedSession===watch.id && state.session?.active_turn_id===active)patchOrdinaryTurn(turn);
+      if(current() && state.session?.active_turn_id===active)patchOrdinaryTurn(turn);
     }
     renderList();setDisabled();
   })();
@@ -385,7 +400,7 @@ async function catchUpOrdinary(watch) {
 function watchOrdinarySession(id) {
   stopSessionWatch();
   const source=new EventSource(sessionURL(id,'events',{view:'chat'}));
-  const watch={id,source,ready:false,ordinary:true,snapshot:null,opened:false,catchUp:null};
+  const watch={id,source,ready:false,ordinary:true,snapshot:null,opened:false,catchUp:null,committedThrough:null};
   sessionWatch=watch;
   const current=()=>sessionWatch===watch && state.selectedSession===id;
   source.addEventListener('session_error',event=>{
@@ -430,6 +445,7 @@ function watchOrdinarySession(id) {
       return;
     } else if(frame.type==='terminal'){
       ordinaryOccupancy(watch,frame.revision,null,frame.turn_no);
+      if(frame.turn_no===(watch.committedThrough ?? 0)+1)watch.committedThrough=frame.turn_no;
       const items=frame.items || [];
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:ordinaryStatus(frame.status ?? frame.state),
         user_input:ordinaryInput(frame.prompt),items,output:frame.output,error_code:frame.error_code,conversation_committed:true});
@@ -805,6 +821,8 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
       }
       else if(!state.session)return;
       if(state.config?.turn_sessions){
+        if(sessionWatch?.id===sessionId && Number.isSafeInteger(payload.session.last_turn_no))
+          sessionWatch.committedThrough=Math.max(sessionWatch.committedThrough ?? 0,payload.session.last_turn_no);
         renderSessionHeader();renderConversation();setDisabled();renderList();
         if(sessionWatch?.ready && state.session?.active_turn_id)void catchUpOrdinary(sessionWatch).catch(showError);
         if(focusComposer && generation===state.generation)$('prompt').focus();
