@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Literal
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
+    sql_binary_key,
+    sql_epoch_seconds,
     sql_id_column,
     sql_table_options,
     sql_unique,
@@ -35,14 +37,10 @@ TerminalState = Literal["succeeded", "failed", "cancelled"]
 
 
 def build_session_turn_sql_metadata(metadata: MetaData) -> None:
-    from sqlalchemy import JSON, BigInteger, Column, LargeBinary, String, Table
-    from sqlalchemy.dialects.mysql import VARBINARY
-
-    def binary(size: int) -> LargeBinary:
-        return LargeBinary(size).with_variant(VARBINARY(size), "mysql")
+    from sqlalchemy import JSON, BigInteger, Column, String, Table
 
     def key(name: str, size: int, description: str, *, nullable: bool = False) -> Column:
-        return Column(name, binary(size), nullable=nullable, comment=description)
+        return Column(name, sql_binary_key(size), nullable=nullable, comment=description)
 
     session = Table(
         SESSION_TABLE, metadata, sql_id_column(),
@@ -96,21 +94,11 @@ class SqlSessionTurns:
     """A tenant-scoped store. The session service owns authorization and request codecs."""
 
     def __init__(self, context: SqlStorageContext, metadata: MetaData, *, namespace: str, tenant_id: str) -> None:
-        from sqlalchemy import BigInteger, cast, extract, func
-
         self._context = context
         self._scope = state_store_key(namespace, tenant_id, "regenerable-session")
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
-        dialect = context.engine.dialect.name
-        if dialect == "sqlite":
-            self._now = cast(func.strftime("%s", "now"), BigInteger)
-        elif dialect == "mysql":
-            self._now = func.unix_timestamp()
-        elif dialect == "postgresql":
-            self._now = cast(func.floor(extract("epoch", func.statement_timestamp())), BigInteger)
-        else:
-            raise ValueError(f"unsupported session turn SQL dialect: {dialect}")
+        self._now = sql_epoch_seconds()
 
     @staticmethod
     def _key(value: str, size: int) -> bytes:

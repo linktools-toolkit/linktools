@@ -989,6 +989,39 @@ def sql_sort_key() -> "String":
     )
 
 
+def sql_binary_key(length: int) -> "LargeBinary":
+    from sqlalchemy import LargeBinary
+    from sqlalchemy.dialects.mysql import VARBINARY
+
+    return LargeBinary(length).with_variant(VARBINARY(length), "mysql")
+
+
+@lru_cache(maxsize=1)
+def sql_epoch_seconds() -> "ColumnElement[int]":
+    """Return the database statement clock for a lease predicate or write."""
+    from sqlalchemy import BigInteger
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy.sql.functions import FunctionElement
+
+    class EpochSeconds(FunctionElement[int]):
+        type = BigInteger()
+        inherit_cache = True
+
+    @compiles(EpochSeconds, "sqlite")
+    def compile_sqlite(element: object, compiler: object, **kwargs: object) -> str:
+        return "CAST(strftime('%s', 'now') AS BIGINT)"
+
+    @compiles(EpochSeconds, "mysql")
+    def compile_mysql(element: object, compiler: object, **kwargs: object) -> str:
+        return "UNIX_TIMESTAMP()"
+
+    @compiles(EpochSeconds, "postgresql")
+    def compile_postgresql(element: object, compiler: object, **kwargs: object) -> str:
+        return "CAST(floor(EXTRACT(epoch FROM statement_timestamp())) AS BIGINT)"
+
+    return EpochSeconds()
+
+
 def sql_blob() -> "LargeBinary":
     from sqlalchemy import LargeBinary
     from sqlalchemy.dialects import mysql
@@ -1457,8 +1490,10 @@ __all__ = [
     "sql_audit_columns",
     "sql_audit_now",
     "sql_audit_indexes",
+    "sql_binary_key",
     "sql_blob",
     "sql_digest",
+    "sql_epoch_seconds",
     "sql_id_column",
     "sql_integer_id",
     "sql_query_index",

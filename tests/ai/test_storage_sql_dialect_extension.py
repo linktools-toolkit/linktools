@@ -3,8 +3,9 @@
 """Custom SQL dialects classify mutation failures through public contracts."""
 
 import pytest
-from sqlalchemy import event, text
-from sqlalchemy.engine import Connection
+from sqlalchemy import event, select, text
+from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.engine import Connection, Dialect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
@@ -14,6 +15,8 @@ from linktools.ai.storage import (
     SqlStorageContext,
     SqlTransactionDisposition,
     SqlTransactionPhase,
+    sql_binary_key,
+    sql_epoch_seconds,
 )
 
 
@@ -91,3 +94,18 @@ async def test_public_sql_classifier_preserves_retry_and_unknown_commit_semantic
             event.remove(engine.sync_engine, "commit", fail_commit)
         await context.close()
         await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("dialect", "clock", "key_type"),
+    (
+        (sqlite.dialect(), "strftime", "BLOB"),
+        (mysql.dialect(), "UNIX_TIMESTAMP", "VARBINARY(64)"),
+        (postgresql.dialect(), "statement_timestamp", "BYTEA"),
+    ),
+)
+def test_sql_lease_clock_and_binary_keys_compile_for_each_backend(
+    dialect: Dialect, clock: str, key_type: str,
+) -> None:
+    assert clock in str(select(sql_epoch_seconds()).compile(dialect=dialect))
+    assert sql_binary_key(64).compile(dialect=dialect) == key_type
