@@ -26,6 +26,8 @@ from ._session_timeline import _timeline_items
 if TYPE_CHECKING:
     from sqlalchemy import RowMapping
 
+_TURN_PAGE_MAX = 64
+
 _STATUS = {
     "accepted": "PENDING_START",
     "cancelling": "CANCELLING",
@@ -180,7 +182,7 @@ class _OrdinarySessionHistory:
     async def session(
         self, session_id: str, *, principal: Principal, cursor: str | None, limit: int, local_workspace: bool,
     ) -> dict[str, JsonValue]:
-        limit = validate_page_limit(limit)
+        limit = min(validate_page_limit(limit), _TURN_PAGE_MAX)
         row = await self._session(session_id, principal, local_workspace=local_workspace)
         lineage = await self._authorize_lineage(row, principal)
         kind = "ORDINARY_TURNS"
