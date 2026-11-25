@@ -148,18 +148,25 @@ class SqlSessionTurnReader:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().filter_by(**self._turn_values(key)))).mappings().one_or_none()
 
-    async def get_inherited_turn(
+    async def get_history_turn(
         self, key: SessionTurnKey, *, lineage: tuple[SessionTurnSegment, ...],
     ) -> RowMapping | None:
         if not lineage:
-            return None
+            return await self.get_turn(key)
+        from sqlalchemy import and_, or_
+
         columns = self._turns.c
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().where(
                 columns.scope_key == self._scope,
                 columns.turn_id == self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES),
-                columns.state.in_(("succeeded", "failed", "cancelled")),
-                lineage_predicate(columns, b"", lineage, after=0, through=lineage[-1].through),
+                or_(
+                    columns.session_key == self._key(key.session_id, TURN_SESSION_MAX_BYTES),
+                    and_(
+                        columns.state.in_(("succeeded", "failed", "cancelled")),
+                        lineage_predicate(columns, b"", lineage, after=0, through=lineage[-1].through),
+                    ),
+                ),
             ))).mappings().one_or_none()
 
     async def find_request(self, session_id: str, request_key: str) -> RowMapping | None:

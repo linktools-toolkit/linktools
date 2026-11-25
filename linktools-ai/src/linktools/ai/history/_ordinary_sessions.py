@@ -201,10 +201,8 @@ class _OrdinarySessionHistory:
     ) -> dict[str, JsonValue]:
         session = await self._session(session_id, principal, local_workspace=local_workspace)
         validate_resource_id(turn_id)
-        row = await self._store.get_turn(SessionTurnKey(session_id, turn_id))
+        lineage = await self._authorize_lineage(session, principal)
+        row = await self._store.get_history_turn(SessionTurnKey(session_id, turn_id), lineage=lineage)
         if row is None:
-            lineage = await self._authorize_lineage(session, principal)
-            row = await self._store.get_inherited_turn(SessionTurnKey(session_id, turn_id), lineage=lineage)
-            if row is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return _turn_view(row)
