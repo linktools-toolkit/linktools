@@ -92,8 +92,6 @@ def build_runtime_sql_metadata(
                              comment="Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.")
     from ._run_admission_schema import build_run_admission_sql_metadata
     build_run_admission_sql_metadata(metadata)
-    from ._turn_sql_schema import build_turn_sql_metadata
-    build_turn_sql_metadata(metadata)
     from ._session_turn_sql import build_session_turn_sql_metadata
     build_session_turn_sql_metadata(metadata)
 

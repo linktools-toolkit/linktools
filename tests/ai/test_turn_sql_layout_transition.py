@@ -1,183 +1,152 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""An existing lease selects its source from the committed admission, not a caller's layout."""
+"""Current strict SQL layouts agree on exact receipts and fencing."""
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import delete, update
+from sqlalchemy import select, update
 
+from linktools.ai.core import PersistenceDomain
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence._turn_sql_schema import TURN_SLOT_TABLE
-from linktools.ai.storage import TurnScopeIdentity
+from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
+from linktools.ai.persistence._split_turn_anchor import SplitSessionTurnTransactions
+from linktools.ai.persistence.contracts import SessionRecord, SessionStatus
+from linktools.ai.persistence.state import record_key
+from linktools.ai.storage import FilesystemObjectStore, StorageRoute, TurnScopeIdentity
+
 
 _SCOPE = TurnScopeIdentity("turn-layout", "tenant", "runtime-pending-turn")
-_FIELDS = dict(session_key="session:s", request_key="a" * 64, request_digest="b" * 64)
+_REQUEST = "a" * 64
+_FIELDS = dict(session_key="session:s", request_key=_REQUEST, request_digest="b" * 64, duration=3600)
+
+
+@asynccontextmanager
+async def _stores(path, *, split):
+    if split:
+        execution = StorageRoute.sqlite(path / "execution.db")
+        conversation = StorageRoute.sqlite(path / "conversation.db")
+        plan = PersistencePlan(conversation=conversation, execution=execution)
+        storage = PersistenceStorage(plan, object_store=FilesystemObjectStore(path / "objects"))
+    else:
+        storage = PersistenceStorage.from_root(path)
+    async with Persistence.open(_SCOPE.namespace, tenant_id=_SCOPE.tenant_id, storage=storage) as state:
+        stores = state.snapshot_resources().stores
+        yield state, stores[PersistenceDomain.EXECUTION], stores[PersistenceDomain.CONVERSATION]
+
+
+async def _declare_session(state, conversation, *, split):
+    now = datetime.now(timezone.utc)
+    await state.conversation.sessions.create(
+        SessionRecord("s", "owner", SessionStatus.OPEN, 0, None, {}, now, now, None, None, "agent", tenant_id=_SCOPE.tenant_id)
+    )
+    if not split:
+        table = conversation.storage_group.metadata.tables["ai_state_records"]
+        key = state.conversation.sessions.session_record_key("s")
+        async with conversation.context.engine.begin() as conn:
+            changed = await conn.execute(update(table).where(
+                table.c.store_key == conversation.store_key, table.c.key == key,
+            ).values(strict_turn_fence=0))
+            assert changed.rowcount == 1
+
+
+async def _claim(execution, conversation, *, split, execution_id, owner_id, token, **fields):
+    values = {**_FIELDS, **fields, "execution_id": execution_id, "owner_id": owner_id, "token": token}
+    if split:
+        return await execution.mutate(lambda tx: SplitSessionTurnTransactions(tx, _SCOPE).claim(**values))
+    return await execution.storage_group.mutate(
+        (conversation, execution),
+        lambda group: group.transaction(execution)._claim_strict_session(_SCOPE, session_store=conversation, **values),
+    )
+
+
+async def _read(execution, *, split, route, identity):
+    return await execution.read(lambda tx: tx._read_native_execution_receipt(
+        _SCOPE, route=route, identity=identity, split=split,
+    ))
+
+
+async def _confirm(execution, *, split, execution_id, receipt, kind="claim"):
+    return await execution.read(lambda tx: tx._confirm_native_execution_receipt(
+        _SCOPE, execution_id=execution_id, receipt=receipt, kind=kind, split=split,
+    ))
+
+
+async def _update_control(execution, identity, **values):
+    table = execution.storage_group.metadata.tables["ai_execution_records"]
+    key = record_key(_SCOPE.namespace, _SCOPE.tenant_id, "execution", "execution", (identity,))
+    async with execution.context.engine.begin() as conn:
+        changed = await conn.execute(update(table).where(table.c.store_key == execution.store_key, table.c.key == key).values(**values))
+        assert changed.rowcount == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("first_coowned", (False, True))
-@pytest.mark.parametrize("same_execution", (False, True))
-async def test_live_replay_and_expired_takeover_across_layouts(tmp_path, first_coowned, same_execution):
-    storage = PersistenceStorage.sqlite(tmp_path / "turns.db")
-    async with Persistence.open(_SCOPE.namespace, tenant_id=_SCOPE.tenant_id, storage=storage) as first:
-        async with Persistence.open(_SCOPE.namespace, tenant_id=_SCOPE.tenant_id, storage=storage) as second:
-            first_store = first.execution.executions.state_store
-            other_store = second.execution.executions.state_store
-            for store in (first_store, other_store):
-                store.bind_runtime_turn_scope(_SCOPE)
+@pytest.mark.parametrize("split", (False, True))
+async def test_native_strict_current_layouts_replay_and_fence_expired_takeover(tmp_path, split):
+    path = tmp_path / "turns"
+    async with _stores(path, split=split) as (state, first, first_conversation):
+        await _declare_session(state, first_conversation, split=split)
+        async with _stores(path, split=split) as (_other_state, other, other_conversation):
+            first_claim = await _claim(first, first_conversation, split=split, execution_id="first",
+                                       owner_id="1" * 32, token="2" * 32)
+            assert first_claim.lease.fence == 1
+            assert await _confirm(other, split=split, execution_id="first", receipt="2" * 32) == first_claim
+            for route, identity in (("execution", "first"), ("request", _REQUEST), ("session", "session:s")):
+                _, proof, observed = await _read(other, split=split, route=route, identity=identity)
+                assert proof.execution_id == "first" and not observed.expired
+            replay = await _claim(other, other_conversation, split=split, execution_id="replay",
+                                  owner_id="3" * 32, token="4" * 32)
+            assert replay.execution_id == "first" and replay.lease is None
+            assert await _claim(other, other_conversation, split=split, execution_id="competing",
+                                owner_id="3" * 32, token="4" * 32, request_key="c" * 64) is None
 
-            first_claim = await first_store.claim_turn_admission(
-                _SCOPE, **_FIELDS, execution_id="first", owner_id="a" * 32, token="b" * 32,
-                duration=3600, coowned=first_coowned,
-            )
-            assert first_claim is not None and first_claim.lease.fence == 1
-
-            other_mode = not first_coowned
-            for route, identity in (("execution", "first"), ("session", "session:s"), ("request", "a" * 64)):
-                proof = await other_store.observe_turn_admission(_SCOPE, route=route, identity=identity, coowned=other_mode)
-                assert proof is not None and proof.execution_id == "first"
-            assert await other_store.confirm_turn_admission(
-                _SCOPE, execution_id="first", receipt="b" * 32, kind="claim", coowned=other_mode,
-            ) == first_claim
-            replay = await other_store.claim_turn_admission(
-                _SCOPE, **_FIELDS, execution_id="proposed", owner_id="c" * 32, token="d" * 32,
-                duration=3600, coowned=other_mode,
-            )
-            assert replay is not None and replay.execution_id == "first" and replay.lease is None
-            assert await other_store.claim_turn_admission(
-                _SCOPE, **{**_FIELDS, "request_key": "f" * 64}, execution_id="competing",
-                owner_id="c" * 32, token="d" * 32, duration=3600, coowned=other_mode,
-            ) is None
-            cancelled = await other_store.change_turn_admission(
-                _SCOPE, execution_id="first", receipt="e" * 32, kind="cancel", coowned=other_mode,
-            )
-            assert cancelled is not None and cancelled.cancel_requested
-            assert await first_store.confirm_turn_admission(
-                _SCOPE, execution_id="first", receipt="e" * 32, kind="cancel", coowned=first_coowned,
-            ) is True
-
-            expiry = datetime.now(timezone.utc) - timedelta(minutes=1)
-            name, field = (("ai_execution_records", "turn_expiry") if first_coowned
-                           else (TURN_SLOT_TABLE, "lease_expires_at"))
-            table = first_store.storage_group.metadata.tables[name]
-            async with first_store.context.engine.begin() as conn:
-                updated = await conn.execute(update(table).where(table.c.store_key == first_store.store_key).values({field: expiry}))
-                assert updated.rowcount == 1
-
-            assert await other_store.observe_turn_admission(
-                _SCOPE, route="session", identity="session:s", coowned=other_mode,
-            ) is None
-            execution_id = "first" if same_execution else "second"
-            winner = await other_store.claim_turn_admission(
-                _SCOPE, **_FIELDS, execution_id=execution_id, owner_id="c" * 32, token="d" * 32,
-                duration=3600, coowned=other_mode,
-            )
-            assert winner is not None and winner.lease.fence == 2
-            owned = await first_store.observe_turn_admission(
-                _SCOPE, route="session", identity="session:s", coowned=first_coowned,
-            )
-            assert owned is not None and owned.execution_id == execution_id and not owned.cancel_requested
-            assert await first_store.confirm_turn_admission(
-                _SCOPE, execution_id="first", receipt="b" * 32, kind="claim", coowned=first_coowned,
-            ) is None
-            if not same_execution:
-                retired = await first_store.get_turn_operation_proof(_SCOPE, "first")
-                assert retired is not None and not retired.active and retired.receipt_kind == "expire"
-
-
-@pytest.mark.asyncio
-async def test_broken_opposite_control_link_is_not_idle(tmp_path):
-    async with Persistence.open(_SCOPE.namespace, tenant_id=_SCOPE.tenant_id,
-                                storage=PersistenceStorage.sqlite(tmp_path / "link.db")) as state:
-        store = state.execution.executions.state_store
-        store.bind_runtime_turn_scope(_SCOPE)
-        assert await store.claim_turn_admission(
-            _SCOPE, **_FIELDS, execution_id="first", owner_id="a" * 32, token="b" * 32,
-            duration=3600, coowned=True,
-        )
-        table = store.storage_group.metadata.tables["ai_execution_records"]
-        async with store.context.engine.begin() as conn:
-            assert (await conn.execute(delete(table).where(table.c.store_key == store.store_key))).rowcount == 1
-        with pytest.raises(AIError) as caught:
-            await store.observe_turn_admission(_SCOPE, route="session", identity="session:s", coowned=False)
-        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        with pytest.raises(AIError) as caught:
-            await store.claim_turn_admission(
-                _SCOPE, **_FIELDS, execution_id="second", owner_id="c" * 32, token="d" * 32,
-                duration=3600, coowned=False,
-            )
-        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("target_coowned", (False, True))
-async def test_expired_request_exchange_retires_both_actual_layouts(tmp_path, target_coowned):
-    async with Persistence.open(_SCOPE.namespace, tenant_id=_SCOPE.tenant_id,
-                                storage=PersistenceStorage.sqlite(tmp_path / "exchange.db")) as state:
-        store = state.execution.executions.state_store
-        store.bind_runtime_turn_scope(_SCOPE)
-        for session, execution, request, coowned in (
-            ("session:z", "target", "a" * 64, target_coowned),
-            ("session:a", "incumbent", "c" * 64, not target_coowned),
-        ):
-            claim = await store.claim_turn_admission(
-                _SCOPE, session_key=session, request_key=request, request_digest="b" * 64, execution_id=execution,
-                owner_id="a" * 32, duration=3600, token="b" * 32, coowned=coowned,
-            )
-            assert claim is not None and claim.lease.fence == 1
-
-        expiry = datetime.now(timezone.utc) - timedelta(minutes=1)
-        async with store.context.engine.begin() as conn:
-            for name, field, identity in (
-                ("ai_execution_records", "turn_expiry", "turn_token"),
-                (TURN_SLOT_TABLE, "lease_expires_at", "lease_token"),
-            ):
-                table = store.storage_group.metadata.tables[name]
-                changed = await conn.execute(update(table).where(
-                    table.c.store_key == store.store_key, table.c[identity].is_not(None),
-                ).values({field: expiry}))
-                assert changed.rowcount == 1
-
-        received = await store.claim_turn_admission(
-            _SCOPE, session_key="session:z", request_key="c" * 64, request_digest="b" * 64, execution_id="new",
-            owner_id="e" * 32, duration=3600, token="f" * 32, coowned=target_coowned,
-        )
-        assert received is not None and received.lease.fence == 2
-        assert await store.observe_turn_admission(_SCOPE, route="session", identity="session:a") is None
-        for old_id in ("target", "incumbent"):
-            proof = await store.get_turn_operation_proof(_SCOPE, old_id)
-            assert proof is not None and not proof.active and proof.receipt_kind == "expire"
-
-
-@pytest.mark.asyncio
-async def test_split_to_coowned_reacquisition_does_not_rewrite_published_body(tmp_path):
-    from linktools.ai.core import ExecutionStatus
-    from .test_history_projection_conformance import _record
-
-    async with Persistence.open(_SCOPE.namespace, tenant_id=_SCOPE.tenant_id,
-                                storage=PersistenceStorage.sqlite(tmp_path / "published.db")) as state:
-        repository = state.execution.executions
-        store = repository.state_store
-        store.bind_runtime_turn_scope(_SCOPE)
-        record = _record(ExecutionStatus.STARTED, 1)
-        await repository.prepare_content(record)
-        envelope = await repository._stored_content(
-            "execution", (record.execution_id,), record, state=record.status.value,
-        )
-        await store.mutate(lambda tx: tx.insert_record(envelope))
-        assert await store.claim_turn_admission(
-            _SCOPE, **_FIELDS, execution_id=record.execution_id, owner_id="a" * 32, duration=3600, token="b" * 32,
-        )
-        slot = store.storage_group.metadata.tables[TURN_SLOT_TABLE]
-        async with store.context.engine.begin() as conn:
-            await conn.execute(update(slot).where(slot.c.store_key == store.store_key).values(
-                lease_expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            cancelled = await first.mutate(lambda tx: tx._change_native_execution_receipt(
+                _SCOPE, execution_id="first", receipt="5" * 32, kind="cancel", lease=None, split=split,
             ))
-        after = await store.claim_turn_admission(
-            _SCOPE, **_FIELDS, execution_id=record.execution_id, owner_id="c" * 32, duration=3600, token="d" * 32,
-            coowned=True,
-        )
-        assert after is not None and after.lease.fence == 2
-        assert await repository.get(record.execution_id, tenant_id=_SCOPE.tenant_id) == record
+            assert cancelled is True
+            assert await _confirm(other, split=split, execution_id="first", receipt="5" * 32, kind="cancel") is True
+
+            await _update_control(first, "first", turn_expiry=datetime.now(timezone.utc) - timedelta(minutes=1))
+            _, proof, observed = await _read(other, split=split, route="execution", identity="first")
+            assert proof.cancel_requested and observed.expired
+            successor = await _claim(other, other_conversation, split=split, execution_id="second",
+                                     owner_id="3" * 32, token="4" * 32)
+            assert successor.lease.fence == 2
+            _, owner, observed = await _read(first, split=split, route="request", identity=_REQUEST)
+            assert owner.execution_id == "second" and not observed.expired and not owner.cancel_requested
+            old, retired, observed = await _read(first, split=split, route="execution", identity="first")
+            assert retired.receipt_kind == "expire" and old["turn_request_route"] is None and observed is None
+            assert await _confirm(first, split=split, execution_id="first", receipt="2" * 32) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split", (False, True))
+async def test_native_strict_broken_current_owner_is_not_read_as_idle(tmp_path, split):
+    async with _stores(tmp_path / "broken", split=split) as (state, execution, conversation):
+        await _declare_session(state, conversation, split=split)
+        await _claim(execution, conversation, split=split, execution_id="current", owner_id="1" * 32, token="2" * 32)
+        await _update_control(execution, "current", **(
+            {"turn_occupied_route": None} if split else {"turn_session_owner_id": 100000}
+        ))
+        with pytest.raises(AIError) as caught:
+            await _read(execution, split=split, route="execution", identity="current")
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split", (False, True))
+async def test_exact_published_identity_requires_recovery_instead_of_rewriting_its_body(tmp_path, split):
+    async with _stores(tmp_path / "published", split=split) as (state, execution, conversation):
+        await _declare_session(state, conversation, split=split)
+        await _claim(execution, conversation, split=split, execution_id="current", owner_id="1" * 32, token="2" * 32)
+        original = {"fixture": "unpublished output must not be replaced by an admission"}
+        await _update_control(execution, "current", kind="execution", payload_json=original,
+                              turn_expiry=datetime.now(timezone.utc) - timedelta(minutes=1))
+        with pytest.raises(AIError) as caught:
+            await _claim(execution, conversation, split=split, execution_id="current", owner_id="3" * 32, token="4" * 32)
+        assert caught.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+        control = execution.storage_group.metadata.tables["ai_execution_records"]
+        async with execution.context.engine.begin() as connection:
+            result = await connection.execute(select(control.c.payload_json).where(control.c.store_key == execution.store_key))
+            assert result.scalar_one() == original

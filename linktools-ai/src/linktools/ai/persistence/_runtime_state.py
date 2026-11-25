@@ -445,21 +445,28 @@ class Persistence:
                     if materialized.execution.idempotency.state_store.storage_group is not group:
                         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
                                       "State turn authority and execution receipts must share their storage group")
-                    # Any configured durable participant can enter a late execution
-                    # boundary. Unconfigured capability partitions join Execution's
-                    # group, and only native Step on its engine joins these writes.
+                    # SQL always uses the canonical Execution receipt. Coownership
+                    # only decides whether it may fence other durable writers and
+                    # update Conversation in the same transaction.
+                    sql_authority = type(execution_store) is SqlStateStore
                     participants = (*materialized.stores.values(), *materialized.capability_stores.values())
-                    coowned = (type(config) is StateTurnResources
-                               and self._plan.route(PersistenceDomain.EXECUTION).retention is StorageRetentionMode.DURABLE
-                               and all(type(store) is SqlStateStore and store.storage_group is group for store in participants))
+                    coowned = sql_authority and all(
+                        type(store) is SqlStateStore and store.storage_group is group for store in participants
+                    )
+                    split = sql_authority and not coowned
                     authority = StateTurnCoordination(
                         execution_store,
                         namespace=namespace, tenant_id=tenant_id,
-                        read_only=read_only, require_ready=self._require_ready, _runtime_sql=True, _coowned=coowned,
+                        read_only=read_only, require_ready=self._require_ready,
+                        _coowned=coowned,
+                        _native_session_store=materialized.stores[PersistenceDomain.CONVERSATION] if coowned else None,
                     )
                     self._coordination_backend = authority
                     self._pending_turn_coordination = PendingTurnCoordination.for_state(
                         config.pending_cache, authority, namespace=namespace, tenant_id=tenant_id,
+                        strict_session_owner_ready=coowned,
+                        strict_session_repository=materialized.conversation.sessions if coowned else None,
+                        _split_session_execution_receipts=split,
                     )
                     self._turn_stream = config.stream
                 else:

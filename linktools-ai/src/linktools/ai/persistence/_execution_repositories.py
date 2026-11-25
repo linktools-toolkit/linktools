@@ -1156,6 +1156,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 authority.control_id = await transaction.insert_execution_with_authority(
                     authority.proof, execution, expiry=authority.expiry,
+                    **({"receipt_values": authority.receipt_values} if authority.receipt_values is not None else {}),
+                    **({"shell_revision": authority.shell_revision} if authority.shell_revision is not None else {}),
                 )
             else:
                 await transaction.publish_execution_shell(authority, execution)

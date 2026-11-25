@@ -415,13 +415,13 @@ async def test_grouped_claim_binds_exact_execution_primary_key_with_plain_insert
         store = persistence.execution.executions.state_store
         engine = store.storage_group.context.engine
         metadata = store.storage_group.metadata
-        executions, admissions = metadata.tables["ai_execution_records"], metadata.tables["ai_turn_admissions"]
+        executions = metadata.tables["ai_execution_records"]
+        sessions = metadata.tables["ai_state_records"]
         writes = []
 
         def observe(_connection, cursor, statement, *_args):
-            if statement.startswith(("INSERT INTO ai_execution_records", "INSERT INTO ai_turn_admissions",
-                                     "DELETE FROM ai_execution_records", "INSERT INTO ai_turn_slots",
-                                     "UPDATE ai_turn_slots")):
+            if (statement.startswith(("INSERT INTO ai_execution_records", "DELETE FROM ai_execution_records"))
+                    or statement.startswith("UPDATE ai_state_records SET strict_turn_")):
                 writes.append((statement, cursor.rowcount))
 
         event.listen(engine.sync_engine, "after_cursor_execute", observe)
@@ -433,34 +433,40 @@ async def test_grouped_claim_binds_exact_execution_primary_key_with_plain_insert
             backend = runtime._execution_service.runtime_backend()
             lifetime = backend._turn_owners[handle.execution_id]
             async with engine.begin() as connection:
-                row = (await connection.execute(select(executions.c.id, executions.c.kind, executions.c.turn_token).select_from(
-                    admissions.join(executions, admissions.c.control_id == executions.c.id),
-                ).where(admissions.c.store_key == store.store_key,
-                        admissions.c.execution_id == handle.execution_id.encode("utf-8")))).one()
+                row = (await connection.execute(select(
+                    executions.c.id, executions.c.kind, executions.c.turn_token, executions.c.turn_receipt,
+                    sessions.c.strict_turn_execution_id, sessions.c.strict_turn_fence,
+                ).join(sessions, sessions.c.id == executions.c.turn_session_owner_id).where(
+                    executions.c.store_key == store.store_key,
+                    executions.c.key == persistence.execution.executions.execution_record_key(handle.execution_id),
+                    sessions.c.strict_turn_fence == executions.c.turn_fence,
+                ))).one()
                 assert row.kind == "execution" and row.turn_token
+                assert row.strict_turn_execution_id == handle.execution_id.encode("utf-8")
+                assert row.turn_receipt["receipt_kind"] == "claim"
                 execution_row_id = row.id
-            execution_insert, receipt_insert = [entry for entry in writes if entry[0].startswith("INSERT INTO ai_execution_records")]
-            assert execution_insert[1] == receipt_insert[1] == 1
+                admitted_fence = row.strict_turn_fence
+            inserts = [entry for entry in writes if entry[0].startswith("INSERT INTO ai_execution_records")]
+            assert len(inserts) == 2 and all(rowcount == 1 for _, rowcount in inserts)
+            # One Execution with its receipt and one business idempotency row.
+            (execution_insert,) = [entry for entry in inserts if "turn_receipt" in entry[0]]
+            assert "turn_session_owner_id" in execution_insert[0]
             assert "strftime" in execution_insert[0]
-            (slot,) = [entry[0] for entry in writes if entry[0].startswith(
-                ("INSERT INTO ai_turn_slots", "UPDATE ai_turn_slots"),
-            )]
-            assert "active_execution_id" in slot and "lease_fence" in slot
-            (admission,) = [entry for entry in writes if entry[0].startswith("INSERT INTO ai_turn_admissions")]
-            assert "VALUES" in admission[0] and "SELECT" not in admission[0] and admission[1] == 1
+            assert "VALUES" in execution_insert[0] and "SELECT" not in execution_insert[0]
+            (slot,) = [entry for entry in writes if entry[0].startswith("UPDATE ai_state_records SET strict_turn_")]
+            assert "strict_turn_execution_id" in slot[0] and "strict_turn_fence" in slot[0] and slot[1] == 1
             finish.set()
             assert (await handle.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
             await asyncio.wait_for(lifetime.closed.wait(), 8)
             async with engine.begin() as connection:
-                retired = (await connection.execute(select(admissions.c.control_id, admissions.c.receipt_kind).where(
-                    admissions.c.store_key == store.store_key,
-                    admissions.c.execution_id == handle.execution_id.encode("utf-8"),
-                ))).one()
-                assert retired.control_id is None and retired.receipt_kind == "release"
-                (token,) = (await connection.execute(select(executions.c.turn_token).where(
+                retired = (await connection.execute(select(
+                    executions.c.turn_token, executions.c.turn_receipt,
+                    sessions.c.strict_turn_execution_id, sessions.c.strict_turn_fence,
+                ).join(sessions, sessions.c.id == executions.c.turn_session_owner_id).where(
                     executions.c.id == execution_row_id,
                 ))).one()
-                assert token is None
+                assert retired.turn_token is None and retired.turn_receipt["receipt_kind"] == "release"
+                assert retired.strict_turn_execution_id is None and retired.strict_turn_fence == admitted_fence
             assert not [entry for entry in writes if entry[0].startswith("DELETE FROM ai_execution_records")]
         finally:
             finish.set()
@@ -486,15 +492,16 @@ async def test_failed_grouped_reservation_rolls_back_early_slot_binding(tmp_path
                 await asyncio.wait_for(owner.closed.wait(), 8)
         store = persistence.execution.executions.state_store
         engine = store.storage_group.context.engine
-        slots = store.storage_group.metadata.tables["ai_turn_slots"]
+        session_repository = persistence.conversation.sessions
+        sessions = store.storage_group.metadata.tables["ai_state_records"]
         from sqlalchemy import select
 
         async def physical():
             async with engine.begin() as conn:
                 return tuple((await conn.execute(select(
-                    slots.c.session_kind, slots.c.session_key, slots.c.active_execution_id,
-                    slots.c.lease_fence, slots.c.revision,
-                ).where(slots.c.store_key == store.store_key))).all())
+                    sessions.c.strict_turn_execution_id, sessions.c.strict_turn_fence, sessions.c.storage_revision,
+                ).where(sessions.c.store_key == session_repository.state_store.store_key,
+                        sessions.c.key == session_repository.session_record_key("session")))).all())
 
         before = await physical()
         commands = backend._runtime_commands

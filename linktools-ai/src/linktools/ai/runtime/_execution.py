@@ -1798,7 +1798,7 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
                 capture_metric=capture_metric,
                 coordinated_receipt=None if grouped is None else grouped.receipt,
-                authority=None if coordinator is None else coordinator.execution_authority(coordination),
+                authority=None if coordinator is None else coordinator._execution_reservation_authority(coordination),
             )
 
         if run_turn is None:

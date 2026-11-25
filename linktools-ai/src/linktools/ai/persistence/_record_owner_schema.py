@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
 from ._record_owner import SCAN_KIND_OWNERS
-from ._turn_sql_schema import TURN_SESSION_MAX_BYTES
+from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 
 
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
@@ -140,6 +140,13 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
             "scan_kind", String(34), nullable=False,
             comment="Write-through kind and execution recovery candidate projection; never domain authority.",
         ))
+    if name == "ai_state_records":
+        columns[-2:-2] = [
+            Column("strict_turn_execution_id", LargeBinary(RESOURCE_ID_MAX_BYTES).with_variant(mysql.VARBINARY(RESOURCE_ID_MAX_BYTES), "mysql"),
+                   nullable=True, comment="Unpublished strict conversation turn owner, distinct from business session state."),
+            Column("strict_turn_fence", BigInteger, nullable=True,
+                   comment="Fencing generation for a same-group strict conversation; NULL has no such ownership."),
+        ]
     if name == "ai_execution_records":
         columns[-2:-2] = [
             Column("turn_slot_kind", SmallInteger, nullable=True, comment="Runtime slot family of the exact source owner."),
@@ -152,6 +159,14 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                    nullable=True, comment="Last granted source deadline; active only with a lease token."),
             Column("turn_revision", BigInteger, nullable=False, server_default=text("0"),
                    comment="Independent writable revision for source lease renewal."),
+            Column("turn_request_route", LargeBinary(TURN_REQUEST_MAX_BYTES).with_variant(mysql.VARBINARY(TURN_REQUEST_MAX_BYTES), "mysql"),
+                   nullable=True, comment="Unique live request or parked standalone request address."),
+            Column("turn_occupied_route", LargeBinary(TURN_SESSION_MAX_BYTES).with_variant(mysql.VARBINARY(TURN_SESSION_MAX_BYTES), "mysql"),
+                   nullable=True, comment="Unique active or parked split-store session address."),
+            Column("turn_session_owner_id", BigInteger, nullable=True,
+                   comment="Exact same-store strict SessionRecord row; never a portable address."),
+            Column("turn_receipt", JSON(none_as_null=True), nullable=True,
+                   comment="Compact retained coordination receipt, independent of the execution payload."),
         ]
     omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
     if name == "ai_task_graphs":
@@ -159,6 +174,10 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
     records = Table(name, metadata, *(column for column in columns if column.name not in omitted),
                     comment=comment, **sql_table_options())
     sql_unique(records, "store_key", "key_locator")
+    if name == "ai_execution_records":
+        sql_unique(records, "store_key", "turn_request_route")
+        sql_unique(records, "store_key", "turn_occupied_route")
+        sql_query_index(records, "turn_session_owner_id", "turn_fence")
     if name == "ai_task_graphs":
         sql_query_index(records, "store_key", "state", "sort_prefix")
         sql_audit_indexes(records)

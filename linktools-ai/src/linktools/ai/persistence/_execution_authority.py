@@ -70,6 +70,10 @@ class InitialExecutionAuthority:
     proof: ExecutionAuthority
     expiry: datetime | timedelta
     control_id: int | None = None
+    # Native SESSION coordinator supplies this before Execution publication.
+    # The domain payload and its source lease have their own fields.
+    receipt_values: dict[str, object] | None = None
+    shell_revision: tuple[int, int] | None = None
 
 
 __all__ = ["ExecutionAuthority", "SourceTurnRevoked"]

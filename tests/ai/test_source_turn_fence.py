@@ -94,12 +94,19 @@ async def test_takeover_revokes_write_before_execution_producer_cas_moves(tmp_pa
                     ).values(turn_expiry=datetime(2000, 1, 1, tzinfo=timezone.utc)))
                     assert expired.rowcount == 1
                 if boundary != "attempt_expired":
-                    old_receipt = await peer_store.get_turn_operation_proof(fence.authority.scope, fence.authority.execution_id, coowned=True)
-                    successor = await peer_store.claim_turn_admission(
-                        fence.authority.scope, session_key=fence.authority.slot, request_key=old_receipt.request_key,
-                        request_digest=old_receipt.request_digest, execution_id=fence.authority.execution_id,
-                        owner_id="b" * 32, duration=90, token="c" * 32, coowned=True,
-                    )
+                    session_store = peer.conversation.sessions.state_store
+                    async def regain(_group):
+                        tx = peer_store._turn_transaction()
+                        _, proof, _ = await tx._read_native_execution_receipt(
+                            fence.authority.scope, route="execution", identity=fence.authority.execution_id,
+                        )
+                        return await tx._regrant_native_execution_receipt(
+                            fence.authority.scope, session_store=session_store, session_key=fence.authority.slot,
+                            request_key=proof.request_key, request_digest=proof.request_digest,
+                            execution_id=fence.authority.execution_id, owner_id="b" * 32, duration=90, token="c" * 32,
+                        )
+                    successor = await peer_store.storage_group.mutate((peer_store, session_store), regain)
+                    assert successor is not None and successor.lease is not None
                     assert successor.lease.fence > fence.authority.fence
                     evidence["successor_fence"] = replace(fence, authority=replace(fence.authority, token=successor.lease.token, fence=successor.lease.fence))
                 assert await peer.execution.executions.get_observed(fence.authority.execution_id, tenant_id=tenant) == before
@@ -139,7 +146,7 @@ async def test_revoked_turn_cannot_admit_new_effect_but_existing_effect_can_sett
         Persistence.open("tool-boundary", tenant_id="tenant", storage=PersistenceStorage.sqlite(tmp_path / "split.db")) as split,
     ):
         repository = state.execution.executions
-        authority = StateTurnCoordination(repository.state_store, namespace="tool-boundary", tenant_id="tenant", _runtime_sql=True, _coowned=True)
+        authority = StateTurnCoordination(repository.state_store, namespace="tool-boundary", tenant_id="tenant", _coowned=True)
         scope = TurnScopeIdentity("tool-boundary", "tenant", "runtime-pending-turn")
 
         coordinator = PendingTurnCoordination.for_state(None, authority, namespace=scope.namespace, tenant_id=scope.tenant_id)
@@ -178,9 +185,9 @@ async def test_revoked_turn_cannot_admit_new_effect_but_existing_effect_can_sett
         finally:
             event.remove(engine, "before_cursor_execute", capture)
         (authority_read,) = [statement for statement in statements if statement.lstrip().startswith("SELECT")]
-        assert "ai_execution_records" in authority_read and "ai_turn_slots" not in authority_read
+        assert "ai_execution_records" in authority_read
         (control_write,) = [statement for statement in statements if statement.lstrip().startswith("UPDATE")]
-        assert "ai_execution_records" in control_write and "ai_turn_slots" not in control_write
+        assert "ai_execution_records" in control_write
         assert await authority.release_turn(first.lease)
         second = await own("2" * 32)
         assert second.lease.fence > first.lease.fence
@@ -221,14 +228,14 @@ async def test_piggyback_cas_rechecks_expiry_after_real_slot_lock_wait(tmp_path,
         repository = state.execution.executions
         store = repository.state_store
         engine = store.storage_group.context.engine
-        authority = StateTurnCoordination(store, namespace=scope.namespace, tenant_id=scope.tenant_id, _runtime_sql=True, _coowned=True)
+        authority = StateTurnCoordination(store, namespace=scope.namespace, tenant_id=scope.tenant_id, _coowned=True)
         from linktools.ai.persistence.coordination import PendingTurnCoordination
         coordinator = PendingTurnCoordination.for_state(None, authority, namespace=scope.namespace, tenant_id=scope.tenant_id)
         execution = replace(_record(ExecutionStatus.STARTED, 1), producer_generation=1, producer_claim_id="worker",
                             recovery=ExecutionRecoveryDetail(agent_run_id="run"))
         await repository.create_execution(execution)
         first = await authority.claim_turn(
-            scope, session_key="session:session", request_key="a" * 64, request_digest="b" * 64,
+            scope, session_key="request:" + "a" * 64, request_key="a" * 64, request_digest="b" * 64,
             execution_id="execution", owner_id="c" * 32, lease_seconds=60,
         )
         fence = coordinator.durable_write_fence(first, store)

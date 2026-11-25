@@ -24,7 +24,7 @@ def _storage(backend: str, path: Path) -> PersistenceStorage:
     return PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(path / "state.db")
 
 
-async def _prepare(state: Persistence, phase: str):
+async def _prepare(state: Persistence, phase: str, *, create_execution=None):
     now = datetime.now(timezone.utc)
     initial = _checkpoint(now)
     base = _continuation()
@@ -44,7 +44,9 @@ async def _prepare(state: Persistence, phase: str):
         initial.execution_id, ExternalCallStatus.PENDING, None, now, None,
     ) for item in continuation.calls)
     commands = _commands(state, "readback")
-    await state.execution.executions.create_execution(initial)
+    if create_execution is None:
+        create_execution = state.execution.executions.create_execution
+    await create_execution(initial)
 
     async def pause():
         return await commands.commit_deferred_checkpoint(
@@ -370,16 +372,31 @@ async def test_expired_source_cannot_publish_deferred_frontier(tmp_path: Path) -
 
     scope = TurnScopeIdentity("readback", "tenant", "runtime-pending-turn")
     async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=_storage("sql", tmp_path)) as state:
-        _, commands, initial, continuation, approvals, calls = await _prepare(state, "pause")
-        store = state.execution.executions.state_store
-        authority = StateTurnCoordination(store, namespace=scope.namespace, tenant_id=scope.tenant_id,
-                                          _runtime_sql=True, _coowned=True)
+        repository = state.execution.executions
+        store = repository.state_store
+        authority = StateTurnCoordination(store, namespace=scope.namespace, tenant_id=scope.tenant_id, _coowned=True)
         coord = PendingTurnCoordination.for_state(None, authority, namespace=scope.namespace, tenant_id=scope.tenant_id)
-        lease = await authority.claim_turn(
-            scope, session_key="request:" + "a" * 64, request_key="a" * 64, request_digest="b" * 64,
-            execution_id=initial.execution_id, owner_id="c" * 32, lease_seconds=60,
+        fence = None
+
+        async def create_owned_execution(initial):
+            nonlocal fence
+            lease = await authority.claim_turn(
+                scope, session_key="request:" + "a" * 64, request_key="a" * 64, request_digest="b" * 64,
+                execution_id=initial.execution_id, owner_id="c" * 32, lease_seconds=60,
+            )
+            assert lease is not None and lease.lease is not None
+            fence = coord.durable_write_fence(lease, store)
+            assert fence is not None
+            await repository.prepare_content(initial)
+            value = await repository._stored_content(
+                "execution", (initial.execution_id,), initial, state=initial.status.value,
+            )
+            await store.mutate(lambda tx: tx.publish_execution_shell(fence.authority, value))
+
+        _, commands, initial, continuation, approvals, calls = await _prepare(
+            state, "pause", create_execution=create_owned_execution,
         )
-        fence = coord.durable_write_fence(lease, store)
+        assert fence is not None
         before = await _facts(state, approvals, calls)
         control = store.storage_group.metadata.tables["ai_execution_records"]
         async with store.storage_group.context.engine.begin() as connection:

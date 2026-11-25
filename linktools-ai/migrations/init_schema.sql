@@ -24,6 +24,8 @@ CREATE TABLE ai_state_records (
 	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete parent_key; raw identity must also match.',
 	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.',
 	scan_kind VARCHAR(34) NOT NULL COMMENT 'Write-through kind and execution recovery candidate projection; never domain authority.',
+	strict_turn_execution_id VARBINARY(128) NULL COMMENT 'Unpublished strict conversation turn owner, distinct from business session state.',
+	strict_turn_fence BIGINT NULL COMMENT 'Strict conversation generation; NULL outside coowned Runtime.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
@@ -70,6 +72,10 @@ CREATE TABLE ai_execution_records (
 	turn_fence BIGINT COMMENT 'Session fencing generation of the coordinated execution.',
 	turn_expiry DATETIME(6) COMMENT 'Last granted source deadline; active only with a lease token.',
 	turn_revision BIGINT NOT NULL COMMENT 'Independent writable revision for source lease renewal.' DEFAULT 0,
+	turn_request_route VARBINARY(64) COMMENT 'Unique live request or parked standalone request address.',
+	turn_occupied_route VARBINARY(128) COMMENT 'Unique active or parked split-store session address.',
+	turn_session_owner_id BIGINT COMMENT 'Exact same-store strict SessionRecord row; never a portable address.',
+	turn_receipt JSON COMMENT 'Compact retained coordination receipt, independent of the execution payload.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
@@ -79,52 +85,11 @@ CREATE TABLE ai_execution_records (
 	KEY ix_scope_locator_subject_id (scope_locator, subject_id),
 	KEY ix_store_key_scan_kind_sort_prefix (store_key, scan_kind, sort_prefix),
 	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
+	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator),
+	UNIQUE KEY uk_store_key_turn_request_route (store_key, turn_request_route),
+	UNIQUE KEY uk_store_key_turn_occupied_route (store_key, turn_occupied_route),
+	KEY ix_turn_session_owner_id_turn_fence (turn_session_owner_id, turn_fence)
 )ENGINE=InnoDB COMMENT='Authoritative execution lifecycle, request receipts, and content references.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
-
-CREATE TABLE ai_turn_slots (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(32) NOT NULL COMMENT 'Physical StateStore partition.',
-	session_kind SMALLINT NOT NULL COMMENT 'Conversation or standalone turn slot.',
-	session_key VARBINARY(128) NOT NULL COMMENT 'Exact coordination session identity.',
-	active_execution_id VARBINARY(128) COMMENT 'Current admission owner, or NULL for an idle slot.',
-	lease_token VARBINARY(32) COMMENT 'Exact active lease token, or NULL for an idle slot.',
-	lease_fence BIGINT NOT NULL COMMENT 'Lease fencing generation.' DEFAULT 0,
-	lease_expires_at DATETIME(6) COMMENT 'Source-clock lease deadline.',
-	revision BIGINT NOT NULL COMMENT 'Physical slot revision for guarded writes.' DEFAULT 0,
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	KEY ix_created_at (created_at),
-	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_store_key_session_kind_session_key (store_key, session_kind, session_key)
-)ENGINE=InnoDB COMMENT='Stable source turn lease slot, including the idle fence high-water mark.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
-
-CREATE TABLE ai_turn_admissions (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(32) NOT NULL COMMENT 'Physical StateStore partition.',
-	session_kind SMALLINT NOT NULL COMMENT 'Conversation or standalone turn slot.',
-	execution_id VARBINARY(128) NOT NULL COMMENT 'Exact coordination execution identity.',
-	session_key VARBINARY(128) NOT NULL COMMENT 'Exact coordination session identity.',
-	retired_request_key VARBINARY(64) COMMENT 'Original request identity, retained only after retirement.',
-	route_kind SMALLINT NOT NULL COMMENT 'Active request or retired execution route.',
-	route_key VARBINARY(128) NOT NULL COMMENT 'Exact active request or retired execution identity.',
-	request_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Digest of the admitted request.',
-	owner_id VARBINARY(32) NOT NULL COMMENT 'Producer that acquired the admission.',
-	lease_fence BIGINT NOT NULL COMMENT 'Lease fencing generation.',
-	cancel_requested BOOL NOT NULL COMMENT 'Whether the current admission was cancelled.',
-	receipt_id VARBINARY(32) NOT NULL COMMENT 'Latest source mutation receipt identifier.',
-	receipt_kind VARCHAR(8) NOT NULL COMMENT 'Latest source mutation operation.',
-	control_id BIGINT COMMENT 'Local row address of the execution authority; rebuilt on restore.',
-	standalone_idle BOOL COMMENT 'NULL for slot-backed or archived admissions, FALSE for an active slotless standalone turn, TRUE for its retained receipt.',
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	KEY ix_created_at (created_at),
-	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_store_key_execution_id (store_key, execution_id),
-	UNIQUE KEY uk_store_key_route_kind_route_key (store_key, route_kind, route_key)
-)ENGINE=InnoDB COMMENT='Source turn admission and its latest operation receipt, retained after release.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
 CREATE TABLE ai_task_graphs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,

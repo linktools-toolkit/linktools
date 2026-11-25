@@ -38,10 +38,11 @@ production DBA approval or a deployed migration.
 
 | Table | Owner and retained representation |
 | --- | --- |
-| `ai_state_records` | Generic domain control state with typed CAS/lease and lookup columns; archive records can own binary bodies. |
-| `ai_execution_records` | Authoritative execution lifecycle, request receipts and content references. |
-| `ai_turn_slots` | Per-session turn lease slot and fence high-water mark, retained when idle. |
-| `ai_turn_admissions` | Request-to-execution admission and latest operation receipt, retained after release. |
+| `ai_sessions` | Ordinary conversation lifecycle, occupancy and committed history position. The host owns business access policy; agent selection is per turn. |
+| `ai_session_turns` | Ordinary turn request, generation and terminal transcript. History reads the committed rows in sequence. |
+| `ai_session_bindings` | Immutable compiled bindings referenced by ordinary turns. |
+| `ai_state_records` | Generic domain control state; a same-group strict SessionRecord also owns its occupied execution and fencing generation. Archive records can own binary bodies. |
+| `ai_execution_records` | Strict execution lifecycle, exact request routes, coordination receipts, lease and content references. In split storage the Execution group also owns the strict session's occupied route. |
 | `ai_task_graphs` | Authoritative TaskGraph state and recovery ordering. |
 | `ai_state_facts` | Ordered fact payloads and native references; transcript bodies stay with their archive or native owner. |
 | `ai_state_counters` | Monotonic counters shared by execution, task, conversation and trace domains; not message sequences. |

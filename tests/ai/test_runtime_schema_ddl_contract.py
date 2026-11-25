@@ -316,7 +316,7 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
         "ai_state_records", "ai_execution_records", "ai_state_facts",
         "ai_state_counters", "ai_state_operations", "ai_step_runs", "ai_step_messages", "ai_step_sequences",
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
-        "ai_turn_slots", "ai_turn_admissions", "ai_sessions", "ai_session_bindings", "ai_session_turns",
+        "ai_sessions", "ai_session_bindings", "ai_session_turns",
     } | ({"ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
 
     def compile_ddl(metadata: MetaData) -> list[str]:
@@ -447,8 +447,7 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
             # The session-turn authority keys one tenant partition directly.
             assert table.c.scope_key.type.length == 32
             continue
-        capacity = (32 if table.name.startswith("ai_turn_") else
-                    NATIVE_STORE_KEY_MAX_BYTES if table.name in native_tables else STORE_KEY_MAX_BYTES)
+        capacity = NATIVE_STORE_KEY_MAX_BYTES if table.name in native_tables else STORE_KEY_MAX_BYTES
         assert table.c.store_key.type.length == capacity
         assert table.c.store_key.type.compile(dialect=dialect) == {
             "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
@@ -491,7 +490,7 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
         "ai_state_operations", "ai_state_records", "ai_execution_records", "ai_state_counters", "ai_step_events",
         "ai_step_messages", "ai_step_runs", "ai_step_sequences", "ai_step_snapshots", "ai_trace_events",
         "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
-        "ai_turn_slots", "ai_turn_admissions", "ai_sessions", "ai_session_bindings", "ai_session_turns",
+        "ai_sessions", "ai_session_bindings", "ai_session_turns",
     }
     for table in metadata.tables.values():
         assert table.comment and all(column.comment for column in table.c)
@@ -506,9 +505,14 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
                 if isinstance(column.type, (LargeBinary, String)):
                     assert column.type.length is not None and column.type.length <= 128, (table.name, column.name)
                 if unique:
-                    assert not column.nullable, (
-                        table.name, index.name, column.name,
+                    sparse_route = (
+                        table.name == "ai_execution_records"
+                        and tuple(index.columns.keys()) in (
+                            ("store_key", "turn_request_route"), ("store_key", "turn_occupied_route"),
+                        )
+                        and column.name in ("turn_request_route", "turn_occupied_route")
                     )
+                    assert column.nullable is sparse_route, (table.name, index.name, column.name)
         for index in table.indexes:
             assert not index.dialect_options["mysql"].get("length"), (table.name, index.name)
 
@@ -541,7 +545,7 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
                 "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
             }[dialect_name]
     for name in state_raw:
-        assert metadata.tables[name].c.store_key.type.length == (32 if name.startswith("ai_turn_") else 128)
+        assert metadata.tables[name].c.store_key.type.length == 128
     for table in metadata.tables.values():
         for column in table.c:
             if column.name.endswith("_locator"):
@@ -594,16 +598,43 @@ def test_record_scan_bucket_is_write_through_and_replaces_only_generic_index(dia
 
 
 
-def test_mysql_grouped_turn_admission_uses_insert_values_with_exact_control_id() -> None:
+def test_strict_turn_sql_uses_only_exact_native_owner_routes() -> None:
+    from sqlalchemy import func, insert
+    from linktools.ai.persistence._execution_authority import ExecutionAuthority
     from linktools.ai.persistence._turn_sql import SqlTurnProof, SqlTurnRows
+    from linktools.ai.persistence.state import state_store_key
     from linktools.ai.storage import TurnScopeIdentity
+    from datetime import datetime, timezone
 
     scope = TurnScopeIdentity("runtime", "tenant", "runtime-pending-turn")
-    source = SqlTurnRows(build_sql_schema_metadata(), b"r" * 32, scope, coowned=True)
-    proof = SqlTurnProof("execution", "session:s", "a" * 64, "b" * 64, "c" * 32,
+    metadata = build_sql_schema_metadata()
+    assert {"ai_turn_slots", "ai_turn_admissions"}.isdisjoint(metadata.tables)
+    store = state_store_key(scope.namespace, scope.tenant_id, "execution")
+    source = SqlTurnRows(metadata, store, scope, coowned=True)
+    control = metadata.tables["ai_execution_records"]
+    owner = metadata.tables["ai_state_records"]
+    assert owner.c.strict_turn_execution_id.type.length == control.c.turn_occupied_route.type.length == 128
+    assert owner.c.strict_turn_fence.nullable and control.c.turn_session_owner_id.nullable
+    assert control.c.turn_request_route.type.length == 64
+    indexes = {tuple(index.columns.keys()): index.unique for index in control.indexes}
+    assert indexes["store_key", "turn_request_route"] and indexes["store_key", "turn_occupied_route"]
+    assert indexes["turn_session_owner_id", "turn_fence"] is False
+
+    request = "a" * 64
+    proof = SqlTurnProof("execution", f"request:{request}", request, "b" * 64, "c" * 32,
                          1, False, "d" * 32, "claim", True)
-    statement = source.publish_claim(proof, previous=None, control_id=42)
-    compiled = statement.compile(dialect=mysql.dialect())
+    authority = ExecutionAuthority(scope, proof.execution_id, proof.session_key, proof.receipt_id, proof.fence)
+    expiry = datetime(2035, 1, 1, tzinfo=timezone.utc)
+    values = {
+        **authority.shell_values(store_key=store, expiry=expiry),
+        **source.standalone_control_claim_values(proof, expiry=expiry),
+    }
+    compiled = insert(control).values(values).compile(dialect=mysql.dialect())
     sql = str(compiled).upper()
-    assert sql.startswith("INSERT INTO AI_TURN_ADMISSIONS") and " VALUES " in sql and "SELECT" not in sql
-    assert compiled.params["control_id"] == 42
+    assert sql.startswith("INSERT INTO AI_EXECUTION_RECORDS") and " VALUES " in sql and "SELECT" not in sql
+    assert compiled.params["turn_request_route"] == request.encode()
+    assert compiled.params["turn_receipt"]["receipt_id"] == proof.receipt_id
+    lookup = source.select_native_execution_receipt(route="request", identity=request, clock=func.current_timestamp())
+    query = str(lookup.compile(dialect=mysql.dialect()))
+    assert "ai_execution_records.turn_request_route =" in query
+    assert "ai_turn_admissions" not in query and "ai_turn_slots" not in query

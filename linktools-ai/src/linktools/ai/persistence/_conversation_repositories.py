@@ -6,9 +6,11 @@ import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
+from typing import TYPE_CHECKING
 from linktools.core import environ
 from ..core import (
     JsonValue,
+    ExecutionStatus,
     OperationKind,
     OperationLedgerInput,
     Page,
@@ -16,6 +18,7 @@ from ..core import (
     SessionStatus,
     canonical_sha256,
     validate_agent_id,
+    validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
 from .codec import (
@@ -36,14 +39,17 @@ from .contracts import (
 )
 from ._history_index import build_fork_index_node_from_roots
 from ._plan import PersistenceDomain
+from ._record_owner import EXECUTION_SHELL_KIND
+from ._strict_session_occupancy import StrictSessionTurn
+from ._turn_sql import SESSION
 from .state import (
-    FactQuery, SqlMutationObserver,
+    FactQuery, SqlMutationObserver, SqlStateRecordReader,
     RecordQuery,
     StateStore,
     StateTransaction,
     StoredFact,
     StoredRecord,
-    stream_key,
+    record_key, stream_key,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -57,6 +63,10 @@ from ._repository_common import (
     require_tenant as _require_tenant,
     validate_page_limit as _validate_page_limit,
 )
+
+if TYPE_CHECKING:
+    from ._sql import SqlStateStore
+
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
 
@@ -455,7 +465,31 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
 
 
+        self._strict_session_execution_store: SqlStateStore | None = None
         self._change_observers: dict[bytes, set[Callable[[], None]]] = {}
+
+    def bind_strict_session_creation(self, execution_store: "SqlStateStore") -> None:
+        """Bind the already-selected same-store typed authority for fresh sessions."""
+        from ._sql import SqlStateStore
+
+        if (type(self._store) is not SqlStateStore or type(execution_store) is not SqlStateStore
+                or self._store.storage_group is not execution_store.storage_group):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if self._strict_session_execution_store not in (None, execution_store):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self._strict_session_execution_store = execution_store
+
+    async def _insert_new_session(
+        self, transaction: StateTransaction, session_id: str, records: tuple[StoredRecord, ...],
+    ) -> None:
+        if self._strict_session_execution_store is None:
+            await transaction.insert_records(records)
+            return
+        from ._sql import _SqlTransaction
+
+        if not isinstance(transaction, _SqlTransaction):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        await transaction.insert_strict_session_records(records, session_key=self.session_record_key(session_id))
 
     def observe_changes(self, session_id: str, callback: Callable[[], None]) -> Callable[[], None]:
         """Subscribe to local commit hints, not another copy of session state."""
@@ -579,8 +613,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         value = _ensure_session_history(value, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
-            await transaction.insert_records(
-                (
+            await self._insert_new_session(
+                transaction, value.session_id, (
                     self._stored(
                         "session",
                         (value.session_id,),
@@ -621,14 +655,20 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
             _, replayed = await _append_operation(transaction, self, operation)
             if replayed:
+                if self._strict_session_execution_store is not None:
+                    _, current, _ = await self.read_strict_turn_session_in_transaction(
+                        transaction, record.session_id, tenant_id=self._tenant_id,
+                        execution_store=self._strict_session_execution_store,
+                    )
+                    return current, True
                 current = await transaction.get_record(
                     self._key("session", (record.session_id,))
                 )
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return await self._decode(current, SessionRecord), True
-            await transaction.insert_records(
-                (
+            await self._insert_new_session(
+                transaction, record.session_id, (
                     self._stored(
                         "session",
                         (record.session_id,),
@@ -696,12 +736,16 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     source_session_id=source_session_id,
                     target=target,
                 )
-            source_stored = await transaction.get_record(
-                self._key("session", (source_session_id,))
-            )
-            if source_stored is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            source = await self._decode(source_stored, SessionRecord)
+            if self._strict_session_execution_store is not None:
+                source_stored, source, _ = await self.read_strict_turn_session_in_transaction(
+                    transaction, source_session_id, tenant_id=self._tenant_id,
+                    execution_store=self._strict_session_execution_store,
+                )
+            else:
+                source_stored = await transaction.get_record(self.session_record_key(source_session_id))
+                if source_stored is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                source = await self._decode(source_stored, SessionRecord)
             if source.owner_principal_id != target.owner_principal_id:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if source.revision != expected_source_revision:
@@ -868,7 +912,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             ]
             if child_projection is not None:
                 records.append(child_projection)
-            await transaction.insert_records(tuple(records))
+            await self._insert_new_session(transaction, expected_target.session_id, tuple(records))
             await self._bump_list_generation(
                 transaction,
                 expected_target.owner_principal_id,
@@ -1449,21 +1493,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if release and next_value.revision != value.revision:
                 await self._bump_list_generation(transaction, value.owner_principal_id)
             if not release:
-                stream = self._timeline_stream(session_id)
-                sequence = await transaction.next_sequence(stream)
-                await transaction.insert_fact(
-                    StoredFact(
-                        stream,
-                        sequence,
-                        self._key("session", (session_id,)),
-                        "session_turn",
-                        execution_id,
-                        None,
-                        {"version": 1, "execution_id": execution_id},
-                    )
-                )
-                if admitted_turn is not None:
-                    admitted_turn(SessionTurnRef(session_id, sequence, execution_id))
+                await self._record_admitted_turn(transaction, session_id, execution_id, admitted_turn)
             return next_value
 
         if transaction is not None:
@@ -1621,6 +1651,102 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return committed
 
+    async def _record_admitted_turn(
+        self, transaction: StateTransaction, session_id: str, execution_id: str,
+        callback: Callable[[SessionTurnRef], None] | None,
+    ) -> None:
+        stream = self._timeline_stream(session_id)
+        sequence = await transaction.next_sequence(stream)
+        await transaction.insert_fact(StoredFact(
+            stream, sequence, self.session_record_key(session_id), "session_turn", execution_id, None,
+            {"version": 1, "execution_id": execution_id},
+        ))
+        if callback is not None:
+            callback(SessionTurnRef(session_id, sequence, execution_id))
+
+    async def publish_strict_turn_in_transaction(
+        self, transaction: StateTransaction, session: SessionRecord, execution_id: str, *,
+        admitted_turn: Callable[[SessionTurnRef], None] | None,
+    ) -> SessionRecord:
+        """Write the history edge after the typed owner publishes its Execution."""
+        _require_tenant(session, self._tenant_id)
+        if session.active_execution_id is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._record_admitted_turn(transaction, session.session_id, execution_id, admitted_turn)
+        if isinstance(transaction, SqlMutationObserver):
+            key = self.session_record_key(session.session_id)
+            transaction.observe_mutation(lambda _committed: self._notify_change(key))
+        return replace(session, active_execution_id=execution_id)
+
+    async def read_strict_turn_session_in_transaction(
+        self, transaction: StateTransaction, session_id: str, *, tenant_id: str, execution_store: "SqlStateStore",
+    ) -> tuple[StoredRecord, SessionRecord, StrictSessionTurn]:
+        """Read the public pointer without storing it in the SessionRecord payload."""
+        from hashlib import sha256
+
+        from sqlalchemy import and_, select
+
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        store = self._store
+        if (not isinstance(transaction, SqlStateRecordReader)
+                or execution_store.storage_group is not store.storage_group):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        metadata = store.storage_group.metadata
+        session = metadata.tables["ai_state_records"]
+        control = metadata.tables["ai_execution_records"]
+        s, e = session.c, control.c
+        key = self.session_record_key(session_id)
+        session_key = validate_resource_id(session_id).encode("utf-8")
+        statement = select(
+            session, e.key.label("strict_control_key"), e.kind.label("strict_control_kind"),
+            e.state.label("strict_control_state"),
+        ).select_from(session.outerjoin(control, and_(
+            s.strict_turn_execution_id.is_not(None),
+            e.turn_session_owner_id == s.id, e.turn_fence == s.strict_turn_fence,
+            e.store_key == execution_store.store_key, e.turn_slot_kind == SESSION, e.turn_slot_key == session_key,
+            e.turn_request_route.is_not(None), e.turn_receipt.is_not(None),
+        ))).where(
+            s.store_key == store.store_key, s.kind == "session",
+            s.key_locator == sha256(key).hexdigest(), s.key == key,
+        )
+        rows = await transaction.read_joined_records(store.context, statement, keys=(key,))
+        if not rows:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        (record, row), = rows
+        value = await self._decode(record, SessionRecord)
+        pointer, fence = row["strict_turn_execution_id"], row["strict_turn_fence"]
+        occupancy = StrictSessionTurn(None if pointer is None else pointer.decode("utf-8"),
+                                      fence, record.storage_revision)
+        if fence is None:
+            if pointer is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return record, value, occupancy
+        if value.active_execution_id is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "strict session occupancy has two physical owners")
+        if occupancy.execution_id is not None:
+            expected = record_key(self._namespace, self._tenant_id, PersistenceDomain.EXECUTION.value,
+                                  "execution", (occupancy.execution_id,))
+            if (row["strict_control_key"] != expected
+                    or row["strict_control_kind"] not in (EXECUTION_SHELL_KIND, "execution")):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (row["strict_control_kind"] == "execution"
+                    and row["strict_control_state"] != ExecutionStatus.PENDING_START.value):
+                value = replace(value, active_execution_id=occupancy.execution_id)
+        return record, value, occupancy
+
+    async def replace_strict_turn_session_in_transaction(
+        self, transaction: StateTransaction, *, record: StoredRecord, occupancy: StrictSessionTurn,
+        updated: SessionRecord,
+    ) -> None:
+        """Persist business fields, leaving the occupancy owner untouched."""
+        if (occupancy.fence is None or record.storage_revision != occupancy.storage_revision
+                or updated.active_execution_id not in (None, occupancy.execution_id)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        physical = replace(updated, active_execution_id=None)
+        await self._replace_observed(
+            transaction, _projected_record(self, record, physical), record.storage_revision,
+        )
+
     def session_record_key(self, session_id: str) -> bytes:
         return self._key("session", (session_id,))
 
@@ -1712,6 +1838,33 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
         await self._bump_list_generation(transaction, current.owner_principal_id)
         return next_value
+
+    async def complete_strict_turn_in_transaction(
+        self, transaction: StateTransaction, session_id: str, *, tenant_id: str,
+        expected: ConversationCursor | None, next_cursor: ConversationCursor | None,
+        history_unavailable: bool, published_turn: bool,
+    ) -> SessionRecord:
+        """Persist terminal history metadata; the exact typed occupancy CAS clears separately."""
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self.session_record_key(session_id))
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(record, SessionRecord)
+        if current.active_execution_id is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "strict session occupancy has two physical owners")
+        if next_cursor is not None and (current.continuation != expected or current.status not in {
+            SessionStatus.OPEN, SessionStatus.CLOSING, SessionStatus.CLEANUP_REQUIRED,
+        }):
+            raise AIError(ErrorCode.SESSION_BUSY)
+        quality = ("complete" if next_cursor is not None else
+                   "unavailable" if history_unavailable else current.history_quality)
+        if next_cursor is None and not published_turn and quality == current.history_quality:
+            return current
+        updated = replace(current, continuation=current.continuation if next_cursor is None else next_cursor,
+                          history_quality=quality, revision=current.revision + 1, updated_at=await transaction.now())
+        await self._replace_observed(transaction, _projected_record(self, record, updated), record.storage_revision)
+        await self._bump_list_generation(transaction, current.owner_principal_id)
+        return updated
 
     async def complete_execution_in_transaction(
         self,
