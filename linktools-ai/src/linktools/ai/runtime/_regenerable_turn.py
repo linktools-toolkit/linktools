@@ -117,7 +117,7 @@ class _RegenerableTurnRunner:
         if (key.session_id in self._observers
                 and self._observed_cancellation.get(key.session_id) != key.turn_id):
             self._observed_cancellation[key.session_id] = key.turn_id
-            self._gap(key)
+            self._gap(key, cancelling=True)
         producer = self._producers.get(key)
         if producer is None or producer.done() or producer.cancelling() or key in self._cancel_notices:
             return
@@ -185,8 +185,11 @@ class _RegenerableTurnRunner:
             except Exception as error:
                 _logger.error("Session turn observer failed: %s", type(error).__name__)
 
-    def _gap(self, key: SessionTurnKey) -> None:
-        self._publish(key.session_id, {"type": "gap", "turn_id": key.turn_id})
+    def _gap(self, key: SessionTurnKey, *, cancelling: bool = False) -> None:
+        self._publish(key.session_id, {
+            "type": "gap", "turn_id": key.turn_id,
+            **({"phase": "cancelling"} if cancelling else {}),
+        })
 
     def _admitted(self, turn: _AdmittedTurn) -> None:
         self._publish(turn.key.session_id, {
@@ -413,7 +416,7 @@ class _RegenerableTurnRunner:
             # A transport-routed cancellation may have no producer on this
             # process to publish its eventual terminal frame. Tell current
             # viewers to reconcile this exact committed turn.
-            self._gap(key)
+            self._gap(key, cancelling=True)
         self._notice_lifecycle(key, "cancelling", session["revision"])
         return True
 
