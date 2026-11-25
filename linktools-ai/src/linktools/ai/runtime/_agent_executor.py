@@ -87,8 +87,11 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
+    ExecutionCapability,
     FileSystemCapability,
     ShellCapability,
+    StepPersistenceCapability,
+    tool_effect_policy_from_metadata,
 )
 from ..core import (
     ExecutionDeltaType,
@@ -156,6 +159,7 @@ from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
+_ORDINARY_WORKSPACE_TOOL = "list_files"
 _PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 
 
@@ -223,6 +227,7 @@ class _AgentRunScope:
     preload_skills: tuple[SkillDefinition, ...] = ()
     mode: ExecutionMode = "run"
     planning: bool = False
+    regenerable: bool = False
     thinking: ThinkingValue = None
     parent_agent_run_id: str | None = None
     subagent_available: bool = False
@@ -383,10 +388,28 @@ class AgentExecutor:
         compiled = binding.compiled_agent
         policy = _runtime_feature_policy(compiled.runtime_contributions)
         if (binding.output_binding.mode != "text"
-                or compiled.selected_tools or compiled.mcp_servers or compiled.selected_subagents
+                or compiled.selected_capabilities or compiled.skill_definitions
+                or compiled.mcp_servers or compiled.selected_subagents
                 or policy.restart_checkpoints or policy.durable_trace or policy.memory_scope is not None
                 or policy.tool_responses is not None):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
+        if compiled.selected_tools:
+            filesystems = tuple(item for item in policy.capabilities if type(item) is FileSystemCapability)
+            if len(compiled.selected_tools) != 1 or len(filesystems) != 1:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns require the native read-only tool surface")
+            (tool,) = compiled.selected_tools
+            metadata = _bound_tool_metadata(tool)
+            if (
+                tool.id != _ORDINARY_WORKSPACE_TOOL
+                or tool_class_from_metadata(metadata) != "filesystem.read"
+                or tool_effect_policy_from_metadata(metadata, require=True) != "none"
+                or tool.contract.get("kind", "function") != "function"
+                or tool.contract.get("defer_loading", False)
+                or filesystems[0].workspace.policy.tool_permissions.decide(
+                    tool_name=tool.id, tool_class="filesystem.read",
+                ) != "allow"
+            ):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns require an allowed native list_files tool")
 
     async def execute_regenerable(
         self,
@@ -422,7 +445,7 @@ class AgentExecutor:
                 agent_conversation_id=context.session_id, run_store=store,
                 agent_run_id=context.execution_id, agent_run_seq=1,
                 event_sink=event_sink, thinking=thinking, streamed_output_bytes=streamed_output_bytes,
-                repository_instructions=repository_instructions,
+                repository_instructions=repository_instructions, regenerable=True, tool_effects="read_only",
             ))
             if isinstance(outcome, DeferredToolRequests):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")
@@ -774,16 +797,23 @@ class AgentExecutor:
                         agent_run_id=scope.agent_run_id,
                         next_model_request_seq=interaction_high_water + 1,
                     )
+                    if scope.regenerable:
+                        runtime_capabilities = tuple(
+                            capability for capability in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
+                            if type(capability) in (ExecutionCapability, FileSystemCapability, StepPersistenceCapability)
+                        )
+                    else:
+                        runtime_capabilities = (self._runtime_capabilities if self._prepare_runtime_capabilities is None
+                                                else await self._prepare_runtime_capabilities(compiled_agent))
                     agent, capabilities = await _materialize_agent(
                         scope,
                         model=model,
                         skill_sources=skill_sources,
-                        current_agent=self._current_agent,
-                        asset_sources=self._asset_sources,
+                        current_agent=None if scope.regenerable else self._current_agent,
+                        asset_sources=None if scope.regenerable else self._asset_sources,
                         deferred_pause_sink=record_deferred_step,
                         metrics=self._metrics,
-                        runtime_capabilities=(self._runtime_capabilities if self._prepare_runtime_capabilities is None
-                                              else await self._prepare_runtime_capabilities(compiled_agent)),
+                        runtime_capabilities=runtime_capabilities,
                         callbacks=callbacks,
                         model_journal=model_journal,
                     )
@@ -1103,7 +1133,8 @@ async def _materialize_agent(
         current = compiled_agent if current_agent is None else await current_agent(compiled_agent)
         return current.skill_definitions
 
-    if scope.preload_skills or compiled_agent.spec.allow_skills and (compiled_agent.skill_definitions or asset_sources):
+    if not scope.regenerable and (scope.preload_skills or compiled_agent.spec.allow_skills and
+                                  (compiled_agent.skill_definitions or asset_sources)):
         initial_skills = compiled_agent.skill_definitions if scope.initial_skills is None else scope.initial_skills
         skill_capability = SkillCapability(
             initial_skills,
@@ -1249,14 +1280,15 @@ async def _materialize_agent(
     async def current_tools() -> CompiledAgent:
         return compiled_agent if current_agent is None else await current_agent(compiled_agent)
 
-    raw_toolsets.insert(0, create_current_toolset(
-        current_tools, asset_readers={} if asset_sources is None else asset_sources,
-        workspace_backend=scope.workspace_backend, workspace_provider=scope.workspace_provider,
-        register_cleanup=scope.register_tool_cleanup, tool_operations=scope.tool_operations,
-        tool_metrics=tool_metrics, budget=scope.budget, tool_effects=scope.tool_effects, input_limits=scope.limits,
-        response_fixture=scope.response_fixture, result_callbacks=callbacks,
-        reserved_tool_names=scope.memory_tool_names,
-    ))
+    if not scope.regenerable:
+        raw_toolsets.append(create_current_toolset(
+            current_tools, asset_readers={} if asset_sources is None else asset_sources,
+            workspace_backend=scope.workspace_backend, workspace_provider=scope.workspace_provider,
+            register_cleanup=scope.register_tool_cleanup, tool_operations=scope.tool_operations,
+            tool_metrics=tool_metrics, budget=scope.budget, tool_effects=scope.tool_effects, input_limits=scope.limits,
+            response_fixture=scope.response_fixture, result_callbacks=callbacks,
+            reserved_tool_names=scope.memory_tool_names,
+        ))
     async def publish_model_request_event(
         event_type: ExecutionEventType,
         payload: JsonValue,

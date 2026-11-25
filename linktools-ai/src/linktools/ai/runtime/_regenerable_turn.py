@@ -7,9 +7,10 @@ from __future__ import annotations
 import asyncio
 import secrets
 from collections.abc import Callable, Coroutine, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from linktools.core import environ
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -23,8 +24,9 @@ from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, decode_session_lineage
+from ..session import ToolProcessItem, project_tool_process_event
 from ..spec import RepositoryInstructions
-from ._agent_executor import LiveDelta
+from ._agent_executor import DurableBoundary, LiveDelta
 from ._regenerable_transcript import decode_regenerable_turn, encode_regenerable_turn
 
 if TYPE_CHECKING:
@@ -164,6 +166,7 @@ class _RegenerableTurnRunner:
         self, turn: _AdmittedTurn, state: str, *, output: JsonValue = None,
         result: JsonValue = None, error_code: str | None = None,
         instructions: list[str] | None = None, system_prompt: str | None = None,
+        activity: dict[str, JsonValue] | None = None,
     ) -> None:
         succeeded = state == "succeeded"
         self._store.note_terminal_context(
@@ -174,7 +177,8 @@ class _RegenerableTurnRunner:
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
             "generation": turn.generation, "revision": turn.revision + 1,
-            "state": state, "prompt": turn.prompt, "attachments": list(turn.attachments), "output": output, "error_code": error_code,
+            "state": state, "prompt": turn.prompt, "attachments": list(turn.attachments), "output": output,
+            "error_code": error_code, **(activity or {}),
         })
         self._notice_lifecycle(turn.key, "terminal", turn.revision + 1)
 
@@ -593,6 +597,8 @@ class _RegenerableTurnRunner:
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
     ) -> None:
+        process: dict[str, ToolProcessItem] = {}
+
         async def emit(emission: AgentEmission) -> None:
             if isinstance(emission, LiveDelta) and emission.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
                 self._publish(turn.key.session_id, {
@@ -600,10 +606,19 @@ class _RegenerableTurnRunner:
                     "generation": turn.generation, "revision": turn.revision,
                     "delta_kind": "text", "text": emission.content,
                 })
+            elif isinstance(emission, DurableBoundary):
+                item = project_tool_process_event(emission.event_type.value, emission.payload)
+                if item is not None:
+                    item = replace(item, error_message=None)
+                    process[item.key] = item
+                    self._publish(turn.key.session_id, {
+                        "type": "tool", "turn_id": turn.key.turn_id, "turn_no": turn.number,
+                        "generation": turn.generation, "revision": turn.revision, "item": asdict(item),
+                    })
             await event_sink(emission)
 
         producer = asyncio.create_task(self.settle(
-            turn, binding=binding, context=context, limits=limits, event_sink=emit, thinking=thinking,
+            turn, binding=binding, context=context, limits=limits, event_sink=emit, thinking=thinking, process=process,
         ))
         self._producers[turn.key] = producer
         try:
@@ -736,6 +751,7 @@ class _RegenerableTurnRunner:
     async def settle(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
+        process: Mapping[str, ToolProcessItem] | None = None,
     ) -> bool:
         """Execute after durable admission and publish only if this producer still owns the turn."""
         result: JsonValue
@@ -765,8 +781,20 @@ class _RegenerableTurnRunner:
             turn.key, generation=turn.generation, turn_no=turn.number, state="succeeded", result=result,
         )
         if committed:
+            activity = None
+            if process:
+                items: list[JsonValue] = []
+                for message in outcome.messages[len(turn.history):]:
+                    if not isinstance(message, ModelResponse):
+                        continue
+                    for part in message.parts:
+                        if isinstance(part, TextPart):
+                            items.append({"item_kind": "assistant", "content": part.content})
+                        elif isinstance(part, ToolCallPart) and f"tool:{part.tool_call_id}" in process:
+                            items.append({"item_kind": "tool_call", "tool_call_id": part.tool_call_id})
+                activity = {"items": items, "process": [asdict(item) for item in process.values()]}
             self._terminal(
-                turn, "succeeded", output=outcome.output, result=result,
+                turn, "succeeded", output=outcome.output, result=result, activity=activity,
                 instructions=list(frozen_spec.instructions)
                 if isinstance(result, dict) and result.get("instructions_from_binding") else None,
                 system_prompt=frozen_spec.system_prompt

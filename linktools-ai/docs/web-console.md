@@ -32,6 +32,12 @@ Agents, with a separate session list. This mode does not enable filesystem or
 shell tools, Memory, durable Trace or checkpoint-based tool recovery. An
 ineligible Agent is rejected rather than retried through the strict profile.
 
+An embedded ordinary Runtime may configure a workspace and explicitly select
+the native `list_files` tool for an eligible Agent. The workspace policy must
+allow the call. No other tools, dynamically loaded skills, or shell commands
+are enabled by this path. The console shows only the tool status and its
+public preview, never the raw parameters or result.
+
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file
 `.linktools/config.yaml`, shared by `ai-run`, `ai-acp`, and `ai-web`:

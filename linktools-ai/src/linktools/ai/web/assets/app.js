@@ -333,23 +333,35 @@ function ordinaryInput(prompt,attachments=[]) {
     attachments:attachments.map(item=>({...item,identifier:item.path || (item.source==='workspace'?'Workspace file':undefined)})),
   };
 }
-function ordinaryTurnNode(turn) {
+function ordinaryTurnNode(turn, previous=null) {
   const node=element('article','turn');node.dataset.turn=turn.turn_id;
+  node.toolRows=previous?.toolRows || new Map();
   node.append(userMessage(ordinaryInput(turn.user_input?.prompt,turn.user_input?.attachments)));
   const answers=element('div','turn-saved-answers');
   const items=turn.items?.length?turn.items:(turn.output?.text?[{item_kind:'assistant',content:turn.output.text}]:[]);
+  const tools=new Map((turn.process || []).map(row=>[row.key,row]));
+  const placed=new Set();
+  const appendTool=row=>{
+    if(!row || placed.has(row.key) || !Object.hasOwn(processToolStatus,row.status))return;
+    placed.add(row.key);answers.append(toolProcessRow(node.toolRows,row,true));
+  };
   for(const item of items) {
     if(item.item_kind==='assistant' && typeof item.content==='string')answers.append(markdownMessage(item.content));
     if(item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) {
       const thought=thinkingMessage('Thinking',item.content);showProcessElapsed(thought,item.elapsed_ms);answers.append(thought);
     }
+    if(item.item_kind==='tool_call')appendTool(tools.get(`tool:${item.tool_call_id}`));
   }
   if(!turn.conversation_committed){
-    node.liveAnswer=element('div','message ordinary-live');answers.append(node.liveAnswer);
-    if(turn.liveText)node.liveAnswer.textContent=turn.liveText;
-    node.liveAnswer.hidden=!turn.liveText;
-    if(turn.liveThinking)answers.append(thinkingMessage('Thinking',turn.liveThinking));
+    for(const part of turn.liveParts || []){
+      if(part.tool){appendTool(part.tool);continue;}
+      const text=element('div','message ordinary-live',part.text);
+      answers.append(text);
+      if(part===turn.liveParts.at(-1))node.liveAnswer=text;
+    }
+    if(!node.liveAnswer){node.liveAnswer=element('div','message ordinary-live');node.liveAnswer.hidden=true;answers.append(node.liveAnswer);}
   }
+  for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
   node.append(answers);
   if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
   if(turn.status!=='SUCCEEDED')node.append(element('div','turn-heading',turn.status));
@@ -362,7 +374,7 @@ function patchOrdinaryTurn(turn) {
   if(index<0)state.turns.push(turn);else state.turns[index]={...before,...turn};
   state.turns.sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity));
   const container=$('conversation'), node=[...container.children].find(row=>row.dataset.turn===turn.turn_id);
-  const content=ordinaryTurnNode(state.turns.find(row=>row.turn_id===turn.turn_id));
+  const content=ordinaryTurnNode(state.turns.find(row=>row.turn_id===turn.turn_id),node);
   const follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40;
   if(node)node.replaceWith(content);
   else {
@@ -463,19 +475,38 @@ function watchOrdinarySession(id) {
     if(frame.type==='admitted'){
       ordinaryOccupancy(watch,frame.revision,frame.turn_id);
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false});
-    } else if(frame.type==='delta'){
+    } else if(frame.type==='delta' || frame.type==='tool'){
       const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
-      if(!turn || typeof frame.text!=='string' || frame.delta_kind!=='text')return;
-      if(turn.liveGeneration>frame.generation)return;
-      if(turn.liveGeneration!==frame.generation){turn.liveGeneration=frame.generation;turn.liveText='';}
-      turn.liveText=(turn.liveText || '')+frame.text;
+      if(!turn || turn.liveGeneration>frame.generation)return;
+      const reset=turn.liveGeneration!==frame.generation;
+      if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];}
+      if(frame.type==='tool'){
+        const item=frame.item;
+        if(item?.kind!=='tool' || typeof item.key!=='string' || !Object.hasOwn(processToolStatus,item.status))return;
+        const previous=turn.liveParts.find(part=>part.tool?.key===item.key);
+        if(previous){
+          previous.tool=mergeProcessRow(previous.tool,item);
+          const node=[...$('conversation').children].find(row=>row.dataset.turn===turn.turn_id);
+          if(node?.toolRows?.has(item.key))toolProcessRow(node.toolRows,previous.tool,true);
+        } else {
+          turn.liveParts.push({tool:item});
+          patchOrdinaryTurn(turn);
+        }
+        return;
+      }
+      if(typeof frame.text!=='string' || frame.delta_kind!=='text' || !frame.text)return;
+      let part=turn.liveParts.at(-1);
+      if(!part || part.tool){part={text:''};turn.liveParts.push(part);}
+      part.text+=frame.text;
+      if(reset)patchOrdinaryTurn(turn);
       if(!watch.paint)watch.paint=requestAnimationFrame(()=>{
         watch.paint=null;
         if(!current())return;
         const active=state.session?.active_turn_id || watch.snapshot?.active_turn_id;
         const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
         const node=[...$('conversation').children].find(item=>item.dataset.turn===active);
-        if(node?.liveAnswer && row){node.liveAnswer.hidden=!row.liveText;node.liveAnswer.textContent=row.liveText || '';}
+        const tail=row?.liveParts?.at(-1);
+        if(node?.liveAnswer && tail && !tail.tool){node.liveAnswer.hidden=!tail.text;node.liveAnswer.textContent=tail.text;}
       });
       return;
     } else if(frame.type==='terminal'){
@@ -483,7 +514,7 @@ function watchOrdinarySession(id) {
       if(frame.turn_no===(watch.committedThrough ?? 0)+1)watch.committedThrough=frame.turn_no;
       const items=frame.items || [];
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:ordinaryStatus(frame.status ?? frame.state),
-        user_input:ordinaryInput(frame.prompt,frame.attachments),items,output:frame.output,error_code:frame.error_code,conversation_committed:true});
+        user_input:ordinaryInput(frame.prompt,frame.attachments),items,process:frame.process || [],liveParts:[],output:frame.output,error_code:frame.error_code,conversation_committed:true});
     }
     renderList();setDisabled();
   });
