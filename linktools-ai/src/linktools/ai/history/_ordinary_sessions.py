@@ -63,8 +63,7 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = {"text": messages[-1].text}
         items = [asdict(item) for item in _timeline_items(messages)]
-    request = row["request_json"]
-    stored_input = request.get("input")
+    stored_input = row["stored_input"]
     attachments = [] if stored_input is None else [
         {key: item.get(key) for key in ("attachment_id", "source", "media_type", "size", "position")}
         for item in stored_input_attachment_views(decode_domain(stored_input, StoredUserInput))
@@ -75,7 +74,7 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
         "status": _STATUS[state],
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
-        "user_input": {"version": 1, "prompt": request["prompt"], "files": [], "attachments": attachments},
+        "user_input": {"version": 1, "prompt": row["prompt"], "files": [], "attachments": attachments},
         "conversation_committed": state in ("succeeded", "failed", "cancelled"),
         "items": items,
         "process": [],

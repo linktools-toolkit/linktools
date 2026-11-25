@@ -166,26 +166,37 @@ class SqlSessionTurnReader:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().filter_by(**self._turn_values(key)))).mappings().one_or_none()
 
+    def _history_view_select(self):
+        from sqlalchemy import select
+
+        columns = self._turns.c
+        return select(
+            columns.turn_id, columns.turn_no, columns.state, columns.created_at, columns.updated_at,
+            columns.result_json, columns.request_json["prompt"].as_string().label("prompt"),
+            columns.request_json["input"].label("stored_input"),
+        )
+
     async def get_history_turn(
         self, key: SessionTurnKey, *, lineage: tuple[SessionTurnSegment, ...],
     ) -> RowMapping | None:
-        if not lineage:
-            return await self.get_turn(key)
         from sqlalchemy import and_, or_
 
         columns = self._turns.c
+        own = columns.session_key == self._key(key.session_id, TURN_SESSION_MAX_BYTES)
+        scope = own if not lineage else or_(
+            own,
+            and_(
+                columns.state.in_(("succeeded", "failed", "cancelled")),
+                lineage_predicate(columns, b"", lineage, after=0, through=lineage[-1].through),
+            ),
+        )
+        statement = self._history_view_select().where(
+            columns.scope_key == self._scope,
+            columns.turn_id == self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES),
+            scope,
+        )
         async with self._context.engine.connect() as connection:
-            return (await connection.execute(self._turns.select().where(
-                columns.scope_key == self._scope,
-                columns.turn_id == self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES),
-                or_(
-                    columns.session_key == self._key(key.session_id, TURN_SESSION_MAX_BYTES),
-                    and_(
-                        columns.state.in_(("succeeded", "failed", "cancelled")),
-                        lineage_predicate(columns, b"", lineage, after=0, through=lineage[-1].through),
-                    ),
-                ),
-            ))).mappings().one_or_none()
+            return (await connection.execute(statement)).mappings().one_or_none()
 
     async def find_request(self, session_id: str, request_key: str) -> RowMapping | None:
         async with self._context.engine.connect() as connection:
@@ -231,7 +242,7 @@ class SqlSessionTurnReader:
         lineage: tuple[SessionTurnSegment, ...] = (),
     ) -> tuple[RowMapping, ...]:
         columns = self._turns.c
-        statement = self._turns.select().where(
+        statement = self._history_view_select().where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
                               after=0, through=through),
