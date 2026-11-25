@@ -275,6 +275,51 @@ consumer, or alternative recovery implementation. See the
 [Runtime history guide](runtime-history.md) for storage-specific recovery and
 publication guarantees.
 
+### Ordinary turns across processes
+
+A host running ai-web with shared SQL storage can optionally supply a
+`TurnNoticeTransport` to each process. Keep Runtime open while serving the app
+and enable ASGI lifespan so the app can attach and detach the bridge:
+
+```python
+from linktools.ai.runtime import Runtime, TurnNoticeTransport
+from linktools.ai.web import create_app
+
+
+def build_console(runtime: Runtime, transport: TurnNoticeTransport):
+    return create_app(runtime=runtime, turn_notice_transport=transport)
+```
+
+For Redis Pub/Sub, pass an open async Redis client that the host owns.
+All processes sharing the same storage use the same deployment prefix;
+use distinct prefixes for independent deployments. Redis DB numbers do not
+isolate Pub/Sub subscriptions.
+
+```python
+from linktools.ai.runtime.redis_notices import RedisTurnNoticeTransport
+
+transport = RedisTurnNoticeTransport(redis_client, prefix="my-deployment")
+app = create_app(runtime=runtime, turn_notice_transport=transport)
+```
+
+Use the same notification backend and channel configuration for processes with
+the same Runtime namespace and tenant. The host owns the transport and its
+credentials. The bridge sends only admission and terminal hints after commit,
+not prompt text, results or live token deltas. The receiving console reads
+committed state through the existing authorized History API. A notification
+does not confer access, replace SQL, or allow a receiver to recover a live turn.
+A single-process host does not need to configure a transport. No database
+polling or separate broker is required by the default setup.
+
+On a reconnect or known delivery gap, the transport signals a gap even if a
+browser's SSE connection stayed open. The console forwards that gap on the
+existing session stream, and the browser uses the authorized session API to
+fill missing committed history in pages.
+A process crash after the SQL commit but before publishing a notice cannot be
+detected by this bridge. If the browser stays connected without receiving a gap
+or another update, use **Refresh** to read the committed state. Refresh does not
+rerun the turn.
+
 ## Command consolidation and coverage
 
 `ai-history`, `ai-session`, `ai-status`, `ai-trace`, and `ai-metrics`, including
