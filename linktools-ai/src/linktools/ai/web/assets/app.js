@@ -352,14 +352,15 @@ function ordinaryTurnNode(turn, previous=null) {
     }
     if(item.item_kind==='tool_call')appendTool(tools.get(`tool:${item.tool_call_id}`));
   }
-  if(!turn.conversation_committed){
-    for(const part of turn.liveParts || []){
-      if(part.tool){appendTool(part.tool);continue;}
-      const text=element('div','message ordinary-live',part.text);
-      answers.append(text);
-      if(part===turn.liveParts.at(-1))node.liveAnswer=text;
-    }
-    if(!node.liveAnswer){node.liveAnswer=element('div','message ordinary-live');node.liveAnswer.hidden=true;answers.append(node.liveAnswer);}
+  const parts=(turn.conversation_committed?turn.interruptedPreview:turn.liveParts) || [];
+  for(const part of parts){
+    if(part.tool){appendTool(part.tool);continue;}
+    const text=element('div','message ordinary-live',part.text);
+    answers.append(text);
+    if(!turn.conversation_committed && part===parts.at(-1))node.liveAnswer=text;
+  }
+  if(!turn.conversation_committed && !node.liveAnswer){
+    node.liveAnswer=element('div','message ordinary-live');node.liveAnswer.hidden=true;answers.append(node.liveAnswer);
   }
   for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
   node.append(answers);
@@ -512,9 +513,17 @@ function watchOrdinarySession(id) {
     } else if(frame.type==='terminal'){
       ordinaryOccupancy(watch,frame.revision,null,frame.turn_no);
       if(frame.turn_no===(watch.committedThrough ?? 0)+1)watch.committedThrough=frame.turn_no;
-      const items=frame.items || [];
-      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:ordinaryStatus(frame.status ?? frame.state),
-        user_input:ordinaryInput(frame.prompt,frame.attachments),items,process:frame.process || [],liveParts:[],output:frame.output,error_code:frame.error_code,conversation_committed:true});
+      const status=ordinaryStatus(frame.status ?? frame.state),items=frame.items || [],process=frame.process || [];
+      const previous=state.turns.find(row=>row.turn_id===frame.turn_id);
+      const interruptions=(status==='FAILED' || status==='CANCELLED') && !items.length && !process.length;
+      // Keep this browser's preview only. A failed turn does not prove that a
+      // running tool failed, so preserve completed rows and mark open ones interrupted.
+      const interruptedPreview=interruptions
+        ? previous?.interruptedPreview || previous?.liveParts?.map(part=>part.tool?.status==='RUNNING'
+          ? {tool:{...part.tool,status:status==='CANCELLED'?'CANCELLED':'INTERRUPTED'}} : part) : null;
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status,
+        user_input:ordinaryInput(frame.prompt,frame.attachments),items,process,liveParts:[],interruptedPreview,
+        output:frame.output,error_code:frame.error_code,conversation_committed:true});
     }
     renderList();setDisabled();
   });
