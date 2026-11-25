@@ -8,6 +8,7 @@ from ._features import RuntimeFeatures, RuntimeFeaturesSource, RuntimeFeaturesRe
 from ._composition_domains import RuntimeTasks, RuntimeEvaluations
 from ..observe import RuntimeMetricsStatus, RuntimeMetricsFlushResult
 from ._runtime_service import Runtime, RuntimeStatus
+from ._turn_notices import TurnNotice, TurnNoticeScope, TurnNoticeTransport
 
 __all__ = [
     "Agent",
@@ -24,4 +25,5 @@ __all__ = [
     "RuntimeMetricsStatus",
     "RuntimeMetricsFlushResult",
     "RuntimeSessions",
+    "TurnNotice", "TurnNoticeScope", "TurnNoticeTransport",
 ]

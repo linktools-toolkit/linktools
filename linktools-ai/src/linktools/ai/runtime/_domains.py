@@ -3,7 +3,7 @@
 """Plural Runtime domain entry points."""
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
 from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn, SessionService
@@ -18,6 +18,7 @@ from ..observe import WaitResult, RuntimeMetricsControl
 from ..inputs import CaptureInputRequest, ExecutionInputCaptureRef, InputCaptures
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ListExecutionRequest, ModelInteractionItem, Page, RetryExecutionRequest, UsageReadCutoff, ExecutionService
+from ._turn_notices import TurnNotice, TurnNoticeScope, TurnNoticeTransport
 from ..session import CloseSessionRequest, CreateSessionRequest, ForkSessionRequest, ListSessionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, UpdateSessionRequest
 
 if TYPE_CHECKING:
@@ -419,20 +420,6 @@ class RuntimeSessions(Generic[AppT]):
             resolver=resolver, limits=PromptLimits(), event_sink=_discard_turn_emission,
         )
 
-    def observe_turn_lifecycle(
-        self, callback: Callable[[dict[str, JsonValue]], None],
-    ) -> Callable[[], None]:
-        """Subscribe a trusted transport to non-content turn milestones."""
-        runner, _ = self._require_turn_sessions()
-        return runner.observe_lifecycle(callback)
-
-    def invalidate_turn_session(self, session_id: str, turn_id: str, *, revision: int) -> None:
-        """Wake an authorized observer after another producer changes this turn."""
-        runner, _ = self._require_turn_sessions()
-        validate_resource_id(session_id)
-        validate_resource_id(turn_id)
-        runner.invalidate_session(session_id, turn_id, revision=revision)
-
     def observe_turn_session(
         self, session_id: str, callback: Callable[[dict[str, JsonValue]], None],
     ) -> Callable[[], None]:
@@ -456,6 +443,32 @@ class RuntimeSessions(Generic[AppT]):
         if type(revision) is not int or revision < 1:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         runner.invalidate_session(session_id, turn_id, revision=revision)
+
+    @asynccontextmanager
+    async def bridge_turn_notices(self, transport: TurnNoticeTransport) -> AsyncIterator[None]:
+        """Attach a trusted host's advisory channel for the lifetime of this Runtime."""
+        runner, runtime = self._require_turn_sessions()
+        scope = TurnNoticeScope(runtime.namespace, runtime.tenant_id)
+
+        def receive(notice: TurnNotice) -> None:
+            if notice.scope == scope:
+                runner.invalidate_session(notice.session_id, notice.turn_id, revision=notice.revision)
+
+        def gap(affected: TurnNoticeScope) -> None:
+            if affected == scope:
+                runner.invalidate_observed_sessions()
+
+        def publish(frame: dict[str, JsonValue]) -> None:
+            transport.offer(TurnNotice(
+                scope, frame["session_id"], frame["turn_id"], frame["revision"], frame["phase"],
+            ))
+
+        async with transport.subscribe(scope, on_notice=receive, on_gap=gap):
+            detach = runner.observe_lifecycle(publish)
+            try:
+                yield
+            finally:
+                detach()
 
     async def get(self, session_id: str, *, principal: Principal | None = None) -> "Session[AppT]":
         return await self._get_session(session_id, principal)

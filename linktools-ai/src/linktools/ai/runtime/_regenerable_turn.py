@@ -99,6 +99,11 @@ class _RegenerableTurnRunner:
         self._observed_revisions[session_id] = revision
         self._gap(SessionTurnKey(session_id, turn_id))
 
+    def invalidate_observed_sessions(self) -> None:
+        """Ask current viewers to reconcile after known advisory-channel loss."""
+        for session_id in tuple(self._observers):
+            self._publish(session_id, {"type": "gap"})
+
     def _notice_lifecycle(self, key: SessionTurnKey, phase: str, revision: int) -> None:
         if key.session_id in self._observers:
             self._observed_revisions[key.session_id] = max(revision, self._observed_revisions.get(key.session_id, -1))
