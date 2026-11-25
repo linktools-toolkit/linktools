@@ -42,7 +42,7 @@ async def store(tmp_path):
 _TRANSCRIPT = (ModelResponse(parts=[TextPart("two")]),)
 _MASKED_TRANSCRIPT = (ModelRequest(parts=[UserPromptPart("question")]), *_TRANSCRIPT)
 _BINDING = AgentBindingContract(
-    agent_spec=AgentSpec("test-agent", model="route", instructions=("frozen",)),
+    agent_spec=AgentSpec("test-agent", model="route", instructions=("frozen",), tool_retries=0, output_retries=0),
     model_contract={"version": 1, "id": "route"},
     selected=(), subagents=(), output_mode="text", output_schema=bind_output().schema_definition,
 ).to_payload()
