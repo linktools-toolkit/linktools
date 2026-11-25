@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 
 from ..core import deterministic_id
 from ..errors import AIError, ErrorCode
-from ..persistence._split_step_source import SplitStepPin, SplitStepSourceObservation, SqlSplitStepSource
 from ..persistence.runs import PreparedArchive
 from ..persistence.state import SqlStateTransaction
+from ..persistence.turns import SplitStepPin, SplitStepSourceObservation, SqlSplitStepSource
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage
