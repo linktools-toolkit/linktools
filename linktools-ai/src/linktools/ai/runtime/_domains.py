@@ -402,6 +402,20 @@ class RuntimeSessions(Generic[AppT]):
             resolver=resolver, limits=PromptLimits(), event_sink=_discard_turn_emission,
         )
 
+    def observe_turn_lifecycle(
+        self, callback: Callable[[dict[str, JsonValue]], None],
+    ) -> Callable[[], None]:
+        """Subscribe a trusted transport to non-content turn milestones."""
+        runner, _ = self._require_turn_sessions()
+        return runner.observe_lifecycle(callback)
+
+    def invalidate_turn_session(self, session_id: str, turn_id: str, *, revision: int) -> None:
+        """Wake an authorized observer after another producer changes this turn."""
+        runner, _ = self._require_turn_sessions()
+        validate_resource_id(session_id)
+        validate_resource_id(turn_id)
+        runner.invalidate_session(session_id, turn_id, revision=revision)
+
     def observe_turn_session(
         self, session_id: str, callback: Callable[[dict[str, JsonValue]], None],
     ) -> Callable[[], None]:
@@ -409,6 +423,22 @@ class RuntimeSessions(Generic[AppT]):
         runner, _ = self._require_turn_sessions()
         validate_resource_id(session_id)
         return runner.observe(session_id, callback)
+
+    def observe_turn_lifecycle(
+        self, callback: Callable[[dict[str, JsonValue]], None],
+    ) -> Callable[[], None]:
+        """Register a trusted host carrier for body-free committed notifications."""
+        runner, _ = self._require_turn_sessions()
+        return runner.observe_lifecycle(callback)
+
+    def invalidate_turn_session(self, session_id: str, turn_id: str, *, revision: int) -> None:
+        """Notify any local observers to re-read the authoritative session."""
+        runner, _ = self._require_turn_sessions()
+        validate_resource_id(session_id)
+        validate_resource_id(turn_id)
+        if type(revision) is not int or revision < 1:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        runner.invalidate_session(session_id, turn_id, revision=revision)
 
     async def get(self, session_id: str, *, principal: Principal | None = None) -> "Session[AppT]":
         return await self._get_session(session_id, principal)

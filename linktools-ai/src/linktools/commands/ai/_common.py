@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from linktools.cli import CommandParser
     from linktools.ai.model import ModelBinding
+    from linktools.ai.core import JsonValue
     from linktools.ai.runtime import Runtime
     from linktools.ai.session import SessionTurnNotice, ToolProcessItem
     from linktools.ai.persistence import PersistenceStorage
@@ -234,6 +235,20 @@ class _LocalSessionFeed:
         return unsubscribe
 
     def receive(self, value: dict[str, object]) -> None:
+        # This authenticated local carrier is advisory: never install its
+        # revision, occupancy, or terminal state as authoritative.
+        if value.get("kind") == "ordinary_turn":
+            session_id, turn_id, revision = value.get("session_id"), value.get("turn_id"), value.get("revision")
+            if (
+                self.runtime.sessions.supports_turn_sessions
+                and value.get("namespace") == self.runtime.namespace
+                and value.get("tenant_id") == self.runtime.tenant_id
+                and value.get("phase") in ("admitted", "terminal")
+                and isinstance(session_id, str) and isinstance(turn_id, str)
+                and type(revision) is int and revision >= 1
+            ):
+                self.runtime.sessions.invalidate_turn_session(session_id, turn_id, revision=revision)
+            return
         kind, session_id, execution_id = value.get("kind"), value.get("session_id"), value.get("execution_id")
         if not isinstance(session_id, str) or not session_id or not isinstance(execution_id, str) or not execution_id:
             return
@@ -266,6 +281,13 @@ async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "
             offer(asdict(notice), discover=notice.kind != "tool")
 
         stack.callback(local.runtime.sessions.observe_turns(publish))
+        if local.runtime.sessions.supports_turn_sessions:
+            def publish_lifecycle(notice: "dict[str, JsonValue]") -> None:
+                offer({
+                    **notice, "namespace": local.runtime.namespace, "tenant_id": local.runtime.tenant_id,
+                })
+
+            stack.callback(local.runtime.sessions.observe_turn_lifecycle(publish_lifecycle))
         yield feed
 
 

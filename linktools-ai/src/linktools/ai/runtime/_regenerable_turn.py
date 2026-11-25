@@ -58,6 +58,37 @@ class _RegenerableTurnRunner:
         self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
         self._closed = False
         self._observers: dict[str, set[Callable[[dict[str, JsonValue]], None]]] = {}
+        self._lifecycle_observers: set[Callable[[dict[str, JsonValue]], None]] = set()
+        self._observed_revisions: dict[str, int] = {}
+
+    def observe_lifecycle(self, callback: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
+        """Offer only committed turn identifiers and revisions to a host carrier."""
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+
+        def listener(notice: dict[str, JsonValue]) -> None:
+            callback(notice)
+
+        self._lifecycle_observers.add(listener)
+        return lambda: self._lifecycle_observers.discard(listener)
+
+    def invalidate_session(self, session_id: str, turn_id: str, *, revision: int) -> None:
+        if session_id not in self._observers or revision <= self._observed_revisions.get(session_id, -1):
+            return
+        self._observed_revisions[session_id] = revision
+        self._gap(SessionTurnKey(session_id, turn_id))
+
+    def _notice_lifecycle(self, key: SessionTurnKey, phase: str, revision: int) -> None:
+        if key.session_id in self._observers:
+            self._observed_revisions[key.session_id] = max(revision, self._observed_revisions.get(key.session_id, -1))
+        for callback in tuple(self._lifecycle_observers):
+            try:
+                callback({
+                    "kind": "ordinary_turn", "phase": phase, "session_id": key.session_id,
+                    "turn_id": key.turn_id, "revision": revision,
+                })
+            except (Exception, asyncio.CancelledError) as error:
+                _logger.warning("Session lifecycle observer failed: %s", type(error).__name__)
 
     def observe(self, session_id: str, callback: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
         if self._closed:
@@ -69,6 +100,7 @@ class _RegenerableTurnRunner:
             listeners.discard(callback)
             if not listeners and self._observers.get(session_id) is listeners:
                 self._observers.pop(session_id, None)
+                self._observed_revisions.pop(session_id, None)
 
         return close
 
@@ -87,6 +119,7 @@ class _RegenerableTurnRunner:
             "type": "admitted", "turn_id": turn.key.turn_id, "turn_no": turn.number,
             "generation": turn.generation, "revision": turn.revision, "prompt": turn.prompt,
         })
+        self._notice_lifecycle(turn.key, "admitted", turn.revision)
 
     def _terminal(self, turn: _AdmittedTurn, state: str, *, output: JsonValue = None, error_code: str | None = None) -> None:
         self._publish(turn.key.session_id, {
@@ -94,6 +127,7 @@ class _RegenerableTurnRunner:
             "generation": turn.generation, "revision": turn.revision + 1,
             "state": state, "prompt": turn.prompt, "output": output, "error_code": error_code,
         })
+        self._notice_lifecycle(turn.key, "terminal", turn.revision + 1)
 
     async def create_session(
         self, session_id: str, agent_id: str, *, principal: Principal, tenant_id: str,
@@ -375,6 +409,8 @@ class _RegenerableTurnRunner:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._observers.clear()
+        self._lifecycle_observers.clear()
+        self._observed_revisions.clear()
 
     async def _settle_with_lease(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
