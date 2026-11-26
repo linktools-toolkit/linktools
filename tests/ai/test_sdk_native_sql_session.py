@@ -78,3 +78,13 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         assert waited.key == turn.key and waited.usage == result.usage
         assert calls == [True]
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id=principal.tenant_id) is None
+
+
+        async with asyncio.timeout(10):
+            plan = await agent.start_plan("Plan next", principal=principal, session_id=created.session_id,
+                                          idempotency_key="plan")
+            planned = await plan.wait()
+        assert planned.key.session_id == created.session_id and planned.key != turn.key
+        assert planned.status is ExecutionStatus.SUCCEEDED
+        assert calls == [True, True]
+        assert await state.execution.executions.get(planned.key.turn_id, tenant_id=principal.tenant_id) is None

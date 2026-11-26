@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Agent and Session behavior with independently owned Execution handles."""
 
+import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from .agent_execution import AgentExecutionPort
     from ..agent import CompiledAgent, AgentBinding, AgentBindingContract
     from ._runtime_service import Runtime
+    from ._native_session import _NativeSessionTurn, _NativeTurnResult
 
 AppT = TypeVar("AppT")
 
@@ -405,10 +407,40 @@ class Agent(Generic[AppT]):
         idempotency_key: "str | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
-    ) -> "Execution[AppT]":
-        """Start plan mode with plan-safe tools without waiting for completion."""
+    ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
+        """Start a plan on its existing session owner, without waiting for completion."""
         if session_id is not None:
-            await self._runtime.sessions._require_agent_session(session_id)
+            sessions = self._runtime.sessions
+            if await sessions._has_native_session(session_id):
+                actor = self._runtime._resolve_principal(principal)
+                session = sessions._bind_native_session(session_id, principal=actor, local_workspace=False)
+                receipt = await sessions._start_turn_receipt(
+                    session_id, user_prompt, agent=self, principal=actor,
+                    idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
+                    files=files, session_context=session_context, budget=budget, output=output,
+                    mode="plan", planning=True, thinking=thinking, correlation=correlation,
+                )
+                return session._turn(receipt.turn_id, actor)
+        return await self._start_plan_execution(
+            user_prompt, files=files, session_context=session_context, budget=budget, output=output,
+            principal=principal, session_id=session_id, idempotency_key=idempotency_key,
+            thinking=thinking, correlation=correlation,
+        )
+
+    async def _start_plan_execution(
+        self,
+        user_prompt: "UserPromptInput",
+        *,
+        files: Sequence[str] = (),
+        session_context: SessionContext = "all",
+        budget: RunBudget | None = None,
+        output: "type[BaseModel] | None" = None,
+        principal: "Principal | None" = None,
+        session_id: "str | None" = None,
+        idempotency_key: "str | None" = None,
+        thinking: "ThinkingValue | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
+    ) -> "Execution[AppT]":
         return await self.execution_port.start(
             validate_user_input(user_prompt),
             files=files,
@@ -446,7 +478,9 @@ class Agent(Generic[AppT]):
         """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
         validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
                       raise_on_stream_error=raise_on_stream_error)
-        execution = await self.start_plan(
+        if session_id is not None:
+            await self._runtime.sessions._require_agent_session(session_id)
+        execution = await self._start_plan_execution(
             user_prompt,
             files=files,
             session_context=session_context,
