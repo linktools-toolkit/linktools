@@ -1449,14 +1449,19 @@ class _RegenerableTurnRunner:
                             **fields, **scope, "type": "output_preview", "field": name,
                             "preview_seq": sequence, "text": emission.content,
                         })
-                elif emission.content:
-                    part_index = position.get("part_index")
-                    if type(part_index) is int and part_index >= 0:
+                else:
+                    part_index, start = position.get("part_index"), position.get("part_start")
+                    if scope and type(part_index) is int and part_index >= 0:
                         scope["part_index"] = part_index
-                    kind = "thinking" if emission.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA else "text"
-                    self._publish(turn.key.session_id, {
-                        **fields, **scope, "type": "delta", "delta_kind": kind, "text": emission.content,
-                    })
+                        if type(start) is bool:
+                            scope["part_start"] = start
+                    if position.get("stream_truncated") is True:
+                        scope["stream_truncated"] = True
+                    if emission.content or scope.get("part_start") is True or scope.get("stream_truncated") is True:
+                        kind = "thinking" if emission.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA else "text"
+                        self._publish(turn.key.session_id, {
+                            **fields, **scope, "type": "delta", "delta_kind": kind, "text": emission.content,
+                        })
             elif isinstance(emission, DurableBoundary):
                 item = project_tool_process_event(emission.event_type.value, emission.payload)
                 if item is not None:
@@ -1465,9 +1470,12 @@ class _RegenerableTurnRunner:
                     if item.status == "FAILED" and error_code is None:
                         error_code = ErrorCode.TOOL_EXECUTION_FAILED
                     item = replace(item, error_code=error_code, error_message=emission.live_error_message)
-                    self._publish(turn.key.session_id, {
-                        **fields, "type": "tool", "item": asdict(item),
-                    })
+                    notice: dict[str, JsonValue] = {**fields, "type": "tool", "item": asdict(item)}
+                    if item.position is not None and isinstance(emission.payload, Mapping):
+                        run, request = emission.payload.get("agent_run_seq"), emission.payload.get("tool_model_request_seq")
+                        if type(run) is int and run > 0 and type(request) is int and request > 0:
+                            notice["order"] = [run, request, item.position[1]]
+                    self._publish(turn.key.session_id, notice)
                 elif (emission.event_type is ExecutionEventType.ASSISTANT_PART_COMPLETED
                       and isinstance(emission.payload, Mapping)):
                     payload = emission.payload

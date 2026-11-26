@@ -154,7 +154,7 @@ _CHAT_PART_POSITION = ("agent_run_seq", "model_request_seq", "stream_attempt_seq
 
 _ExecutionFrame = tuple[str, dict[str, object], str | None]
 _MAX_CHAT_TURN_FRAME_BYTES = 256 * 1024
-_NATIVE_TURN_PREVIEWS = {"delta", "tool", "progress", "preview_reset", "thinking_completed"}
+_NATIVE_TURN_PREVIEWS = {"tool", "progress", "preview_reset", "thinking_completed"}
 
 
 def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
@@ -272,8 +272,15 @@ def _native_turn_event_wire(
     if event_type == "output_preview":
         fields = ("type", "turn_id", "generation", "model_key", "attempt", "field", "preview_seq", "text")
         return {key: value[key] for key in fields}
+    if event_type == "delta":
+        fields = ("type", "turn_id", "generation", "delta_kind", "text", "model_key",
+                  "attempt", "part_index", "part_start", "stream_truncated")
+        return {key: value[key] for key in fields if key in value}
     if event_type in _NATIVE_TURN_PREVIEWS:
-        frame = {key: item for key, item in value.items() if key not in ("turn_no", "revision")}
+        if event_type == "tool":
+            frame = {key: item for key, item in value.items() if key in ("type", "turn_id", "generation", "order")}
+        else:
+            frame = {key: item for key, item in value.items() if key not in ("turn_no", "revision")}
         if event_type in ("progress", "tool"):
             item = value.get("item")
             if not isinstance(item, Mapping):

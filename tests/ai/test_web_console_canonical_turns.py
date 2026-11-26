@@ -99,6 +99,10 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
                         seen.append(frame["type"])
                         if frame["type"] == "delta":
                             assert "private-provider-signature" not in json.dumps(frame)
+                            assert type(frame["part_start"]) is bool and frame["part_start"] is True
+                            assert frame["model_key"] == "model:1:1" and frame["attempt"] == 1
+                            assert type(frame["part_index"]) is int
+                            assert "stream_truncated" not in frame
                             deltas.append((frame["delta_kind"], frame["text"]))
                         if frame["type"] == "thinking_completed":
                             thinking_timing = frame
@@ -295,3 +299,66 @@ def test_native_sse_projects_tool_updates_without_unused_or_empty_fields():
         **scope, "type": "terminal", "state": "succeeded", "prompt": "question",
         "items": [{"item_kind": "assistant", "content": "answer"}],
     }
+
+
+@pytest.mark.asyncio
+async def test_native_preview_supplies_only_real_positions_and_resets_retried_stream(tmp_path, monkeypatch):
+    from linktools.ai.core import ExecutionDeltaType, ExecutionEventType
+    from linktools.ai.runtime._agent_executor import AgentExecutor, DurableBoundary, LiveDelta
+    from linktools.ai.runtime.turn_clients import TurnObserver
+    from linktools.ai.web._app import _native_turn_event_wire
+
+    class WorkspacePolicy(TenantAuthorizationPolicy):
+        pass
+
+    execute = AgentExecutor.execute_regenerable
+    position = {"agent_run_seq": 1, "model_request_seq": 7, "stream_attempt_seq": 1, "part_index": 0}
+    text = ExecutionDeltaType.ASSISTANT_TEXT_DELTA
+
+    async def exercise_stream(executor, *, event_sink, **kwargs):
+        await event_sink(LiveDelta(text, "attempt one", {**position, "part_start": True,
+                                                        "private": "do not project"}))
+        await event_sink(LiveDelta(text, " continuation", {**position, "part_start": False}))
+        await event_sink(LiveDelta(text, "attempt two", {**position, "stream_attempt_seq": 2,
+                                                        "part_start": True, "stream_truncated": True}))
+        await event_sink(LiveDelta(text, "stale", {**position, "part_start": False}))
+        await event_sink(LiveDelta(text, "unpositioned", {"part_index": 6, "part_start": 1}))
+
+        tool = {"call_id": "ordered", "tool_name": "read_file", "tool_position": [2, 2],
+                "agent_run_seq": 1, "tool_model_request_seq": 7, "raw_arguments": "never public"}
+        await event_sink(DurableBoundary(ExecutionEventType.TOOL_CALL_STARTED, tool))
+        await event_sink(DurableBoundary(ExecutionEventType.TOOL_CALL_STARTED,
+                                         {**tool, "call_id": "unordered", "tool_model_request_seq": None}))
+        return await execute(executor, event_sink=event_sink, **kwargs)
+
+    monkeypatch.setattr(AgentExecutor, "execute_regenerable", exercise_stream)
+    features = model_features(RuntimeUsageModels())
+    features.agent("default", model="default", allow_tools=())
+    async with Runtime.open(
+        "stream-positions", storage=PersistenceStorage.sqlite(tmp_path / "positions.db"),
+        features=features, authorization=WorkspacePolicy(),
+    ) as runtime:
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        with TurnObserver(runtime, "session", principal, local_workspace=False) as observer:
+            turn = await runtime.sessions.start(
+                "session", "question", agent="default", principal=principal, idempotency_key="one",
+            )
+            async with asyncio.timeout(5):
+                frames = [frame async for frame in observer.events(turn.key.turn_id, append_only=False)]
+
+    selected = [frame for frame in frames if frame.get("model_key") == "model:1:7"]
+    assert [frame["type"] for frame in selected] == ["delta", "delta", "preview_reset", "delta"]
+    first, continuation, reset, replacement = selected
+    assert first["part_start"] is True and "stream_truncated" not in first
+    assert continuation["part_start"] is False
+    assert reset["attempt"] == 1 and replacement["attempt"] == 2
+    assert replacement["stream_truncated"] is True and replacement["part_start"] is True
+    assert "private" not in first
+    assert not any(frame.get("text") == "stale" for frame in frames)
+    unpositioned, = (frame for frame in frames if frame.get("text") == "unpositioned")
+    assert set(unpositioned).isdisjoint({"model_key", "attempt", "part_index", "part_start"})
+    ordered, unordered = (_native_turn_event_wire(frame) for frame in frames if frame["type"] == "tool")
+    assert ordered["order"] == [1, 7, 2] and "position" not in ordered["item"]
+    assert "order" not in unordered
+    assert "raw_arguments" not in str(ordered)
