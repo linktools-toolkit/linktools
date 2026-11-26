@@ -60,6 +60,8 @@ class _Components:
     history = None
     memory_scope = None
     native_turn_read = None
+    turn_runner = None
+    require_session_available = None
     asset_sources = {}
 
     def __init__(self, close_callback) -> None:
