@@ -406,39 +406,39 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
         tool_permissions=ToolPermissionPolicy(default="ask"),
     ))
     features = workspace_features("recover-scopes", workspace=workspace)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.agent("reader", model="default", allow_tools=("read_file",), tool_retries=0, output_retries=0)
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open("recover-scopes", storage=storage) as persistence:
-        async with Runtime.open(persistence=persistence, features=features) as runtime:
-            session = await runtime.agents.get("reader").create_session("session")
-            execution = await session.start("read")
-            tenant = runtime.tenant_id
-            await _wait_for_committed(
-                lambda: persistence.execution.executions.get(execution.execution_id, tenant_id=tenant),
-                lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
+        principal = Principal("operator", persistence.tenant_id)
+        async with Runtime.open(
+            persistence=persistence, features=features, authorization=_HostAuthorization(),
+        ) as runtime:
+            await runtime.agents.get("reader").create_session("session", principal=principal)
+            turn = await runtime.sessions.start(
+                "session", "read", agent="reader", principal=principal, idempotency_key="read-once",
             )
-            approvals = await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant)
-            assert len(approvals) == 1 and requests == pause_requests
-            checkpoint = await persistence.execution.executions.get_recovery(execution.execution_id, tenant_id=tenant)
-            assert checkpoint is not None and checkpoint.recovery is not None and checkpoint.recovery.pending_tools is not None
-            assert "linktools" not in checkpoint.recovery.pending_tools.approvals[0].metadata
-            rules.write_text("LATER-RULE", encoding="utf-8")
-            await persistence.checkpoint.approvals.decide(
-                approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
-                idempotency_key="a" * 64, decision=ApprovalDecision.APPROVE,
-                principal_id=runtime.default_principal.principal_id, decision_digest="b" * 64,
-                decided_at=datetime.now(timezone.utc),
-                resolution_metadata={"operator_note": "approved exact tool call"},
+            assert (await asyncio.wait_for(turn.wait(), timeout=10)).status is ExecutionStatus.WAITING_DEFERRED
+            [waiting] = await runtime.approvals.list(turn.key, principal=principal)
+            assert requests == pause_requests
+        rules.write_text("LATER-RULE", encoding="utf-8")
+        async with Runtime.open(
+            persistence=persistence, features=features, authorization=_HostAuthorization(),
+        ) as recovered:
+            [approval] = await recovered.approvals.list(turn.key, principal=principal)
+            assert approval.approval_id == waiting.approval_id
+            assert requests == pause_requests
+            attached = await recovered.sessions.start(
+                "session", "read", agent="reader", principal=principal, idempotency_key="read-once",
             )
-        async with Runtime.open(persistence=persistence, features=features, auto_recover=True) as runtime:
-            finished = await runtime.executions.wait(
-                execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
-            )
-            assert finished.result.status is ExecutionStatus.SUCCEEDED
+            assert attached.key == turn.key
+            await recovered.approvals.decide(turn.key, ApprovalDecisionRequest(
+                principal, approval.approval_id, "approve-exact", ApprovalDecision.APPROVE,
+            ))
+            assert (await attached.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
             assert requests == pause_requests + 1
-            assert await persistence.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant) == ()
+            assert await recovered.approvals.list(turn.key, principal=principal) == ()
 
 
 @pytest.mark.asyncio
@@ -447,43 +447,48 @@ async def test_discovery_scope_commit_precedes_execution_pin_across_storage_grou
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
     overlay = RepositoryInstructions((RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "rule"),))
-    async with _storage(tmp_path, "split") as storage:
-        async with Persistence.open("scope-pin-order", storage=storage, tenant_id="tenant") as persistence:
-            sessions = persistence.conversation.sessions
-            await sessions.create(_session())
-            await sessions.admit_execution("session", tenant_id="tenant", execution_id="active", expected=None)
-            pin_attempts = []
+    storage = PersistenceStorage.from_plan(PersistencePlan(
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.memory(),
+    ))
+    async with Persistence.open("scope-pin-order", storage=storage, tenant_id="tenant") as persistence:
+        sessions = persistence.conversation.sessions
+        assert sessions is not None
+        assert sessions.state_store.storage_group is not persistence.execution.executions.state_store.storage_group
+        await sessions.create(_session())
+        await sessions.admit_execution("session", tenant_id="tenant", execution_id="active", expected=None)
+        pin_attempts = []
 
-            async def promote(execution_id):
-                assert execution_id == "active"
+        async def promote(execution_id):
+            assert execution_id == "active"
 
-            async def store_pin(execution, instructions):
-                del execution, instructions
-                pin_attempts.append(True)
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        async def store_pin(execution, instructions):
+            del execution, instructions
+            pin_attempts.append(True)
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
-            async def fail_scope(*args, **kwargs):
-                del args, kwargs
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        async def fail_scope(*args, **kwargs):
+            del args, kwargs
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
-            if failure == "scope":
-                monkeypatch.setattr(sessions, "remember_repository_instruction_scopes_in_transaction", fail_scope)
-            port = SimpleNamespace(
-                _tenant_id="tenant", _conversation=persistence.conversation, _turn_owners={},
-                promote_pending_execution=promote, _store_repository_instructions=store_pin,
+        if failure == "scope":
+            monkeypatch.setattr(sessions, "remember_repository_instruction_scopes_in_transaction", fail_scope)
+        port = SimpleNamespace(
+            _tenant_id="tenant", _legacy_sessions=lambda: sessions, _turn_owners={},
+            promote_pending_execution=promote, _store_repository_instructions=store_pin,
+        )
+        with pytest.raises(AIError) as interrupted:
+            await LocalExecutionBackend.commit_repository_instruction_overlay(
+                port,
+                SimpleNamespace(execution_id="active", session_id="session",
+                                recovery=ExecutionRecoveryDetail(agent_run_id="run")),
+                overlay,
             )
-            with pytest.raises(AIError) as interrupted:
-                await LocalExecutionBackend.commit_repository_instruction_overlay(
-                    port,
-                    SimpleNamespace(execution_id="active", session_id="session",
-                                    recovery=ExecutionRecoveryDetail(agent_run_id="run")),
-                    overlay,
-                )
-            assert interrupted.value.code is ErrorCode.STORAGE_UNAVAILABLE
-            stored = await sessions.get("session", tenant_id="tenant")
-            assert stored is not None
-            assert stored.repository_instruction_scopes == (() if failure == "scope" else ("pkg",))
-            assert bool(pin_attempts) is (failure == "pin")
+        assert interrupted.value.code is ErrorCode.STORAGE_UNAVAILABLE
+        stored = await sessions.get("session", tenant_id="tenant")
+        assert stored is not None
+        assert stored.repository_instruction_scopes == (() if failure == "scope" else ("pkg",))
+        assert bool(pin_attempts) is (failure == "pin")
 
 
 @pytest.mark.asyncio
@@ -727,7 +732,7 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
         return ModelResponse(parts=[TextPart("done")])
 
     features = workspace_features("scope-admission", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.agent("reader", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features).borrow()
     async with AsyncExitStack() as stack:
@@ -736,20 +741,25 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
             persistence = await stack.enter_async_context(Persistence.open(
                 "scope-admission", storage=PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache),
             ))
-            runtimes.append(await stack.enter_async_context(Runtime.open(persistence=persistence, features=features)))
-        session = await runtimes[0].agents.get("reader").create_session("session")
-        handles = await asyncio.gather(
-            session.start("same", idempotency_key="same-key"),
-            runtimes[1].agents.get("reader").session("session").start("same", idempotency_key="same-key"),
+            runtimes.append(await stack.enter_async_context(Runtime.open(
+                persistence=persistence, features=features, authorization=_HostAuthorization(),
+            )))
+        principal = runtimes[0].default_principal
+        await runtimes[0].agents.get("reader").create_session("session", principal=principal)
+        handles = await asyncio.gather(*(
+            runtime.sessions.start("session", "same", agent="reader", principal=principal, idempotency_key="same-key")
+            for runtime in runtimes
+        ))
+        assert handles[0].key == handles[1].key
+        # This fixture has two runtimes without a shared observer carrier;
+        # observe durable settlement rather than subscribe from the losing host.
+        stored = await _wait_for_committed(
+            lambda: persistence.session_turns.get_turn(handles[0].key),
+            lambda row: row is not None and row["state"] == "succeeded",
         )
-        assert handles[0].execution_id == handles[1].execution_id
-        finished = await runtimes[0].executions.wait(
-            handles[0].execution_id, principal=runtimes[0].default_principal, timeout_seconds=10,
-        )
-        assert finished.result.status is ExecutionStatus.SUCCEEDED
-        assert len(requests) == 1
-        stored = await persistence.conversation.sessions.get("session", tenant_id=runtimes[0].tenant_id)
-        assert stored is not None and stored.repository_instruction_scopes == (".",)
+        assert arrivals == 2 and len(requests) == 1
+        instructions = RepositoryInstructions.from_payload(stored["request_json"]["repository_instructions"])
+        assert tuple(document.content for document in instructions.documents) == ("INITIAL-RULE",)
 
 
 @pytest.mark.asyncio
