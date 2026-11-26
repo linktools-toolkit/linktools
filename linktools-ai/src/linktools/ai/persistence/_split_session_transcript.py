@@ -26,6 +26,7 @@ class SplitTranscriptReference:
     generation: int
     receipt_id: str
     root: NativeMessageRoot
+    terminal_text_bytes: int
 
 
 class SplitSessionTranscriptReader:
@@ -51,7 +52,8 @@ class SplitSessionTranscriptReader:
             if ref.root.group_id != self._group_id or ref.root.store_key != self._store_key:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             key = ref.turn_id, ref.session_id, ref.generation, ref.receipt_id
-            if expected.setdefault(key, ref.root) != ref.root:
+            value = ref.root, ref.terminal_text_bytes
+            if expected.setdefault(key, value) != value:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def capture(reader):
@@ -75,7 +77,9 @@ class SplitSessionTranscriptReader:
                     pin = row["turn_source_pin"]
                     try:
                         if (not isinstance(pin, Mapping) or pin.get("terminal_state") != "succeeded"
-                                or NativeMessageRoot.from_json(pin["transcript"]) != expected[receipt]):
+                                or type(pin.get("terminal_text_bytes")) is not int
+                                or (NativeMessageRoot.from_json(pin["transcript"]), pin["terminal_text_bytes"])
+                                != expected[receipt]):
                             raise ValueError("source pin differs from the committed transcript")
                     except (KeyError, TypeError, ValueError, AIError) as error:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error

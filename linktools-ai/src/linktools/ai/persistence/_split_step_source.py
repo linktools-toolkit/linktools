@@ -56,6 +56,19 @@ class SplitStepPin:
     binding_refs: tuple[tuple[int, int | None], ...] = ()
     output_ref: tuple[int, int] | None = None
     waiting: SplitStepWaiting | None = None
+    terminal_text_bytes: int = 0
+
+    @classmethod
+    def for_terminal(
+        cls, receipt_id: str, *, terminal_message: object, terminal_state: str,
+        transcript: NativeMessageRoot | None, result: JsonValue,
+        binding_refs: tuple[tuple[int, int | None], ...], output_ref: tuple[int, int] | None,
+    ) -> SplitStepPin:
+        from ._session_transcript import terminal_text_bytes
+
+        return cls(receipt_id, terminal_state=terminal_state, transcript=transcript, result=result,
+                   binding_refs=binding_refs, output_ref=output_ref,
+                   terminal_text_bytes=terminal_text_bytes(terminal_message))
 
     def to_json(self) -> dict:
         validate_resource_id(self.receipt_id)
@@ -69,6 +82,9 @@ class SplitStepPin:
             self.terminal_state is not None or self.checkpoint_id is None
         ):
             raise ValueError("split waiting intent requires an exact nonterminal checkpoint")
+        if type(self.terminal_text_bytes) is not int or self.terminal_text_bytes < 0 or (
+                self.terminal_state != "succeeded" and self.terminal_text_bytes != 0):
+            raise ValueError("invalid split terminal text charge")
         if self.terminal_state == "succeeded":
             if self.transcript is None or not self.transcript.count or self.result is not None:
                 raise ValueError("successful split receipt requires its native transcript")
@@ -91,6 +107,7 @@ class SplitStepPin:
             "output_ref": None if self.output_ref is None else list(self.output_ref),
             "checkpoint_id": self.checkpoint_id,
             "terminal_state": self.terminal_state,
+            **({"terminal_text_bytes": self.terminal_text_bytes} if self.terminal_state == "succeeded" else {}),
             "transcript": None if self.transcript is None else self.transcript.to_json(),
             **({} if self.waiting is None else {"waiting": self.waiting.to_json()}),
         }
@@ -99,6 +116,8 @@ class SplitStepPin:
     @classmethod
     def from_json(cls, receipt_id: str, value: dict) -> SplitStepPin:
         fields = {"checkpoint_id", "terminal_state", "transcript", "result", "binding_refs", "output_ref"}
+        if value.get("terminal_state") == "succeeded":
+            fields.add("terminal_text_bytes")
         if value.keys() not in (fields, fields | {"waiting"}):
             raise ValueError("invalid split source pin")
         transcript = value["transcript"]
@@ -106,7 +125,7 @@ class SplitStepPin:
         pin = cls(
             receipt_id, checkpoint_id=value["checkpoint_id"], terminal_state=value["terminal_state"],
             transcript=None if transcript is None else NativeMessageRoot.from_json(transcript),
-            result=value["result"], binding_refs=tuple(tuple(ref) for ref in value["binding_refs"]),
+            result=value["result"], terminal_text_bytes=value.get("terminal_text_bytes", 0), binding_refs=tuple(tuple(ref) for ref in value["binding_refs"]),
             output_ref=None if output_ref is None else tuple(output_ref),
             waiting=SplitStepWaiting.from_json(value["waiting"]) if "waiting" in value else None,
         )

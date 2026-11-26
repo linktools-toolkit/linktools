@@ -730,8 +730,9 @@ class _CanonicalSplitStep:
         prepared = PreparedArchive()
         root = (None if transcript is None
                 else await self._step_store.prepare_archived_messages(transcript, prepared))
-        pin = SplitStepPin(
+        pin = SplitStepPin.for_terminal(
             deterministic_id("canonical-split-terminal", key.session_id, key.turn_id, generation, state),
+            terminal_message=transcript[-1] if transcript else None,
             terminal_state=state, transcript=root, result=result, binding_refs=binding_refs, output_ref=output_ref,
         )
 

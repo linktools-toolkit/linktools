@@ -4706,10 +4706,12 @@ class StateCommands:
             archive = await binding[1](create=True)
             native_suffix = (archive, PreparedArchive(), root)
         raw_source = trace_suffix or native_suffix
+        graph_messages = native_messages if native_suffix is not None else _graph_trace_messages
         prepared = await turns._prepare_finish(
             key, generation=generation, turn_no=turn_no, state=state, result=result,
             transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
             _graph_trace_suffix=raw_source, _graph_step_source=native_suffix is not None,
+            _graph_terminal_message=graph_messages[-1] if graph_messages else None,
         )
         result_source = None
         if prepared.transcript is not None:

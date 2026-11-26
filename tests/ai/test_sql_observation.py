@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 
 import pytest
 from sqlalchemy.exc import DBAPIError
@@ -139,42 +140,122 @@ async def test_debug_disabled_preserves_labels_without_starting_sql_timing(tmp_p
         await state.close()
 
 
-async def test_runtime_warm_turn_has_specific_source_phases(tmp_path, caplog):
+async def test_standalone_execution_preserves_live_sql_source_phases(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    from linktools.ai.core import ExecutionStatus
     from linktools.ai.storage import InMemoryCacheBackend
     from .test_pending_session_projection import _runtimes
 
     cache = InMemoryCacheBackend(max_bytes=2**24)
-    async with _runtimes(tmp_path, cache=cache, source_authority=True) as (runtimes, entered, finish, block):
+    async with _runtimes(tmp_path, cache=cache, native=True) as (runtimes, entered, finish, block):
         runtime, _state = runtimes[0]
         reader, _reader_state = runtimes[1]
-        session = await runtime.agents.get().create_session("debug-session")
-        warm = await session.start("never-log-this-prompt-first")
+        principal = runtime.default_principal
         producer = runtime._execution_service.runtime_backend()
-        warm_owner = producer._turn_owners[warm.execution_id]
-        await warm.wait()
-        await warm_owner.closed.wait()
         caplog.set_level(logging.DEBUG, logger=_logger.name)
 
         block()
-        turn = await runtime.sessions.start(
-            "debug-session", "never-log-this-prompt", principal=runtime.default_principal,
-        )
+        turn = await runtime.agents.get().start("never-log-this-prompt", principal=principal, idempotency_key="standalone")
         holder = producer._turn_owners[turn.execution_id]
         await asyncio.wait_for(entered.wait(), 5)
-        busy = await reader.history.inspect_session("debug-session", principal=reader.default_principal)
-        assert busy.active_execution_id == turn.execution_id
+        busy = await reader.executions.inspect(turn.execution_id, principal=reader.default_principal)
+        assert busy.status is ExecutionStatus.STARTED and busy.session_id is None
         finish.set()
-        await turn.wait(timeout_seconds=5)
+        assert (await turn.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         await holder.closed.wait()
-        await reader.history.session_detail("debug-session", principal=reader.default_principal, limit=1)
+        assert (await reader.executions.wait(turn.execution_id, principal=reader.default_principal)).result.status is ExecutionStatus.SUCCEEDED
 
     cursor_logs = [record.getMessage() for record in caplog.records
                    if record.name == _logger.name and record.getMessage().startswith("SQL cursor")]
-    assert all("never-log-this-prompt" not in line and "debug-session" not in line for line in cursor_logs)
+    assert cursor_logs
+    assert all("never-log-this-prompt" not in line and turn.execution_id not in line for line in cursor_logs)
     for label in (
-        "runtime.session.start", "storage.turn.claim", "runtime.execution.worker",
-        "coordination.session.verify_cached_fence", "persistence.terminal.receipt_lookup",
-        "persistence.terminal.checkpoint_prepare", "storage.turn.release", "history.session.detail",
+        "runtime.execution.inspect", "runtime.execution.wait", "runtime.execution.worker",
     ):
-        assert any(label in line for line in cursor_logs), label
-    assert all("runtime.session.start/runtime.execution.worker" not in line for line in cursor_logs)
+        assert any(label in line for line in cursor_logs), (label, cursor_logs)
+    assert all("runtime.execution.inspect/runtime.execution.worker" not in line for line in cursor_logs)
+
+
+@pytest.mark.parametrize("observers", (0, 2))
+async def test_native_sqlite_turn_statement_budgets(tmp_path: Path, observers: int) -> None:
+    from collections import Counter, defaultdict
+    from contextlib import AsyncExitStack, aclosing
+
+    from sqlalchemy import event
+
+    from linktools.ai.core import ExecutionStatus
+    from linktools.ai.storage import InMemoryCacheBackend
+    from .test_pending_session_projection import _runtimes
+
+    cache = InMemoryCacheBackend(max_bytes=2**24)
+    async with _runtimes(
+        tmp_path, cache=cache, source_authority=True, native=True,
+    ) as (runtimes, entered, finish, block):
+        (runtime, state), (reader, reader_state) = runtimes
+        principal = runtime.default_principal
+        session = await runtime.agents.get().create_session("debug-session", principal=principal)
+        warm = await runtime.sessions.start(
+            session.session_id, "previous", agent="default", principal=principal, idempotency_key="first",
+        )
+        assert (await warm.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+
+        counts = defaultdict(Counter)
+        phase = "subscription"
+        history_turn_queries = []
+
+        def count(_conn, _cursor, statement, _params, _context, _many):
+            verb = statement.split(maxsplit=1)[0].upper()
+            if verb in {"SELECT", "WITH", "BEGIN", "INSERT", "UPDATE", "DELETE", "REPLACE"}:
+                counts[phase][verb] += 1
+            if phase == "history" and verb == "SELECT" and "ai_session_turns" in statement:
+                history_turn_queries.append(_context.compiled.statement)
+
+        engines = {value.session_turns._context.engine.sync_engine for value in (state, reader_state)}
+        async with AsyncExitStack() as stack:
+            for engine in engines:
+                event.listen(engine, "before_cursor_execute", count)
+                stack.callback(event.remove, engine, "before_cursor_execute", count)
+            streams = [await stack.enter_async_context(aclosing(session.watch())) for _ in range(observers)]
+            for stream in streams:
+                initial = await anext(stream)
+                assert initial.active_turn_id is None and initial.last_turn_no == 1
+
+            phase = "admission"
+            block()
+            turn = await runtime.sessions.start(
+                session.session_id, "current", agent="default", principal=principal, idempotency_key="second",
+            )
+            await asyncio.wait_for(entered.wait(), 5)
+            phase = "admitted_notice"
+            for stream in streams:
+                occupied = await asyncio.wait_for(anext(stream), 5)
+                assert occupied.active_turn_id == turn.key.turn_id and occupied.last_turn_no == 1
+
+            phase = "occupancy"
+            occupancy = await reader.history.turn_session_state(session.session_id, principal=reader.default_principal)
+            assert occupancy["active_turn_id"] == turn.key.turn_id
+
+            phase = "settlement"
+            finish.set()
+            assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+            phase = "terminal_notice"
+            for stream in streams:
+                released = await asyncio.wait_for(anext(stream), 5)
+                assert released.active_turn_id is None and released.last_turn_no == 2
+
+            phase = "history"
+            page = await reader.history.turn_session(session.session_id, principal=reader.default_principal, limit=1)
+            assert [item["turn_id"] for item in page["timeline"]["items"]] == [turn.key.turn_id]
+            assert page["timeline"]["next_cursor"] is not None
+
+        query, = history_turn_queries
+        assert query._limit == 2 and query._offset is None
+
+        assert counts["subscription"] == Counter(SELECT=observers)
+        assert not counts["admitted_notice"] and not counts["terminal_notice"]
+        for phase, budget in {
+            "admission": Counter(SELECT=2, INSERT=1, UPDATE=1, BEGIN=1),
+            "occupancy": Counter(SELECT=1),
+            "settlement": Counter(SELECT=4, WITH=1, INSERT=2, UPDATE=2, BEGIN=3),
+            "history": Counter(SELECT=2, WITH=1, BEGIN=1),
+        }.items():
+            assert counts[phase] <= budget, (phase, counts[phase], budget)

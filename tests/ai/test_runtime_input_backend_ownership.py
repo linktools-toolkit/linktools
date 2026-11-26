@@ -123,11 +123,11 @@ async def test_runtime_cancelled_entry_closes_acquired_input_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     instances: list[_OwnedBackend] = []
-    entered = asyncio.Event()
+    entered = asyncio.get_running_loop().create_future()
 
-    async def prepare_archives(store: RuntimeAgentRunStore) -> None:
-        del store
-        entered.set()
+    async def prepare_archives(store: RuntimeAgentRunStore, *, defer_trace: bool = False) -> None:
+        del store, defer_trace
+        entered.set_result(None)
         await asyncio.Event().wait()
 
     monkeypatch.setattr(RuntimeAgentRunStore, "prepare_archives", prepare_archives)
@@ -135,7 +135,11 @@ async def test_runtime_cancelled_entry_closes_acquired_input_backend(
         runtime = Runtime.open(persistence=persistence, features=_features(tmp_path, instances))
         task = asyncio.create_task(runtime.__aenter__())
         try:
-            await asyncio.wait_for(entered.wait(), 5)
+            done, _ = await asyncio.wait((entered, task), timeout=5, return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                task.result()
+                pytest.fail("Runtime entered before reaching the archive gate")
+            assert entered in done, "Runtime did not reach the archive gate"
             assert len(instances) == 1 and not instances[0].resource.closed
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -144,6 +148,7 @@ async def test_runtime_cancelled_entry_closes_acquired_input_backend(
             await runtime.close()
             assert persistence.ready
         finally:
+            entered.cancel()
             if not task.done():
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):

@@ -176,6 +176,7 @@ class PairedSplitTerminalRestore:
                         raise ValueError("split transcript differs from the source group")
                     if not discard and (root != decode_session_transcript_root(target["result_json"])
                             or target["result_json"]["binding_refs"] != [list(ref) for ref in pin.binding_refs]
+                            or target["result_json"]["terminal_text_bytes"] != pin.terminal_text_bytes
                             or target["result_json"].get("output_ref") != (
                                 None if pin.output_ref is None else list(pin.output_ref)
                             )):

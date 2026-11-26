@@ -216,7 +216,7 @@ async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(
     assert session["active_turn_id"] == b"second" and session["last_turn_no"] == 1
     turn = await turns.get_turn(key)
     assert turn["request_json"] == {"prompt": "turn"}
-    assert set(turn["result_json"]) == {"transcript", "binding_refs", "usage"}
+    assert set(turn["result_json"]) == {"transcript", "binding_refs", "usage", "terminal_text_bytes"}
     root = NativeMessageRoot.from_json(turn["result_json"]["transcript"])
     assert root.count == 1 and turn["result_json"]["binding_refs"] == []
     published = await turns.get_history_turn(key, lineage=())
@@ -592,3 +592,48 @@ async def test_ordinary_snapshot_preserves_exact_fork_receipt(tmp_path):
     with pytest.raises(AIError) as corrupt:
         await Persistence.restore_snapshot(invalid, object_store=archive, root=tmp_path / "invalid", limits=limits)
     assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_cold_context_charge_verifies_the_pruning_witness(store):
+    from linktools.ai.errors import AIError, ErrorCode
+
+    engine, metadata, turns = store
+    for number in range(1, 6):
+        key = SessionTurnKey("chat", f"charge-{number}")
+        failed = number in (2, 5)
+        request = {"prompt": key.turn_id}
+        if failed:
+            request["session_context"] = "current_turn"
+        assert await turns.accept(
+            key, expected_revision=2 * (number - 1), context_from=number if failed else 1,
+            context_through=number - 1, request_key=key.turn_id, request=request, binding=_BINDING, lease_seconds=60,
+        )
+        assert await turns.finish(
+            key, generation=1, turn_no=number, state="failed" if failed else "succeeded",
+            transcript=None if failed else (ModelResponse(parts=[TextPart(str(number) * 900)]),),
+            result={"error_code": "MODEL_ERROR"} if failed else None,
+        )
+
+    def cold():
+        reader = SqlSessionTurns(create_sql_storage_context(engine), metadata, namespace="test", tenant_id="a")
+        reader.bind_transcript_reader(*turns._transcript_source)
+        return reader
+
+    reader = cold()
+    suffix = await reader.recent_context("chat", through=5, max_context_bytes=1500)
+    assert [turn.turn_no for turn in suffix] == [3, 4, 5]
+    assert suffix[-1].interrupted
+    exact = await reader.read_context_range("chat", after=0, through=5)
+    assert [turn.turn_no for turn in exact] == [1, 2, 3, 4, 5]
+    assert suffix == exact[-3:]
+
+    key = SessionTurnKey("chat", "charge-4")
+    result = (await turns.get_turn(key))["result_json"]
+    async with engine.begin() as tx:
+        await tx.execute(turns._turns.update().filter_by(**turns._turn_values(key)).values(
+            result_json={**result, "terminal_text_bytes": 1600},
+        ))
+    with pytest.raises(AIError) as failure:
+        await cold().recent_context("chat", through=5, max_context_bytes=1500)
+    assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

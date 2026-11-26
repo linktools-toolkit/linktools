@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import fields
 from typing import TYPE_CHECKING
 
+from pydantic_ai.messages import ModelResponse, TextPart
+
 from ..core import UsageMetrics
 from ..errors import AIError, ErrorCode
 from ..steps import NATIVE_STORE_KEY_MAX_BYTES, native_store_key
@@ -20,6 +22,13 @@ if TYPE_CHECKING:
 
 SESSION_TURN_TABLE = "ai_session_turns"
 _USAGE_KEYS = frozenset(field.name for field in fields(UsageMetrics))
+
+
+def terminal_text_bytes(message: object) -> int:
+    """Lower bound on JSON transcript bytes unaffected by input or binding projection."""
+    if not isinstance(message, ModelResponse):
+        return 0
+    return sum(len(part.content.encode("utf-8")) for part in message.parts if isinstance(part, TextPart))
 
 
 def decode_session_turn_usage(value: object) -> UsageMetrics:
@@ -46,7 +55,10 @@ def decode_session_compacted_context(result: Mapping[str, object]) -> NativeMess
 def decode_session_transcript_root(result: object) -> NativeMessageRoot:
     if not isinstance(result, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session transcript reference")
-    fields = {"transcript", "binding_refs"}
+    fields = {"transcript", "binding_refs", "terminal_text_bytes"}
+    charge = result.get("terminal_text_bytes")
+    if type(charge) is not int or charge < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid terminal transcript charge")
     if "output_ref" in result:
         fields.add("output_ref")
     if "graph_trace_suffix" in result:

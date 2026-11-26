@@ -3,7 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Contract tests for model interaction projection primitives."""
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import _wait_for_committed, model_features
 
 from linktools.ai.persistence import Persistence
 import sqlite3
@@ -28,7 +28,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import JsonValue
+from linktools.ai.core import JsonValue, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -89,27 +89,38 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
     sizes = []
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('response-growth', storage=PersistenceStorage.sqlite(database)) as persistence_92, Runtime.open(persistence=persistence_92, features=model_features(_TextModels(), features)) as runtime:
-        agent = runtime.agents.get("default")
-        await agent.create_session("session")
-        for turn in range(8):
-            execution = await agent.session("session").start(f"turn-{turn}:" + "user-" * 400)
-            result = (await execution.wait(timeout_seconds=10)).result
-            assert result.status == "SUCCEEDED"
-            interactions = await execution.model_interactions(include_content=True)
-            assert len(interactions.items) == 1
-            messages = interactions.items[0].request["messages"]
-            assert len(messages) == 2 * turn + 1
-            if turn in (3, 7):
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Authorize the synthetic host's native session."""
+
+    async with Runtime.open(
+        "response-growth", storage=PersistenceStorage.sqlite(database),
+        features=model_features(_TextModels(), features), authorization=HostAuthorization(),
+    ) as runtime:
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        for index in range(8):
+            turn = await runtime.sessions.start(
+                "session", f"turn-{index}:" + "user-" * 400, agent="default",
+                principal=principal, idempotency_key=f"turn-{index}",
+            )
+            assert (await turn.wait_final(timeout_seconds=10)).status == "SUCCEEDED"
+            interactions = await _wait_for_committed(
+                lambda: runtime.history.turn_model_interactions(
+                    "session", turn.key.turn_id, principal=principal, local_workspace=True, include_content=True,
+                ), lambda page: len(page.items) == 1,
+            )
+            messages = interactions.items[0]["request"]["messages"]
+            assert len(messages) == 2 * index + 1
+            if index in (3, 7):
                 with sqlite3.connect(database) as connection:
-                    sizes.append(dict(connection.execute(
-                        "SELECT kind, SUM(length(payload_json)) FROM ai_state_records "
-                        "WHERE kind IN ('context_projection', 'model_interaction') GROUP BY kind"
-                    )))
-    assert len(sizes) == 2
-    assert sizes[0].keys() == sizes[1].keys() == {"context_projection", "model_interaction"}
-    for kind in sizes[0]:
-        assert sizes[1][kind] < 2.6 * sizes[0][kind]
+                    interactions_size, = connection.execute(
+                        "SELECT SUM(length(payload_json)) FROM ai_state_records WHERE kind = 'model_interaction'"
+                    ).fetchone()
+                    message_size, = connection.execute("SELECT SUM(raw_size) FROM ai_messages").fetchone()
+                    sizes.append((interactions_size, message_size))
+    first, second = sizes
+    for early, late in zip(first, second, strict=True):
+        assert 0 < early < late < 2.6 * early
 
 
 def _journal() -> ModelRequestJournal:

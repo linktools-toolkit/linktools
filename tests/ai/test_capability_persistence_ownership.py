@@ -67,11 +67,8 @@ async def test_conversation_owners_isolate_identical_run_ids_and_preserve_contex
             await archive.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_conversation_owner_reads_committed_state_without_changing_cursor(
-    tmp_path: Path, backend: str,
-) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+async def test_conversation_owner_reads_committed_state_without_changing_cursor(tmp_path: Path) -> None:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         await _commit(state, turn)
         owner = ConversationPersistence(state.storage.run_store.read_store(PersistenceDomain.CONVERSATION))
@@ -90,6 +87,46 @@ async def test_conversation_owner_reads_committed_state_without_changing_cursor(
         assert await state.storage.conversation.sessions.get("session", tenant_id="tenant") == before
 
 
+async def test_sql_conversation_owner_reads_committed_state_without_changing_cursor(tmp_path: Path) -> None:
+    from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Authorize this host's synthetic native session."""
+
+    seen = []
+
+    async def model(messages, _info):
+        seen.append([part.content for message in messages for part in message.parts
+                     if isinstance(part, (UserPromptPart, TextPart))])
+        return ModelResponse(parts=[TextPart(f"answer-{len(seen)}")])
+
+    features = RuntimeFeatures("cursor-owner")
+    features.agent("default", model="default", allow_tools=())
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    async with (
+        Persistence.open("cursor-owner", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state,
+        Runtime.open(persistence=state, features=features, authorization=HostAuthorization()) as runtime,
+    ):
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        for index in (1, 2):
+            turn = await runtime.sessions.start(
+                "session", f"question-{index}", agent="default", principal=principal, idempotency_key=f"turn-{index}",
+            )
+            assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        before = dict(await state.session_turns.get_session("session"))
+        latest = await runtime.sessions.timeline("session", principal=principal, limit=1)
+        older = await runtime.sessions.timeline("session", principal=principal, cursor=latest["next_cursor"], limit=1)
+        assert [item["output"]["text"] for page in (older, latest) for item in page["items"]] == ["answer-1", "answer-2"]
+        assert dict(await state.session_turns.get_session("session")) == before
+        assert seen == [["question-1"], ["question-1", "answer-1", "question-2"]]
+
+
+@pytest.mark.asyncio
 async def test_state_conversation_reads_require_history_identity(tmp_path: Path) -> None:
     async with _turn_state("memory", tmp_path) as state:
         owner = ConversationPersistence(state.storage.run_store.read_store(PersistenceDomain.CONVERSATION))

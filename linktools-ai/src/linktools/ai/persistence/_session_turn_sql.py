@@ -51,7 +51,7 @@ from ._session_transcript import (
     decode_session_compacted_context,
     decode_session_input_reference,
     decode_session_turn_usage,
-    decode_session_transcript_root,
+    decode_session_transcript_root, terminal_text_bytes,
 )
 from .state import SqlStateRowReader, state_store_key
 
@@ -320,6 +320,7 @@ class SqlSessionTurnReader:
                                 compacted_context: bool | str = False,
                                 reset_window: tuple[int, int, ErrorCode] | None = None,
                                 expected_turns: range | None = None,
+                                context_budget: int | None = None,
                                 ) -> tuple[Mapping[str, object], ...]:
         if self._transcript_source is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -347,6 +348,19 @@ class SqlSessionTurnReader:
                     raise AIError(missing, "The finalized session context range is incomplete")
                 for index in range(len(rows) - 1, -1, -1):
                     if rows[index]["state"] == "succeeded" and rows[index]["reset_context"] is True:
+                        rows = rows[index:]
+                        break
+            if context_budget is not None:
+                remaining = context_budget
+                for index in range(len(rows) - 1, -1, -1):
+                    row = rows[index]
+                    if row["state"] != "succeeded":
+                        continue
+                    self._transcript_manifest(row["result_json"])
+                    remaining -= row["result_json"]["terminal_text_bytes"]
+                    if remaining < 0:
+                        # Keep the non-fitting witness to prove the archive cut and
+                        # preserve the boundary across cached suffix extensions.
                         rows = rows[index:]
                         break
             selected = rows[:body_limit]
@@ -424,6 +438,7 @@ class SqlSessionTurnReader:
                 SplitTranscriptReference(
                     row["turn_id"].decode("utf-8"), row["session_key"].decode("utf-8"),
                     row["generation"], row["split_source_receipt"].decode("utf-8"), root,
+                    row["result_json"]["terminal_text_bytes"],
                 ) for _, row, root in foreign
             ))
             encoded_by_position.update(zip((index for index, _, _ in foreign), contents, strict=True))
@@ -461,6 +476,8 @@ class SqlSessionTurnReader:
                 if len(parts) != 1:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 messages.append(parts[0])
+            if terminal_text_bytes(messages[-1]) != row["result_json"]["terminal_text_bytes"]:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Session terminal transcript charge differs")
             if row["result_json"].get("graph_trace_suffix") is True:
                 if position not in prompts:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript lacks its admitted input")
@@ -889,7 +906,7 @@ class SqlSessionTurnReader:
         turns += await self.read_context_range(
             session_id, after=after, through=through, lineage=lineage,
             checkpoint=checkpoint if cached is None and not lineage else None,
-            compacted_context=not lineage, _trim_reset=True,
+            compacted_context=not lineage, _trim_reset=True, _context_budget=max_context_bytes,
         )
         for index in range(len(turns) - 1, -1, -1):
             if turns[index].reset_context:
@@ -907,7 +924,7 @@ class SqlSessionTurnReader:
     async def read_context_range(
         self, session_id: str, *, after: int, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
         missing: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR, checkpoint: SqlStepStore | None = None,
-        compacted_context: bool | str = False, _trim_reset: bool = False,
+        compacted_context: bool | str = False, _trim_reset: bool = False, _context_budget: int | None = None,
     ) -> tuple[SessionContextTurn, ...]:
         """Read finalized input and only the confirmed conversation transcripts."""
         from sqlalchemy import case, select, type_coerce
@@ -945,6 +962,7 @@ class SqlSessionTurnReader:
         rows = await self._read_transcripts(
             statement, display=False, compacted_context=compacted_context,
             reset_window=(after, through, missing) if _trim_reset else None,
+            context_budget=_context_budget,
         )
         if not _trim_reset and len(rows) != through - after:
             raise AIError(missing, "The finalized session context range is incomplete")
@@ -1389,6 +1407,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         compacted_context: Sequence[ModelMessage] | None = None,
         _graph_trace_suffix: tuple[ContentArchive, PreparedArchive, NativeMessageRoot] | None = None,
         _graph_step_source: bool = False,
+        _graph_terminal_message: ModelMessage | None = None,
         _expired: bool = False,
     ) -> _PreparedSessionTerminal:
         """Prepare the caller's normalized suffix, without starting another mutation."""
@@ -1418,7 +1437,10 @@ class SqlSessionTurns(SqlSessionTurnReader):
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 native._message_content.validate_root(root)
             body = (archive, content, root)
-            result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
+            result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs],
+                      "terminal_text_bytes": terminal_text_bytes(
+                          transcript[-1] if transcript else _graph_terminal_message
+                      )}
             if compacted_context is not None:
                 if _graph_trace_suffix is not None or not compacted_context:
                     raise ValueError("compaction requires an ordinary local terminal")
@@ -1519,7 +1541,8 @@ class SqlSessionTurns(SqlSessionTurnReader):
             _store, _archive, native = self._transcript_write_binding
             if root.store_key != native.store_key:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
+            result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs],
+                      "terminal_text_bytes": source_pin.terminal_text_bytes}
             if output_ref is not None:
                 result["output_ref"] = list(output_ref)
             self._transcript_manifest(result)

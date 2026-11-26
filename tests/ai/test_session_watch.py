@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import Principal, SessionStatus
+from linktools.ai.core import ExecutionStatus, Principal, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime
@@ -77,21 +77,31 @@ async def test_watch_shares_reads_and_tracks_real_turn_release(monkeypatch, outc
 
 
 async def test_watch_pending_admission_and_completion(tmp_path):
-    async with _runtimes(tmp_path, cache=InMemoryCacheBackend(max_bytes=2**24), shared=False) as (values, entered, finish, block):
+    async with _runtimes(
+        tmp_path, cache=InMemoryCacheBackend(max_bytes=2**24), shared=False, native=True,
+    ) as (values, entered, finish, block):
         runtime, state = values[0]
-        session = await runtime.agents.get().create_session('session')
+        principal = runtime.default_principal
+        session = await runtime.agents.get().create_session("session", principal=principal)
         async with aclosing(session.watch()) as stream:
-            assert (await anext(stream)).active_execution_id is None
+            initial = await anext(stream)
+            assert initial.active_turn_id is None and initial.last_turn_no == 0
             busy = asyncio.create_task(anext(stream))
             block()
-            execution = await session.start('hello', idempotency_key='pending')
+            turn = await runtime.sessions.start(
+                "session", "hello", agent="default", principal=principal, idempotency_key="pending",
+            )
             await asyncio.wait_for(entered.wait(), 5)
-            assert (await asyncio.wait_for(busy, 5)).active_execution_id == execution.execution_id
-            assert await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
+            occupied = await asyncio.wait_for(busy, 5)
+            assert occupied.active_turn_id == turn.key.turn_id and occupied.last_turn_no == 0
+            row = await state.session_turns.get_turn(turn.key)
+            assert row["state"] == "accepted" and row["turn_no"] == 1
+            assert await state.execution.executions.get(turn.key.turn_id, tenant_id=principal.tenant_id) is None
             idle = asyncio.create_task(anext(stream))
             finish.set()
-            await execution.wait(timeout_seconds=5)
-            assert (await asyncio.wait_for(idle, 5)).active_execution_id is None
+            assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+            released = await asyncio.wait_for(idle, 5)
+            assert released.active_turn_id is None and released.last_turn_no == 1
 
 
 async def test_watch_authorizes_each_observation_and_isolates_tenant():

@@ -447,35 +447,8 @@ async def test_session_history_reports_missing_committed_checkpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
-    state = PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
-    state = Persistence(state)
-    await state.initialize(namespace="session-history-durable", tenant_id="tenant")
-    agent_run_id = "session-history-durable-run"
-    await state.conversation.sessions.create(_session())
-    await _materialize(state, agent_run_id, ("A", "B"))
-    await _advance(state, None, ConversationCursor(agent_run_id))
-    before_close = await _service(state).history(
-        "session",
-        principal=Principal("owner", "tenant"),
-    )
-    await state.close()
-
-    reopened = PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
-    reopened = Persistence(reopened)
-    await reopened.initialize(namespace="session-history-durable", tenant_id="tenant")
-    try:
-        after_reopen = await _service(reopened).history(
-            "session",
-            principal=Principal("owner", "tenant"),
-        )
-        assert after_reopen == before_close
-    finally:
-        await reopened.close()
-
-
-@pytest.mark.asyncio
-async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
+@pytest.mark.parametrize("local", (True, False), ids=("local", "engine"))
+async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path, local) -> None:
     class _HostAuthorization(TenantAuthorizationPolicy):
         """Use the same explicit host policy for production and reopened reads."""
 
@@ -490,8 +463,14 @@ async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path) -> 
     model_features(_Models(_UsageFunctionModel(model)), features)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     try:
-        await provision_database(engine)
-        storage = PersistenceStorage.sql(engine)
+        if not local:
+            await provision_database(engine)
+
+        def open_storage():
+            return (PersistenceStorage.from_root(tmp_path / "local", exclusive_writer=True)
+                    if local else PersistenceStorage.sql(engine))
+
+        storage = open_storage()
         async with (
             Persistence.open(namespace, storage=storage, tenant_id=principal.tenant_id) as state,
             Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
@@ -508,7 +487,7 @@ async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path) -> 
             assert len(before_close["items"]) == 1
             assert before_close["items"][0]["turn_id"] == result.key.turn_id
 
-        reopened = PersistenceStorage.sql(engine)
+        reopened = open_storage()
         async with (
             Persistence.open(namespace, storage=reopened, tenant_id=principal.tenant_id) as state,
             Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,

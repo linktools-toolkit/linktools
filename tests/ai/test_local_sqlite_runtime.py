@@ -232,7 +232,7 @@ async def test_local_sqlite_unknown_terminal_keeps_owner_until_same_commit_is_co
     async with Persistence.open('local-unknown', storage=storage) as state:
         async with Runtime.open(persistence=state,
             features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-            session = await runtime.agents.get().create_session('session')
+            agent = runtime.agents.get()
             group = state.execution.executions.state_store.storage_group
             original_mutate, original_read = type(group).mutate, type(group).read_many
             committed = asyncio.Event()
@@ -254,7 +254,7 @@ async def test_local_sqlite_unknown_terminal_keeps_owner_until_same_commit_is_co
 
             monkeypatch.setattr(type(group), 'mutate', lose_ack)
             monkeypatch.setattr(type(group), 'read_many', fail_confirmation)
-            execution = await session.start('question', idempotency_key='same')
+            execution = await agent.start('question', idempotency_key='same')
             await asyncio.wait_for(committed.wait(), 5)
             with pytest.raises(AIError) as unknown:
                 await execution.wait(timeout_seconds=5)
@@ -281,8 +281,7 @@ async def test_local_sqlite_unknown_terminal_keeps_owner_until_same_commit_is_co
         assert reopened.exclusive_execution_writer
         async with Runtime.open(persistence=reopened,
             features=model_features(_Models(_UsageFunctionModel(model)), features)) as following:
-            session = following.agents.get().session('session')
-            replay = await session.start('question', idempotency_key='same')
+            replay = await following.agents.get().start('question', idempotency_key='same')
             assert replay.execution_id == execution.execution_id
             result = (await replay.wait()).result
             assert result.status is ExecutionStatus.SUCCEEDED
