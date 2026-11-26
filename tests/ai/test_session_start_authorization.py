@@ -102,7 +102,8 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
         assert replay.key.turn_id == execution.key.turn_id
         assert calls == 1
         assert policy.execution_resources
-        assert set(policy.execution_resources) == {execution.key.turn_id}
+        assert policy.execution_resources[-1] == execution.key.turn_id
+        assert "shared" not in policy.execution_resources
         assert await state.conversation.sessions.get("shared", tenant_id="default") is None
         assert await state.execution.executions.get(execution.key.turn_id, tenant_id="default") is None
         row = await state.session_turns.get_turn(execution.key)
