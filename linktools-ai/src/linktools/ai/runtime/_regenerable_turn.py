@@ -1628,19 +1628,14 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         text = native_input if isinstance(native_input, str) else ""
         stored_input = None if isinstance(native_input, str) else encode_domain(captured)
-        instructions = None
-        resolver = self._resolver_for(binding)
-        if resolver is not None:
-            # Use the already frozen input provenance, not the current contents
-            # of attachment files. Scope cwd/path instructions only once here.
-            files = () if captured.view is None else captured.view.get("files", ())
-            documents = {}
-            for path in dict.fromkeys((cwd or ".", *(file["path"] for file in files))):
-                resolved = await resolver.resolve(path, exclude_sources=frozenset(documents))
-                for document in resolved.documents:
-                    documents.setdefault(document.source, document)
-            instructions = RepositoryInstructions(tuple(documents.values()))
-            resolver.validate(instructions)
+        instruction_scopes = decode_instruction_scopes(config)
+        # The captured paths are provenance, not a request to read or materialize
+        # the files again. Recovery reuses the instructions admitted below.
+        files = () if captured.view is None else captured.view.get("files", ())
+        instructions = await _resolve_initial_instruction_scopes(
+            self._resolver_for(binding), cwd, instruction_scopes, files,
+        )
+        scopes = _merging_instruction_scopes(instruction_scopes, instructions)
         metadata = ImmutableJsonMapping(config.get("metadata", {}))
         request: dict[str, JsonValue] = {
             "prompt": text, "principal": asdict(principal), "thinking": execution.thinking,
@@ -1674,6 +1669,7 @@ class _RegenerableTurnRunner:
             context_from=context_from, context_through=through, request_key=request_key,
             request=request, lease_seconds=_LEASE_SECONDS,
             task_repository=task_repository, task_lease=lease,
+            instruction_scopes=None if scopes == instruction_scopes else scopes,
         )
         if not result.created:
             return result, None

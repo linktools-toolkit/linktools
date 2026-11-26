@@ -1707,6 +1707,7 @@ class StateCommands:
         expected_revision: int, context_from: int, context_through: int,
         request_key: str, request: "dict[str, JsonValue]", lease_seconds: int,
         task_repository: "TaskRepositoryImpl", task_lease: "TaskLease",
+        instruction_scopes: tuple[str, ...] | None = None,
     ) -> ExecutionStartReservationResult:
         """Reserve the root Graph owner and its exact canonical turn in one group."""
         from ._task_repository import TaskRepositoryImpl
@@ -1762,7 +1763,7 @@ class StateCommands:
             request_key=request_key, request={
                 **request, "graph_execution": execution.execution_id, "prompt": "", "input": source.to_json(),
             },
-            binding=binding.to_payload(), lease_seconds=lease_seconds, budget=None,
+            binding=binding.to_payload(), lease_seconds=lease_seconds, budget=None, instruction_scopes=instruction_scopes,
         )
         stores = tuple(dict.fromkeys((repository.state_store, archive.store, task_repository.state_store, *admission.stores)))
 

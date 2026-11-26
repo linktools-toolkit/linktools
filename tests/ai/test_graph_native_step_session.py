@@ -36,7 +36,12 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
     package = workspace / "package"
     package.mkdir()
     root_rule, package_rule = workspace / "AGENTS.md", package / "AGENTS.md"
+    remembered = workspace / "remembered"
+    remembered_rule = remembered / "AGENTS.md"
     if attachment == "cwd":
+        remembered.mkdir()
+        (remembered / "source.txt").write_text("previous attachment", encoding="utf-8")
+        remembered_rule.write_text("INITIAL REMEMBERED RULE", encoding="utf-8")
         root_rule.write_text("CAPTURED ROOT RULE", encoding="utf-8")
         package_rule.write_text("CAPTURED PACKAGE RULE", encoding="utf-8")
     file = workspace / "source.txt"
@@ -61,7 +66,8 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
     async def model(_messages, _info):
         nonlocal calls
         calls += 1
-        if attachment == "cwd":
+        if attachment == "cwd" and calls == 2:
+            assert "CAPTURED REMEMBERED RULE" in (_info.instructions or "")
             assert "CAPTURED ROOT RULE" in (_info.instructions or "")
             assert "CAPTURED PACKAGE RULE" in (_info.instructions or "")
             assert "MUTATED RULE" not in (_info.instructions or "")
@@ -96,16 +102,25 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
             principal, "graph-session", "create-session", cwd="package" if attachment == "cwd" else None,
         ))
         if attachment == "cwd":
+            prior = await runtime.sessions.start(
+                created.session_id, "learn from a file", agent="default", principal=principal,
+                idempotency_key="learn-scope", files=("remembered/source.txt",),
+            )
+            await prior.wait_final(timeout_seconds=10)
+            learned = await state.session_turns.get_session(created.session_id)
+            assert "remembered" in learned["config_json"]["instruction_scopes"]
+            remembered_rule.write_text("CAPTURED REMEMBERED RULE", encoding="utf-8")
             dispatch = LocalExecutionBackend._dispatch_attached_graph
 
             async def dispatch_from_capture(backend, request, execution, identity, turn, **kwargs):
                 assert turn.cwd == "package"
                 assert {doc.content.strip() for doc in turn.repository_instructions.documents} == {
-                    "CAPTURED ROOT RULE", "CAPTURED PACKAGE RULE",
+                    "CAPTURED ROOT RULE", "CAPTURED PACKAGE RULE", "CAPTURED REMEMBERED RULE",
                 }
                 assert execution.repository_instructions is None and execution.input_context is None
                 root_rule.write_text("MUTATED RULE", encoding="utf-8")
                 package_rule.unlink()
+                remembered_rule.unlink()
                 runner = kwargs["runner"]
                 restored = await backend._hydrate_attached_graph_recovery(
                     execution, turn.key, turn.generation, runner=runner,
@@ -137,8 +152,12 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
         execution_id = (await run.execution("agent")).execution_id
         session = await runtime.sessions.get(created.session_id, principal=principal)
         items = (await session.timeline())["items"]
-        assert [item["turn_id"] for item in items] == [execution_id]
-        assert items[0]["conversation_committed"] and items[0]["output"] == {"text": "retained graph output"}
+        expected_turns = [prior.key.turn_id, execution_id] if attachment == "cwd" else [execution_id]
+        assert [item["turn_id"] for item in items] == expected_turns
+        assert items[-1]["conversation_committed"] and items[-1]["output"] == {"text": "retained graph output"}
+        if attachment == "cwd":
+            session_row = await state.session_turns.get_session(created.session_id)
+            assert set(session_row["config_json"]["instruction_scopes"]) == {".", "package", "remembered"}
         execution = await state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
         assert execution is not None and execution.requires_task_invocation_capture
         assert execution.restart_checkpoints and not execution.durable_trace and execution.session_id is None
@@ -155,5 +174,5 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
         projected = turn["user_input"]["attachments"]
         assert sorted(item["size"] for item in projected) == sorted(map(len, expected))
         assert all(set(item) == {"attachment_id", "source", "media_type", "size", "position"} for item in projected)
-    assert calls == 1
-    assert seen == expected
+    assert calls == (2 if attachment == "cwd" else 1)
+    assert seen == ([b"previous attachment"] if attachment == "cwd" else expected)
