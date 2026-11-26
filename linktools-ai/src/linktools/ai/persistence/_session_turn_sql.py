@@ -38,7 +38,7 @@ from ._plan import PersistenceDomain
 from .codec import decode_agent_binding_content, encode_agent_binding_content, encode_domain, restore_native_user_input
 from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage, fork_segments, lineage_predicate
 from ._turn_sql_schema import (
-    TURN_EXECUTION_MAX_BYTES,
+    NATIVE_TURN_ID_MAX_BYTES,
     TURN_SESSION_MAX_BYTES,
 )
 from ._message_root import NativeMessageRoot
@@ -122,7 +122,7 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         key("session_key", TURN_SESSION_MAX_BYTES, "Exact session identity."),
         Column("status", String(8), nullable=False, comment="Session lifecycle status."),
         Column("revision", BigInteger, nullable=False, comment="Compare-and-swap revision of the session."),
-        key("active_turn_id", TURN_EXECUTION_MAX_BYTES, "Accepted turn occupying the session.", nullable=True),
+        key("active_turn_id", NATIVE_TURN_ID_MAX_BYTES, "Accepted turn occupying the session.", nullable=True),
         Column("last_turn_no", BigInteger, nullable=False, comment="Last finalized turn number."),
         Column("config_json", JSON(), nullable=False, comment="Session metadata, workspace path and instruction scopes."),
         Column("lineage_json", JSON(), nullable=True, comment="Immutable referenced turn ranges for a fork."),
@@ -137,7 +137,7 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         SESSION_TURN_TABLE, metadata, sql_id_column(),
         key("scope_key", 32, "Partition of one tenant in the configured session store."),
         key("session_key", TURN_SESSION_MAX_BYTES, "Session owning the turn."),
-        key("turn_id", TURN_EXECUTION_MAX_BYTES, "Exact public turn identity."),
+        key("turn_id", NATIVE_TURN_ID_MAX_BYTES, "Exact public turn identity."),
         key("request_key", SESSION_REQUEST_KEY_MAX_BYTES, "Idempotency key scoped to the session."),
         Column("turn_no", BigInteger, nullable=False, comment="Sequential turn position within the session."),
         Column("context_from", BigInteger, nullable=False, comment="First selected context position, inclusive."),
@@ -511,7 +511,7 @@ class SqlSessionTurnReader:
         return {"scope_key": self._scope, "session_key": self._key(session_id, TURN_SESSION_MAX_BYTES)}
 
     def _turn_values(self, key: SessionTurnKey) -> dict[str, bytes]:
-        return {**self._session_values(key.session_id), "turn_id": self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES)}
+        return {**self._session_values(key.session_id), "turn_id": self._key(key.turn_id, NATIVE_TURN_ID_MAX_BYTES)}
 
     async def get_session(self, session_id: str) -> RowMapping | None:
         async with self._context.engine.connect() as connection:
@@ -528,12 +528,12 @@ class SqlSessionTurnReader:
     ) -> tuple[SessionTurnKey, int] | None:
         from sqlalchemy import select
 
-        if not 1 <= len(execution_id.encode("utf-8")) <= TURN_EXECUTION_MAX_BYTES:
+        if not 1 <= len(execution_id.encode("utf-8")) <= NATIVE_TURN_ID_MAX_BYTES:
             return None
         rows = self._turns.c
         statement = select(
             rows.session_key, rows.generation, rows.request_json["graph_execution"].as_string(),
-        ).where(rows.scope_key == self._scope, rows.turn_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES))
+        ).where(rows.scope_key == self._scope, rows.turn_id == self._key(execution_id, NATIVE_TURN_ID_MAX_BYTES))
 
         async def read(connection):
             return (await connection.execute(statement)).one_or_none()
@@ -627,7 +627,7 @@ class SqlSessionTurnReader:
         )
         statement = self._history_view_select(observe_lease=True).where(
             columns.scope_key == self._scope,
-            columns.turn_id == self._key(key.turn_id, TURN_EXECUTION_MAX_BYTES),
+            columns.turn_id == self._key(key.turn_id, NATIVE_TURN_ID_MAX_BYTES),
             scope,
         )
         if include_authority:

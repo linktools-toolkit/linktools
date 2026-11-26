@@ -58,6 +58,38 @@ async def accept(turns: SqlSessionTurns, turn: str, *, revision: int = 0, throug
 
 
 @pytest.mark.asyncio
+async def test_native_turn_id_fits_graph_execution_identity_at_the_sql_boundary(store):
+    from pathlib import Path
+
+    from sqlalchemy.dialects import mysql
+
+    engine, metadata, turns = store
+    identity = "你" * 21 + "x"
+    writes = []
+
+    def capture(_conn, _cursor, statement, *_args):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        with pytest.raises(ValueError, match="1 to 64 UTF-8 bytes"):
+            await accept(turns, identity + "x")
+        assert writes == []
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+    assert await accept(turns, identity)
+    assert (await turns.get_turn(SessionTurnKey("chat", identity)))["turn_id"] == identity.encode()
+    assert (await turns.get_session("chat"))["active_turn_id"] == identity.encode()
+    migration = (Path(__file__).resolve().parents[2] / "linktools-ai" / "migrations" / "init_schema.sql").read_text(encoding="utf-8")
+    for table, column in (("ai_sessions", "active_turn_id"), ("ai_session_turns", "turn_id")):
+        assert metadata.tables[table].c[column].type.compile(dialect=mysql.dialect()) == "VARBINARY(64)"
+        body = migration.split(f"CREATE TABLE {table} (", 1)[1].split(")ENGINE=", 1)[0]
+        assert f"{column} VARBINARY(64)" in body
+
+
+@pytest.mark.asyncio
 async def test_regenerable_turn_has_two_write_boundaries_and_one_visible_record(store):
     engine, metadata, turns = store
     usage = UsageMetrics(model_requests=1, input_tokens=13, output_tokens=5)

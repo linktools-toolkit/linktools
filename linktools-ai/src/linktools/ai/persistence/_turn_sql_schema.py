@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 """Logical addresses for persisted source turn coordination."""
 
-from ..core import SESSION_ID_MAX_BYTES
+from ..core import EXECUTION_ID_MAX_BYTES, SESSION_ID_MAX_BYTES
 
 
 RUNTIME_TURN_SCOPE = "runtime-pending-turn"
 TURN_SESSION_MAX_BYTES = SESSION_ID_MAX_BYTES
 TURN_REQUEST_MAX_BYTES = 64
 TURN_EXECUTION_MAX_BYTES = 128
+# A native turn is either a generated ID or the exact attached Graph Execution ID.
+NATIVE_TURN_ID_MAX_BYTES = EXECUTION_ID_MAX_BYTES
 
 
 

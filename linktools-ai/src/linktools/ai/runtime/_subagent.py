@@ -3,6 +3,7 @@
 """Runtime-owned one-level subagent dispatch and cancellation."""
 
 import asyncio
+from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol, cast
 
@@ -520,17 +521,14 @@ class SubagentDispatcher:
             }:
                 self._background_failures.pop(execution_id, None)
                 return
+        digest = canonical_sha256({
+            "version": 1,
+            "parent_execution_id": parent_execution_id,
+            "child_execution_id": execution_id,
+        })
+        cancel_key = urlsafe_b64encode(bytes.fromhex(digest)).rstrip(b"=").decode("ascii")
         request = CancelExecutionRequest(
-            principal=principal,
-            idempotency_key="subagent-cancel:"
-            + canonical_sha256(
-                {
-                    "version": 1,
-                    "parent_execution_id": parent_execution_id,
-                    "child_execution_id": execution_id,
-                }
-            ),
-            force=True,
+            principal=principal, idempotency_key="subagent-cancel:" + cancel_key, force=True,
         )
         task = asyncio.create_task(
             self._cancel_child_operation(
