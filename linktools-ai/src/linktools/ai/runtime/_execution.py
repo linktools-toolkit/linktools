@@ -1329,6 +1329,10 @@ class DefaultExecutionService(TaskExecutionService):
         context = await self._canonicalize_request(request)
         request = context.request
         binding = await self._binding(binding_digest, binding_contract, resolved_binding)
+        if any(item.tool_members is not None for item in binding.compiled_agent.selected_capabilities):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                "field": "agent", "reason": "registered_capability_requires_session_checkpoint",
+            })
         policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
         fixture = policy.tool_responses
         if request.tool_response_ref is None and fixture is not None and lineage_kind is ExecutionLineageKind.RUN:

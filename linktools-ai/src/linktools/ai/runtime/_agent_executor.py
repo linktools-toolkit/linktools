@@ -122,7 +122,7 @@ from ..workspace import (
 )
 
 from ._budget import RunBudgetContext, RunBudgetCapability
-from ._current_toolsets import create_current_toolset
+from ._current_toolsets import create_business_toolset, create_current_toolset
 from ._tool_metrics import ToolMetricContext
 from ._capabilities import compose_platform_capabilities, runtime_feature_leaves
 from ._feature_policy import _runtime_feature_policy
@@ -249,6 +249,7 @@ class _AgentRunScope:
     previous_turn_interrupted: bool = False
     before_first_model_dispatch: Callable[[], Awaitable[None]] | None = None
     canonical_step: AtomicStepPersistence | None = None
+    split_step: bool = False
     thinking: ThinkingValue = None
     parent_agent_run_id: str | None = None
     subagent_available: bool = False
@@ -422,7 +423,8 @@ class AgentExecutor:
         unsupported = [name for name, selected in (
             ("agent_capabilities", any(
                 not canonical_step or split_step
-                or type(item.value) not in (ReferencedInputsCapability, ProviderMessagesCapability)
+                or (item.tool_members is None
+                    and type(item.value) not in (ReferencedInputsCapability, ProviderMessagesCapability))
                 for item in compiled.selected_capabilities
             )),
             ("skills", compiled.skill_definitions and (not canonical_step or split_step)),
@@ -550,7 +552,8 @@ class AgentExecutor:
                 event_sink=event_sink, thinking=thinking, streamed_output_bytes=streamed_output_bytes,
                 repository_instructions=repository_instructions, regenerable=canonical_step is None,
                 repository_instruction_boundary=repository_instruction_boundary,
-                canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
+                canonical_step=canonical_step, split_step=split_step, tool_operations=tool_operations,
+                deferred_tool_results=deferred_tool_results,
                 previous_turn_interrupted=previous_turn_interrupted,
                 capture_compacted_context=capture_compacted_context,
                 before_first_model_dispatch=before_first_model_dispatch,
@@ -1241,6 +1244,14 @@ class _RunCapabilities(StepBoundaryCapabilities[AgentContext[object]]):
         return rebound
 
 
+@dataclass
+class _RegisteredCapability(WrapperCapability[AgentContext[object]]):
+    toolset: AbstractToolset[AgentContext[object]] | None
+
+    def get_toolset(self) -> AbstractToolset[AgentContext[object]] | None:
+        return self.toolset
+
+
 async def _materialize_agent(
     scope: _AgentRunScope,
     *,
@@ -1310,12 +1321,40 @@ async def _materialize_agent(
         ), RunCallbackScope(callbacks),
         BindReferencedInputOrigins(),
     ]
+    tool_metrics = (
+        None if metrics is None else ToolMetricContext(
+            metrics, source_namespace=scope.context.namespace,
+            tenant_id=scope.context.principal.tenant_id, execution_id=scope.context.execution_id,
+            session_id=scope.context.session_id, agent_run_id=scope.agent_run_id,
+            agent_id=compiled_agent.spec.id,
+        )
+    )
+    selected_tools = {candidate.id: candidate for candidate in compiled_agent.selected_tools}
+    owned_tools: set[str] = set()
     for candidate in compiled_agent.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capabilities.append(bind_run_callbacks(
-            candidate.value, CapabilityRef("capability", candidate.id, candidate.revision), callbacks,
-        ))
+        if candidate.tool_members is None:
+            capabilities.append(bind_run_callbacks(
+                candidate.value, CapabilityRef("capability", candidate.id, candidate.revision), callbacks,
+            ))
+        else:
+            if scope.canonical_step is None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                    "field": "agent", "reason": "registered_capability_requires_session_checkpoint",
+                })
+            owned_tools.update(ref.id for ref in candidate.tool_members)
+            toolset = create_business_toolset(
+                tuple(selected_tools[ref.id] for ref in candidate.tool_members),
+                id=candidate.id, tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
+                budget=scope.budget, tool_effects=scope.tool_effects, result_callbacks=callbacks,
+                reserved_tool_names=scope.memory_tool_names, manage_approval=True,
+            )
+            capabilities.append(_RegisteredCapability(
+                candidate.value, toolset, id=candidate.id,
+                defer_loading=bool(candidate.contract["defer_loading"]),
+            ))
+
     async def current_skills() -> tuple[SkillDefinition, ...]:
         current = compiled_agent if current_agent is None else await current_agent(compiled_agent)
         return current.skill_definitions
@@ -1363,18 +1402,6 @@ async def _materialize_agent(
         )
     )
 
-    tool_metrics = (
-        None
-        if metrics is None
-        else ToolMetricContext(metrics,
-            source_namespace=scope.context.namespace,
-            tenant_id=scope.context.principal.tenant_id,
-            execution_id=scope.context.execution_id,
-            session_id=scope.context.session_id,
-            agent_run_id=scope.agent_run_id,
-            agent_id=compiled_agent.spec.id,
-        )
-    )
     async def commit_history_boundary() -> None:
         if isinstance(scope.run_store, RuntimeAgentRunStore):
             await scope.run_store.flush_execution_projection(
@@ -1492,7 +1519,8 @@ async def _materialize_agent(
             register_cleanup=scope.register_tool_cleanup, tool_operations=scope.tool_operations,
             tool_metrics=tool_metrics, budget=scope.budget, tool_effects=scope.tool_effects, input_limits=scope.limits,
             response_fixture=scope.response_fixture, result_callbacks=callbacks,
-            reserved_tool_names=scope.memory_tool_names,
+            reserved_tool_names=scope.memory_tool_names, owned_tool_names=frozenset(owned_tools),
+            manage_approval=scope.canonical_step is not None and not scope.split_step,
         ))
     async def publish_model_request_event(
         event_type: ExecutionEventType,

@@ -23,6 +23,7 @@ from ..model import ModelBinding
 from ..spec import (
     AgentSpec,
     AgentUsageLimits,
+    CapabilityRef,
     MCPServerSpec,
     RepositoryInstructionDocument,
     RepositoryInstructions,
@@ -236,18 +237,22 @@ class RuntimeFeatures(Generic[AppT]):
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
         scope: Literal["agent", "runtime"] = "runtime",
+        tools: Sequence[CapabilityRef] | None = None,
     ) -> "AbstractCapability[AgentContext[AppT]]":
         """Register Runtime-wide behavior, or explicitly opt into Agent selection.
 
         Runtime-scoped capabilities bypass Agent selection and are current host
         policy, outside durable Agent bindings. They must not defer loading.
+        For agent-scoped SDK Capability declarations on checkpointed Sessions,
+        tools lists registered tool revisions. Change the capability revision
+        when membership changes.
         """
         if not isinstance(capability, AbstractCapability):
             raise TypeError("capability must be an AbstractCapability")
         capability_id = _capability_registration_id(capability, id)
         contribution = CapabilityContribution.from_opaque(
             "capability", capability_id, capability, revision=revision,
-            config=config, scope=scope,
+            config=config, scope=scope, tool_members=None if tools is None else tuple(tools),
         )
         previous = [item for item in self._contributions
                     if (item.kind, item.id) != (contribution.kind, contribution.id)]

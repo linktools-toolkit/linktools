@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 
-from ..capability import CapabilityContribution, SkillDefinition
+from ..capability import CapabilityContribution, SkillDefinition, tool_class_from_metadata
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ..spec import AgentSpec, MCPServerSpec
@@ -45,6 +45,17 @@ class CompiledAgent:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
                 identities.add(identity)
                 previous = value.id
+        tools = {item.id: item for item in self.selected_tools}
+        owned: set[str] = set()
+        for capability in self.selected_capabilities:
+            for ref in capability.tool_members or ():
+                tool = tools.get(ref.id)
+                if (tool is None or tool.revision != ref.revision
+                        or tool_class_from_metadata(tool.contract.get("metadata")) != "business"):
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                if ref.id in owned:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                owned.add(ref.id)
         if any(item.scope != "runtime" for item in self.runtime_contributions):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if tuple(sorted(set(self.selected_subagents))) != self.selected_subagents:

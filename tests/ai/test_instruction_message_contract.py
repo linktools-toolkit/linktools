@@ -260,18 +260,37 @@ async def test_native_deferred_two_request_writer_round_trips_real_baseline_dige
     assert decode_model_messages(encode_model_messages(messages)) == tuple(messages)
 
 
-async def _runtime_deferred_session(root: str, resumed: bool, backend: str) -> None:
+async def _runtime_deferred_session(
+    root: str, resumed: bool, backend: str, *, unmanaged: bool = False,
+    requires_approval: bool = False, eager: bool = False,
+) -> None:
+    import asyncio
+    from pydantic_ai.capabilities import Capability
+
+    from linktools.ai.capability import AgentContext, CapabilityContribution, SessionCapability
+    from linktools.ai.core import ApprovalDecision, ApprovalStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
+    from linktools.ai.execution import ApprovalDecisionRequest
+    from linktools.ai.spec import CapabilityRef
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
     state = {"text": "replacement" if resumed else "original"}
-    requests = 0
+    requests, calls = 0, []
+
+    def activated(_context: AgentContext[None]) -> str:
+        calls.append("activated")
+        return "native tool result"
 
     async def stream(messages, info):
         nonlocal requests
         requests += 1
         names = {tool.name for tool in info.function_tools}
-        if resumed:
+        if resumed or eager:
             assert "activated" in names
-            assert any(isinstance(part, ToolReturnPart) and _is_deferred_instruction_return(part, messages)
-                       for message in messages for part in message.parts)
+            if resumed:
+                assert any(isinstance(part, ToolReturnPart) and _is_deferred_instruction_return(part, messages)
+                           for message in messages for part in message.parts)
             if requests == 1:
                 yield {0: DeltaToolCall(name="activated", json_args="{}", tool_call_id="use-activated")}
                 return
@@ -295,37 +314,114 @@ async def _runtime_deferred_session(root: str, resumed: bool, backend: str) -> N
     features = RuntimeFeatures("deferred-instructions")
     features.model("default", Binding())
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(_DeferredInstructions(), scope="agent")
-    features.capability(_ChangingInstructions(state), scope="agent")
-    features.agent("default", instructions="Fixed instructions.", allow_tools=(), allow_skills=(), allow_subagents=())
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    tool = features.tool(activated, name="activated", revision=1, effect_policy="none")
+    if requires_approval:
+        tool.requires_approval = True
+        features._register(CapabilityContribution.from_opaque("tool", "activated", tool))
+    if unmanaged:
+        features.capability(_DeferredInstructions(), scope="agent")
+    elif not eager:
+        features.capability(
+            Capability(id="deferred", defer_loading=True, instructions="Activated instruction."),
+            scope="agent", tools=(CapabilityRef("tool", "activated", 1),),
+        )
+    features.capability(
+        Capability(id="changing", instructions=_ChangingInstructions(state).get_instructions()), scope="agent", tools=(),
+    )
+    features.agent("default", instructions="Fixed instructions.", allow_tools=("activated",), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.sqlite(Path(root) / "runtime.db") if backend == "sqlite" else PersistenceStorage.from_root(Path(root), exclusive_writer=True)
-    async with Persistence.open('deferred-instructions', storage=storage) as persistence_239, Runtime.open(persistence=persistence_239, features=features) as runtime:
-        agent = runtime.agents.get()
-        session = agent.session("session") if resumed else await agent.create_session("session")
+    async with (
+        Persistence.open("deferred-instructions", storage=storage) as persistence,
+        Runtime.open(persistence=persistence, features=features, authorization=HostAuthorization()) as runtime,
+    ):
+        principal = Principal("owner", runtime.tenant_id, "service")
+        sessions = runtime.sessions
+        store = persistence.session_turns
+
+        async def committed_messages():
+            row = await runtime.history.turn_session_state("session", principal=principal)
+            turns = await store.read_context_range("session", after=0, through=row["last_turn_no"])
+            return tuple(message for turn in turns for message in turn.messages)
+
         if resumed:
-            messages = (await runtime.history.messages("session", principal=runtime.default_principal)).items
-            assert encode_model_messages(messages) == (Path(root) / "expected.json").read_bytes()
-            context = await runtime._session_service.load_model_context("session", principal=runtime.default_principal)
-            assert encode_model_messages(context) == (Path(root) / "expected-context.json").read_bytes()
-        result = (await session.run("Continue." if resumed else "Load capability.", timeout_seconds=10)).result
-        assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
-        assert result.output == {"text": "done"} and requests == 2
-        messages = (await runtime.history.messages("session", principal=runtime.default_principal)).items
-        # SDK instruction windows belong to the persisted working context, not the raw transcript.
-        context = await runtime._session_service.load_model_context("session", principal=runtime.default_principal)
-        parts = [part for message in context for part in message.parts]
+            assert encode_model_messages(await committed_messages()) == (Path(root) / "expected.json").read_bytes()
+        else:
+            await sessions.create_turn_session("session", principal=principal)
+        if unmanaged:
+            with pytest.raises(AIError) as rejected:
+                await sessions.start("session", "Load capability.", agent="default", principal=principal,
+                                     idempotency_key="unmanaged")
+            assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
+            assert rejected.value.safe_details["reason"] == "turn_agent_features_unsupported"
+            assert not requests and not calls
+            assert (await runtime.history.turn_session_state("session", principal=principal))["active_turn_id"] is None
+            return
+        turn = await sessions.start("session", "Continue." if resumed else "Load capability.",
+                                    agent="default", principal=principal, idempotency_key="resume" if resumed else "load")
+        if requires_approval and (resumed or eager):
+            waiting = await asyncio.wait_for(turn.wait(), 10)
+            assert waiting.status is ExecutionStatus.WAITING_DEFERRED, waiting.view
+            [approval] = await runtime.approvals.list(turn.key, principal=principal)
+            assert approval.tool_name == "activated" and approval.status is ApprovalStatus.PENDING
+            assert approval.arguments == {} and not calls
+            pending = await store.get_waiting_turn(turn.key)
+            assert pending is not None and pending.key == turn.key
+            [operation_id] = pending.approval_operation_ids
+            assert not pending.external_operation_ids
+            tools = persistence.checkpoint.tools
+            operation = await tools.get_operation(operation_id, tenant_id=principal.tenant_id)
+            assert operation is not None and operation.status is ToolOperationStatus.PENDING
+            assert operation.execution_id == turn.key.turn_id and operation.tool_call_id == "use-activated"
+            assert operation.capability_ref == CapabilityRef("tool", "activated", 1)
+            receipt = await runtime.approvals.decide(turn.key, ApprovalDecisionRequest(
+                principal, approval.approval_id, "approve-activated", ApprovalDecision.APPROVE,
+            ))
+            assert receipt.approval_id == approval.approval_id and receipt.decision is ApprovalDecision.APPROVE
+        result = await turn.wait_final(timeout_seconds=10)
+        assert result.status is ExecutionStatus.SUCCEEDED, result.view
+        assert result.view["output"] == {"text": "done"} and requests == 2
+        assert calls == (["activated"] if resumed or eager else [])
+        if requires_approval and (resumed or eager):
+            settled = await tools.list_by_execution(turn.key.turn_id, tenant_id=principal.tenant_id)
+            [completed] = [entry for entry in settled if entry.tool_name == "activated"]
+            assert completed.tool_operation_id == operation_id and completed.status is ToolOperationStatus.COMPLETED
+            assert completed.capability_ref == operation.capability_ref
+            repeated = await sessions.start("session", "Continue." if resumed else "Load capability.",
+                                            agent="default", principal=principal,
+                                            idempotency_key="resume" if resumed else "load")
+            assert repeated.key == turn.key and (await repeated.result()).view == result.view
+            assert calls == ["activated"] and requests == 2
+        if eager:
+            return
+        messages = await committed_messages()
+        parts = [part for message in messages for part in message.parts]
         assert any(isinstance(part, InstructionBaselinePart) for part in parts)
         assert any(isinstance(part, InstructionDeltaPart) and part.content == "replacement" for part in parts)
         if not resumed:
             (Path(root) / "expected.json").write_bytes(encode_model_messages(messages))
-            (Path(root) / "expected-context.json").write_bytes(encode_model_messages(context))
 
 
 @pytest.mark.parametrize("backend", ["local_sqlite", "sqlite"])
-def test_runtime_fresh_process_reopen_retains_instructions_and_deferred_activation(tmp_path: Path, backend: str) -> None:
+@pytest.mark.parametrize("requires_approval", (False, True))
+def test_runtime_fresh_process_reopen_retains_instructions_and_deferred_activation(
+    tmp_path: Path, backend: str, requires_approval: bool,
+) -> None:
     script = ("import asyncio, sys; from tests.ai.test_instruction_message_contract import _runtime_deferred_session; "
-              "asyncio.run(_runtime_deferred_session(sys.argv[1], sys.argv[2] == 'reopen', sys.argv[3]))")
+              "asyncio.run(_runtime_deferred_session(sys.argv[1], sys.argv[2] == 'reopen', sys.argv[3], requires_approval=sys.argv[4] == 'True'))")
     for phase in ("write", "reopen"):
-        result = subprocess.run([sys.executable, "-c", script, str(tmp_path), phase, backend],
+        result = subprocess.run([sys.executable, "-c", script, str(tmp_path), phase, backend, str(requires_approval)],
                                 capture_output=True, text=True, timeout=35)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+
+@pytest.mark.asyncio
+async def test_native_session_rejects_unmanaged_deferred_function_toolset(tmp_path: Path) -> None:
+    await _runtime_deferred_session(str(tmp_path), False, "sqlite", unmanaged=True)
+
+
+
+@pytest.mark.asyncio
+async def test_native_session_registered_eager_tool_approval_has_one_effect(tmp_path: Path) -> None:
+    await _runtime_deferred_session(str(tmp_path), False, "sqlite", requires_approval=True, eager=True)

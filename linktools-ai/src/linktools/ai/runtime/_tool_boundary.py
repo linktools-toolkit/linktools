@@ -77,6 +77,7 @@ class ManagedToolDescriptor:
     tool_class: ToolClass
     workspace_path_fields: tuple[str, ...] = ()
     capability_ref: CapabilityRef | None = None
+    requires_approval: bool = False
 
     def __post_init__(self) -> None:
         if self.effect_owner not in {"none", "tool_operation"}:
@@ -621,6 +622,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             kind="tool" if descriptor.capability_ref is None else descriptor.capability_ref.kind,
             effect_policy=descriptor.effect_policy,
         )
+        if descriptor.requires_approval and not approved:
+            raise ApprovalRequired()
         policy = self._permission_policy
         if policy is None or (
             not descriptor.tool_class.startswith("filesystem")

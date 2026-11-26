@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import Generic, Literal, TypeAlias, TypeVar, cast
 
 from pydantic_ai import Tool
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, Capability
 
 from ..core import ImmutableJsonMapping, JsonValue, validate_capability_id, validate_capability_revision
 from ..errors import AIError, ErrorCode
@@ -53,8 +53,18 @@ class CapabilityContribution(Generic[AppT]):
     )
 
     scope: Literal["agent", "runtime"] = field(default="agent", kw_only=True)
+    tool_members: tuple[CapabilityRef, ...] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
+        if self.tool_members is not None:
+            refs = tuple(self.tool_members)
+            if (self.kind != "capability" or self.scope != "agent" or type(self.value) is not Capability
+                    or self.value.id != self.id or self.value.toolsets
+                    or Capability.get_toolset(self.value).tools
+                    or any(not isinstance(ref, CapabilityRef) or ref.kind != "tool" for ref in refs)
+                    or len({ref.id for ref in refs}) != len(refs)):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            object.__setattr__(self, "tool_members", refs)
         if self.scope not in ("agent", "runtime") or (
             self.scope == "runtime" and self.kind != "capability"
         ):
@@ -122,6 +132,7 @@ class CapabilityContribution(Generic[AppT]):
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
         scope: Literal["agent", "runtime"] = "agent",
+        tool_members: tuple[CapabilityRef, ...] | None = None,
     ) -> "CapabilityContribution[AppT]":
         if kind not in {"tool", "capability"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -137,7 +148,7 @@ class CapabilityContribution(Generic[AppT]):
                 revision=revision,
                 config=config,
             ),
-            scope=scope,
+            scope=scope, tool_members=tool_members,
         )
 
     @classmethod
@@ -283,7 +294,7 @@ def _freeze_contribution(
         value.id,
         value.value,
         value.contract,
-        scope=value.scope,
+        scope=value.scope, tool_members=value.tool_members,
     )
 
 

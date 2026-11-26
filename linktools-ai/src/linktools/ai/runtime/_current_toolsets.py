@@ -47,6 +47,8 @@ def create_current_toolset(
     response_fixture: _ToolResponseManifest | None = None,
     result_callbacks: RunCallbacks | None = None,
     reserved_tool_names: Sequence[str] = (),
+    owned_tool_names: frozenset[str] = frozenset(),
+    manage_approval: bool = False,
     register_cleanup: Callable[[Callable[[bool], Awaitable[None]]], None] | None = None,
     workspace_provider: Callable[[], Awaitable[WorkspaceBackend | None]] | None = None,
 ) -> AbstractToolset[AgentContext[object]]:
@@ -58,7 +60,45 @@ def create_current_toolset(
     return _CurrentToolsets(
         provider, asset_readers, workspace_backend, tool_operations, tool_metrics, budget,
         response_fixture, result_callbacks, tuple(reserved_tool_names), register_cleanup, workspace_provider,
-        tool_effects, input_limits,
+        tool_effects, input_limits, owned_tool_names, manage_approval,
+    )
+
+
+def create_business_toolset(
+    candidates: Sequence[CapabilityContribution[object]], *,
+    id: str, tool_operations: ToolOperationBridge | None,
+    tool_metrics: ToolMetricContext | None, budget: RunBudgetContext | None,
+    tool_effects: ToolEffects, result_callbacks: RunCallbacks | None,
+    reserved_tool_names: Sequence[str], manage_approval: bool,
+) -> BoundaryToolset | None:
+    tools, descriptors = [], {}
+    for candidate in candidates:
+        metadata = candidate.contract.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        tool_class = tool_class_from_metadata(metadata)
+        if tool_class in {"memory", "filesystem.read", "filesystem.write", "shell"}:
+            continue
+        if tool_class != "business" or candidate.id in reserved_tool_names:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        tool = candidate.materialize_tool()
+        requires_approval = manage_approval and tool.requires_approval
+        if requires_approval:
+            # The native owner needs a pending receipt before the SDK parks the call.
+            tool.requires_approval = False
+        tools.append(tool)
+        descriptors[candidate.id] = replace(
+            managed_tool_descriptor_from_metadata(metadata),
+            capability_ref=CapabilityRef("tool", candidate.id, candidate.revision),
+            requires_approval=requires_approval,
+        )
+    if not tools:
+        return None
+    return BoundaryToolset(
+        (FunctionToolset(tools, id=id),), descriptors, id=id,
+        tool_operations=tool_operations, tool_metrics=tool_metrics, budget=budget,
+        tool_effects=tool_effects,
+        result_callbacks=result_callbacks,
     )
 
 
@@ -77,6 +117,8 @@ class _CurrentToolsets(AbstractToolset[AgentContext[object]]):
     workspace_provider: Callable[[], Awaitable[WorkspaceBackend | None]] | None
     tool_effects: ToolEffects
     input_limits: PromptLimits
+    owned_tool_names: frozenset[str]
+    manage_approval: bool
     _compiled: CompiledAgent | None = field(default=None, init=False)
     _owned: _MCPToolsetScope | None = field(default=None, init=False)
     _candidate: _MCPToolsetScope | None = field(default=None, init=False)
@@ -117,29 +159,14 @@ class _CurrentToolsets(AbstractToolset[AgentContext[object]]):
 
     async def business_tools(self, ctx: RunContext[AgentContext[object]]) -> AbstractToolset[AgentContext[object]] | None:
         assert self._compiled is not None
-        tools, descriptors = [], {}
-        for candidate in self._compiled.selected_tools:
-            metadata = candidate.contract.get("metadata")
-            if not isinstance(metadata, Mapping):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            tool_class = tool_class_from_metadata(metadata)
-            if tool_class in {"memory", "filesystem.read", "filesystem.write", "shell"}:
-                continue
-            if tool_class != "business" or candidate.id in self.reserved_tool_names:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            tools.append(candidate.materialize_tool())
-            descriptors[candidate.id] = replace(
-                managed_tool_descriptor_from_metadata(metadata),
-                capability_ref=CapabilityRef("tool", candidate.id, candidate.revision),
-            )
-        if not tools:
-            return None
-        boundary = BoundaryToolset(
-            (FunctionToolset(tools, id="linktools.business"),), descriptors, id="linktools.business",
-            tool_operations=self.tool_operations, tool_metrics=self.tool_metrics, budget=self.budget,
-            tool_effects=self.tool_effects,
-            result_callbacks=self.result_callbacks,
+        boundary = create_business_toolset(
+            tuple(candidate for candidate in self._compiled.selected_tools if candidate.id not in self.owned_tool_names),
+            id="linktools.business", tool_operations=self.tool_operations, tool_metrics=self.tool_metrics,
+            budget=self.budget, tool_effects=self.tool_effects, result_callbacks=self.result_callbacks,
+            reserved_tool_names=self.reserved_tool_names, manage_approval=self.manage_approval,
         )
+        if boundary is None:
+            return None
         bound = await boundary.for_run(ctx)
         return await bound.for_run_step(ctx)
 
