@@ -400,15 +400,25 @@ class AgentExecutor:
         policy = _runtime_feature_policy(compiled.runtime_contributions)
         if policy.memory_scope is not None and (not canonical_step or self._canonical_memory_store is None):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical memory requires a coowned Step store")
-        if (compiled.selected_capabilities or compiled.skill_definitions
-                or compiled.mcp_servers or compiled.selected_subagents
-                or policy.restart_checkpoints != canonical_step or policy.durable_trace != canonical_trace
-                or policy.tool_responses is not None):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "The Agent cannot run a regenerable conversation turn")
+        unsupported = [name for name, selected in (
+            ("agent_capabilities", compiled.selected_capabilities),
+            ("skills", compiled.skill_definitions),
+            ("mcp", compiled.mcp_servers),
+            ("subagents", compiled.selected_subagents),
+            ("checkpoints", policy.restart_checkpoints != canonical_step),
+            ("trace", policy.durable_trace != canonical_trace),
+            ("tool_response_fixture", policy.tool_responses is not None),
+        ) if selected]
+        if unsupported:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                "field": "agent", "reason": "turn_agent_features_unsupported", "features": unsupported,
+            })
         if compiled.selected_tools and not canonical_step:
             filesystems = tuple(item for item in policy.capabilities if type(item) is FileSystemCapability)
             if len(filesystems) != 1:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns require the native read-only tool surface")
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                    "field": "agent", "reason": "turn_tools_require_checkpoint_or_filesystem",
+                })
             permissions = filesystems[0].workspace.policy.tool_permissions
             for tool in compiled.selected_tools:
                 metadata = _bound_tool_metadata(tool)
@@ -420,7 +430,9 @@ class AgentExecutor:
                     or tool.contract.get("defer_loading", False)
                     or permissions.decide(tool_name=tool.id, tool_class="filesystem.read") != "allow"
                 ):
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns require allowed native read-only file tools")
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                        "field": "agent", "reason": "turn_tools_require_checkpoint_or_read_only",
+                    })
 
     async def execute_regenerable(
         self,

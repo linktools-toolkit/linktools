@@ -170,3 +170,32 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
         history = (await http.get(f"/api/session?session_id=chat&turn_id={turn_id}")).json()
         assert history["user_input"]["attachments"][0]["size"] == len(binary)
         assert request["attachments"][0]["data"] not in json.dumps(history)
+
+
+@pytest.mark.asyncio
+async def test_web_send_reports_default_agent_feature_that_prevents_admission(tmp_path):
+    class HostPolicy(TenantAuthorizationPolicy):
+        pass
+
+    features = RuntimeFeatures("web-send-diagnostics")
+    features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=("worker",))
+    features.agent("worker", allow_tools=(), allow_skills=(), allow_subagents=())
+    model_features(RuntimeUsageModels(), features)
+    async with (
+        Persistence.open("web-send-diagnostics", storage=PersistenceStorage.from_root(tmp_path)) as state,
+        Runtime.open(persistence=state, features=features, authorization=HostPolicy()) as runtime,
+        client(create_app(runtime=runtime)) as http,
+    ):
+        created = await http.post("/api/sessions", headers=_HEADERS, json={
+            "session_id": "chat", "request_id": "create",
+        })
+        assert created.status_code == 201, created.text
+        rejected = await http.post("/api/session/messages?session_id=chat", headers=_HEADERS, json={
+            "prompt": "question", "request_id": "send",
+        })
+        assert rejected.status_code == 400, rejected.text
+        assert rejected.json()["safe_details"] == {
+            "field": "agent", "reason": "turn_agent_features_unsupported", "features": ["subagents"],
+        }
+        state_view = await runtime.history.turn_session_state("chat", principal=runtime.default_principal)
+        assert state_view["active_turn_id"] is None

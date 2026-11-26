@@ -587,7 +587,9 @@ class _Console:
         if self.turn_sessions:
             if action == "messages":
                 if payload.get("planning"):
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns do not support plan mode")
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                        "field": "planning", "reason": "use_standalone_plan",
+                    })
                 prompt = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []))
                 turn_id = await runtime.sessions.start_turn(
                     session_id, prompt, agent="default",
@@ -1138,8 +1140,9 @@ def _debug_error(request: Request, error: AIError) -> None:
     if environ.debug:
         state = request.scope.get("state", {})
         _logger.debug(
-            "Web request failed: path=%s phase=%s code=%s operation_id=%s wire_type=%s missing_fields=%s",
+            "Web request failed: path=%s phase=%s code=%s operation_id=%s field=%r reason=%r wire_type=%s missing_fields=%s",
             request.url.path, state.get("phase", "request"), error.code.value, _operation_id(request, error),
+            error.safe_details.get("field"), error.safe_details.get("reason"),
             error.safe_details.get("wire_type"), error.safe_details.get("missing_fields"),
         )
 

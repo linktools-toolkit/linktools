@@ -118,7 +118,12 @@ def validate_execution_request_key(value: str) -> str:
 
 def validate_session_id(value: str) -> str:
     """Validate a session identifier within the SQL address budget."""
-    return _text(value, SESSION_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
+    try:
+        return _text(value, SESSION_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
+    except AIError as error:
+        raise AIError(error.code, safe_details={
+            "field": "session_id", "reason": "session_id_invalid", "max_bytes": SESSION_ID_MAX_BYTES,
+        }) from error
 
 
 def validate_task_graph_id(value: str) -> str:
