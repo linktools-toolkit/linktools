@@ -2081,13 +2081,25 @@ class LocalExecutionBackend:
         if row is None or row["state"] != ("ready" if ready else "accepted") or row["generation"] != generation:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         request = row["request_json"]
-        if (request.get("graph_execution") != key.turn_id or request.get("cwd") is not None
-                or request.get("principal") != {
+        if (request.get("graph_execution") != key.turn_id or "cwd" not in request
+                or "repository_instructions" not in request or request.get("principal") != {
                     "principal_id": principal.principal_id, "tenant_id": self._tenant_id, "kind": principal.kind,
                 }
                 or not isinstance(execution.binding, AgentBindingContract)
                 or row["binding_json"] != execution.binding.to_payload()):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        cwd = request["cwd"]
+        if cwd is not None:
+            if self._workspace is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted workspace is unavailable")
+            # Validate the stored relative path lexically. Do not resolve it
+            # through the mutable workspace or discover the instruction files again.
+            try:
+                self._workspace.validate_path(cwd)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        frozen_instructions = request["repository_instructions"]
+        instructions = None if frozen_instructions is None else RepositoryInstructions.from_payload(frozen_instructions)
         # This read resolves the admitted immutable native prompt, not the
         # request supplied by the current caller or its workspace.
         projection = await turns.get_history_turn(key, lineage=())
@@ -2121,9 +2133,9 @@ class LocalExecutionBackend:
             session_context=execution.session_context, remaining=_CONTEXT_BYTES - runner._input_bytes(prompt, stored),
         )
         return _AttachedGraphTurn(
-            key, generation, row["turn_no"], prompt, tuple(history), terminal_bytes, session["revision"], None,
+            key, generation, row["turn_no"], prompt, tuple(history), terminal_bytes, session["revision"], cwd,
             context_from, through, ImmutableJsonMapping(request["session_metadata"]), execution.session_context,
-            stored_input=stored_input, model_prompt=None if isinstance(restored, str) else tuple(restored),
+            repository_instructions=instructions, stored_input=stored_input, model_prompt=None if isinstance(restored, str) else tuple(restored),
             attachments=() if stored is None else stored_input_attachment_views(stored),
         )
 
@@ -2321,10 +2333,10 @@ class LocalExecutionBackend:
                 or not (execution.durable_trace or execution.restart_checkpoints)
                 or self._execution_buffer is not None):
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        binding = await self._execution_binding(execution, request.resolved_binding)
         if execution.restart_checkpoints:
-            binding = await self._execution_binding(execution, request.resolved_binding)
             self._require_attached_graph_step_launch(execution, runner, binding)
-            request = replace(request, resolved_binding=binding)
+        request = replace(request, resolved_binding=binding)
         await self._validate_start(request, execution)
         lease = task_invocation.task_lease
         if lease is None:
@@ -2341,7 +2353,7 @@ class LocalExecutionBackend:
             request_key=canonical_sha256([identity.scope, identity.idempotency_key]),
             prompt=request.user_prompt, principal=request.principal, tenant_id=self._tenant_id,
             authorization=authorization, task_repository=task_repository,
-            task_admission=task_admission, task_invocation=task_invocation,
+            task_admission=task_admission, task_invocation=task_invocation, binding=binding,
         )
         if receipt.idempotency.request_digest != identity.request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -4902,6 +4914,7 @@ class LocalExecutionBackend:
             compiled_agent = binding.compiled_agent
             accepted_context = await self.load_input_context(current.input_context)
             initial_repository_instructions = (
+                graph_turn.repository_instructions if graph_turn is not None else
                 await self.load_repository_instructions(current.repository_instructions)
                 if accepted_context is None else (
                     None if accepted_context.repository_instructions is None

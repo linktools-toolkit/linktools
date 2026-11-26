@@ -120,6 +120,7 @@ class _AttachedGraphTurn:
     context_through: int
     session_metadata: ImmutableJsonMapping
     session_context: SessionContext
+    repository_instructions: RepositoryInstructions | None = None
     attachments: Sequence[Mapping[str, JsonValue]] = ()
     stored_input: JsonValue = None
     model_prompt: tuple[UserContent, ...] | None = None
@@ -1275,7 +1276,7 @@ class _RegenerableTurnRunner:
         self, commands: StateCommands, reservation: ExecutionStartReservation, *,
         session_id: str, session: Mapping[str, object], request_key: str, prompt: CanonicalUserInput, principal: Principal, tenant_id: str,
         authorization: AuthorizationPolicy, task_repository: TaskRepositoryImpl,
-        task_admission: TaskGraphAdmission, task_invocation: TaskNodeInvocation,
+        task_admission: TaskGraphAdmission, task_invocation: TaskNodeInvocation, binding: AgentBinding,
     ) -> tuple[ExecutionStartReservationResult, _AttachedGraphTurn | None]:
         """Join an already prepared Graph reservation to one authorized native turn."""
         execution = reservation.execution
@@ -1305,9 +1306,8 @@ class _RegenerableTurnRunner:
         await self._authorize_lineage(lineage, principal=principal, tenant_id=tenant_id, authorization=authorization)
         config = session["config_json"]
         cwd = config.get("cwd")
-        if cwd is not None:
-            # Attaching a different workspace needs the original Graph instruction policy.
-            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        if await self.canonicalize_cwd(cwd) != cwd:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd"})
         captured = execution.stored_user_input
         native_input = None if captured is None else native_graph_input_content(captured)
         if (native_input is None or (native_input != prompt if isinstance(prompt, str)
@@ -1315,11 +1315,24 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         text = native_input if isinstance(native_input, str) else ""
         stored_input = None if isinstance(native_input, str) else encode_domain(captured)
+        instructions = None
+        resolver = self._resolver_for(binding)
+        if resolver is not None:
+            # Use the already frozen input provenance, not the current contents
+            # of attachment files. Scope cwd/path instructions only once here.
+            files = () if captured.view is None else captured.view.get("files", ())
+            documents = {}
+            for path in dict.fromkeys((cwd or ".", *(file["path"] for file in files))):
+                resolved = await resolver.resolve(path, exclude_sources=frozenset(documents))
+                for document in resolved.documents:
+                    documents.setdefault(document.source, document)
+            instructions = RepositoryInstructions(tuple(documents.values()))
+            resolver.validate(instructions)
         metadata = ImmutableJsonMapping(config.get("metadata", {}))
         request: dict[str, JsonValue] = {
             "prompt": text, "principal": asdict(principal), "thinking": execution.thinking,
             "session_metadata": dict(metadata), "cwd": cwd,
-            "repository_instructions": None,
+            "repository_instructions": None if instructions is None else instructions.to_payload(),
         }
         if execution.session_context == "current_turn":
             request["session_context"] = "current_turn"
@@ -1351,7 +1364,7 @@ class _RegenerableTurnRunner:
             return result, None
         return result, _AttachedGraphTurn(
             key, 1, through + 1, text, tuple(history), terminal_bytes, revision + 1,
-            cwd, context_from, through, metadata, execution.session_context,
+            cwd, context_from, through, metadata, execution.session_context, repository_instructions=instructions,
             stored_input=stored_input, model_prompt=None if isinstance(native_input, str) else tuple(native_input),
             attachments=stored_input_attachment_views(captured),
         )

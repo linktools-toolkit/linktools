@@ -15,6 +15,7 @@ from linktools.ai.history import History
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.session import CreateSessionRequest
 from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.task.engine import TaskEngine
@@ -24,12 +25,20 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("attachment", ("none", "file", "binary", "mixed"))
-async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: Path, attachment: str) -> None:
+@pytest.mark.parametrize("attachment", ("none", "file", "binary", "mixed", "cwd"))
+async def test_graph_step_reopens_exact_session_result_without_trace(
+    tmp_path: Path, attachment: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = 0
     seen: list[bytes] = []
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    package = workspace / "package"
+    package.mkdir()
+    root_rule, package_rule = workspace / "AGENTS.md", package / "AGENTS.md"
+    if attachment == "cwd":
+        root_rule.write_text("CAPTURED ROOT RULE", encoding="utf-8")
+        package_rule.write_text("CAPTURED PACKAGE RULE", encoding="utf-8")
     file = workspace / "source.txt"
     file.write_bytes(b"workspace-file")
     second = workspace / "second.txt"
@@ -45,13 +54,17 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
             "following text", BinaryContent(tail, media_type="application/octet-stream"),
         )
     expected = {
-        "none": [], "file": [b"workspace-file"], "binary": [binary],
+        "none": [], "cwd": [], "file": [b"workspace-file"], "binary": [binary],
         "mixed": [b"workspace-file", b"second-file", binary, tail],
     }[attachment]
 
     async def model(_messages, _info):
         nonlocal calls
         calls += 1
+        if attachment == "cwd":
+            assert "CAPTURED ROOT RULE" in (_info.instructions or "")
+            assert "CAPTURED PACKAGE RULE" in (_info.instructions or "")
+            assert "MUTATED RULE" not in (_info.instructions or "")
         seen.extend(
             item.data for message in _messages for part in message.parts
             if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
@@ -69,7 +82,8 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
         state = await stack.enter_async_context(Persistence.open(namespace, storage=storage))
         native = await state.create_step_store()
         stack.push_async_callback(native.close)
-        features = workspace_features(namespace, workspace=Workspace.load(workspace)) if files else RuntimeFeatures(namespace)
+        features = (workspace_features(namespace, workspace=Workspace.load(workspace))
+                    if files or attachment == "cwd" else RuntimeFeatures(namespace))
         features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
         features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
         features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
@@ -78,7 +92,29 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
             persistence=state, features=features, authorization=authorization,
         ))
         principal = runtime.default_principal
-        created = await runtime.sessions.create(CreateSessionRequest(principal, "graph-session", "create-session"))
+        created = await runtime.sessions.create(CreateSessionRequest(
+            principal, "graph-session", "create-session", cwd="package" if attachment == "cwd" else None,
+        ))
+        if attachment == "cwd":
+            dispatch = LocalExecutionBackend._dispatch_attached_graph
+
+            async def dispatch_from_capture(backend, request, execution, identity, turn, **kwargs):
+                assert turn.cwd == "package"
+                assert {doc.content.strip() for doc in turn.repository_instructions.documents} == {
+                    "CAPTURED ROOT RULE", "CAPTURED PACKAGE RULE",
+                }
+                assert execution.repository_instructions is None and execution.input_context is None
+                root_rule.write_text("MUTATED RULE", encoding="utf-8")
+                package_rule.unlink()
+                runner = kwargs["runner"]
+                restored = await backend._hydrate_attached_graph_recovery(
+                    execution, turn.key, turn.generation, runner=runner,
+                    principal=request.principal, authorization=authorization,
+                )
+                assert restored.cwd == "package" and restored.repository_instructions == turn.repository_instructions
+                return await dispatch(backend, request, execution, identity, restored, **kwargs)
+
+            monkeypatch.setattr(LocalExecutionBackend, "_dispatch_attached_graph", dispatch_from_capture)
         task = Task.from_agent("native.agent", runtime.agents.get())
         engine = await stack.enter_async_context(TaskEngine.open(
             task, persistence=state, context=runtime.context, authorization=authorization,

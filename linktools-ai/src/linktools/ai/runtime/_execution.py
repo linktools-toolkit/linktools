@@ -1510,7 +1510,7 @@ class DefaultExecutionService(TaskExecutionService):
             )
             if request.input_context.repository_instructions is not None:
                 RepositoryInstructions.from_payload(request.input_context.repository_instructions)
-        elif instruction_resolver is not None:
+        elif instruction_resolver is not None and graph_task is None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
                 if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
