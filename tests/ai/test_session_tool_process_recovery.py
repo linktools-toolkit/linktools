@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import traceback
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, SessionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
+from linktools.ai.errors import AIError
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -160,6 +162,30 @@ def _crash_native_process(root_path: str, phase: str) -> None:
     asyncio.run(run())
 
 
+@contextmanager
+def _recovery_diagnostic(phase: str):
+    try:
+        yield
+    except AIError as error:
+        # CI summarizes failures without a traceback. Report only typed codes,
+        # known internal reasons and frame locations, never exception payloads.
+        details = []
+        cause = error
+        for _ in range(3):
+            if cause is None:
+                break
+            code = cause.code.value if isinstance(cause, AIError) else type(cause).__name__
+            reason = cause.safe_details.get("reason") if isinstance(cause, AIError) else None
+            frames = list(traceback.walk_tb(cause.__traceback__))[-6:]
+            sites = ",".join(f"{Path(frame.f_code.co_filename).name}:{lineno}:{frame.f_code.co_name}"
+                             for frame, lineno in frames)
+            if reason in ("native_subagent_trace_incomplete", "native_child_reservation_missing"):
+                code += f":{reason}"
+            details.append(f"{code}[{sites}]")
+            cause = cause.__cause__
+        raise AssertionError(f"{phase}: {' -> '.join(details)}") from None
+
+
 def _crash_interruption_recovery(root_path: str, turn_id: str, traced: bool) -> None:
     root = Path(root_path)
     commit = RuntimeStepStore.commit_step
@@ -264,19 +290,23 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         assert receipt.tool_call_id == "stable-call"
         assert receipt.status is (ToolOperationStatus.CLAIMED if interrupted else ToolOperationStatus.COMPLETED)
         if phase == "projected_tool_checkpoint_trace":
-            captured = await runtime.history.turn_trace(_SESSION, turn_id, principal=principal)
+            with _recovery_diagnostic("pre-recovery durable Trace"):
+                captured = await runtime.history.turn_trace(_SESSION, turn_id, principal=principal)
             [projected_result] = [item for item in captured.items if item.payload.get("kind") == "TOOL_RESULT"]
             assert projected_result.payload["tool_call_id"] == "stable-call"
         repeated = await _send(runtime)
         assert repeated.key == key
         assert await turns.get_turn(key) == before
         assert provider_log.read_text().splitlines() == ["initial"]
-        assert not await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+        with _recovery_diagnostic("recovery before lease expiry"):
+            assert not await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
         # Simulate the DB lease reaching its expiry without sleeping the worker
         # lease duration. Recovery must acquire a new generation itself.
         await _expire(turns, key, generation=predecessor)
-        assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
-        result = await repeated.wait_final(timeout_seconds=10)
+        with _recovery_diagnostic("recovery after lease expiry"):
+            assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+        with _recovery_diagnostic("recovered terminal wait"):
+            result = await repeated.wait_final(timeout_seconds=10)
         assert result.key == key and result.status is ExecutionStatus.SUCCEEDED
         assert result.view["output"] == {"text": "done"}
         assert (await turns.get_turn(key))["generation"] == predecessor + 1
