@@ -621,7 +621,7 @@ class SqlSessionTurnReader:
         request = {name: value for name, value in row["request_json"].items() if name != "instruction_frontier"}
         return {**row, "request_json": request}
 
-    def _history_view_select(self, *, observe_lease: bool = False):
+    def _history_view_select(self, *, observe_lease: bool = False, include_authority: bool = False):
         from sqlalchemy import select
 
         columns = self._turns.c
@@ -637,6 +637,10 @@ class SqlSessionTurnReader:
                 (columns.state.in_(("accepted", "cancelling")) & (columns.lease_until <= sql_epoch_seconds()))
                 .label("needs_recovery"),
                 columns.request_json["split_step"].as_boolean().label("split_step"),
+            )
+        if include_authority:
+            statement = statement.add_columns(
+                columns.request_json["principal"]["principal_id"].as_string().label("owner_principal_id"),
             )
         return statement
 
@@ -654,15 +658,11 @@ class SqlSessionTurnReader:
                 lineage_predicate(columns, b"", lineage, after=0, through=lineage[-1].through),
             ),
         )
-        statement = self._history_view_select(observe_lease=True).where(
+        statement = self._history_view_select(observe_lease=True, include_authority=include_authority).where(
             columns.scope_key == self._scope,
             columns.turn_id == self._key(key.turn_id, NATIVE_TURN_ID_MAX_BYTES),
             scope,
         )
-        if include_authority:
-            statement = statement.add_columns(
-                columns.request_json["principal"]["principal_id"].as_string().label("owner_principal_id"),
-            )
         rows = await self._read_transcripts(statement, display=True)
         if not rows:
             return None
@@ -769,10 +769,10 @@ class SqlSessionTurnReader:
     async def turn_page(
         self, session_id: str, *, through: int, limit: int,
         lineage: tuple[SessionTurnSegment, ...] = (),
-        body_limit: int | None = None,
+        body_limit: int | None = None, include_authority: bool = False,
     ) -> tuple[Mapping[str, object], ...]:
         columns = self._turns.c
-        statement = self._history_view_select().where(
+        statement = self._history_view_select(include_authority=include_authority).where(
             columns.scope_key == self._scope,
             lineage_predicate(columns, self._key(session_id, TURN_SESSION_MAX_BYTES), lineage,
                               after=0, through=through),

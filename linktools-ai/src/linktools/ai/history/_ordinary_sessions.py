@@ -203,6 +203,41 @@ class SessionTurnTraceItem:
     payload: JsonValue
 
 
+def _project_tool_returns(
+    messages: tuple[ModelMessage, ...], tool_names: frozenset[str], tool_call_ids: frozenset[str] | None = None,
+) -> tuple[dict[str, JsonValue], ...]:
+    calls = set()
+    results = []
+    for message in messages:
+        if isinstance(message, ModelResponse):
+            for part in message.parts:
+                if (isinstance(part, ToolCallPart) and part.tool_name in tool_names
+                        and part.tool_name != CANONICAL_OUTPUT_TOOL_NAME
+                        and (tool_call_ids is None or part.tool_call_id in tool_call_ids)):
+                    calls.add((part.tool_name, part.tool_call_id))
+        elif isinstance(message, ModelRequest):
+            for part in message.parts:
+                if (isinstance(part, ToolReturnPart) and part.outcome == "success"
+                        and (part.tool_name, part.tool_call_id) in calls):
+                    if isinstance(part.content, (list, tuple)):
+                        value = []
+                        for fragment in part.content:
+                            try:
+                                value.append(normalize_json_value(fragment))
+                            except (TypeError, ValueError):
+                                # Omit typed SDK inputs (including media) from mixed returns.
+                                continue
+                        if part.content and not value:
+                            continue
+                    else:
+                        try:
+                            value = normalize_json_value(part.content)
+                        except (TypeError, ValueError):
+                            continue
+                    results.append({"tool_name": part.tool_name, "tool_call_id": part.tool_call_id, "value": value})
+    return tuple(results)
+
+
 class _OrdinarySessionHistory:
     def __init__(
         self, store: SqlSessionTurnReader, tenant_id: str, authorization: AuthorizationPolicy, signer: CursorSigner,
@@ -309,26 +344,57 @@ class _OrdinarySessionHistory:
 
     async def session(
         self, session_id: str, *, principal: Principal, cursor: str | None, limit: int, local_workspace: bool,
+        tool_return_names: frozenset[str] | None,
     ) -> dict[str, JsonValue]:
+        policy = None
+        if tool_return_names is not None:
+            if local_workspace or not tool_return_names:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            policy = self._require_tool_return_policy(principal)
         limit = min(validate_page_limit(limit), _TURN_PAGE_MAX)
         row = await self._session(session_id, principal, local_workspace=local_workspace)
         lineage = await self._authorize_lineage(row, principal)
         kind = "ORDINARY_TURNS"
-        digest = canonical_sha256({
+        filters: dict[str, JsonValue] = {
             "principal": principal_identity_payload(principal), "session": session_id, "local_workspace": local_workspace,
-        })
+        }
+        if tool_return_names is not None:
+            filters["tool_return_names"] = sorted(tool_return_names)
+        digest = canonical_sha256(filters)
         before = self._cursor_position(cursor, kind, digest)
         through = row["last_turn_no"] if before is None else min(row["last_turn_no"], before - 1)
-        turns = () if through == 0 else await self._store.turn_page(session_id, through=through, limit=limit + 1, lineage=lineage, body_limit=limit)
+        turns = () if through == 0 else await self._store.turn_page(
+            session_id, through=through, limit=limit + 1, lineage=lineage, body_limit=limit,
+            include_authority=policy is not None,
+        )
         next_cursor = self._next_cursor(turns[limit - 1]["turn_no"], kind, digest) if len(turns) > limit else None
-        return {
-            "session": _session_view(row),
-            "timeline": {"items": [
-                await _turn_view(turn, self._store.read_scalar_input, local_tool_feedback=local_workspace)
-                for turn in reversed(turns[:limit])
-            ],
-                         "next_cursor": next_cursor},
-        }
+        items = []
+        for turn in reversed(turns[:limit]):
+            view = await _turn_view(turn, self._store.read_scalar_input, local_tool_feedback=local_workspace)
+            if (policy is not None and tool_return_names is not None and turn["state"] == "succeeded"
+                    and turn["session_key"] == row["session_key"]):
+                owner = turn["owner_principal_id"]
+                if not isinstance(owner, str) or not owner:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                resource = ResourceRef(ResourceKind.EXECUTION, view["turn_id"], self._tenant_id, owner)
+                try:
+                    await policy.authorize(principal, AuthorizationAction.EXECUTION_READ, resource)
+                    granted = await policy.session_tool_return_names(principal, session_id, resource)
+                except AIError as error:
+                    if error.code is not ErrorCode.AUTHORIZATION_DENIED:
+                        raise
+                else:
+                    allowed = tool_return_names & granted
+                    if allowed:
+                        view["tool_returns"] = list(_project_tool_returns(turn["messages"], allowed))
+            items.append(view)
+        return {"session": _session_view(row), "timeline": {"items": items, "next_cursor": next_cursor}}
+
+    def _require_tool_return_policy(self, principal: Principal) -> SessionToolReturnAuthorization:
+        policy = self._authorization
+        if principal.kind == PrincipalKind.LOCAL_TRUSTED.value or not isinstance(policy, SessionToolReturnAuthorization):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        return policy
 
     async def _authorize_exact_turn(
         self, session_id: str, turn_id: str, principal: Principal, *, local_workspace: bool,
@@ -350,10 +416,9 @@ class _OrdinarySessionHistory:
         tool_names: frozenset[str], tool_call_ids: frozenset[str] | None,
     ) -> tuple[dict[str, JsonValue], ...]:
         """Read only successful JSON values for the host's selected tools."""
-        policy = self._authorization
-        if (principal.kind == PrincipalKind.LOCAL_TRUSTED.value
-                or not isinstance(policy, SessionToolReturnAuthorization) or not tool_names):
+        if not tool_names:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        policy = self._require_tool_return_policy(principal)
         resource = await self._authorize_exact_turn(session_id, turn_id, principal, local_workspace=False)
         granted = await policy.session_tool_return_names(principal, session_id, resource)
         if not tool_names <= granted:
@@ -365,36 +430,7 @@ class _OrdinarySessionHistory:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if row["state"] != "succeeded":
             return ()
-        calls = set()
-        results = []
-        for message in row["messages"]:
-            if isinstance(message, ModelResponse):
-                for part in message.parts:
-                    if (isinstance(part, ToolCallPart) and part.tool_name in tool_names
-                            and part.tool_name != CANONICAL_OUTPUT_TOOL_NAME
-                            and (tool_call_ids is None or part.tool_call_id in tool_call_ids)):
-                        calls.add((part.tool_name, part.tool_call_id))
-            elif isinstance(message, ModelRequest):
-                for part in message.parts:
-                    if (isinstance(part, ToolReturnPart) and part.outcome == "success"
-                            and (part.tool_name, part.tool_call_id) in calls):
-                        if isinstance(part.content, (list, tuple)):
-                            value = []
-                            for fragment in part.content:
-                                try:
-                                    value.append(normalize_json_value(fragment))
-                                except (TypeError, ValueError):
-                                    # Omit typed SDK inputs (including media) from mixed returns.
-                                    continue
-                            if part.content and not value:
-                                continue
-                        else:
-                            try:
-                                value = normalize_json_value(part.content)
-                            except (TypeError, ValueError):
-                                continue
-                        results.append({"tool_name": part.tool_name, "tool_call_id": part.tool_call_id, "value": value})
-        return tuple(results)
+        return _project_tool_returns(row["messages"], tool_names, tool_call_ids)
 
     async def turn_trace(
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,

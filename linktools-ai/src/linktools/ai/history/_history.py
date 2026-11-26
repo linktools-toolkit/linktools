@@ -411,11 +411,15 @@ class History:
 
     async def turn_session(
         self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
-        local_workspace: bool = False,
+        local_workspace: bool = False, tool_return_names: frozenset[str] | None = None,
     ) -> dict[str, JsonValue]:
-        """Read an authorized page of committed turns, newest page first."""
+        """Read an authorized page of committed turns, newest page first.
+
+        Hosts can request tool returns only with an explicit per-turn grant.
+        """
         return await self._require_ordinary_sessions().session(
-            session_id, principal=principal, cursor=cursor, limit=limit, local_workspace=local_workspace,
+            session_id, principal=principal, cursor=cursor, limit=limit,
+            local_workspace=local_workspace, tool_return_names=tool_return_names,
         )
 
     async def turn_tool_returns(
