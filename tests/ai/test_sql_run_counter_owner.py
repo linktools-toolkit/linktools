@@ -97,11 +97,11 @@ def test_run_admission_key_width_matches_the_longest_owned_address() -> None:
     from sqlalchemy.dialects import mysql
     from linktools.ai.persistence.schema import build_runtime_sql_metadata
 
-    key = record_key("n" * 128, "t" * 128, "conversation", "agent_run", ("界" * 21 + "a",))
+    key = record_key("n" * 64, "t" * 64, "conversation", "agent_run", ("界" * 21 + "a",))
     table = build_runtime_sql_metadata(frozenset(PersistenceDomain)).tables["ai_step_run_admissions"]
-    assert len(key) == 359
+    assert len(key) == 231
     assert record_owner_table(key) == table.name
-    assert str(table.c.key.type.compile(dialect=mysql.dialect())) == "VARBINARY(359)"
+    assert str(table.c.key.type.compile(dialect=mysql.dialect())) == "VARBINARY(231)"
     assert run_counter_address(run_counter_streams(key)[0]) == (key, "event_high_water")
 
 

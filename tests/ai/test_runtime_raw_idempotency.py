@@ -48,7 +48,7 @@ async def test_raw_replay_keys_preserve_maximum_bytes_and_component_boundaries(
     backend: str, tmp_path: Path,
 ) -> None:
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
-    namespace, tenant = "n" * 128, "t" * 128
+    namespace, tenant = "n" * 64, "t" * 64
     records = (_record("s" * 128), _record("a:b", "c"), _record("a", "b:c"))
     assert len(EXECUTION_KEY.encode("utf-8")) == 64
     async with Persistence.open(namespace, tenant_id=tenant, storage=storage) as state:
@@ -67,7 +67,7 @@ async def test_raw_replay_keys_preserve_maximum_bytes_and_component_boundaries(
             await repository.get(records[0].scope, EXECUTION_KEY + "x", tenant_id=tenant)
         assert invalid.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
         address = record_key(namespace, tenant, "execution", "idempotency", (records[0].scope, EXECUTION_KEY))
-        assert len(address) <= 768 and EXECUTION_KEY.encode("utf-8") in address
+        assert len(address) <= 360 and EXECUTION_KEY.encode("utf-8") in address
 
 
 @pytest.mark.parametrize(("value", "expected_key"), (

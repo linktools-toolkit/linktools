@@ -51,6 +51,8 @@ from ._redaction import (
 )
 from ._usage import UsageMetrics
 from ._validation import (
+    PERSISTENCE_NAMESPACE_MAX_BYTES,
+    TENANT_ID_MAX_BYTES,
     AGENT_RUN_ID_MAX_BYTES,
     validate_agent_run_id,
     LEASE_OWNER_MAX_BYTES,
@@ -130,6 +132,8 @@ from ._domain import PersistenceDomain
 from ._token_seed import token_seed
 
 __all__ = [
+    "PERSISTENCE_NAMESPACE_MAX_BYTES",
+    "TENANT_ID_MAX_BYTES",
     "AGENT_RUN_ID_MAX_BYTES",
     "validate_agent_run_id",
     "LEASE_OWNER_MAX_BYTES",

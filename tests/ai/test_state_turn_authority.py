@@ -996,7 +996,7 @@ async def test_state_turn_rejects_foreign_scope_without_mutation(tmp_path, backe
 async def test_pending_turn_uses_local_scope_with_maximum_namespace_and_compound_keys(tmp_path, backend):
     from linktools.ai.persistence.coordination import PendingTurnCoordination
 
-    namespace, tenant = '"' * 128, '"' * 128
+    namespace, tenant = '"' * 64, '"' * 64
     request_key = "s" * 128 + ":" + "k" * 128
     session_key = "request:" + request_key
     async with _open_base_store(backend, tmp_path / backend) as store:
@@ -1008,15 +1008,15 @@ async def test_pending_turn_uses_local_scope_with_maximum_namespace_and_compound
         coordinator = PendingTurnCoordination(None, authority, namespace=namespace, tenant_id=tenant)
         lifetime = coordinator.enter(session_key=session_key, request_key=request_key,
                                      request_digest=_request("digest") if backend == "sql" else "digest",
-                                     execution_id="e" * 128, owner_id=_owner("owner") if backend == "sql" else "owner")
+                                     execution_id="e" * 64, owner_id=_owner("owner") if backend == "sql" else "owner")
         async with lifetime as owner:
             records = await _authority_records(store, namespace=namespace, tenant_id=tenant)
             assert len(records) == (1 if backend == "sql" else 3)
             assert {record.data["scope"] for record in records} == {"runtime-pending-turn"}
             _validate_authority(records, namespace=namespace, tenant_id=tenant)
-            assert await coordinator.read_owner("e" * 128, tenant_id=tenant) == replace(owner, lease=None)
+            assert await coordinator.read_owner("e" * 64, tenant_id=tenant) == replace(owner, lease=None)
             assert await authority.renew_turn(owner.lease, lease_seconds=60) == owner
-        assert await coordinator.read_owner("e" * 128, tenant_id=tenant) is None
+        assert await coordinator.read_owner("e" * 64, tenant_id=tenant) is None
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)

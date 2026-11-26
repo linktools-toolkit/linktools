@@ -53,7 +53,7 @@ class StepPayloadSql:
         from sqlalchemy import LargeBinary, and_, cast, func, literal, or_, select
         from sqlalchemy.dialects.mysql import BINARY
         from ._archive import archive_scope_parts
-        from ._record_key import encode_key_components
+        from ._record_key import RECORD_KEY_MAX_BYTES, encode_key_components
         from ._step_payload_owner import payload_store_key
         table = self.table
         tag = encode_key_components(("step_payload",), 274)
@@ -68,9 +68,9 @@ class StepPayloadSql:
                 value = value.op("||")(part)
             return cast(value, LargeBinary())
 
-        logical_key = concatenate(literal(encode_key_components(("record",), 768)),
+        logical_key = concatenate(literal(encode_key_components(("record",), RECORD_KEY_MAX_BYTES)),
             func.substr(table.c.store_key, len(tag) + 1),
-            literal(encode_key_components(("archive", "archive_content"), 768) + b"\x00Rexecution-payload:"), digest)
+            literal(encode_key_components(("archive", "archive_content"), RECORD_KEY_MAX_BYTES) + b"\x00Rexecution-payload:"), digest)
         sort_key = concatenate(literal(b"execution-payload:"), digest)
         conditions = [func.substr(table.c.store_key, 1, len(tag)) == tag]
         if after is not None:

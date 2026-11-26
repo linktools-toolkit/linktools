@@ -56,16 +56,13 @@ There is no committed older Metrics schema or data format to migrate.
 
 Definition identity is the full `(namespace, metric_name, revision)` tuple.
 Observation identity is the full `(namespace, observation_id)` tuple. Namespace
-and observation ID retain their existing limits of 256 and 128 UTF-8 bytes.
+and observation ID retain their existing limits of 64 and 128 UTF-8 bytes.
 MySQL uses `utf8mb4_bin`; PostgreSQL uses `C` for the namespace and observation
 ID; SQLite uses its binary text comparison. No namespace or observation ID hash
 is stored, calculated or used as a second identity.
 
-Both unique keys index complete values. MySQL's ordinary observation indexes
-use `(namespace(128), kind, active_occurred_at)` and
-`(namespace(128), active_occurred_at)`. Queries still compare the complete
-namespace, so a shared 128-character prefix does not combine partitions.
-PostgreSQL and SQLite index the complete values.
+The unique and ordinary observation indexes use the complete namespace on
+all backends; there is no prefix index.
 
 `payload_digest` covers the complete canonical ObservationEnvelope before
 model decoding, including namespace and observation ID. Active reads and prune

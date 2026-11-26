@@ -9,6 +9,8 @@ from ..errors import AIError, ErrorCode
 from ._json import JsonValue, canonical_json_bytes, normalize_json_value
 
 
+PERSISTENCE_NAMESPACE_MAX_BYTES = 64
+TENANT_ID_MAX_BYTES = 64
 AGENT_RUN_ID_MAX_BYTES = 64
 LEASE_OWNER_MAX_BYTES = 64
 RESOURCE_ID_MAX_BYTES = 128
@@ -21,11 +23,11 @@ SESSION_REQUEST_KEY_MAX_BYTES = 64
 
 
 def validate_tenant_id(value: str) -> str:
-    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+    return _text(value, TENANT_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_persistence_namespace(value: str) -> str:
-    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+    return _text(value, PERSISTENCE_NAMESPACE_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_asset_namespace(value: str) -> str:

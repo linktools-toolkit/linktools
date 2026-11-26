@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256, validate_persistence_namespace, validate_tenant_id
+from ..core import (
+    PERSISTENCE_NAMESPACE_MAX_BYTES, TENANT_ID_MAX_BYTES, JsonValue, canonical_json_bytes,
+    canonical_sha256, validate_persistence_namespace, validate_tenant_id,
+)
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload, store_attachment_payload, validate_attachment_payload
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
@@ -54,16 +57,20 @@ def validate_archive_group_id(value: str) -> str:
     return value
 
 
+_ARCHIVE_SCOPE_MAX_BYTES = 3 * 2 + len("archive_scope") + PERSISTENCE_NAMESPACE_MAX_BYTES + TENANT_ID_MAX_BYTES
+_ARCHIVE_SCOPE_TOKEN_MAX_LENGTH = (_ARCHIVE_SCOPE_MAX_BYTES * 4 + 2) // 3
+
+
 def archive_scope_key(namespace: str, tenant_id: str) -> bytes:
     """Encode the physical archive partition directly from its exact owners."""
     return encode_key_components(("archive_scope", validate_persistence_namespace(namespace),
-                                  validate_tenant_id(tenant_id)), 403)
+                                  validate_tenant_id(tenant_id)), _ARCHIVE_SCOPE_MAX_BYTES)
 
 
 def archive_scope_parts(value: bytes) -> tuple[str, str]:
     """Validate persisted archive scope bytes and recover their exact owners."""
     try:
-        parts = decode_key_components(value, 403)
+        parts = decode_key_components(value, _ARCHIVE_SCOPE_MAX_BYTES)
         if len(parts) != 3 or parts[0] != "archive_scope":
             raise _integrity()
         namespace, tenant_id = parts[1:]
@@ -82,7 +89,7 @@ def archive_scope_token(value: bytes) -> str:
 def decode_archive_scope(value: str) -> bytes:
     """Accept only the single canonical unpadded URL-safe scope transport."""
     try:
-        if not isinstance(value, str) or not 1 <= len(value) <= 538:
+        if not isinstance(value, str) or not 1 <= len(value) <= _ARCHIVE_SCOPE_TOKEN_MAX_LENGTH:
             raise _integrity()
         raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
         if archive_scope_token(raw) != value:

@@ -206,7 +206,7 @@ def build_runtime_sql_metadata(
             "operation_key",
             LargeBinary(OPERATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(OPERATION_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Binary operation address, at most 768 bytes.",
+            comment=f"Binary operation address, at most {OPERATION_KEY_MAX_BYTES} bytes.",
         ),
         Column(
             "stream_key",

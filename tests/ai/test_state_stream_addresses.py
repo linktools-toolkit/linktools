@@ -27,7 +27,8 @@ def _tuple(*parts: str) -> bytes:
 
 
 def test_stream_components_preserve_exact_unicode_scope_and_empty_owner() -> None:
-    namespace, tenant, owner = "界" * 42 + "ab", "界" * 42 + "ab", "界" * 42 + "ab"
+    namespace = tenant = "界" * 21 + "a"
+    owner = "界" * 42 + "ab"
     address = stream_key(namespace, tenant, "trace", "event", (owner,))
     assert address == _tuple("stream", namespace, tenant, "trace", "event", owner)
     assert stream_key("ns", "tenant", "conversation", "session_list_tenant", ()) == _tuple(
@@ -67,12 +68,12 @@ def test_stream_and_receipt_bounds_preserve_current_wire_and_private_repr() -> N
     with pytest.raises(AIError) as snapshot:
         _decode_snapshot_sequences([{"stream_key": (key + b"x").hex(), "value": 1}])
     assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    namespace = capability = write = "界" * 42 + "ab"
-    tenant = run = "界" * 42 + "ab"
+    namespace = tenant = "界" * 21 + "a"
+    capability = write = run = "界" * 42 + "ab"
     receipt = capability_receipt_key(namespace, tenant, capability, (1 << 63) - 1, run, write)
     assert receipt == (b"\x02" + capability_store_key(namespace, tenant, capability)
                        + ((1 << 63) - 1).to_bytes(8, "big") + _tuple(run, write))
-    assert len(receipt) == 301 <= OPERATION_KEY_MAX_BYTES
+    assert len(receipt) == OPERATION_KEY_MAX_BYTES == 301
     assert capability_receipt_key(namespace, tenant, capability, 1, "a", "bc") != capability_receipt_key(
         namespace, tenant, capability, 1, "ab", "c",
     )

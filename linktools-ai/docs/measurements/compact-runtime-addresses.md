@@ -4,14 +4,17 @@ The 64-byte budget applies at a field's owner, not by truncating an encoded
 address. Existing `store_key` is already bounded independently. Common State
 columns and dedicated runtime owners must be budgeted separately.
 
-### Generic State columns that still require 768 bytes
+### Generic State columns and current limits
+
+Exact record, relation and stream addresses share a 640-byte ceiling. That
+budget includes framing and any compound owner parts, not a public business ID.
 
 | Table | Columns | Public writer that can use the full width |
 | --- | --- | --- |
 | `ai_state_records` | `key`, `scope_key`, `parent_key` | `StoredRecord` accepts opaque bytes; `RecordQuery` compares the complete scope or parent. |
 | `ai_state_facts` | `stream_key`, `owner_key` | `StoredFact` can refer to any such stream and record; owner-based deletion matches the original key exactly. |
 | `ai_state_counters` | `stream_key` | `StateTransaction.next_sequence` and batch counter operations accept a raw stream address. |
-| `ai_state_operations` | `operation_key`, `stream_key` | Generic `StoredOperation` accepts opaque keys independent of the built-in codecs. |
+| `ai_state_operations` | `operation_key` (301 bytes), `stream_key` (640 bytes) | The largest built-in operation receipt fits 301 bytes. Custom operation IDs share that limit; the independent opaque ordered stream still has a 640-byte contract. |
 
 Shorter built-in addresses do not justify shrinking a column shared with
 those callers. The SQL regressions in `test_state_stream_addresses.py` and
@@ -23,10 +26,21 @@ including direct SQL insertion and portable restore.
 
 | Table | Key | Scope | Parent |
 | --- | --- | --- | --- |
-| `ai_task_graphs` | 352 bytes: six framed components, namespace and tenant at 128 bytes each and Graph ID at 64 | Removed; graph headers have no scope | Removed; graph headers have no parent |
-| `ai_execution_records` | 488 bytes: up to 356 for Execution and 488 for its idempotency receipt | 428 bytes: full session or execution-idempotency resource relation | 367 bytes: full parent-execution relation |
-| `ai_step_run_admissions` | 359 bytes: reserved run address with a bounded 64-byte run ID; other key shapes stay in generic State | 436 bytes: full conversation relation | 367 bytes: full parent-run relation |
-| `ai_step_tool_operations` | 362 bytes: exact checkpoint address with a bounded 64-byte operation ID; other key shapes stay in generic State | 436 bytes: full agent-run relation | 437 bytes: full execution relation |
+| `ai_task_graphs` | 224 bytes: six framed components, namespace and tenant at 64 bytes each and Graph ID at 64 | Removed; graph headers have no scope | Removed; graph headers have no parent |
+| `ai_execution_records` | 360 bytes: up to 228 for Execution and 360 for its idempotency receipt | 300 bytes: full session or execution-idempotency resource relation | 239 bytes: full parent-execution relation |
+| `ai_step_run_admissions` | 231 bytes: reserved run address with a bounded 64-byte run ID; other key shapes stay in generic State | 308 bytes: full conversation relation | 239 bytes: full parent-run relation |
+| `ai_step_tool_operations` | 234 bytes: exact checkpoint address with a bounded 64-byte operation ID; other key shapes stay in generic State | 308 bytes: full agent-run relation | 309 bytes: full execution relation |
+
+Persistence namespaces and tenant IDs are limited at ingress to 64 UTF-8 bytes
+each. The same limits size the five native Step partition columns (146 bytes,
+including tuple framing), as well as dedicated keys, scope and parent addresses.
+This cutover changes the maximum accepted input, not the bytes of identities that
+fit. Existing stores beyond the new bounds must not be opened with the new schema
+until they have been rebuilt or migrated offline. Asset IDs and ObjectStore keys
+are separate opaque paths; a persistence ID limit must not truncate them.
+The generic `sort_key` still carries ordered data such as complete encoded
+memory paths for prefix scans. It is not an identity column and is not included
+in the raw-key ceiling.
 
 For the dedicated owners, the full bounded key and relation address are
 retained; the canonical reserved key determines which

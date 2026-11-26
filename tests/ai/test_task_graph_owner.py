@@ -61,7 +61,7 @@ def test_graph_owner_index_budget_and_constant_projection(dialect_name: str) -> 
     table.create(engine, checkfirst=False)
     indexes = [sql for sql in statements if sql.startswith("CREATE INDEX") or sql.startswith("CREATE UNIQUE INDEX")]
     assert len(table.c) == 16
-    assert table.c.key.type.length == 352
+    assert table.c.key.type.length == 224
     assert {"scope_key", "parent_key", "scope_locator", "parent_locator"}.isdisjoint(table.c.keys())
     import re
     constraints = re.findall(r"\b(?:PRIMARY KEY|UNIQUE) \([^()]+\)", " ".join(statements))
@@ -71,8 +71,8 @@ def test_graph_owner_index_budget_and_constant_projection(dialect_name: str) -> 
     key = record_key("n", "t", "task", "task_graph", ("g",))
     sql = str(select(record_owner_rows(metadata, keys=(key,))).compile(dialect=engine.dialect))
     assert "ai_task_graphs" in sql and "ai_state_records" not in sql
-    maximum = record_key("n" * 128, "t" * 128, "task", "task_graph", ("界" * 21 + "a",))
-    assert len(maximum) == 352 and record_owner_table(maximum) == "ai_task_graphs"
+    maximum = record_key("n" * 64, "t" * 64, "task", "task_graph", ("界" * 21 + "a",))
+    assert len(maximum) == 224 and record_owner_table(maximum) == "ai_task_graphs"
     assert record_owner_table(record_key("n", "t", "task", "task_graph", ("界" * 21 + "ab",))) == "ai_state_records"
     assert record_owner_table(record_key("n", "t", "task", "task_graph", ("graph", "child"))) == "ai_state_records"
 

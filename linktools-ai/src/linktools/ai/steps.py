@@ -12,11 +12,14 @@ from typing import Literal
 
 from pydantic_ai_harness.step_persistence import StepEvent
 
-from .core import validate_agent_run_id, validate_resource_id, validate_persistence_namespace, validate_tenant_id
+from .core import (
+    PERSISTENCE_NAMESPACE_MAX_BYTES, TENANT_ID_MAX_BYTES, validate_agent_run_id,
+    validate_persistence_namespace, validate_resource_id, validate_tenant_id,
+)
 from .errors import AIError
 
 
-NATIVE_STORE_KEY_MAX_BYTES = 274
+NATIVE_STORE_KEY_MAX_BYTES = 3 * 2 + len("native_store") + PERSISTENCE_NAMESPACE_MAX_BYTES + TENANT_ID_MAX_BYTES
 NATIVE_REPLAY_KEY_MAX_BYTES = 128
 
 

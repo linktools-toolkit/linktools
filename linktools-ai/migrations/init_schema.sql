@@ -6,10 +6,10 @@
 CREATE TABLE ai_state_records (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
-	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
+	`key` VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	scope_key VARBINARY(640) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-	parent_key VARBINARY(768) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
+	parent_key VARBINARY(640) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
 	kind VARCHAR(32) NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
@@ -39,12 +39,12 @@ CREATE TABLE ai_state_records (
 CREATE TABLE ai_execution_records (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(488) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
-	scope_key VARBINARY(428) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
+	`key` VARBINARY(360) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	scope_key VARBINARY(300) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-	parent_key VARBINARY(367) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
+	parent_key VARBINARY(239) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
 	kind VARCHAR(32) NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
-	sort_key VARBINARY(488) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
+	sort_key VARBINARY(360) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
 	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
@@ -89,7 +89,7 @@ CREATE TABLE ai_execution_records (
 CREATE TABLE ai_task_graphs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(352) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	`key` VARBINARY(224) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
@@ -113,9 +113,9 @@ CREATE TABLE ai_task_graphs (
 CREATE TABLE ai_state_facts (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the append-only fact stream.',
+	stream_key VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the append-only fact stream.',
 	sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the fact within its stream.',
-	owner_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record that owns this fact.',
+	owner_key VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record that owns this fact.',
 	kind VARCHAR(32) NOT NULL COMMENT 'Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier grouping facts such as one tool call.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Queryable fact state such as checkpoint completeness or tool-effect lifecycle state.',
@@ -135,7 +135,7 @@ CREATE TABLE ai_state_facts (
 CREATE TABLE ai_state_counters (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the monotonic sequence counter.',
+	stream_key VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the monotonic sequence counter.',
 	value BIGINT NOT NULL COMMENT 'Last committed value allocated by the sequence.',
 	stream_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete stream_key; raw identity must also match.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -149,8 +149,8 @@ CREATE TABLE ai_state_counters (
 CREATE TABLE ai_state_operations (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	operation_key VARBINARY(768) NOT NULL COMMENT 'Binary operation address, at most 768 bytes.',
-	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the ordered operation stream.',
+	operation_key VARBINARY(301) NOT NULL COMMENT 'Binary operation address, at most 301 bytes.',
+	stream_key VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the ordered operation stream.',
 	sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Current durable operation state used by replay and completion logic.',
 	compactable BOOL NOT NULL COMMENT 'Whether a terminal operation may be removed by ledger compaction.',
@@ -171,7 +171,7 @@ CREATE TABLE ai_state_operations (
 
 CREATE TABLE ai_step_runs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream conversation identifier.',
 	parent_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream parent run identifier.',
@@ -198,9 +198,9 @@ CREATE TABLE ai_step_runs (
 CREATE TABLE ai_step_run_admissions (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact namespace, tenant and domain partition admitting this run.',
-	`key` VARBINARY(359) NOT NULL COMMENT 'Canonical local run admission identity, independent of the registration owner.',
-	scope_key VARBINARY(436) COMMENT 'Conversation lookup identity derived from the validated domain projection.',
-	parent_key VARBINARY(367) COMMENT 'Parent-run lookup identity derived from the validated domain projection.',
+	`key` VARBINARY(231) NOT NULL COMMENT 'Canonical local run admission identity, independent of the registration owner.',
+	scope_key VARBINARY(308) COMMENT 'Conversation lookup identity derived from the validated domain projection.',
+	parent_key VARBINARY(239) COMMENT 'Parent-run lookup identity derived from the validated domain projection.',
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable ordering by projected start time and complete admission identity.',
 	storage_revision BIGINT NOT NULL COMMENT 'Optimistic local publication and release fence, independent of canonical registration.',
 	payload_json JSON NOT NULL COMMENT 'Typed canonical registration reference and actual domain projection differences; no copied run body.',
@@ -222,10 +222,10 @@ CREATE TABLE ai_step_run_admissions (
 CREATE TABLE ai_step_tool_operations (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(362) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
-	scope_key VARBINARY(436) COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
+	`key` VARBINARY(234) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	scope_key VARBINARY(308) COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-	parent_key VARBINARY(437) COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
+	parent_key VARBINARY(309) COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
@@ -254,7 +254,7 @@ CREATE TABLE ai_step_tool_operations (
 
 CREATE TABLE ai_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical uncompressed bytes for the partition content type.',
 	message LONGBLOB NULL COMMENT 'Raw or compressed canonical content bytes, absent for native attachment manifests.',
 	compression VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Message body compression codec: raw or zlib.',
@@ -272,7 +272,7 @@ CREATE TABLE ai_messages (
 
 CREATE TABLE ai_message_sequences (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the immutable sequence node.',
 	message_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
 	tree_count BIGINT NOT NULL COMMENT 'Number of ordered message occurrences in this tree.',
@@ -290,7 +290,7 @@ CREATE TABLE ai_message_sequences (
 
 CREATE TABLE ai_step_snapshots (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
 	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream conversation identifier.',
@@ -314,7 +314,7 @@ CREATE TABLE ai_step_snapshots (
 
 CREATE TABLE ai_step_events (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream boundary event kind.',
 	outcome VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Owned lifecycle outcome, absent for ordinary upstream events.',
@@ -470,7 +470,7 @@ CREATE TABLE ai_trace_events (
 
 CREATE TABLE ai_metric_definitions (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Metrics namespace owning the definition.',
+	namespace VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Metrics namespace owning the definition.',
 	metric_name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Versioned metric definition name.',
 	revision BIGINT NOT NULL COMMENT 'Metric semantic revision.',
 	observation_kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical observation kind consumed by the metric.',
@@ -485,7 +485,7 @@ CREATE TABLE ai_metric_definitions (
 
 CREATE TABLE ai_metric_observations (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original Metrics namespace retained after pruning.',
+	namespace VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original Metrics namespace retained after pruning.',
 	observation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original observation identity retained after pruning.',
 	payload_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical ObservationEnvelope payload.',
 	kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical observation kind query projection.',

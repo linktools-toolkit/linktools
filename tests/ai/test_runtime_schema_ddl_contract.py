@@ -364,9 +364,9 @@ def test_operation_address_column_is_bounded_binary_with_scoped_unique_key(diale
     from sqlalchemy.dialects import postgresql, sqlite
     table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION})).tables["ai_state_operations"]
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
-    assert table.c.operation_key.type.length == 768
+    assert table.c.operation_key.type.length == 301
     assert table.c.operation_key.type.compile(dialect=dialect) == {
-        "mysql": "VARBINARY(768)", "postgresql": "BYTEA", "sqlite": "BLOB",
+        "mysql": "VARBINARY(301)", "postgresql": "BYTEA", "sqlite": "BLOB",
     }[dialect_name]
     assert any(index.unique and tuple(column.name for column in index.columns) == ("store_key", "operation_locator")
                for index in table.indexes)
@@ -377,11 +377,11 @@ def test_execution_owner_sort_width_fits_maximum_exact_address() -> None:
     from linktools.ai.persistence._record_owner import record_owner_table, record_owner_values
     from linktools.ai.persistence.state import record_key, validate_sort_key
 
-    key = record_key("n" * 128, "t" * 128, "execution", "idempotency", ("s" * 128, "r" * 64))
+    key = record_key("n" * 64, "t" * 64, "execution", "idempotency", ("s" * 128, "r" * 64))
     table = build_sql_schema_metadata().tables["ai_execution_records"]
-    assert len(key) == 488
+    assert len(key) == 360
     assert record_owner_table(key) == table.name
-    assert table.c.sort_key.type.compile(dialect=mysql.dialect()) == "VARBINARY(488)"
+    assert table.c.sort_key.type.compile(dialect=mysql.dialect()) == "VARBINARY(360)"
     assert record_owner_values(table.name, {"key": key, "kind": "idempotency", "sort_key": key})["sort_key"] == key
     with pytest.raises(ValueError, match="execution sort key"):
         record_owner_values(table.name, {"key": key, "kind": "idempotency", "sort_key": key + b"x"})
@@ -403,9 +403,9 @@ def test_state_stream_and_counter_schema_uses_complete_binary_keys(dialect_name:
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
     for name in ("ai_state_facts", "ai_state_operations", "ai_state_counters"):
         table = metadata.tables[name]
-        assert table.c.stream_key.type.length == 768
+        assert table.c.stream_key.type.length == 640
         assert table.c.stream_key.type.compile(dialect=dialect) == {
-            "mysql": "VARBINARY(768)", "postgresql": "BYTEA", "sqlite": "BLOB",
+            "mysql": "VARBINARY(640)", "postgresql": "BYTEA", "sqlite": "BLOB",
         }[dialect_name]
         assert all(len(index.columns) <= 3 for index in table.indexes)
     facts = metadata.tables["ai_state_facts"]
@@ -541,9 +541,22 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
         "ai_state_counters": ("stream_key",),
         "ai_state_operations": ("operation_key", "stream_key"),
     }
-    raw_columns = {(name, column): 768 for name, columns in state_raw.items() for column in columns}
+    raw_columns = {(name, column): 640 for name, columns in state_raw.items() for column in columns}
     native_tables = ("ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_messages", "ai_message_sequences")
-    raw_columns.update({(name, "store_key"): 274 for name in native_tables})
+    raw_columns.update({
+        ("ai_execution_records", "key"): 360,
+        ("ai_execution_records", "scope_key"): 300,
+        ("ai_execution_records", "parent_key"): 239,
+        ("ai_task_graphs", "key"): 224,
+        ("ai_step_run_admissions", "key"): 231,
+        ("ai_step_run_admissions", "scope_key"): 308,
+        ("ai_step_run_admissions", "parent_key"): 239,
+        ("ai_step_tool_operations", "key"): 234,
+        ("ai_step_tool_operations", "scope_key"): 308,
+        ("ai_step_tool_operations", "parent_key"): 309,
+        ("ai_state_operations", "operation_key"): 301,
+    })
+    raw_columns.update({(name, "store_key"): 146 for name in native_tables})
     raw_columns.update({("ai_asset_entries", "asset_id"): 512, ("ai_objects", "object_key"): 1024})
     for (name, column_name), capacity in raw_columns.items():
         table = metadata.tables[name]
@@ -571,7 +584,7 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
         assert any(index.unique and tuple(index.columns.keys()) == ("store_locator", "run_id", "idempotency_key")
                    for index in table.indexes)
     for name in ("ai_metric_definitions", "ai_metric_observations"):
-        assert metadata.tables[name].c.namespace.type.length == 128
+        assert metadata.tables[name].c.namespace.type.length == 64
     assert metadata.tables["ai_asset_batch_receipts"].c.idempotency_key.type.length == 128
     for name, columns in (
         ("ai_asset_entries", ("namespace", "kind", "asset_locator")),

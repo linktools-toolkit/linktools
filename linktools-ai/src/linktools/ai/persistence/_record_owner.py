@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 from ..core import (
     AGENT_RUN_ID_MAX_BYTES, EXECUTION_ID_MAX_BYTES, EXECUTION_REQUEST_KEY_MAX_BYTES,
-    RESOURCE_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner,
+    PERSISTENCE_NAMESPACE_MAX_BYTES, RESOURCE_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES,
+    TENANT_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner,
 )
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
@@ -71,9 +72,11 @@ def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) ->
     )
 
 
+_SCOPE_OWNER_MAX_BYTES = PERSISTENCE_NAMESPACE_MAX_BYTES + TENANT_ID_MAX_BYTES
+
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
 # Framed execution and idempotency writer addresses share this physical owner.
-EXECUTION_RECORD_KEY_MAX_BYTES = 2 * 128 + max(
+EXECUTION_RECORD_KEY_MAX_BYTES = _SCOPE_OWNER_MAX_BYTES + max(
     36 + EXECUTION_ID_MAX_BYTES,
     40 + RESOURCE_ID_MAX_BYTES + EXECUTION_REQUEST_KEY_MAX_BYTES,
 )
@@ -81,21 +84,21 @@ EXECUTION_RECORD_KEY_MAX_BYTES = 2 * 128 + max(
 # Timestamp-prefixed sort addresses belong to other State owners.
 EXECUTION_SORT_KEY_MAX_BYTES = EXECUTION_RECORD_KEY_MAX_BYTES
 # Six framed components: record, namespace, tenant, task, task_graph, graph ID.
-TASK_GRAPH_KEY_MAX_BYTES = 32 + 2 * 128 + TASK_GRAPH_ID_MAX_BYTES
+TASK_GRAPH_KEY_MAX_BYTES = 32 + _SCOPE_OWNER_MAX_BYTES + TASK_GRAPH_ID_MAX_BYTES
 # Six framed components: record, namespace, tenant, checkpoint, tool_operation, ID.
-TOOL_OPERATION_KEY_MAX_BYTES = 42 + 2 * 128 + TOOL_OPERATION_ID_MAX_BYTES
+TOOL_OPERATION_KEY_MAX_BYTES = 42 + _SCOPE_OWNER_MAX_BYTES + TOOL_OPERATION_ID_MAX_BYTES
 # Six framed components: record, namespace, tenant, domain, agent_run, run ID.
 _RUN_ADMISSION_DOMAINS = frozenset(("trace", "checkpoint", "conversation"))
-RUN_ADMISSION_KEY_MAX_BYTES = 27 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + AGENT_RUN_ID_MAX_BYTES
+RUN_ADMISSION_KEY_MAX_BYTES = 27 + max(map(len, _RUN_ADMISSION_DOMAINS)) + _SCOPE_OWNER_MAX_BYTES + AGENT_RUN_ID_MAX_BYTES
 # Seven framed components: role, namespace, tenant, domain, agent_run, relation, ID.
-RUN_ADMISSION_SCOPE_MAX_BYTES = 40 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + RESOURCE_ID_MAX_BYTES
-RUN_ADMISSION_PARENT_MAX_BYTES = 35 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + AGENT_RUN_ID_MAX_BYTES
+RUN_ADMISSION_SCOPE_MAX_BYTES = 40 + max(map(len, _RUN_ADMISSION_DOMAINS)) + _SCOPE_OWNER_MAX_BYTES + RESOURCE_ID_MAX_BYTES
+RUN_ADMISSION_PARENT_MAX_BYTES = 35 + max(map(len, _RUN_ADMISSION_DOMAINS)) + _SCOPE_OWNER_MAX_BYTES + AGENT_RUN_ID_MAX_BYTES
 # Tool ledger accepts both exact resource IDs at the 128-byte public boundary.
-TOOL_OPERATION_SCOPE_MAX_BYTES = 52 + 2 * 128 + RESOURCE_ID_MAX_BYTES
-TOOL_OPERATION_PARENT_MAX_BYTES = 53 + 2 * 128 + RESOURCE_ID_MAX_BYTES
+TOOL_OPERATION_SCOPE_MAX_BYTES = 52 + _SCOPE_OWNER_MAX_BYTES + RESOURCE_ID_MAX_BYTES
+TOOL_OPERATION_PARENT_MAX_BYTES = 53 + _SCOPE_OWNER_MAX_BYTES + RESOURCE_ID_MAX_BYTES
 # Execution can carry a session scope or an EXECUTION idempotency resource scope.
-EXECUTION_SCOPE_MAX_BYTES = 2 * 128 + max(44 + RESOURCE_ID_MAX_BYTES, 58 + EXECUTION_ID_MAX_BYTES)
-EXECUTION_PARENT_MAX_BYTES = 47 + 2 * 128 + EXECUTION_ID_MAX_BYTES
+EXECUTION_SCOPE_MAX_BYTES = _SCOPE_OWNER_MAX_BYTES + max(44 + RESOURCE_ID_MAX_BYTES, 58 + EXECUTION_ID_MAX_BYTES)
+EXECUTION_PARENT_MAX_BYTES = 47 + _SCOPE_OWNER_MAX_BYTES + EXECUTION_ID_MAX_BYTES
 RECORD_OWNER_RELATION_WIDTHS = {
     "ai_execution_records": (EXECUTION_SCOPE_MAX_BYTES, EXECUTION_PARENT_MAX_BYTES),
     "ai_step_run_admissions": (RUN_ADMISSION_SCOPE_MAX_BYTES, RUN_ADMISSION_PARENT_MAX_BYTES),
@@ -123,7 +126,8 @@ _EDGE_OWNERS = {"ai_task_graphs": "task_graph", "ai_state_records": "record", "a
 def is_run_admission_address(parts: Sequence[str]) -> bool:
     """Recognize the bounded owner prefix and run ID shared by record and stream addresses."""
     return (len(parts) == 6 and parts[3] in _RUN_ADMISSION_DOMAINS
-            and all(1 <= len(value.encode("utf-8")) <= 128 for value in parts[1:3])
+            and all(1 <= len(value.encode("utf-8")) <= width for value, width in
+                    zip(parts[1:3], (PERSISTENCE_NAMESPACE_MAX_BYTES, TENANT_ID_MAX_BYTES)))
             and 1 <= len(parts[5].encode("utf-8")) <= AGENT_RUN_ID_MAX_BYTES)
 
 
@@ -154,7 +158,7 @@ def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
         if execution_identity_widths is not None and (
                 parts[3] != "execution" or len(parts) != 5 + len(execution_identity_widths)
                 or any(not 1 <= len(value.encode("utf-8")) <= width for value, width in
-                       zip((*parts[1:3], *parts[5:]), (128, 128, *execution_identity_widths)))
+                       zip((*parts[1:3], *parts[5:]), (PERSISTENCE_NAMESPACE_MAX_BYTES, TENANT_ID_MAX_BYTES, *execution_identity_widths)))
         ):
             return "ai_state_records"
         return _KIND_OWNERS.get(parts[4], "ai_state_records")

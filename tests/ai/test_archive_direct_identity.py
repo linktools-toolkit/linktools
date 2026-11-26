@@ -33,13 +33,13 @@ from .test_incremental_projection_boundaries import _storage
 
 
 def test_archive_scope_uses_exact_bounded_utf8_tuple_and_one_transport() -> None:
-    namespace, tenant = "界" * 42 + "xx", "😀" * 32
+    namespace, tenant = "界" * 21 + "x", "😀" * 16
     raw = archive_scope_key(namespace, tenant)
     expected = b"".join(len(value.encode()).to_bytes(2, "big") + value.encode()
                         for value in ("archive_scope", namespace, tenant))
-    assert raw == expected and len(raw) == 275
+    assert raw == expected and len(raw) == 147
     token = archive_scope_token(raw)
-    assert len(token) == 367 and "=" not in token
+    assert len(token) == 196 and "=" not in token
     assert decode_archive_scope(token) == raw
     assert archive_scope_parts(raw) == (namespace, tenant)
     assert archive_content_scope("é", "tenant") != archive_content_scope("e\u0301", "tenant")
@@ -194,7 +194,7 @@ async def test_archive_shared_store_isolates_exact_owners_and_round_trips_unicod
 async def test_archive_object_paths_keep_maximum_scope_and_hide_reversible_values() -> None:
     store, objects = InMemoryStateStore(), InMemoryObjectStore()
     await store.initialize()
-    namespace, tenant, group = "界" * 42 + "xx", "😀" * 32, "g/" + "x" * 126
+    namespace, tenant, group = "界" * 21 + "x", "😀" * 16, "g/" + "x" * 126
     archive = ContentArchive(store, group, namespace=namespace, tenant_id=tenant, object_store=objects)
     raw = encode_model_messages((ModelRequest(parts=[UserPromptPart(
         [BinaryContent(b"attachment", media_type="application/octet-stream")],
@@ -206,7 +206,7 @@ async def test_archive_object_paths_keep_maximum_scope_and_hide_reversible_value
         content = ContentRecord.from_record(record)
         reference, = content.object_refs()
         assert identity.startswith("model-message:") and len(identity) == 78
-        assert len(reference.key.encode("utf-8")) == 572
+        assert len(reference.key.encode("utf-8")) == 401
         assert reference.key == f"v1/archive/{group}/{archive.content_scope}/{reference.digest}"
         assert await archive.read_payload_object(reference) == b"attachment"
         stat = await objects.stat(reference.key)

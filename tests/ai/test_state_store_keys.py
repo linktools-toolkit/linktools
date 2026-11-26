@@ -59,7 +59,8 @@ def test_store_families_compact_complete_framed_tuples_once_and_keep_utf8_bounds
     assert STATE_GROUP_ARCHIVE_KEY == _tuple("state-group-archive")
     assert state_store_key("a", "bc", "d") != state_store_key("ab", "c", "d")
     assert state_store_key("é", "b", "c") != state_store_key("e\u0301", "b", "c")
-    namespace, tenant, capability = "界" * 42 + "ab", "界" * 42 + "ab", "界" * 42 + "ab"
+    namespace = tenant = "界" * 21 + "a"
+    capability = "界" * 42 + "ab"
     assert len(state_store_key(namespace, tenant, "capability:" + capability)) == 32
     assert len(capability_store_key(namespace, tenant, capability)) == 32
     for raw in _keys():

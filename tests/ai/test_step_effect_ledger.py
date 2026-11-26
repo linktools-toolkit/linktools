@@ -84,10 +84,10 @@ def test_effect_ledger_key_width_preserves_opaque_records() -> None:
     from linktools.ai.persistence.state import record_key
 
     metadata = build_runtime_sql_metadata(frozenset(PersistenceDomain))
-    assert metadata.tables["ai_step_tool_operations"].c.key.type.length == 362
+    assert metadata.tables["ai_step_tool_operations"].c.key.type.length == 234
     identity = "界" * 21 + "a"
-    maximum = record_key("n" * 128, "t" * 128, "checkpoint", "tool_operation", (identity,))
-    assert len(maximum) == 362
+    maximum = record_key("n" * 64, "t" * 64, "checkpoint", "tool_operation", (identity,))
+    assert len(maximum) == 234
     assert record_owner_table(maximum) == "ai_step_tool_operations"
     assert record_owner_table(record_key("n", "t", "checkpoint", "tool_operation", (identity + "b",))) == "ai_state_records"
     assert record_owner_table(record_key("n", "t", "plugin", "tool_operation", (identity,))) == "ai_state_records"

@@ -5,15 +5,15 @@
 import hashlib
 from collections.abc import Mapping
 
-from ..core import validate_persistence_namespace, validate_tenant_id
+from ..core import PERSISTENCE_NAMESPACE_MAX_BYTES, TENANT_ID_MAX_BYTES, validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ._archive import EXECUTION_PAYLOAD_CODEC, ContentRecord, archive_scope_key, archive_scope_parts
-from ._record_key import decode_key_components, encode_key_components
+from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
 from .state import StoredRecord, record_key
 
 PAYLOAD_PARTITION = "step_payload"
 PAYLOAD_CODEC = EXECUTION_PAYLOAD_CODEC
-PAYLOAD_PARTITION_MAX_BYTES = 274
+PAYLOAD_PARTITION_MAX_BYTES = 3 * 2 + len(PAYLOAD_PARTITION) + PERSISTENCE_NAMESPACE_MAX_BYTES + TENANT_ID_MAX_BYTES
 
 
 def payload_store_key(namespace: str, tenant_id: str) -> bytes:
@@ -42,7 +42,7 @@ def payload_store_locator(value: bytes) -> str:
 def payload_address(key: bytes) -> tuple[bytes, str] | None:
     """Resolve only the canonical fixed-codec archive content address."""
     try:
-        parts = decode_key_components(key, 768)
+        parts = decode_key_components(key, RECORD_KEY_MAX_BYTES)
     except (TypeError, ValueError, UnicodeError):
         return None
     if len(parts) != 6 or parts[0] != "record" or parts[3:5] != ("archive", "archive_content"):

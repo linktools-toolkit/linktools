@@ -28,20 +28,20 @@ from linktools.ai.steps import (
 
 
 def test_native_scope_and_replay_boundaries_preserve_original_values() -> None:
-    scope = native_store_key("界" * 42 + "xx", "🙂" * 32)
-    assert len(scope) == 274
+    scope = native_store_key("界" * 21 + "x", "🙂" * 16)
+    assert len(scope) == 146
     assert validate_native_store_key(scope) == scope
     assert decode_native_store_key(encode_native_store_key(scope)) == scope
     assert native_store_key("a:b", "c") != native_store_key("a", "b:c")
     for value in (None, "", "k", "k ", "é", "e\u0301", "🙂" * 32):
         assert validate_native_replay_key(value) == value
-    for namespace, tenant in (("x" * 129, "t"), ("n", "🙂" * 33)):
+    for namespace, tenant in (("x" * 65, "t"), ("n", "🙂" * 17)):
         with pytest.raises(AIError):
             native_store_key(namespace, tenant)
     for value in ("🙂" * 32 + "x", "\ud800", "\0", 1):
         with pytest.raises(ValueError):
             validate_native_replay_key(value)
-    for value in (scope + b"\0", b"", b"x" * 275, b"\0\x01\xff"):
+    for value in (scope + b"\0", b"", b"x" * 147, b"\0\x01\xff"):
         with pytest.raises(ValueError):
             validate_native_store_key(value)
     with pytest.raises(ValueError):
@@ -77,7 +77,7 @@ def test_native_schema_and_joins_preserve_binary_keys_within_index_and_bind_budg
     metadata = build_step_sql_metadata()
     for table_name in ("events", "snapshots"):
         table = metadata.tables["ai_step_" + table_name]
-        assert isinstance(table.c.store_key.type, LargeBinary) and table.c.store_key.type.length == 274
+        assert isinstance(table.c.store_key.type, LargeBinary) and table.c.store_key.type.length == 146
         assert isinstance(table.c.idempotency_key.type, LargeBinary) and table.c.idempotency_key.type.length == 128
         assert not table.c.idempotency_key.nullable
         keys = [index for index in table.indexes if index.unique]
@@ -86,10 +86,10 @@ def test_native_schema_and_joins_preserve_binary_keys_within_index_and_bind_budg
             assert len(index.columns) <= 3
             str(CreateIndex(index).compile(dialect=dialect))
         size = sum(column.type.length * (4 if isinstance(column.type, String) else 1) for column in keys[0].columns)
-        assert size == 896 < 3072
+        assert size == 640 < 3072
         str(CreateTable(table).compile(dialect=dialect))
     owner = SimpleNamespace(context=SimpleNamespace(dialect=dialect), store_key=b"state")
-    query = NativeEventReferences(owner, namespace="界" * 42 + "xx", tenant_id="🙂" * 32).statement(query=FactQuery(b"events"))
+    query = NativeEventReferences(owner, namespace="界" * 21 + "x", tenant_id="🙂" * 16).statement(query=FactQuery(b"events"))
     compiled = query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
     sql = str(compiled).upper()
     assert "CONVERT_TO(" in sql if name == "postgresql" else " AS BINARY)" in sql if name == "mysql" else " AS BLOB)" in sql
@@ -309,7 +309,7 @@ async def test_recovery_requests_bound_maximum_execution_identity_in_both_launch
     from .test_local_execution_recovery import _record
 
     keys = []
-    for identity in ("🙂" * 32, "x" * 128):
+    for identity in ("🙂" * 16, "x" * 64):
         execution = replace(_record(), execution_id=identity, recovery=ExecutionRecoveryDetail(agent_run_id="run"))
         port = SimpleNamespace(tenant_id="tenant", validate_binding=AsyncMock(return_value=None),
             _reconcile_session_recovery=AsyncMock(return_value=True), _recovery_idempotency=AsyncMock(return_value=None),
@@ -320,7 +320,7 @@ async def test_recovery_requests_bound_maximum_execution_identity_in_both_launch
             expected_revision=None, recovery_operation=None, resolved_binding=None)
         first = port.launch.call_args.args[0].idempotency_key
         decision = SimpleNamespace(execution=execution, binding=None)
-        local = SimpleNamespace(_tenant_id="tenant", _recovery_coordinator=SimpleNamespace(
+        local = SimpleNamespace(_tenant_id="tenant", _turn_owners={}, _recovery_coordinator=SimpleNamespace(
             reconcile_deferred=AsyncMock(return_value=decision)), restore_user_input=port.restore_user_input,
             _prepare_recovery_relaunch=lambda value: True, launch=AsyncMock())
         await LocalExecutionBackend._reconcile_deferred_owned(local, identity, tenant_id="tenant")

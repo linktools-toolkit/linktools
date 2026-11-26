@@ -27,11 +27,12 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 
-OPERATION_KEY_MAX_BYTES = 768
-STREAM_KEY_MAX_BYTES = 768
+# Two length-prefixed 128-byte caller identities, a tag, 32-byte partition and revision.
+OPERATION_KEY_MAX_BYTES = 301
+STREAM_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
 STORE_KEY_MAX_BYTES = 64
 _STORE_SOURCE_MAX_BYTES = 768
-RELATION_KEY_MAX_BYTES = 768
+RELATION_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
 PARENT_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
 
 
@@ -1180,7 +1181,7 @@ class StateStorageGroup(Protocol):
     ) -> "StateStore | None":
         """Borrow an isolated logical store owned by this existing group.
 
-        Keys are opaque binary storage identities of 1..768 bytes. Open outside
+        Keys are opaque binary storage identities bounded by STREAM_KEY_MAX_BYTES. Open outside
         transaction callbacks; opening never changes record keys or transaction boundaries.
         Read-only opens do not create partitions. The group owns their lifetime.
         """
