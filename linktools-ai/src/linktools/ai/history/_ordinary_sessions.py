@@ -10,12 +10,14 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ThinkingPart, ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessage, ModelRequest, ModelResponse, TextPart, ThinkingPart, ToolCallPart, ToolReturnPart,
+)
 
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, CursorSigner, ExecutionStatus, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
-    ResourceRef, SessionListingAuthorization, TenantAuthorizationPolicy, UsageMetrics, canonical_sha256, decode_cursor, encode_cursor,
-    principal_identity_payload, validate_execution_id, validate_page_limit, validate_session_id,
+    ResourceRef, SessionListingAuthorization, SessionToolReturnAuthorization, TenantAuthorizationPolicy, UsageMetrics, canonical_sha256, decode_cursor, encode_cursor,
+    normalize_json_value, principal_identity_payload, validate_execution_id, validate_page_limit, validate_session_id,
 )
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
@@ -328,25 +330,77 @@ class _OrdinarySessionHistory:
                          "next_cursor": next_cursor},
         }
 
-    async def _authorize_turn_trace(
+    async def _authorize_exact_turn(
         self, session_id: str, turn_id: str, principal: Principal, *, local_workspace: bool,
-    ) -> None:
+    ) -> ResourceRef:
         validate_execution_id(turn_id)
         await self._session(session_id, principal, local_workspace=local_workspace)
         key = SessionTurnKey(session_id, turn_id)
         owner = await self._store.get_turn(key)
         if owner is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal, AuthorizationAction.EXECUTION_READ,
-            ResourceRef(ResourceKind.EXECUTION, turn_id, self._tenant_id, owner["request_json"]["principal"]["principal_id"]),
+        resource = ResourceRef(
+            ResourceKind.EXECUTION, turn_id, self._tenant_id, owner["request_json"]["principal"]["principal_id"],
         )
+        await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, resource)
+        return resource
+
+    async def tool_returns(
+        self, session_id: str, turn_id: str, *, principal: Principal,
+        tool_names: frozenset[str], tool_call_ids: frozenset[str] | None,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        """Read only successful JSON values for the host's selected tools."""
+        policy = self._authorization
+        if (principal.kind == PrincipalKind.LOCAL_TRUSTED.value
+                or not isinstance(policy, SessionToolReturnAuthorization) or not tool_names):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        resource = await self._authorize_exact_turn(session_id, turn_id, principal, local_workspace=False)
+        granted = await policy.session_tool_return_names(principal, session_id, resource)
+        if not tool_names <= granted:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        row = await self._store.get_history_turn(
+            SessionTurnKey(session_id, turn_id), lineage=(), include_authority=True,
+        )
+        if row is None or row["owner_principal_id"] != resource.owner_principal_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if row["state"] != "succeeded":
+            return ()
+        calls = set()
+        results = []
+        for message in row["messages"]:
+            if isinstance(message, ModelResponse):
+                for part in message.parts:
+                    if (isinstance(part, ToolCallPart) and part.tool_name in tool_names
+                            and part.tool_name != CANONICAL_OUTPUT_TOOL_NAME
+                            and (tool_call_ids is None or part.tool_call_id in tool_call_ids)):
+                        calls.add((part.tool_name, part.tool_call_id))
+            elif isinstance(message, ModelRequest):
+                for part in message.parts:
+                    if (isinstance(part, ToolReturnPart) and part.outcome == "success"
+                            and (part.tool_name, part.tool_call_id) in calls):
+                        if isinstance(part.content, (list, tuple)):
+                            value = []
+                            for fragment in part.content:
+                                try:
+                                    value.append(normalize_json_value(fragment))
+                                except (TypeError, ValueError):
+                                    # Omit typed SDK inputs (including media) from mixed returns.
+                                    continue
+                            if part.content and not value:
+                                continue
+                        else:
+                            try:
+                                value = normalize_json_value(part.content)
+                            except (TypeError, ValueError):
+                                continue
+                        results.append({"tool_name": part.tool_name, "tool_call_id": part.tool_call_id, "value": value})
+        return tuple(results)
 
     async def turn_trace(
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
         source: StateStepArchive | None, cursor: str | None, limit: int,
     ) -> Page[SessionTurnTraceItem]:
-        await self._authorize_turn_trace(session_id, turn_id, principal, local_workspace=local_workspace)
+        await self._authorize_exact_turn(session_id, turn_id, principal, local_workspace=local_workspace)
         if source is None:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         limit = validate_page_limit(limit)
@@ -391,7 +445,7 @@ class _OrdinarySessionHistory:
         source: StateStepArchive | None, cursor: str | None, limit: int,
         include_content: bool, model_request_seq: int | None,
     ) -> Page[dict[str, JsonValue]]:
-        await self._authorize_turn_trace(session_id, turn_id, principal, local_workspace=local_workspace)
+        await self._authorize_exact_turn(session_id, turn_id, principal, local_workspace=local_workspace)
         if include_content and not local_workspace:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         limit = validate_page_limit(limit)

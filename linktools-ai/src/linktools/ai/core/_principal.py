@@ -83,6 +83,17 @@ class SessionListingAuthorization(AuthorizationPolicy, Protocol):
         ...
 
 
+@runtime_checkable
+class SessionToolReturnAuthorization(AuthorizationPolicy, Protocol):
+    """Optional host grant for reading selected business tool returns."""
+
+    async def session_tool_return_names(
+        self, principal: Principal, session_id: str, turn: ResourceRef,
+    ) -> "frozenset[str]":
+        """Return the tool names explicitly granted on the exact authorized turn."""
+        ...
+
+
 def service_principal(tenant_id: str, principal_id: str) -> Principal:
     return Principal(principal_id=principal_id, tenant_id=tenant_id, kind=PrincipalKind.SERVICE.value)
 
@@ -126,4 +137,4 @@ class TenantAuthorizationPolicy:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
 
-__all__ = ["AuthorizationAction", "AuthorizationPolicy", "ResourceRef", "SessionListingAuthorization", "TenantAuthorizationPolicy", "service_principal"]
+__all__ = ["AuthorizationAction", "AuthorizationPolicy", "ResourceRef", "SessionListingAuthorization", "SessionToolReturnAuthorization", "TenantAuthorizationPolicy", "service_principal"]

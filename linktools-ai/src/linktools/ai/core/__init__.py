@@ -41,6 +41,7 @@ from ._principal import (
     AuthorizationPolicy,
     ResourceRef,
     SessionListingAuthorization,
+    SessionToolReturnAuthorization,
     TenantAuthorizationPolicy,
     service_principal,
 )
@@ -165,6 +166,7 @@ __all__ = [
     "AuthorizationAction",
     "AuthorizationPolicy",
     "SessionListingAuthorization",
+    "SessionToolReturnAuthorization",
     "CursorPayload",
     "CursorSigner",
     "DEFAULT_DISCOVERY_POLICY",

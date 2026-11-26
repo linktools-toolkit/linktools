@@ -418,6 +418,18 @@ class History:
             session_id, principal=principal, cursor=cursor, limit=limit, local_workspace=local_workspace,
         )
 
+    async def turn_tool_returns(
+        self, session_id: str, turn_id: str, *, principal: Principal,
+        tool_names: frozenset[str], tool_call_ids: frozenset[str] | None = None,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        """Read host-granted business JSON returns from one exact committed turn.
+
+        Mixed returns keep their JSON fragments in order and omit typed SDK content.
+        """
+        return await self._require_ordinary_sessions().tool_returns(
+            session_id, turn_id, principal=principal, tool_names=tool_names, tool_call_ids=tool_call_ids,
+        )
+
     async def turn_trace(
         self, session_id: str, turn_id: str, *, principal: Principal,
         local_workspace: bool = False, cursor: str | None = None, limit: int = 100,

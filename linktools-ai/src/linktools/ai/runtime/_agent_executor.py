@@ -76,6 +76,7 @@ from ..capability import (
     RunCallbackScope,
     bind_run_callbacks,
     PydanticToolControlCapability,
+    ProviderMessagesCapability,
     ReferencedInputsCapability,
     SkillCapability,
     SkillDefinition,
@@ -419,7 +420,8 @@ class AgentExecutor:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical memory requires a coowned Step store")
         unsupported = [name for name, selected in (
             ("agent_capabilities", any(
-                not canonical_step or split_step or type(item.value) is not ReferencedInputsCapability
+                not canonical_step or split_step
+                or type(item.value) not in (ReferencedInputsCapability, ProviderMessagesCapability)
                 for item in compiled.selected_capabilities
             )),
             ("skills", compiled.skill_definitions and (not canonical_step or split_step)),

@@ -40,6 +40,7 @@ from ..capability import (
     CapabilityLoadContext,
     ToolEffectPolicy,
     ToolResponsesCapability,
+    ProviderMessagesCapability,
     ReferencedInputsCapability,
     FileSystemCapability,
     capture_contributions,
@@ -385,9 +386,9 @@ def _runtime_declarations(contributions):
             filesystem_capabilities.append(value)
         else:
             def collect_leaf(leaf: AbstractCapability[object]) -> None:
-                if isinstance(leaf, ReferencedInputsCapability) and scope != "agent":
+                if isinstance(leaf, (ReferencedInputsCapability, ProviderMessagesCapability)) and scope != "agent":
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                                  "ReferencedInputsCapability requires Agent scope")
+                                  f"{type(leaf).__name__} requires Agent scope")
                 if isinstance(leaf, ToolResponsesCapability):
                     response_capabilities.append(leaf)
                 elif isinstance(leaf, ShellCapability):
