@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Rejected ordinary Trace payloads still settle admitted Execution control."""
+"""Rejected durable Trace payloads still settle independent Execution control."""
 
 import asyncio
 from contextvars import ContextVar
@@ -11,7 +11,6 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import TraceCapability
-from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import CommitPolicy, ExecutionStatus, OperationStatus, PersistenceDomain, ResourceKind, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
@@ -99,8 +98,8 @@ async def test_rejected_trace_payload_finishes_source_control_without_replaying_
                 async def reject_terminal(*args, **kwargs):
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
                 monkeypatch.setattr(backend._runtime_commands, "commit_terminal_checkpoint", reject_terminal)
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("question", idempotency_key="request")
+            agent = runtime.agents.get()
+            execution = await agent.start("question", idempotency_key="request")
             if source_rejection:
                 with pytest.raises(AIError):
                     await execution.wait(timeout_seconds=5)
@@ -144,14 +143,12 @@ async def test_rejected_trace_payload_finishes_source_control_without_replaying_
                 assert "rejected terminal marker" not in repr(events_prefix)
             else:
                 assert "rejected response body" not in repr(resolved_prefix)
-            session_record = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-            assert session_record.active_execution_id is None
             if ack_failure:
                 assert buffer.ack_calls > 0
                 buffer.ack_failure = False
             if not source_rejection:
                 buffer.rejecting = False
-                following = await session.start("next question", idempotency_key="following")
+                following = await agent.start("next question", idempotency_key="following")
                 assert (await following.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
                 assert calls == (1 if rejection == "before_provider" else 2)
 
@@ -221,8 +218,8 @@ async def test_trace_buffer_cancellation_keeps_control_settled(tmp_path, monkeyp
             archive = store.read_store(PersistenceDomain.TRACE)
             repository = persistence.execution.executions
             trace_frames, terminal_frames = _track_source_transactions(monkeypatch, archive, repository)
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("question")
+            agent = runtime.agents.get()
+            execution = await agent.start("question")
             await asyncio.wait_for(entered.wait(), 5)
             queued = tuple(store.trace_persistence._buffers.values())
             assert len(queued) == 1
@@ -245,8 +242,6 @@ async def test_trace_buffer_cancellation_keeps_control_settled(tmp_path, monkeyp
                 execution.execution_id, CancelExecutionRequest(runtime.default_principal, "cancel"),
             )
             assert repeated.cancelled and calls == 1
-            session_record = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-            assert session_record.active_execution_id is None
             assert len(terminal_frames) == 1 and trace_frames
             if mode == "terminal":
                 assert all(value is terminal_frames[0] for value in trace_frames)

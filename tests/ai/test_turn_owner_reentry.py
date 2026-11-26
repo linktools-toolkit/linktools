@@ -23,6 +23,7 @@ class _Backend(LocalExecutionBackend):
     def __init__(self):
         self._tenant_id = "tenant"
         self._turn_owners = {}
+        self._native_parents = {}
         self._tasks = {}
         self._handoff_scopes = {}
         self._turn_monitors = {}

@@ -55,7 +55,7 @@ async def test_sql_session_start_reads_one_authorized_session_row(tmp_path, entr
             await agent.create_session("session")
             if entry == "loaded":
                 session = await runtime.sessions.get("session", principal=principal)
-            engine = state.conversation.sessions.state_store.storage_group.context.engine
+            engine = state.session_turns._context.engine
             selects = []
             admission_task = asyncio.current_task()
 
@@ -109,7 +109,7 @@ async def test_canonical_sql_planning_reads_one_authorized_snapshot(tmp_path, bo
             principal = runtime.default_principal
             await runtime.sessions.create_turn_session("session", principal=principal)
             agent = runtime.agents.get() if bound_agent else "default"
-            engine = state.conversation.sessions.state_store.storage_group.context.engine
+            engine = state.session_turns._context.engine
             event.listen(engine.sync_engine, "before_cursor_execute", capture)
             try:
                 with TurnObserver(runtime, "session", principal, local_workspace=True) as observer:
@@ -180,7 +180,7 @@ async def test_session_start_preserves_create_and_reauthorizes_created_record(mo
 
 @pytest.mark.parametrize("change", ("owner-before-start", "owner-in-policy", "owner-in-run-policy", "closed", "agent", "agent-in-policy", "cwd-in-policy"))
 @pytest.mark.parametrize("terminal", (False, True))
-async def test_session_start_rechecks_live_authority_status_and_binding(tmp_path, change, terminal):
+async def test_session_start_rechecks_live_authority_status_and_binding(change, terminal):
     calls = 0
     armed = False
 
@@ -209,8 +209,7 @@ async def test_session_start_rechecks_live_authority_status_and_binding(tmp_path
     if terminal:
         features.capability(ExecutionCapability(retain_history=True,
             commit=CommitPolicy.terminal(buffer=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))), scope="runtime")
-    storage = PersistenceStorage.sqlite(tmp_path / "state.db",
-        coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None)
+    storage = PersistenceStorage.in_memory()
     async with Persistence.open("session-start-preparation", storage=storage) as state:
         async with Runtime.open(persistence=state, features=features, metrics=None, authorization=Policy()) as runtime:
             await runtime.agents.get().create_session("session")
@@ -453,10 +452,7 @@ async def test_reconciled_unknown_session_refreshes_source_before_start(monkeypa
             assert source_reads == ["session"]
 
 
-async def test_session_start_authorizes_source_owner_after_remote_cached_replacement(tmp_path, monkeypatch):
-    from linktools.ai.storage import _write_cache
-
-    monkeypatch.setattr(_write_cache, "time", lambda: 1000.0)
+async def test_native_session_reauthorizes_host_owner_after_remote_update(tmp_path):
     decisions = []
     calls = 0
 
@@ -465,31 +461,46 @@ async def test_session_start_authorizes_source_owner_after_remote_cached_replace
         calls += 1
         return await _answer(messages, info)
 
-    class Policy(TenantAuthorizationPolicy):
+    class WriterPolicy(TenantAuthorizationPolicy):
+        pass
+
+    class ReaderPolicy(TenantAuthorizationPolicy):
         async def authorize(self, principal, action, resource):
-            if action is AuthorizationAction.SESSION_READ:
-                decisions.append(resource.owner_principal_id)
             await super().authorize(principal, action, resource)
+            if action is AuthorizationAction.SESSION_READ:
+                current = await writer.history.turn_session_state(resource.id, principal=writer.default_principal)
+                owner = current["metadata"]["owner"]
+                decisions.append(owner)
+                if principal.principal_id != owner:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
-    from .test_session_admission import _session
-
+    namespace = "session-start-source-owner"
     path = tmp_path / "state.db"
-    storage = PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Persistence.open("session-start-source-owner", storage=PersistenceStorage.sqlite(path)) as writer:
-        await writer.conversation.sessions.create(replace(_session(), owner_principal_id="runtime", agent_id="default"))
-        async with Persistence.open("session-start-source-owner", storage=storage) as reader:
-            async with Runtime.open(persistence=reader, features=_features(model), metrics=None, authorization=Policy()) as runtime:
-                target = runtime.agents.get().session("session")
-                original = await reader.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-                await _delete_session(writer)
-                await writer.conversation.sessions.create(replace(original, owner_principal_id="replacement"))
-                cached = await reader.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-                assert cached.owner_principal_id == original.owner_principal_id
-                with pytest.raises(AIError) as denied:
-                    await target.start("question", idempotency_key="request")
-                assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
-                assert decisions and set(decisions) == {"replacement"}
-                assert calls == 0
+    reader_storage = PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with (
+        Persistence.open(namespace, storage=PersistenceStorage.sqlite(path)) as writer_state,
+        Runtime.open(persistence=writer_state, features=_features(_answer), authorization=WriterPolicy()) as writer,
+        Persistence.open(namespace, storage=reader_storage) as reader_state,
+        Runtime.open(persistence=reader_state, features=_features(model), authorization=ReaderPolicy()) as reader,
+    ):
+        principal = reader.default_principal
+        original = await writer.sessions.create_turn_session(
+            "session", principal=writer.default_principal, metadata={"owner": principal.principal_id},
+        )
+        target = await reader.sessions.get("session", principal=principal)
+        assert decisions == [principal.principal_id]
+        assert await writer.sessions.update_turn_session(
+            "session", principal=writer.default_principal, expected_revision=original["revision"],
+            metadata={"owner": "replacement"},
+        )
+        with pytest.raises(AIError) as denied:
+            async with target.start("question", agent="default", idempotency_key="request"):
+                pytest.fail("remote owner replacement must prevent admission")
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert decisions == [principal.principal_id, "replacement"]
+        view = await writer.history.turn_session_state("session", principal=writer.default_principal)
+        assert view["active_turn_id"] is None and view["last_turn_no"] == 0
+        assert calls == 0
 
 
 @pytest.mark.parametrize("settled", (False, True))
