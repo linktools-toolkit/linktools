@@ -551,7 +551,7 @@ class _RegenerableTurnRunner:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        session = await self._store.get_session(session_id)
+        session = await self._store.get_session_for_admission(session_id, request_key)
         if session is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await authorization.authorize(
@@ -652,9 +652,11 @@ class _RegenerableTurnRunner:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return identity
 
-        if session["active_turn_id"] is not None:
+        if session["has_request"] or session["active_turn_id"] is not None:
             if (identity := await replay()) is not None:
                 return _SessionTurnStartReceipt(identity, replayed=True)
+            if session["has_request"]:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             raise AIError(ErrorCode.SESSION_BUSY)
 
         key = SessionTurnKey(session_id, secrets.token_hex(16))

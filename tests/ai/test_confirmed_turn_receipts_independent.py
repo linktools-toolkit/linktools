@@ -137,8 +137,7 @@ async def test_public_wait_receipt_preserves_authorization_and_worker_failure(tm
 
     async with Persistence.open(_NAMESPACE, storage=_storage("sqlite", tmp_path)) as state:
         async with Runtime.open(persistence=state, features=model_features(_Models(_UsageFunctionModel(respond)), _features())) as runtime:
-            session = await runtime.agents.get().create_session("receipt-wait")
-            execution = await session.start("question")
+            execution = await runtime.agents.get().start("question")
             await asyncio.wait_for(entered.wait(), 5)
             service = runtime._execution_service
             backend = service._backend
@@ -211,8 +210,7 @@ async def test_wait_started_after_publication_preserves_read_guards(
         async with Runtime.open(persistence=state, features=model_features(
             _Models(_UsageFunctionModel(respond)), _features(),
         )) as runtime:
-            session = await runtime.agents.get().create_session("late-receipt-wait")
-            execution = await session.start("question")
+            execution = await runtime.agents.get().start("question")
             await asyncio.wait_for(entered.wait(), 5)
             service = runtime._execution_service
             backend = service._backend

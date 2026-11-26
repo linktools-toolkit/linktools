@@ -9,7 +9,8 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
 
-from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
+from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import InMemoryCacheBackend
@@ -39,14 +40,16 @@ async def test_pending_admission_shares_fresh_identity_and_session_transaction(
         turns = state.session_turns
         engine = turns._context.engine.sync_engine
         batches = []
+        session_reads = []
         current = None
         accept = type(turns).accept
 
         def sql(connection, _cursor, statement, _parameters, _context, _many):
-            if current is not None:
-                statement = statement.lstrip().upper()
-                if statement.startswith(("UPDATE AI_SESSIONS ", "INSERT INTO AI_SESSION_TURNS ")):
-                    current.append((statement.split()[0], connection.get_transaction()))
+            statement = statement.lstrip().upper()
+            if statement.startswith("SELECT ") and "\nFROM AI_SESSIONS " in statement:
+                session_reads.append(statement)
+            if current is not None and statement.startswith(("UPDATE AI_SESSIONS ", "INSERT INTO AI_SESSION_TURNS ")):
+                current.append((statement.split()[0], connection.get_transaction()))
 
         async def accept_turn(self, *args, **kwargs):
             nonlocal current
@@ -71,12 +74,23 @@ async def test_pending_admission_shares_fresh_identity_and_session_transaction(
                 await runtime.sessions.create_turn_session("session", principal=principal)
                 for index in range(2):
                     request = f"request-{index}"
+                    session_reads.clear()
                     turn = await runtime.sessions.start("session", "question", principal=principal,
                                                         agent="default", idempotency_key=request)
+                    assert len(session_reads) == 1 and "EXISTS (SELECT" in session_reads[0]
                     assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
                     replay = await runtime.sessions.start("session", "question", principal=principal,
                                                           agent="default", idempotency_key=request)
                     assert replay.key == turn.key
+                    with pytest.raises(AIError) as conflict:
+                        await runtime.sessions.start("session", "different", principal=principal,
+                                                     agent="default", idempotency_key=request)
+                    assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+                    with pytest.raises(AIError) as denied:
+                        await runtime.sessions.start("session", "question", agent="default", idempotency_key=request,
+                                                     principal=Principal("foreign", principal.tenant_id))
+                    assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+                    assert len(batches) == index + 1
                 assert calls == 2
                 assert len(batches) == 2
                 for batch in batches:
@@ -144,7 +158,7 @@ async def test_pending_replay_precedes_corrupt_session(
         async def corrupt(transaction):
             [old] = [record for record in await transaction.scan_records() if record.kind == "session"]
             assert await transaction.replace_record(
-                replace(old, data={}), expected_storage_revision=old.storage_revision,
+                replace(old, data={}, storage_revision=old.storage_revision + 1), expected_storage_revision=old.storage_revision,
             )
 
         await store.mutate(corrupt)
@@ -152,7 +166,6 @@ async def test_pending_replay_precedes_corrupt_session(
             identities, "session.resume", "request", tenant_id="tenant",
             sessions=sessions, session_id="session",
         ) == (identity, None)
-        from linktools.ai.errors import AIError, ErrorCode
         with pytest.raises(AIError) as rejected:
             await sessions.state_store.read(
                 lambda _transaction: sessions.get("session", tenant_id="tenant")

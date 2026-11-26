@@ -546,6 +546,22 @@ class SqlSessionTurnReader:
                 self._sessions.select().filter_by(**self._session_values(session_id)),
             )).mappings().one_or_none()
 
+    async def get_session_for_admission(self, session_id: str, request_key: str) -> RowMapping | None:
+        """Read the admission head and exact request existence without loading its body."""
+        from sqlalchemy import select
+
+        sessions, turns = self._sessions.c, self._turns.c
+        exists = select(turns.turn_id).where(
+            turns.scope_key == sessions.scope_key,
+            turns.session_key == sessions.session_key,
+            turns.request_key == self._key(request_key, SESSION_REQUEST_KEY_MAX_BYTES),
+        ).exists()
+        statement = self._sessions.select().add_columns(exists.label("has_request")).filter_by(
+            **self._session_values(session_id),
+        )
+        async with self._context.engine.connect() as connection:
+            return (await connection.execute(statement)).mappings().one_or_none()
+
     async def get_turn(self, key: SessionTurnKey) -> RowMapping | None:
         async with self._context.engine.connect() as connection:
             return (await connection.execute(self._turns.select().filter_by(**self._turn_values(key)))).mappings().one_or_none()
