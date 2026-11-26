@@ -185,6 +185,13 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             assert recovered.json()["safe_details"] == {"reason": "native_child_reservation_missing", "generation": 2}
             assert row["state"] == "accepted" and row["generation"] == 2 and settled == original
             assert not children and receipt is None
+            ended = await http.post("/api/session/abandon", params=params, headers=_HEADERS, json={
+                "turn_id": turn_id, "expected_generation": 2, "request_id": "end-after-blocked-recovery",
+            })
+            assert ended.status_code == 200 and ended.json() == {"accepted": True}, ended.text
+            assert (await turns.get_turn(key))["state"] == "failed"
+            assert (await turns.get_session(key.session_id))["active_turn_id"] is None
+            assert await state.checkpoint.tools.get_operation(original.tool_operation_id, tenant_id=tenant_id) == original
             assert calls == ["parent dispatch"] and returned_children == []
             return
         [same_child] = children

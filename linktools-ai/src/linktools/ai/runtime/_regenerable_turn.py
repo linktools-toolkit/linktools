@@ -1165,6 +1165,8 @@ class _RegenerableTurnRunner:
                             # A cold Trace continuation can only append the terminal
                             # marker to an already complete, retained parent run.
                             if not completed_checkpoint or not continuation or not isinstance(continuation[-1], ModelResponse):
+                                # This recovery acquired the generation but has not started a producer.
+                                await self._store.expire_stopped_lease(key, generation=generation + 1)
                                 self._gap(key)
                                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
                                               safe_details={"reason": "native_subagent_trace_incomplete",
@@ -1224,7 +1226,13 @@ class _RegenerableTurnRunner:
                 await self._settle_with_lease(
                     turn, binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=request["thinking"],
                 )
-            except Exception:
+            except Exception as error:
+                if (recover_native_results is not None and isinstance(error, AIError)
+                        and error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+                        and error.safe_details.get("reason") == "native_child_reservation_missing"
+                        and error.safe_details.get("generation") == turn.generation):
+                    # The producer has been joined and no original child could be started.
+                    await self._store.expire_stopped_lease(key, generation=turn.generation)
                 self._producer_stopped(turn)
                 raise
             return True

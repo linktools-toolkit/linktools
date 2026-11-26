@@ -1770,6 +1770,16 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         return await self._context.run_mutation(write, domain="session.renew")
 
+    async def expire_stopped_lease(self, key: SessionTurnKey, *, generation: int) -> bool:
+        """Relinquish the exact accepted generation after its producer has stopped."""
+        async def write(connection: AsyncSession) -> bool:
+            result = await connection.execute(self._turns.update().filter_by(
+                **self._turn_values(key), generation=generation, state="accepted",
+            ).where(self._turns.c.lease_until > self._now).values(lease_until=self._now))
+            return result.rowcount == 1
+
+        return await self._context.run_mutation(write, domain="session.expire_stopped_lease")
+
     async def _take_over(
         self, session: AsyncSession, key: SessionTurnKey, *, generation: int,
         lease_seconds: int, cancelling: bool, source_receipt: bytes | None = None,
