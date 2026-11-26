@@ -880,14 +880,34 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return tuple(value for value in values if statuses is None or value.status in statuses)
         return await self.read_content(read)
 
-    async def require_no_children_for_abandon(
+    async def require_children_terminal_for_abandon(
         self, transaction: StateTransaction, execution_id: str,
     ) -> None:
-        """Check after the same-group canonical parent write fenced child admission."""
-        children = await transaction.list_records(RecordQuery(
-            kind="execution", parent_key=self._parent("execution", "execution", (execution_id,)), limit=1,
+        """Check control state after the same-group parent CAS fenced admission."""
+        from sqlalchemy import literal, or_, select
+
+        from ._record_owner import record_owner_names
+        from ._sql import SqlStateStore
+        from .state import SqlStateRowReader
+
+        if (not isinstance(self._store, SqlStateStore) or self._store.context.engine.dialect.name != "sqlite"
+                or not isinstance(transaction, SqlStateRowReader)):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        store = self._store
+        parent = self._parent("execution", "execution", (execution_id,))
+        terminal = tuple(status.value for status in (
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
         ))
-        if children:
+        blockers = []
+        for owner in record_owner_names(kind="execution"):
+            rows = store.storage_group.metadata.tables[owner].c
+            blockers.append(select(literal(1)).where(
+                rows.store_key == store.store_key,
+                rows.kind == "execution",
+                rows.parent_key == parent,
+                or_(rows.state.is_(None), rows.state.not_in(terminal)),
+            ).exists())
+        if await transaction.read_sql_rows(store.context, select(literal(1)).where(or_(*blockers))):
             raise AIError(
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
                 safe_details={"reason": "abandon_child_disposition_required"},

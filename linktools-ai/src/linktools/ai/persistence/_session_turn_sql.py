@@ -712,6 +712,7 @@ class SqlSessionTurnReader:
                 if name in required or row[name] is not None
             },
             "agent_id": spec["id"], "output_mode": binding["output_mode"], "output_schema": binding["output_schema"],
+            "default_output_schema": spec.get("output_schema"),
             "default_planning": spec["planning"], "default_thinking": spec["thinking"],
             **({"binding_digest": AgentBindingContract.from_payload(binding).binding_digest}
                if row["explicit_agent_binding"] is True else {}),

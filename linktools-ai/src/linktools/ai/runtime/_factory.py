@@ -1036,7 +1036,16 @@ async def _build_local_components(
                     or tools.state_store.storage_group is not turn_state.storage_group
                     or executions.state_store.storage_group is not turn_state.storage_group):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            async with backend.canonical_subagent_parent(turn.key, turn.generation, principal):
+            async def stop_children() -> None:
+                row = await turns.get_turn(turn.key)
+                if row is not None and row["generation"] == turn.generation and row["state"] == "cancelling":
+                    # Handoff also cancels the coroutine, but only a committed
+                    # Stop authorizes durable child cancellation.
+                    await dispatcher.cancel_native_children(executions, turn.key, principal, principal)
+
+            async with backend.canonical_subagent_parent(
+                turn.key, turn.generation, principal, stop_children=stop_children,
+            ):
                 yield lambda capability: dispatcher.claimed_native_leaf(
                     turns=turns, key=turn.key, generation=turn.generation, tools=tools, principal=principal,
                     binding=binding.binding_contract, capability=capability, mode=turn.mode,

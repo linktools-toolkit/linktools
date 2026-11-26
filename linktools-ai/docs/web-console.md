@@ -71,9 +71,9 @@ If recovery reports that a stopped ordinary turn cannot resume, the same
 **Recover** control stays visible. Choosing it again asks whether to end the
 failed turn, without retrying recovery or rerunning tools. The Runtime releases only the
 confirmed producer generation after its lease expires and preserves recorded
-tool uncertainty. This control does not end Graph or split-store turns, and
-turns with persisted children need a separate disposition. The child-absence
-check is supported on SQLite.
+tool uncertainty. This control does not end Graph or split-store turns.
+On SQLite, any persisted child must already be in a durable terminal state.
+Ending the parent does not change the child or its tool receipts.
 
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file

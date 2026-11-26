@@ -1293,8 +1293,9 @@ class LocalExecutionBackend:
     @asynccontextmanager
     async def canonical_subagent_parent(
         self, key: "SessionTurnKey", generation: int, principal: Principal,
+        *, stop_children: Callable[[], Awaitable[None]],
     ) -> AsyncIterator[None]:
-        """Drain only local child workers for this exact native generation."""
+        """Stop durable children before abandoning their local owners on explicit cancellation."""
         identity = key.turn_id
         if principal.tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -1304,6 +1305,11 @@ class LocalExecutionBackend:
         self._native_parents[identity] = parent
         try:
             yield
+        except asyncio.CancelledError:
+            parent.stopping = True
+            stopping = asyncio.create_task(stop_children(), name=f"ai-native-child-stop-{identity}")
+            await self._await_checkpoint_task(stopping, label="native child stop")
+            raise
         finally:
             parent.stopping = True
             self._stop_child_workers(parent)

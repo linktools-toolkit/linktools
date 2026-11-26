@@ -6,6 +6,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from traceback import extract_tb
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
+from linktools.ai.errors import AIError
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
@@ -338,10 +340,20 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path)
         assert pending.status is ApprovalStatus.PENDING
         assert calls == ["approval requested"] and child_ids == []
 
-        await runtime.approvals.decide(turn.key, ApprovalDecisionRequest(
-            principal, pending.approval_id, "approve-original", ApprovalDecision.APPROVE,
-        ))
-        final = await turn.wait_final(timeout_seconds=10)
+        phase = "approval decision and resume"
+        try:
+            await runtime.approvals.decide(turn.key, ApprovalDecisionRequest(
+                principal, pending.approval_id, "approve-original", ApprovalDecision.APPROVE,
+            ))
+            phase = "wait for terminal"
+            final = await turn.wait_final(timeout_seconds=10)
+        except AIError as error:
+            cause = error.__cause__ or error
+            frame = extract_tb(cause.__traceback__)[-1]
+            raise AssertionError(
+                f"{phase}: {error.code.value} at {Path(frame.filename).name}:{frame.lineno} ({frame.name}); "
+                f"calls={calls!r}, children={len(child_ids)}"
+            ) from error
         assert final.key == turn.key and final.status is ExecutionStatus.SUCCEEDED
         assert final.view["output"] == {"text": _ANSWER}
         row = await state.session_turns.get_turn(turn.key)

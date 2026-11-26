@@ -3,9 +3,11 @@
 import asyncio
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
 from linktools.ai.core import TenantAuthorizationPolicy
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.messages import CANONICAL_OUTPUT_TOOL_NAME
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime
@@ -20,6 +22,9 @@ from .test_web_console import _HEADERS, client
 async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, caplog):
     class Policy(TenantAuthorizationPolicy):
         pass
+
+    class DifferentOutput(BaseModel):
+        title: str
 
     expected = {"count": 3}
     output_requests = []
@@ -71,6 +76,19 @@ async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, c
         item, = terminal["items"]
         assert item["item_kind"] == "structured_output" and item["content"] == expected
         assert terminal["process"] == []
+
+        duplicate = await http.post(
+            "/api/session/messages?session_id=session", headers=_HEADERS,
+            json={"request_id": "run", "agent_id": "default", "prompt": "count"},
+        )
+        assert duplicate.status_code == 202 and duplicate.json() == {"turn_id": turn_id}
+        with pytest.raises(AIError) as conflict:
+            await runtime.sessions.start_turn(
+                "session", "count", agent="default", principal=runtime.default_principal,
+                idempotency_key="run", output=DifferentOutput,
+            )
+        assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert output_requests == [(1, True)]
 
     async with Persistence.open("structured-web", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features, authorization=Policy(),

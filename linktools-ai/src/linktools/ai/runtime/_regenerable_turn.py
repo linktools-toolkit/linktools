@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy.exc import IntegrityError
 
-from ..agent import AgentBindingContract, bind_output
+from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
@@ -524,7 +524,7 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "attachment_display_names"})
         if not isinstance(prompt, str):
             prompt = await self._input_materializer.canonicalize_input(prompt)
-        output_binding = bind_output(output)
+        output_binding = None if output is None else bind_output(output)
         if budget is not None:
             from ..core import RunBudget
             if not isinstance(budget, RunBudget):
@@ -572,6 +572,14 @@ class _RegenerableTurnRunner:
                 mode=mode, planning=planning, thinking=thinking,
                 default_planning=prior["default_planning"], default_thinking=prior["default_thinking"],
             )
+            output_mismatch = False
+            if selected_binding is None:
+                schema = prior["default_output_schema"]
+                requested_output = output_binding or (
+                    bind_output() if schema is None else restore_output("structured", schema)
+                )
+                output_mismatch = (prior["output_mode"] != requested_output.mode
+                                   or prior["output_schema"] != requested_output.schema_definition)
             if (
                 not same_input or request["principal"] != asdict(principal)
                 or request["thinking"] != replay_thinking
@@ -581,8 +589,7 @@ class _RegenerableTurnRunner:
                 or bool(request.get("budgeted", False)) != (budget is not None)
                 or prior["agent_id"] != agent_id
                 or (prior.get("binding_digest") is not None) != (selected_binding is not None)
-                or (selected_binding is None and (prior["output_mode"] != output_binding.mode
-                                                 or prior["output_schema"] != output_binding.schema_definition))
+                or output_mismatch
             ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if selected_binding is not None and prior["binding_digest"] != (await bind()).binding_digest:
@@ -688,10 +695,10 @@ class _RegenerableTurnRunner:
             if children is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
-            async def require_no_children(transaction):
-                await children.require_no_children_for_abandon(transaction, key.turn_id)
+            async def require_terminal_children(transaction):
+                await children.require_children_terminal_for_abandon(transaction, key.turn_id)
 
-            child_guard = (children.state_store, require_no_children)
+            child_guard = (children.state_store, require_terminal_children)
         session = await self._store.get_session(key.session_id)
         if session is None or session["active_turn_id"] != key.turn_id.encode():
             return False

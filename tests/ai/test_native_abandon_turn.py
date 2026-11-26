@@ -11,9 +11,11 @@ from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.capability import StepPersistenceCapability
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
+from linktools.ai.core import (
+    ExecutionLineageKind, ExecutionStatus, StopReason, TenantAuthorizationPolicy, ToolOperationStatus, UsageMetrics,
+)
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence.contracts import StoredPayload, ToolOperationRecord
+from linktools.ai.persistence.contracts import ResultRecord, StoredPayload, ToolOperationRecord
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
@@ -27,7 +29,10 @@ class _HostPolicy(TenantAuthorizationPolicy):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ("no-child", "cancel-race", "child-present"))
+@pytest.mark.parametrize("boundary", (
+    "no-child", "cancel-race", "child-pending", "child-started", "child-uncertain",
+    "child-succeeded", "child-failed", "child-cancelled", "mixed",
+))
 async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, monkeypatch, boundary):
     prompts = []
     stopped = asyncio.Event()
@@ -97,17 +102,40 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
             ErrorCode.TOOL_EFFECT_UNKNOWN.value, now, now, producer_generation=1, arguments_payload=args,
         )
         await state.checkpoint.tools.reserve(unknown)
-        if boundary == "child-present":
-            # A real indexed child Execution models an original reservation
-            # that committed before the parent lost its acknowledgement.
-            repository = state.execution.executions
-            child = replace(
+        repository = state.execution.executions
+        child_statuses = {
+            "child-pending": (ExecutionStatus.PENDING_START,),
+            "child-started": (ExecutionStatus.STARTED,),
+            "child-uncertain": (ExecutionStatus.RECOVERY_REQUIRED,),
+            "child-succeeded": (ExecutionStatus.SUCCEEDED,),
+            "child-failed": (ExecutionStatus.FAILED,),
+            "child-cancelled": (ExecutionStatus.CANCELLED,),
+            "mixed": (ExecutionStatus.SUCCEEDED, ExecutionStatus.WAITING_DEFERRED),
+        }.get(boundary, ())
+        terminal_reasons = {
+            ExecutionStatus.SUCCEEDED: StopReason.END_TURN,
+            ExecutionStatus.FAILED: StopReason.ERROR,
+            ExecutionStatus.CANCELLED: StopReason.CANCELLED,
+        }
+        for index, status in enumerate(child_statuses):
+            reason = terminal_reasons.get(status)
+            output = StoredPayload.inline_json({"kept": "child answer"}) if status is ExecutionStatus.SUCCEEDED else None
+            code = (ErrorCode.EXECUTION_CANCELLED.value if status is ExecutionStatus.CANCELLED
+                    else ErrorCode.MODEL_API_ERROR.value if status in (ExecutionStatus.FAILED, ExecutionStatus.RECOVERY_REQUIRED)
+                    else None)
+            await repository.create_execution(replace(
                 _record(ExecutionStatus.PENDING_START, 0),
-                execution_id="original-child", parent_execution_id=turn_id, root_execution_id=turn_id,
-                parent_invocation_id=unknown.tool_call_id, lineage_kind=ExecutionLineageKind.SUBAGENT,
+                execution_id=f"original-child-{index}", parent_execution_id=turn_id, root_execution_id=turn_id,
+                parent_invocation_id=unknown.tool_call_id if index == 0 else f"other-invocation-{index}",
+                lineage_kind=ExecutionLineageKind.SUBAGENT, status=status,
                 principal_id=principal.principal_id, principal_kind=principal.kind,
-            )
-            await repository.create_execution(child)
+                started_at=None if status is ExecutionStatus.PENDING_START else now,
+                completed_at=None if reason is None else now, error_code=code,
+                result=None if reason is None else ResultRecord(output, reason, UsageMetrics(), now),
+            ))
+        children_before = await repository.list_children(turn_id, tenant_id=principal.tenant_id)
+        assert len(children_before) == len(child_statuses)
+        if any(status not in terminal_reasons for status in child_statuses):
             previous = await turns.get_turn(key)
             with pytest.raises(AIError) as blocked:
                 await runtime.sessions.abandon_turn("session", turn_id, expected_generation=1, principal=principal)
@@ -115,7 +143,7 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
             assert blocked.value.safe_details["reason"] == "abandon_child_disposition_required"
             assert await turns.get_turn(key) == previous
             assert await turns.get_session("session") == before
-            assert await repository.get(child.execution_id, tenant_id=principal.tenant_id) == child
+            assert await repository.list_children(turn_id, tenant_id=principal.tenant_id) == children_before
             assert await state.checkpoint.tools.get_operation(
                 unknown.tool_operation_id, tenant_id=principal.tenant_id,
             ) == unknown
@@ -142,7 +170,7 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         assert (old["state"], old["generation"], old["result_json"]) == (
             "failed", 1, {"error_code": ErrorCode.STORAGE_RECOVERY_REQUIRED.value, "abandoned": True},
         )
-        assert await state.execution.executions.list_children(turn_id, tenant_id=principal.tenant_id) == ()
+        assert await repository.list_children(turn_id, tenant_id=principal.tenant_id) == children_before
         assert (await turns.get_session("session"))["active_turn_id"] is None
 
         next_id = await runtime.sessions.start_turn(
