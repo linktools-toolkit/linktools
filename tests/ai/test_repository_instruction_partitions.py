@@ -39,7 +39,7 @@ class _Port:
 
 
 class _Resolver:
-    async def resolve(self, path, *, exclude_sources):
+    async def resolve(self, path, *, exclude_sources, within=None):
         assert exclude_sources == {"agents:pkg/AGENTS.md", "agents:pkg/deep/AGENTS.md"}
         return RepositoryInstructions()
 
@@ -124,7 +124,7 @@ async def test_latest_overlay_uses_loaded_content_without_rechecking_digest() ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("initial", "paths", "bytes", "overlay"))
-async def test_dynamic_instruction_union_limits_precede_overlay_commit(tmp_path, kind) -> None:
+async def test_dynamic_instruction_union_commits_only_fitting_additions(tmp_path, kind) -> None:
     from linktools.ai.workspace import WorkspaceInstructionResolver, WorkspacePolicy
 
     root = RepositoryInstructionDocument("agents:AGENTS.md", ".", "根规则")
@@ -148,9 +148,18 @@ async def test_dynamic_instruction_union_limits_precede_overlay_commit(tmp_path,
         checkpoint = replace(checkpoint, recovery=replace(checkpoint.recovery,
             repository_instruction_overlay=RepositoryInstructionPayload.capture(persisted, persisted.to_payload()).to_reference(PersistenceDomain.CHECKPOINT)))
 
+    committed = []
+
     class Port(_Port):
-        async def commit_repository_instruction_overlay(self, *args, **kwargs):
-            raise AssertionError("over-limit union must not write scopes or payloads")
+        async def commit_repository_instruction_overlay(self, current, overlay, **kwargs):
+            assert current == self.checkpoint
+            committed.append(overlay)
+            self.overlay = overlay
+            self.checkpoint = replace(current, recovery=replace(current.recovery,
+                repository_instruction_overlay=RepositoryInstructionPayload.capture(
+                    overlay, overlay.to_payload(),
+                ).to_reference(PersistenceDomain.CHECKPOINT)))
+            return self.checkpoint
 
     coordinator = _RecoveryCoordinator(
         Port(checkpoint, persisted),
@@ -159,14 +168,16 @@ async def test_dynamic_instruction_union_limits_precede_overlay_commit(tmp_path,
     arguments = {"path": ["pkg/file.txt", "other/file.txt"]} if kind == "paths" else {
         "path": "other/file.txt" if kind == "overlay" else "pkg/file.txt",
     }
-    with pytest.raises(AIError) as raised:
-        await coordinator.check_repository_instructions(
-            execution=SimpleNamespace(execution_id="execution"),
-            initial=None if kind in {"paths", "overlay"} else RepositoryInstructions((root,)),
-            overlay=persisted, tool_name="read_file", tool_call_id="call",
-            arguments=arguments, path_fields=("path",),
-        )
-    assert raised.value.code is ErrorCode.PROMPT_TOO_LARGE
+    result = await coordinator.check_repository_instructions(
+        execution=SimpleNamespace(execution_id="execution"),
+        initial=None if kind in {"paths", "overlay"} else RepositoryInstructions((root,)),
+        overlay=persisted, tool_name="read_file", tool_call_id="call",
+        arguments=arguments, path_fields=("path",),
+    )
+    if kind == "paths":
+        assert result == RepositoryInstructions((child,)) and committed == [result]
+    else:
+        assert result == persisted and committed == []
 
 
 @pytest.mark.asyncio

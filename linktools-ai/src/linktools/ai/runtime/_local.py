@@ -241,7 +241,7 @@ from ._recovery_coordinator import _DeferredResume, _RecoveryCoordinator
 from ._repository_instructions import (
     _RepositoryInstructionBoundary,
     _repository_instructions_contain,
-    _validate_repository_instruction_frontier,
+    _validate_repository_instruction_overlay,
 )
 
 if TYPE_CHECKING:
@@ -2370,7 +2370,6 @@ class LocalExecutionBackend:
         )
         if resolved is None:
             return None
-        results, repository_approvals = resolved
         state = self._execution.executions.state_store
         source: tuple[NativeMessageRoot, str, int] | None = None
 
@@ -2425,8 +2424,8 @@ class LocalExecutionBackend:
         if observed is None or observed.value != resumed:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         resume = _DeferredResume(
-            resumed, history, results, resumed.producer_generation, binding,
-            snapshot.output_retries_used, repository_approvals,
+            resumed, history, resolved, resumed.producer_generation, binding,
+            snapshot.output_retries_used,
         )
         return await self._launch_attached_graph(
             request, identity, observed, replace(turn, generation=graph.generation + 1), graph.turns,
@@ -3279,7 +3278,6 @@ class LocalExecutionBackend:
         call: ToolCallPart,
         metadata: Mapping[str, object],
         *,
-        repository_instruction_frontier: str | None = None,
         capability_ref: CapabilityRef | None = None,
         operation_id: str | None,
     ) -> PendingDeferredCall:
@@ -3315,17 +3313,6 @@ class LocalExecutionBackend:
                 key: value
                 for key, value in raw_metadata.items()
                 if key != "linktools"
-            }
-        if repository_instruction_frontier is not None:
-            if (
-                len(repository_instruction_frontier) != 64
-                or any(character not in "0123456789abcdef" for character in repository_instruction_frontier)
-            ):
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            # This reserved evidence comes from the runtime's observation point,
-            # never from tool-authored metadata or the later approval decision.
-            raw_metadata["linktools"] = {
-                "repository_instruction_frontier": repository_instruction_frontier,
             }
         operation_id = operation_id or tool_operation_id(
             tenant_id=self._tenant_id, execution_id=execution.execution_id,
@@ -5149,7 +5136,7 @@ class LocalExecutionBackend:
             repository_overlay = await self.load_repository_instructions(
                 checkpoint.recovery.repository_instruction_overlay
             )
-            _validate_repository_instruction_frontier(checkpoint, repository_overlay)
+            _validate_repository_instruction_overlay(checkpoint, repository_overlay)
             agent_run_id = (make_agent_run_id(
                 namespace=self._namespace, tenant_id=self._tenant_id,
                 execution_id=execution_id, agent_run_seq=current.agent_run_seq + 1,
@@ -5606,7 +5593,6 @@ class LocalExecutionBackend:
                 ),
                 initial_repository_instructions,
                 repository_overlay,
-                approved_frontiers=(None if resume is None else resume.repository_instruction_approvals),
             )
             if current.producer_generation != producer_generation or current.producer_claim_id is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -5904,7 +5890,6 @@ class LocalExecutionBackend:
                         paused_at=datetime.now(timezone.utc),
                         capability_refs=deferred_capability_refs,
                         producer_generation=producer_generation,
-                        repository_instruction_frontiers=repository_boundary.approval_frontiers(result.approvals),
                     )
                 except AIError as error:
                     if error.code is ErrorCode.EXECUTION_CANCELLED:
@@ -8159,7 +8144,7 @@ class LocalExecutionBackend:
             current_overlay = await self.load_repository_instructions(
                 current.recovery.repository_instruction_overlay
             )
-            _validate_repository_instruction_frontier(current, current_overlay)
+            _validate_repository_instruction_overlay(current, current_overlay)
             if _repository_instructions_contain(current_overlay, overlay):
                 return current
             raise

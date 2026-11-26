@@ -67,7 +67,6 @@ class RepositoryInstructionBoundary(Protocol):
         tool_call_id: str,
         arguments: dict[str, Any],
         path_fields: tuple[str, ...],
-        approved: bool = False,
     ) -> None: ...
 
 
@@ -369,7 +368,6 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     tool_call_id=call_id,
                     arguments=final_args,
                     path_fields=path_fields,
-                    approved=ctx.tool_call_approved,
                 )
         except (ApprovalRequired, CallDeferred):
             if isinstance(bridge, RuntimeToolOperationBridge):

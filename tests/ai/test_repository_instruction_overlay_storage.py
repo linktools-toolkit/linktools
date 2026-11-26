@@ -24,7 +24,7 @@ from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.inputs import RepositoryInstructionPayload
-from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary, _validate_repository_instruction_frontier
+from linktools.ai.runtime._repository_instructions import _validate_repository_instruction_overlay
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, StorageOverlay, StoredPayload
 from linktools.ai.workspace import Workspace
@@ -52,17 +52,6 @@ class _OverlayPort:
 
     async def promote_pending_execution(self, execution_id: str) -> None:
         assert execution_id == "execution"
-
-
-def _frontier(execution: ExecutionRecord, overlay: RepositoryInstructions) -> str:
-    _validate_repository_instruction_frontier(execution, overlay)
-
-    async def check_frontier(**_kwargs):
-        pytest.fail("Rendering the committed approval frontier must not rediscover instructions")
-
-    boundary = _RepositoryInstructionBoundary(check_frontier, None, overlay)
-    boundary.render_overlay()
-    return boundary.approval_frontiers((ToolCallPart("read_file", {"path": "pkg/file.txt"}, "call"),))["call"]
 
 
 async def _create_execution(state: Persistence) -> ExecutionRecord:
@@ -98,10 +87,7 @@ async def test_overlay_keeps_fixed_assets_and_all_original_semantic_digests(tmp_
         assert {item["content"] for item in wire["instructions"]["documents"] if "content" in item} == {
             "accepted Workspace text", "accepted custom text",
         }
-        expected_frontier = canonical_sha256({"initial": [], "overlay": [
-            [document.source, document.scope, document.content] for document in overlay.documents
-        ]})
-        assert _frontier(committed, overlay) == expected_frontier
+        _validate_repository_instruction_overlay(committed, overlay)
         await assets.put(key, b"changed Rule")
         await assets.delete(key)
         await state.purge_unreferenced_objects((), exclusive=Offline())
@@ -109,8 +95,7 @@ async def test_overlay_keeps_fixed_assets_and_all_original_semantic_digests(tmp_
         retained = await state.execution.executions.get_recovery("execution", tenant_id="tenant")
         restored = await cold.load_repository_instructions(retained.recovery.repository_instruction_overlay)
         assert restored.to_payload() == overlay.to_payload()
-        _validate_repository_instruction_frontier(retained, restored)
-        assert _frontier(retained, restored) == expected_frontier
+        _validate_repository_instruction_overlay(retained, restored)
 
 
 @pytest.mark.parametrize("outcome", ("acknowledgement_lost", "conflict", "historical_overlay"))
@@ -208,7 +193,6 @@ async def test_overlay_snapshot_keeps_asset_references_and_accepted_inline_bodie
             port = _OverlayPort(state, assets)
             committed = await port.commit_repository_instruction_overlay(await _create_execution(state), overlay)
             await state.purge_unreferenced_objects((), exclusive=Offline())
-            expected_frontier = _frontier(committed, overlay)
     finally:
         await assets.close()
     transport = InMemoryObjectStore("overlay-snapshot")
@@ -227,8 +211,7 @@ async def test_overlay_snapshot_keeps_asset_references_and_accepted_inline_bodie
             port = _OverlayPort(state, reopened)
             restored = await port.load_repository_instructions(retained.recovery.repository_instruction_overlay)
             assert restored.to_payload() == overlay.to_payload()
-            _validate_repository_instruction_frontier(retained, restored)
-            assert _frontier(retained, restored) == expected_frontier
+            _validate_repository_instruction_overlay(retained, restored)
             assert RepositoryInstructionPayload.from_reference(retained.recovery.repository_instruction_overlay).semantic_digest == canonical_sha256(overlay.to_payload())
     finally:
         await reopened.close()

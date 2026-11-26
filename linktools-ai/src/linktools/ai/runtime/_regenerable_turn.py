@@ -35,7 +35,7 @@ from .agent_execution import resolve_execution_policy
 from ._regenerable_transcript import prepare_native_turn_transcript, reply_from_turn, restore_turn_prompt
 from ._step_store import RuntimeStepStore
 from ._repository_instructions import (
-    _RepositoryInstructionApproval, _RepositoryInstructionBoundary,
+    _RepositoryInstructionBoundary,
     _discover_repository_overlay, _instruction_paths, _merge_repository_instructions,
 )
 from ._feature_policy import _runtime_feature_policy
@@ -1874,17 +1874,6 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             resolver.validate(_merge_repository_instructions(initial, overlay))
 
-        approved = {}
-        for item in turn.deferred_approvals:
-            provenance = item.metadata.get("linktools")
-            if not isinstance(provenance, Mapping):
-                continue
-            digest = provenance.get("repository_instruction_frontier")
-            if digest is not None:
-                if resolver is None or not isinstance(digest, str):
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                approved[item.tool_call_id] = _RepositoryInstructionApproval(item.tool_name, digest)
-
         if resolver is None:
             return None
 
@@ -1892,7 +1881,12 @@ class _RegenerableTurnRunner:
             paths = _instruction_paths(arguments, path_fields)
             if not paths:
                 return overlay
-            discovered = await _discover_repository_overlay(resolver, initial, overlay, paths)
+            discovered = await _discover_repository_overlay(
+                resolver, initial, overlay, paths,
+                fits_overlay=lambda value: len(canonical_json_bytes(
+                    SessionInstructionFrontier(value).to_json(),
+                )) <= turn.terminal_bytes,
+            )
             if discovered is None:
                 return overlay
             # Expose new instructions only after the fenced transaction commits.
@@ -1902,7 +1896,7 @@ class _RegenerableTurnRunner:
             )
             return discovered
 
-        return _RepositoryInstructionBoundary(check, initial, overlay, approved_frontiers=approved)
+        return _RepositoryInstructionBoundary(check, initial, overlay)
 
     async def _finish_retained_turn(
         self, turn: _AdmittedTurn, *, state, result=None, transcript=None,
@@ -2013,21 +2007,6 @@ class _RegenerableTurnRunner:
                     if not isinstance(capability.store, RuntimeStepStore):
                         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                     checkpoint_id = capability.store.require_interrupted_checkpoint()
-                    if repository_boundary is not None:
-                        metadata = {key: dict(value) for key, value in outcome.metadata.items()}
-                        for call_id, digest in repository_boundary.approval_frontiers(
-                            outcome.approvals, omit_empty=turn.split_source is not None,
-                        ).items():
-                            item = metadata.setdefault(call_id, {})
-                            original = item.get("linktools")
-                            evidence = {"repository_instruction_frontier": digest}
-                            if isinstance(original, Mapping) and original.get("kind") == "workspace_approval":
-                                # Leaf receipt owns authorized arguments. Do not store a second copy.
-                                evidence["kind"] = "workspace_approval"
-                            elif original is not None:
-                                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-                            item["linktools"] = evidence
-                        outcome = replace(outcome, metadata=metadata)
                     committed = await self._publish_deferred(
                         turn, checkpoint_id, tools, outcome,
                         split_source=capability.store._canonical_split_source,

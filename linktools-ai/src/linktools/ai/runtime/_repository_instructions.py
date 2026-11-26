@@ -3,16 +3,15 @@
 """Repository-instruction overlay and tool-boundary coordination."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import Capability
-from pydantic_ai.messages import InstructionPart, ToolCallPart
+from pydantic_ai.messages import InstructionPart
 
 from ..capability import AgentContext
-from ..capability import ToolCallFailed, ToolCallRetry
-from ..core import PersistenceDomain, canonical_sha256
+from ..capability import ToolCallRetry
+from ..core import PersistenceDomain
 from ..errors import AIError, ErrorCode
 from ..spec import RepositoryInstructionDocument, RepositoryInstructionResolver, RepositoryInstructions
 from ._tool_boundary import RepositoryInstructionBoundary
@@ -58,33 +57,29 @@ async def _discover_repository_overlay(
     initial: RepositoryInstructions | None,
     overlay: RepositoryInstructions | None,
     paths: tuple[str, ...],
+    *,
+    fits_overlay: Callable[[RepositoryInstructions], bool] | None = None,
 ) -> RepositoryInstructions | None:
-    active = _merge_repository_instructions(initial, overlay)
-    sources = {document.source for document in (() if active is None else active.documents)}
+    active = _merge_repository_instructions(initial, overlay) or RepositoryInstructions()
+    sources = {document.source for document in active.documents}
     discovered: list[RepositoryInstructionDocument] = []
+    previous = () if overlay is None else overlay.documents
     for path in paths:
-        resolved = await resolver.resolve(path, exclude_sources=frozenset(sources))
+        resolved = await resolver.resolve(path, exclude_sources=frozenset(sources), within=active)
+        added = []
         for document in resolved.documents:
-            if document.source not in sources:
-                sources.add(document.source)
-                discovered.append(document)
+            if document.source in sources:
+                continue
+            if fits_overlay is not None and not fits_overlay(RepositoryInstructions((*previous, *discovered, document))):
+                continue
+            sources.add(document.source)
+            discovered.append(document)
+            added.append(document)
+        if added:
+            active = RepositoryInstructions((*active.documents, *added))
     if not discovered:
         return None
-    next_overlay = _merge_repository_instructions(overlay, RepositoryInstructions(tuple(discovered)))
-    assert next_overlay is not None
-    resolver.validate(_merge_repository_instructions(initial, next_overlay))
-    return next_overlay
-
-
-def _repository_instruction_signature(
-    value: RepositoryInstructions | None,
-) -> tuple[tuple[str, str, str], ...]:
-    if value is None:
-        return ()
-    return tuple(
-        (document.source, document.scope, document.content)
-        for document in value.documents
-    )
+    return RepositoryInstructions((*previous, *discovered))
 
 
 def _repository_instructions_contain(
@@ -107,7 +102,7 @@ def _repository_instructions_contain(
     )
 
 
-def _validate_repository_instruction_frontier(
+def _validate_repository_instruction_overlay(
     execution: ExecutionRecord,
     overlay: RepositoryInstructions | None,
 ) -> None:
@@ -123,19 +118,12 @@ def _validate_repository_instruction_frontier(
     RepositoryInstructionPayload.from_reference(reference, source_domain=PersistenceDomain.CHECKPOINT)
 
 
-@dataclass(frozen=True, slots=True)
-class _RepositoryInstructionApproval:
-    tool_name: str
-    frontier_digest: str
-
-
 class _RepositoryInstructionBoundary:
     def __init__(
         self,
         check_frontier: Callable[..., Awaitable[RepositoryInstructions | None]],
         initial: RepositoryInstructions | None,
         overlay: RepositoryInstructions | None,
-        approved_frontiers: Mapping[str, _RepositoryInstructionApproval] | None = None,
     ) -> None:
         self._check_frontier = check_frontier
         self._initial = initial
@@ -144,9 +132,6 @@ class _RepositoryInstructionBoundary:
         self._initial_text = "" if not self._has_initial else initial.render()
         self._overlay_text = self._render_overlay_text(overlay)
         self._lock = asyncio.Lock()
-        self._approved_frontiers = dict(approved_frontiers or {})
-        self._checked_approvals: dict[str, _RepositoryInstructionApproval] = {}
-        self._observed_frontier: str | None = None
 
     def _render_overlay_text(
         self, overlay: RepositoryInstructions | None
@@ -162,35 +147,7 @@ class _RepositoryInstructionBoundary:
         return self._initial_text
 
     def render_overlay(self) -> str:
-        self._observed_frontier = self._frontier_digest()
         return self._overlay_text
-
-    def _frontier_digest(self) -> str:
-        return canonical_sha256({
-            "initial": [list(document) for document in _repository_instruction_signature(self._initial)],
-            "overlay": [list(document) for document in _repository_instruction_signature(self._overlay)],
-        })
-
-    def approval_frontiers(self, calls: Sequence[ToolCallPart], *, omit_empty: bool = False) -> dict[str, str]:
-        observed = self._observed_frontier
-        if (omit_empty and observed is not None and not self._has_initial
-                and (self._overlay is None or not self._overlay.documents)
-                and observed == self._frontier_digest()):
-            # An empty observation is not a repository instruction. Only the
-            # split profile omits it; an earlier nonempty or checked frontier
-            # must still reach approval persistence and its policy checks.
-            observed = None
-        result = {}
-        for call in calls:
-            if observed is not None:
-                result[call.tool_call_id] = observed
-            else:
-                # Deferred replay may pause again without a new model request.
-                # Only that original approved call can carry its observed frontier.
-                checked = self._checked_approvals.get(call.tool_call_id)
-                if checked is not None and checked.tool_name == call.tool_name:
-                    result[call.tool_call_id] = checked.frontier_digest
-        return result
 
     async def check(
         self,
@@ -199,22 +156,8 @@ class _RepositoryInstructionBoundary:
         tool_call_id: str,
         arguments: dict[str, object],
         path_fields: tuple[str, ...],
-        approved: bool = False,
     ) -> None:
         async with self._lock:
-            # Only a resumed approval needs proof of the previously observed
-            # instructions. Ordinary tools never wait for a model round trip.
-            if approved and self._observed_frontier != self._frontier_digest():
-                permit = self._approved_frontiers.get(tool_call_id)
-                if (
-                    permit is None
-                    or permit.tool_name != tool_name
-                    or permit.frontier_digest != self._frontier_digest()
-                ):
-                    raise ToolCallFailed("This approval no longer matches its repository instructions. Request a new approval.")
-                # The SDK binds approval to the frozen original args through
-                # ToolApproved.override_args; its validators may normalize them.
-                self._checked_approvals[tool_call_id] = permit
             try:
                 next_overlay = (
                     await self._check_frontier(

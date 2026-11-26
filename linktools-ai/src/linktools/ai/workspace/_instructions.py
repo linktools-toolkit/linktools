@@ -8,6 +8,8 @@ import asyncio
 import errno
 import os
 import stat
+from collections.abc import Iterator
+from itertools import chain
 from pathlib import Path
 
 from ..errors import AIError, ErrorCode
@@ -39,10 +41,11 @@ class WorkspaceInstructionResolver:
         self,
         relative_target: Path,
         exclude_sources: frozenset[str],
-    ) -> tuple[RepositoryInstructionDocument, ...]:
+        *,
+        skip_oversize: bool = False,
+    ) -> Iterator[RepositoryInstructionDocument]:
         resolved_workspace_root = _resolve_existing_path(self._root)
         parts = relative_target.parts
-        documents: list[RepositoryInstructionDocument] = []
         for depth in range(len(parts) + 1):
             prefix_parts = parts[:depth]
             lexical_path = Path(*prefix_parts, "AGENTS.md")
@@ -51,24 +54,27 @@ class WorkspaceInstructionResolver:
             if source in exclude_sources:
                 continue
             scope = "." if not prefix_parts else Path(*prefix_parts).as_posix()
-            content = _read_verified_instruction_file(
-                self._root / lexical_path,
-                containment_roots=(resolved_workspace_root,),
-                max_bytes=self._policy.max_repository_instruction_bytes,
-                missing_ok=True,
-                allow_lexical_symlink=True,
-            )
-            if content is not None:
-                documents.append(
-                    RepositoryInstructionDocument(source, scope, content)
+            try:
+                content = _read_verified_instruction_file(
+                    self._root / lexical_path,
+                    containment_roots=(resolved_workspace_root,),
+                    max_bytes=self._policy.max_repository_instruction_bytes,
+                    missing_ok=True,
+                    allow_lexical_symlink=True,
                 )
-        return tuple(documents)
+            except AIError as error:
+                if skip_oversize and error.code is ErrorCode.PROMPT_TOO_LARGE:
+                    continue
+                raise
+            if content is not None:
+                yield RepositoryInstructionDocument(source, scope, content)
 
     async def resolve(
         self,
         path: str | Path = ".",
         *,
         exclude_sources: frozenset[str] = frozenset(),
+        within: RepositoryInstructions | None = None,
     ) -> RepositoryInstructions:
         relative_target = _normalize_target_path(self._root, path)
         target_scope = "." if not relative_target.parts else relative_target.as_posix()
@@ -76,14 +82,20 @@ class WorkspaceInstructionResolver:
             target_scope,
             exclude_sources=exclude_sources,
         )
-        agents = await asyncio.to_thread(
-            self._resolve_agents_blocking,
-            relative_target,
-            exclude_sources,
-        )
-        bundle = RepositoryInstructions((*rules.documents, *agents))
-        self.validate(bundle)
-        return bundle
+        def collect() -> RepositoryInstructions:
+            agents = self._resolve_agents_blocking(relative_target, exclude_sources, skip_oversize=within is not None)
+            candidates = chain(rules.documents, agents)
+            if within is not None:
+                return within.fit_additions(
+                    candidates,
+                    max_documents=self._policy.max_repository_instruction_documents,
+                    max_bytes=self._policy.max_repository_instruction_bytes,
+                )
+            bundle = RepositoryInstructions(tuple(candidates))
+            self.validate(bundle)
+            return bundle
+
+        return await asyncio.to_thread(collect)
 
     def validate(self, instructions: RepositoryInstructions) -> None:
         instructions.validate_limits(

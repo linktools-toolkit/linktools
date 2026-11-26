@@ -3,6 +3,7 @@
 """Publish deferred receipts under the existing canonical turn authority."""
 
 from datetime import datetime, timezone
+from collections.abc import Mapping
 
 from ..core import ApprovalStatus, ExternalCallStatus, ToolOperationStatus
 from ..errors import AIError, ErrorCode
@@ -30,7 +31,7 @@ def bind_deferred_publication(runner, turns, checkpoint) -> None:
         operations = ({staged.tool_call_id: staged} if staged is not None else
                       {operation.tool_call_id: operation for operation in await tool_bridge.list_operations()})
 
-        def pending(call) -> PendingDeferredCall:
+        def pending(call, *, approval: bool) -> PendingDeferredCall:
             operation = operations.get(call.tool_call_id)
             if (
                 operation is None or operation.execution_id != turn.key.turn_id
@@ -40,17 +41,23 @@ def bind_deferred_publication(runner, turns, checkpoint) -> None:
                 or operation.arguments_payload is None
             ):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            metadata = dict(requests.metadata.get(call.tool_call_id, {}))
+            if approval and "linktools" in metadata:
+                evidence = metadata.pop("linktools")
+                if not isinstance(evidence, Mapping) or evidence.get("kind") != "workspace_approval":
+                    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+                # The owned tool receipt already contains the canonical arguments.
             return PendingDeferredCall(
                 call.tool_call_id, call.tool_name, operation.arguments_payload,
-                requests.metadata.get(call.tool_call_id, {}), capability_ref=operation.capability_ref,
+                metadata, capability_ref=operation.capability_ref,
                 operation_id=operation.tool_operation_id,
             )
 
         identity = turn.key.turn_id
         continuation = PendingToolContinuation(
             source_agent_run_id=identity,
-            approvals=tuple(map(pending, requests.approvals)),
-            calls=tuple(map(pending, requests.calls)),
+            approvals=tuple(pending(call, approval=True) for call in requests.approvals),
+            calls=tuple(pending(call, approval=False) for call in requests.calls),
         )
         now = datetime.now(timezone.utc)
 

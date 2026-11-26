@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 """Reconstruct canonical deferred input from its accepted tool receipts."""
 
-from collections.abc import Mapping
-
 from pydantic_ai.tools import DeferredToolResults, ToolApproved, ToolDenied
 
 from ..capability import PydanticToolControlCapability
@@ -76,18 +74,6 @@ def canonical_deferred_commands(
         if loaded is None:
             return False
         decisions, supplies = loaded
-        for item, record in decisions:
-            if record.status is not ApprovalStatus.APPROVED or "linktools" not in item.metadata:
-                continue
-            evidence = item.metadata["linktools"]
-            digest = evidence.get("repository_instruction_frontier") if isinstance(evidence, Mapping) else None
-            if (
-                not isinstance(digest, str) or len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
-            ):
-                # Never convert a workspace approval without original proof
-                # into a generic deferred approval.
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         settled = [(item, record, None) for item, record in decisions if record.status is ApprovalStatus.DENIED]
         for item, record in supplies:
             if record.result_payload is None:

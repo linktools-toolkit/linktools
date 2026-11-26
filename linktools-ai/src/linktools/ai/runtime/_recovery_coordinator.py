@@ -43,11 +43,10 @@ from ..storage import StoredPayload
 from ..spec import CapabilityRef, RepositoryInstructionResolver, RepositoryInstructions
 from ..inputs import CanonicalUserInput
 from ._repository_instructions import (
-    _RepositoryInstructionApproval,
     _discover_repository_overlay,
     _instruction_paths,
     _repository_instructions_contain,
-    _validate_repository_instruction_frontier,
+    _validate_repository_instruction_overlay,
 )
 from ..execution import (
     ExecutionRecoveryEffect,
@@ -83,7 +82,6 @@ class _DeferredResume:
     producer_generation: int
     binding: AgentBinding = field(repr=False, compare=False)
     output_retries_used: int
-    repository_instruction_approvals: Mapping[str, _RepositoryInstructionApproval] = field(default_factory=dict)
 
 
 class _RecoveryCoordinatorPort(Protocol):
@@ -190,7 +188,6 @@ class _RecoveryCoordinatorPort(Protocol):
         call: ToolCallPart,
         metadata: Mapping[str, object],
         *,
-        repository_instruction_frontier: str | None = None,
         capability_ref: CapabilityRef | None = None,
         operation_id: str | None,
     ) -> PendingDeferredCall: ...
@@ -444,7 +441,7 @@ class _RecoveryCoordinator:
         persisted_overlay = await self._port.load_repository_instructions(
             current.recovery.repository_instruction_overlay
         )
-        _validate_repository_instruction_frontier(current, persisted_overlay)
+        _validate_repository_instruction_overlay(current, persisted_overlay)
         next_overlay = await _discover_repository_overlay(resolver, initial, persisted_overlay, paths)
         if next_overlay is None:
             return persisted_overlay
@@ -456,7 +453,7 @@ class _RecoveryCoordinator:
         committed_overlay = await self._port.load_repository_instructions(
             committed.recovery.repository_instruction_overlay
         )
-        _validate_repository_instruction_frontier(committed, committed_overlay)
+        _validate_repository_instruction_overlay(committed, committed_overlay)
         if (
             committed_overlay is None
             or not _repository_instructions_contain(committed_overlay, next_overlay)
@@ -478,7 +475,6 @@ class _RecoveryCoordinator:
         agent_run_id: str,
         paused_at: datetime,
         producer_generation: int | None = None,
-        repository_instruction_frontiers: Mapping[str, str] | None = None,
         capability_refs: Mapping[str, CapabilityRef] | None = None,
     ) -> ExecutionRecord:
         current = await self._port.load_recovery_execution(
@@ -513,10 +509,6 @@ class _RecoveryCoordinator:
                     metadata.get(call.tool_call_id, {}),
                     operation_id=operation_ids.get(call.tool_call_id),
                     capability_ref=None if capability_refs is None else capability_refs.get(call.tool_call_id),
-                    repository_instruction_frontier=(
-                        None if repository_instruction_frontiers is None
-                        else repository_instruction_frontiers.get(call.tool_call_id)
-                    ),
                 )
             )
         approvals = tuple(approvals_list)
@@ -1180,7 +1172,7 @@ class _RecoveryCoordinator:
         resolved = await self._load_deferred_results(current, continuation)
         if resolved is None:
             return None
-        deferred_results, repository_approvals = resolved
+        deferred_results = resolved
         checkpoint = await self._port.load_interrupted_checkpoint(
             continuation.source_agent_run_id, execution=current,
         )
@@ -1204,14 +1196,13 @@ class _RecoveryCoordinator:
             resumed_execution, tuple(checkpoint.messages if checkpoint.context_messages is None
                                      else checkpoint.context_messages),
             deferred_results, current.revision + 1,
-            binding, checkpoint.output_retries_used, repository_approvals,
+            binding, checkpoint.output_retries_used,
         )
 
     async def _load_deferred_results(
         self, execution: ExecutionRecord, continuation: PendingToolContinuation, *, settled_only: bool = False,
-    ) -> tuple[DeferredToolResults, dict[str, _RepositoryInstructionApproval]] | None:
+    ) -> DeferredToolResults | None:
         deferred_results = DeferredToolResults()
-        repository_approvals: dict[str, _RepositoryInstructionApproval] = {}
         for pending in continuation.approvals:
             approval_id = deferred_resource_id(
                 "approval-v1",
@@ -1235,21 +1226,6 @@ class _RecoveryCoordinator:
                 deferred_results.approvals[pending.tool_call_id] = ToolApproved(
                     override_args=arguments
                 )
-                # Only runtime-frozen pending metadata is evidence of the
-                # original model's instruction frontier, never resolution metadata.
-                metadata = pending.metadata.get("linktools")
-                if metadata is not None:
-                    frontier = (metadata.get("repository_instruction_frontier")
-                                if isinstance(metadata, Mapping) else None)
-                    if (
-                        not isinstance(frontier, str)
-                        or len(frontier) != 64
-                        or any(character not in "0123456789abcdef" for character in frontier)
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    repository_approvals[pending.tool_call_id] = _RepositoryInstructionApproval(
-                        pending.tool_name, frontier,
-                    )
             elif record.status in {
                 ApprovalStatus.DENIED,
                 ApprovalStatus.CANCELLED,
@@ -1306,7 +1282,7 @@ class _RecoveryCoordinator:
             deferred_results.metadata[pending.tool_call_id] = dict(
                 record.resolution_metadata
             )
-        return deferred_results, repository_approvals
+        return deferred_results
 
     async def restore_resumed_deferred(
         self, execution: ExecutionRecord, *,
@@ -1319,9 +1295,8 @@ class _RecoveryCoordinator:
         resolved = await self._load_deferred_results(execution, execution.recovery.pending_tools)
         if resolved is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        results, approvals = resolved
         return _DeferredResume(
-            execution, history, results, producer_generation, binding, output_retries_used, approvals,
+            execution, history, resolved, producer_generation, binding, output_retries_used,
         )
 
     def _deferred_attempt_advanced(

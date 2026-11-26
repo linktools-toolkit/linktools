@@ -388,10 +388,11 @@ async def compose_runtime_components(
 
             async def resolve(
                 self, path: str | Path = ".", *, exclude_sources: frozenset[str] = frozenset(),
+                within: RepositoryInstructions | None = None,
             ) -> RepositoryInstructions:
                 current = await current_resolution()
                 current_rules = RepositoryInstructions(()) if current is None else current.instructions
-                return await resolver_for(current_rules).resolve(path, exclude_sources=exclude_sources)
+                return await resolver_for(current_rules).resolve(path, exclude_sources=exclude_sources, within=within)
 
         instruction_resolver = _CurrentInstructionResolver()
         if workspace is None:

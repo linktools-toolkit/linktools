@@ -17,18 +17,18 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import ExecutionCapability, SessionCapability
-from linktools.ai.core import ApprovalDecision, ApprovalStatus, CommitPolicy, ExecutionStatus, SessionStatus, WorkspaceFileInput
+from linktools.ai.core import ApprovalDecision, ApprovalStatus, CommitPolicy, ExecutionStatus, Principal, SessionStatus, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.execution import ExecutionRecoveryDetail
+from linktools.ai.execution import ApprovalDecisionRequest, ExecutionRecoveryDetail
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.storage import InMemoryCacheBackend, StorageOverlay, StorageRoute
 from linktools.ai.session import SessionRecord
-from linktools.ai.workspace import ToolPermissionPolicy, Workspace, WorkspacePolicy
+from linktools.ai.workspace import ToolPermissionPolicy, ToolPermissionRule, Workspace, WorkspacePolicy
 
 from ._runtime_test_helpers import (
     _Models,
@@ -66,11 +66,14 @@ async def _storage(root: Path, backend: str) -> AsyncIterator[PersistenceStorage
 
 
 @pytest.mark.asyncio
-async def test_native_session_reads_new_scope_on_first_call_and_loads_rules(tmp_path: Path) -> None:
-    nested = tmp_path / "pkg"
-    nested.mkdir()
+@pytest.mark.parametrize("overflow", (None, "model", "turn"))
+async def test_native_session_reads_new_scope_on_first_call_and_loads_rules(tmp_path: Path, overflow) -> None:
+    nested = tmp_path / "pkg" / "deep"
+    nested.mkdir(parents=True)
     (nested / "AGENTS.md").write_text("NESTED-ONLY-GUIDANCE", encoding="utf-8")
     (nested / "README.md").write_text("first read body", encoding="utf-8")
+    if overflow is not None:
+        (nested.parent / "AGENTS.md").write_text("OVER-BUDGET-" + "x" * (70 * 1024), encoding="utf-8")
     requests = 0
 
     async def model(messages, info):
@@ -80,18 +83,20 @@ async def test_native_session_reads_new_scope_on_first_call_and_loads_rules(tmp_
         if requests == 1:
             assert "NESTED-ONLY-GUIDANCE" not in instructions
             return ModelResponse(parts=[
-                ToolCallPart("read_file", {"path": "pkg/README.md"}, "read-once"),
-                ToolCallPart("list_files", {"path": "pkg"}, "list-once"),
+                ToolCallPart("read_file", {"path": "pkg/deep/README.md"}, "read-once"),
+                ToolCallPart("list_files", {"path": "pkg/deep"}, "list-once"),
             ])
         assert requests == 2
         assert "NESTED-ONLY-GUIDANCE" in instructions
+        assert "OVER-BUDGET-" not in instructions
         returns = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
         assert {part.tool_call_id for part in returns} == {"read-once", "list-once"}
         assert all(part.outcome == "success" for part in returns)
         assert "first read body" in str(next(part for part in returns if part.tool_call_id == "read-once").content)
         return ModelResponse(parts=[TextPart("done")])
 
-    features = workspace_features("native-no-instruction-retry", workspace=Workspace.load(tmp_path))
+    policy = WorkspacePolicy(max_repository_instruction_bytes=4096) if overflow == "model" else WorkspacePolicy()
+    features = workspace_features("native-no-instruction-retry", workspace=Workspace.load(tmp_path, policy=policy))
     features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.agent("reader", model="default", allow_tools=("read_file", "list_files"), tool_retries=0)
     model_features(_Models(_UsageFunctionModel(model)), features)
@@ -106,6 +111,57 @@ async def test_native_session_reads_new_scope_on_first_call_and_loads_rules(tmp_
         turn = await runtime.sessions.start(
             "session", "Read the file", agent=agent, principal=principal, idempotency_key="once",
         )
+        assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        assert requests == 2
+
+
+@pytest.mark.asyncio
+async def test_native_workspace_approval_resumes_after_sibling_discovers_rules(tmp_path: Path) -> None:
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    (nested / "AGENTS.md").write_text("SIBLING-GUIDANCE", encoding="utf-8")
+    (tmp_path / "README.md").write_text("approved original body", encoding="utf-8")
+    requests = 0
+
+    async def model(messages, info):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            assert "SIBLING-GUIDANCE" not in (info.instructions or "")
+            return ModelResponse(parts=[
+                ToolCallPart("read_file", {"path": "README.md"}, "approved-original"),
+                ToolCallPart("list_files", {"path": "pkg"}, "discover-rules"),
+            ])
+        assert requests == 2
+        assert "SIBLING-GUIDANCE" in (info.instructions or "")
+        [result] = [part for message in messages for part in message.parts
+                    if isinstance(part, ToolReturnPart) and part.tool_call_id == "approved-original"]
+        assert result.outcome == "success" and "approved original body" in str(result.content)
+        return ModelResponse(parts=[TextPart("done")])
+
+    workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(
+        rules=(ToolPermissionRule(tool_name="read_file", decision="ask"),),
+    )))
+    features = workspace_features("approval-after-discovery", workspace=workspace)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    features.agent("reader", model="default", allow_tools=("read_file", "list_files"), tool_retries=0)
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    async with Persistence.open(
+        "approval-after-discovery", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+    ) as persistence, Runtime.open(
+        persistence=persistence, features=features, authorization=_HostAuthorization(),
+    ) as runtime:
+        principal = Principal("operator", runtime.tenant_id)
+        agent = runtime.agents.get("reader")
+        await agent.create_session("session", principal=principal)
+        turn = await runtime.sessions.start(
+            "session", "Read the file", agent=agent, principal=principal, idempotency_key="once",
+        )
+        assert (await asyncio.wait_for(turn.wait(), timeout=10)).status is ExecutionStatus.WAITING_DEFERRED
+        [pending] = await runtime.approvals.list(turn.key, principal=principal)
+        await runtime.approvals.decide(turn.key, ApprovalDecisionRequest(
+            principal, pending.approval_id, "approve-exact", ApprovalDecision.APPROVE,
+        ))
         assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         assert requests == 2
 
@@ -367,14 +423,14 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
             assert len(approvals) == 1 and requests == pause_requests
             checkpoint = await persistence.execution.executions.get_recovery(execution.execution_id, tenant_id=tenant)
             assert checkpoint is not None and checkpoint.recovery is not None and checkpoint.recovery.pending_tools is not None
-            assert len(checkpoint.recovery.pending_tools.approvals[0].metadata["linktools"]["repository_instruction_frontier"]) == 64
+            assert "linktools" not in checkpoint.recovery.pending_tools.approvals[0].metadata
             rules.write_text("LATER-RULE", encoding="utf-8")
             await persistence.checkpoint.approvals.decide(
                 approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
                 idempotency_key="a" * 64, decision=ApprovalDecision.APPROVE,
                 principal_id=runtime.default_principal.principal_id, decision_digest="b" * 64,
                 decided_at=datetime.now(timezone.utc),
-                resolution_metadata={"linktools": {"repository_instruction_frontier": "0" * 64}},
+                resolution_metadata={"operator_note": "approved exact tool call"},
             )
         async with Runtime.open(persistence=persistence, features=features, auto_recover=True) as runtime:
             finished = await runtime.executions.wait(
@@ -566,7 +622,7 @@ async def test_subagent_attachments_extend_but_do_not_refresh_parent_pin_or_sess
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("native", "custom"))
-async def test_native_and_custom_approvals_restore_observed_frontier_with_validated_arguments(
+async def test_native_and_custom_approvals_restore_validated_arguments(
     tmp_path: Path, kind: str,
 ) -> None:
     from pydantic_ai.exceptions import ApprovalRequired
@@ -628,7 +684,7 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
             idempotency_key="c" * 64, decision=ApprovalDecision.APPROVE,
             principal_id=principal_id, decision_digest="d" * 64,
             decided_at=datetime.now(timezone.utc),
-            resolution_metadata={"linktools": {"repository_instruction_frontier": "0" * 64}},
+            resolution_metadata={"operator_note": "approved exact tool call"},
         )
         async with Runtime.open(persistence=persistence, features=features, auto_recover=True) as runtime:
             finished = await runtime.executions.wait(
@@ -652,14 +708,14 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
     arrivals = 0
     original_resolve = WorkspaceInstructionResolver.resolve
 
-    async def resolve(resolver, path=".", *, exclude_sources=frozenset()):
+    async def resolve(resolver, path=".", *, exclude_sources=frozenset(), within=None):
         nonlocal arrivals
         if path == "." and arrivals < 2:
             arrivals += 1
             if arrivals == 2:
                 both_resolving.set()
             await asyncio.wait_for(both_resolving.wait(), timeout=5)
-        return await original_resolve(resolver, path, exclude_sources=exclude_sources)
+        return await original_resolve(resolver, path, exclude_sources=exclude_sources, within=within)
 
     monkeypatch.setattr(WorkspaceInstructionResolver, "resolve", resolve)
     requests = []
