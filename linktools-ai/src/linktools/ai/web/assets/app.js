@@ -132,8 +132,9 @@ function setDisabled() {
   $('settings').disabled=!state.config;$('open-record').disabled=!state.config;
   $('open-recovery').disabled=readonly || !state.selectedExecution;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
-  ['send','planning','thinking','prompt'].forEach(id => $(id).disabled=readonly || !state.session || state.session.status === 'CLOSED' || !state.selectedSession);
-  $('send').disabled ||= sessionSendBlocked();
+  const composerDisabled=readonly || !state.session || state.session.status==='CLOSED' || !state.selectedSession;
+  ['planning','thinking','thinking-toggle','prompt'].forEach(id=>$(id).disabled=composerDisabled);
+  if(composerDisabled)setThinkingPanel(false);
   const ordinary=Boolean(state.config?.turn_sessions) && state.view==='sessions';
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
   if(ordinary){
@@ -170,22 +171,31 @@ function setDisabled() {
   $('end-active').disabled=Boolean(active && [...state.actionsPending].some(key=>key.startsWith(`${active.execution_id}:`)));
   const stoppable=!readonly && state.execution && !terminal(state.execution.status);
   $('stop-run').hidden=!stoppable;
-  $('cancel').hidden=readonly || !active || terminal(active.status);
   $('inspector-active-stop').hidden=readonly || !active || terminal(active.status) || active.execution_id===state.selectedExecution;
   $('inspector-active-stop').disabled=readonly || !active || state.actionsPending.has(`${active.execution_id}:end-stopped`);
-  $('cancel').setAttribute('aria-label',`Stop current execution ${active?.execution_id || ''}`);
-  $('stop-run').disabled=ending;$('cancel').disabled=Boolean(active && state.actionsPending.has(`${active.execution_id}:end-stopped`));
+  $('stop-run').disabled=ending;
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
   $('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);
   const turn=ordinary ? state.session?.active_turn_id : null;
+  const stop=state.view==='sessions' && !readonly && (ordinary?Boolean(turn):Boolean(active && !terminal(active.status)));
+  const stopPending=ordinary?state.actionsPending.has(`turn:${turn}`)
+    :Boolean(active && (state.actionsPending.has(`${active.execution_id}:cancel`)
+      || state.actionsPending.has(`${active.execution_id}:end-stopped`)));
+  const send=$('send');
+  send.type=stop?'button':'submit';
+  const actionLabel=stop?'Stop':'Send ↑';
+  if(send.textContent!==actionLabel)send.textContent=actionLabel;
+  send.setAttribute('aria-label',stop?'Stop current turn':'Send message');
+  send.classList.toggle('danger',stop);send.classList.toggle('primary',!stop);
+  send.disabled=stop?stopPending:composerDisabled || sessionSendBlocked();
+  $('reader-stop').hidden=!stop || state.conversationMode==='chat';
+  $('reader-stop').disabled=stopPending;
   $('recover-turn').hidden=readonly || !turn;
   $('recover-turn').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
   if(ordinary){
     $('open-recovery').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
     $('inspector-toggle').hidden=!state.config.turn_trace || (!turn && !state.turns.some(row=>row.turn_id));
     $('inspector-toggle').textContent='Turn trace';
-    $('cancel').hidden=readonly || !turn;$('cancel').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
-    $('cancel').setAttribute('aria-label','Stop current turn');
     if(turn && sessionWatch?.ready){
       const status=state.turns.find(row=>row.turn_id===turn)?.status;
       $('current-status').hidden=false;
@@ -212,7 +222,8 @@ function renderPage() {
   (executions?$('execution-list'):$('sidebar-browse')).append($('browse-panel'));
   $('composer').hidden=!sessions || !state.selectedSession || state.conversationMode!=='chat';
   $('conversation-column').classList.toggle('reading',state.conversationMode==='original');
-  const cancelHome=$(sessions && state.conversationMode!=='chat'?'reader-actions':'composer-actions');if($('cancel').parentElement!==cancelHome)cancelHome.append($('cancel'));
+  if($('composer').hidden)setThinkingPanel(false);
+  $('reader-stop').hidden=$('send').type!=='button' || state.conversationMode==='chat';
   $('session-details').hidden=!sessions;
   $('inspector-close').hidden=executions;
   $('inspector').classList.toggle('execution-page',executions || sessions && state.conversationMode==='activity');
@@ -1011,6 +1022,17 @@ function renderSessionHeader() {
 const thinkingLevels=['low','medium','high','xhigh','max'];
 const thinkingLabels=['Low','Medium','High','Extra high','Maximum'];
 const thinkingPreferenceKey='linktools.ai-web.thinking';
+function setThinkingPanel(open) {
+  $('thinking-panel').hidden=!open;
+  $('thinking-toggle').setAttribute('aria-expanded',String(open));
+  if(open)$('thinking').focus();
+}
+function renderComposerModel() {
+  const model=state.config?.model || 'Model';
+  $('composer-model-name').textContent=model;
+  $('thinking-toggle').title=`${model} · Thinking settings`;
+}
+
 function restoreThinkingPreference() {
   try {
     const index=thinkingLevels.indexOf(localStorage.getItem(thinkingPreferenceKey));
@@ -2426,7 +2448,7 @@ async function sendMessage(event) {
   const ordinary=Boolean(state.config?.turn_sessions), uploads=turnUploads;
   if(!sessionId || !state.session || state.session.status!=='OPEN' || state.config?.read_only || !promptValue.trim() || sessionSendBlocked())return;
   sessionSubmissions.add(sessionId);
-  $('send').disabled=true;notice('');
+  setThinkingPanel(false);$('send').disabled=true;notice('');
   try {
     const options={prompt:promptValue,thinking:readThinking()};
     if(!ordinary)options.planning=$('planning').checked;
@@ -2687,7 +2709,7 @@ function showSettings() {
   const card=element('div','detail-card');card.append(element('h3','','Captured capabilities'));config.capabilities.forEach(item=>card.append(element('p','',`${item.kind} · ${item.id} · revision ${item.revision}`)));if(!config.capabilities.length)card.append(element('p','','Capability composition is loaded when an execution Runtime starts.'));$('settings-content').append(card);$('settings-dialog').showModal();
 }
 async function bootstrap() {
-  state.config=await api('/api/config');$('workspace-label').textContent=state.config.workspace || 'Local Runtime';
+  state.config=await api('/api/config');renderComposerModel();$('workspace-label').textContent=state.config.workspace || 'Local Runtime';
   state.config.metric_names.forEach(name=>{const option=element('option','',name.replace('linktools.',''));option.value=name;$('metric-names').append(option);});
   if(state.config.turn_sessions)$('planning').checked=false;
   if(state.config.read_only){connection('Read-only');notice('Read-only. Configure a model at startup to send messages.');}
@@ -2730,6 +2752,16 @@ $('open-recovery').onclick=()=>{ $('action-menu').open=false;return openRecovery
 $('recovery-shortcut').onclick=()=>openRecovery(true).catch(showError);
 restoreThinkingPreference();
 $('thinking').oninput=saveThinkingPreference;
+$('thinking-toggle').onclick=()=>setThinkingPanel($('thinking-panel').hidden);
+document.addEventListener('pointerdown',event=>{
+  if(!$('thinking-panel').hidden && !$('composer-model').contains(event.target))setThinkingPanel(false);
+});
+$('composer-model').addEventListener('keydown',event=>{
+  if(event.key==='Escape' && !$('thinking-panel').hidden){
+    event.preventDefault();setThinkingPanel(false);$('thinking-toggle').focus();
+  }
+});
+
 function nativeTurnInspector() {
   return state.view==='sessions' && state.config?.turn_sessions && state.config.turn_trace;
 }
@@ -2801,7 +2833,7 @@ $('refresh').onclick=()=>{if(state.config?.turn_sessions && state.view==='sessio
   }if(state.view==='sessions' && state.selectedSession && !hasExecutionStream(state.observedExecution))watchSession(state.selectedSession,{restart:true});if(!state.cancellationNoticeId)notice('');return (async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
 let settingsRequest=null;
 $('settings').onclick=()=>{
-  if(!settingsRequest)settingsRequest=api('/api/config').then(config=>{state.config=config;showSettings();}).catch(showError).finally(()=>{settingsRequest=null;});
+  if(!settingsRequest)settingsRequest=api('/api/config').then(config=>{state.config=config;renderComposerModel();showSettings();}).catch(showError).finally(()=>{settingsRequest=null;});
   return settingsRequest;
 };
 $('export').onclick=()=>{closeRunActions();return exportResult().catch(showError);};
@@ -2810,7 +2842,11 @@ $('turn-files').onchange=selectAttachments;
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
 $('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
 $('recover-turn').onclick=()=>ordinaryAction('recover').catch(showError);
-$('cancel').onclick=()=> (state.config?.turn_sessions && state.view==='sessions' ? ordinaryAction('cancel') : executionAction('cancel',{active:true})).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
+const stopConversation=()=> (state.config?.turn_sessions && state.view==='sessions'
+  ? ordinaryAction('cancel') : executionAction('cancel',{active:true})).catch(showError);
+$('reader-stop').onclick=stopConversation;
+$('send').onclick=()=>{if($('send').type==='button')return stopConversation();};
+$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
 $('metrics-form').onsubmit=event=>loadMetrics(event).catch(showError);
 document.querySelectorAll('[data-view]').forEach(node=>node.onclick=()=>navigateView(node.dataset.view));
 $('detail-view').onchange=()=>{state.tab=$('detail-view').value;return loadDetail().catch(showError);};

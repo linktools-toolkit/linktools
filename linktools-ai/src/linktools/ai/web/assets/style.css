@@ -288,19 +288,23 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 @media(max-width:620px){.conversation-nav{padding:0 16px;gap:22px}.conversation-nav button{font-size:12px}.native-toolbar{gap:8px;min-height:50px}.native-toolbar select{font-size:11px}.native-turn{max-width:75px}.native-status{font-size:10px}.native-message{grid-template-columns:1fr;gap:8px;padding:14px 0}.native-text{font-size:14px;line-height:23px}.native-literal{font-size:12px}.native-tool-heading{font-size:12px}.native-tool-result>.native-text{font-size:12px;line-height:20px}}
 
 .composer-bar>.composer-settings{display:flex;align-items:center;gap:8px;min-width:0}
-.thinking-control{display:flex;flex-flow:row nowrap;align-items:center;gap:6px;font-size:12px;min-width:0;white-space:nowrap}
-.thinking-control output{color:var(--muted);text-align:right}
-.thinking-control input{width:clamp(40px,9vw,108px);min-width:36px;margin:0;padding:0;accent-color:var(--accent)}
+.composer-model{position:relative;min-width:0}
+#thinking-toggle{display:flex;align-items:center;gap:5px;max-width:min(30vw,200px);font-size:12px;white-space:nowrap}
+#composer-model-name{overflow:hidden;text-overflow:ellipsis}
+.thinking-panel{position:absolute;right:0;bottom:calc(100% + 8px);z-index:5;width:176px;padding:12px;border:1px solid var(--line);border-radius:10px;background:#fff;box-shadow:0 8px 22px #20252c18}
+.thinking-control{flex-flow:row nowrap;justify-content:space-between;gap:8px;white-space:nowrap}
+.thinking-control output{color:var(--muted)}
+.thinking-panel input{width:100%;height:24px;margin:6px 0 0;padding:0;accent-color:var(--accent)}
 .planning-control{display:flex;flex-direction:row;align-items:center;gap:6px;white-space:nowrap;font-size:12px}
 .live-tools{margin:10px 0}
 .live-tool{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}
 .live-tool .tool-name{font-weight:600;min-width:0}.live-tool .tool-status{color:var(--muted);text-align:right;min-width:0}
 .live-tool.error .tool-status,.tool-message.error .tool-status{color:var(--danger)}
-#composer-actions{flex-shrink:0}
+#composer-actions{flex-shrink:0;align-items:center;margin-left:auto}
+#send{min-width:67px;white-space:nowrap}
 @media(max-width:600px){.live-tool{gap:8px}}
 @media(max-width:480px){
   .composer-bar,.composer-bar>.composer-settings{gap:4px}
-  .thinking-label{display:none}
   #composer-actions button{padding-inline:8px}
 }
 .turn-process{margin:10px 0 14px;padding:10px 12px;background:var(--wash);border:1px solid var(--line);border-radius:8px}
