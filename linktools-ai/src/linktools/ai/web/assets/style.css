@@ -263,7 +263,7 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .trace-seq{color:var(--muted);font-size:10px;min-width:20px}.trace-label{flex:1;min-width:0;overflow-wrap:anywhere;color:var(--ink)}
 .trace-status{font-size:9px;color:var(--muted)}.trace-duration{font-size:10px;white-space:nowrap;color:var(--muted)}
 .trace-detail{padding:0 0 16px 30px;overflow-wrap:anywhere;font-size:12px;line-height:1.6}.trace-detail p{margin:7px 0}.trace-detail button{font-size:11px;margin:5px 8px 5px 0;border:0;padding:4px 0}.trace-detail summary{cursor:pointer;color:var(--muted);font-size:11px;margin-top:8px}
-.workbench:has(.trace-workspace-mode){display:flex;overflow:auto}
+.workbench:has(.trace-workspace-mode){display:flex;overflow:auto;overflow-anchor:none}
 .inspector.execution-page.trace-workspace-mode{position:relative;min-width:0;min-height:0;padding:0}
 .trace-workspace-mode>.inspector-heading{position:absolute;inset:0 7px auto auto;height:33px}
 .trace-workspace-mode #detail-title,.trace-workspace-mode>#execution-meta,.trace-workspace-mode>#session-details{display:none}
@@ -271,6 +271,7 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .trace-workspace-mode .detail-turn-picker{display:flex;align-items:center;gap:5px;flex:none;padding:0}
 .trace-workspace-mode .detail-turn-picker>span{display:none}
 .trace-workspace-mode .detail-turn-picker select{width:auto;max-width:175px;margin:0;padding:2px 4px;font-size:11px}
+.trace-workspace-mode #trace-earlier-turns{flex:none;padding:2px 5px;font-size:10px}
 .trace-workspace-mode>#detail-more{align-self:flex-start;margin:5px 12px}
 .execution-page .inspector-content.turn-trace{max-width:none;display:flex;flex-direction:column;min-height:350px;overflow:hidden;padding-top:0}
 .trace-log-heading{display:flex;flex:1;align-items:center;gap:12px;font-size:11px;color:var(--muted)}
@@ -281,7 +282,7 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .trace-band-empty{color:var(--muted);font-size:10px}
 .trace-band-span{position:absolute;top:0;height:8px;border-radius:1px;background:#8f76b4}.trace-band-span.tools{background:#ce883b}.trace-band-span.failed{background:#d34c4c}
 .trace-workspace{display:grid;grid-template-columns:minmax(0,62fr) minmax(0,38fr);flex:1;min-height:0;overflow:hidden}
-.trace-log{min-width:0;min-height:0;overflow:auto;border-right:1px solid var(--line)}
+.trace-log{min-width:0;min-height:0;overflow:auto;overflow-anchor:none;overscroll-behavior:contain;border-right:1px solid var(--line)}
 .trace-log-select{display:grid;grid-template-columns:24px 20px minmax(0,1fr) auto;align-items:center;gap:6px;width:100%;height:30px;border:0;border-bottom:1px solid #eceef1;border-radius:0;background:#fff;padding:0 9px 0 3px;color:var(--ink);text-align:left;font-size:12px}
 .trace-log-select:hover{background:#f5f7fa}.trace-log-select[aria-pressed=true]{background:#e8f0fc;box-shadow:inset 3px 0 #407dcc,inset 0 0 0 1px #8bacdb}
 .trace-log-no,.trace-log-status{color:var(--muted);font:10px ui-monospace,monospace;white-space:nowrap}.trace-log-no{text-align:center}.trace-log-status.failed{color:#bd343c}
@@ -296,7 +297,7 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .trace-record-close,.trace-record-tab,.trace-record-link{border:0;background:none;color:var(--muted);padding:4px 6px}
 .trace-record-tabs{display:flex;gap:8px;padding:0 8px;border-bottom:1px solid var(--line)}
 .trace-record-tab{min-height:30px;border-radius:0;font-size:12px}.trace-record-tab[aria-pressed=true]{color:#366bae;box-shadow:inset 0 -2px #4e82c5}
-.trace-record-body{min-height:0;overflow:auto;padding:8px 12px}.trace-record-event{margin:0 0 4px;padding:4px 8px;border-left:2px solid var(--line);font-size:12px}.trace-record-event>summary{cursor:pointer}
+.trace-record-body{min-height:0;overflow:auto;overflow-anchor:none;overscroll-behavior:contain;padding:8px 12px}.trace-record-event{margin:0 0 4px;padding:4px 8px;border-left:2px solid var(--line);font-size:12px}.trace-record-event>summary{cursor:pointer}
 .trace-record-link{color:#366bae;font-size:12px}.trace-record-empty{margin:12px;color:var(--muted);font-size:12px}
 .trace-preview-text{font-size:13px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;margin:5px 0 8px}
 .trace-record .native-message{grid-template-columns:1fr;gap:4px}.trace-record .kv{margin:0 0 8px}

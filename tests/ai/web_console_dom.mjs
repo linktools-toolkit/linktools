@@ -28,7 +28,7 @@ class Element {
   replaceChildren(...children){this.children.forEach(child=>child.connect?.(false));this._text='';this.children=[];this.append(...children);}
   contains(node){return node===this || this.children.some(child=>child.contains?.(node));}
   querySelector(selector){if(selector===':scope > .empty')return this.children.find(child=>child.className?.split(' ').includes('empty')) || null;return this.querySelectorAll(selector)[0] || null;}
-  querySelectorAll(selector){const matches=[];for(const child of this.children){if(selector==='[data-request-focus]' && child.dataset?.requestFocus)matches.push(child);matches.push(...(child.querySelectorAll?.(selector)||[]));}return matches;}
+  querySelectorAll(selector){const matches=[];for(const child of this.children){if(selector==='[data-request-focus]' && child.dataset?.requestFocus || selector.startsWith('.') && child.className?.split(' ').includes(selector.slice(1)))matches.push(child);matches.push(...(child.querySelectorAll?.(selector)||[]));}return matches;}
   focus(){document.activeElement=this;}
   addEventListener(name,listener){this.listeners ??= new Map();this.listeners.set(name,listener);}
   scrollIntoView(){}
@@ -284,7 +284,7 @@ if(process.argv[3]==='native-model-messages') {
   const id='b-current-turn',last='b-previous-turn',session=sessions.get('b');
   Object.assign(session,{active_turn_id:id,active_execution_id:'stale-execution',last_turn_no:1,revision:1});
   timelineOverrides.set('b',{items:[{turn_id:last,turn_no:1,status:'SUCCEEDED',
-    conversation_committed:true,user_input:{prompt:'Earlier question',attachments:[]},items:[]}],next_cursor:null});
+    conversation_committed:true,user_input:{prompt:'Earlier question',attachments:[]},items:[]}],next_cursor:'earlier-turns'});
   await select('#session=b');
   const models=()=>calls.filter(call=>call.query.models==='true');
   const event=(ordinal,kind,status,fields={})=>({turn_id:id,step_event_seq:ordinal,payload:{kind,status,scope:'root',occurred_at:`2026-01-01T00:00:0${ordinal}Z`,...fields}});
@@ -328,13 +328,31 @@ if(process.argv[3]==='native-model-messages') {
   assert.equal(descendants(findClass('trace-bands')).filter(item=>item.className.startsWith('trace-band-span')).length,2);
   assert.doesNotMatch(findClass('trace-bands').textContent,/Input/);
   assert.match(pane().textContent,/Select an event/);
+  const older='b-earliest-turn',earlierButton=node('trace-earlier-turns');
+  assert.equal(earlierButton.hidden,false);
+  const historyPage=deferred('GET /api/sessions/b'),olderTurns=earlierButton.click();
+  await historyPage.requested;
+  assert.equal(calls.at(-1).query.cursor,'earlier-turns');
+  assert.equal(calls.at(-1).query.trace,undefined);
+  historyPage({session,timeline:{items:[{turn_id:older,turn_no:1,status:'SUCCEEDED',
+    conversation_committed:true,user_input:{prompt:'Earliest question',attachments:[]},items:[]}],next_cursor:null}});
+  await olderTurns;
+  assert.equal(earlierButton.hidden,true);
+  assert.equal(node('detail-turn').value,id);
+  assert.ok(node('detail-turn').children.some(option=>option.value===older));
+  assert.equal(models().length,0);
+  log().scrollTop=80;node('conversation-view').scrollTop=24;
   rows()[0].onkeydown({key:'ArrowDown',preventDefault(){}});
   assert.equal(document.activeElement,rows()[1]);
   await rows()[1].click();
   assert.equal(rows()[1].getAttribute('aria-pressed'),'true');
+  assert.equal(log().scrollTop,80,'row selection keeps the event scroll position');
+  assert.equal(node('conversation-view').scrollTop,24,'row selection keeps the outer scroll position');
+  findClass('trace-record-body').scrollTop=44;
   assert.match(pane().textContent,/trace only tool.*tool call.*tool result/s);
   await tab('Raw').click();
   assert.match(pane().textContent,/TOOL_CALL.*TOOL_RESULT/s);
+  assert.equal(findClass('trace-record-body').scrollTop,44,'tab switch keeps detail scroll position');
   assert.equal(models().length,0,'opening a tool event does not read a model body');
 
   const body=deferred('GET /api/sessions/b'),openBody=rows()[0].click();
@@ -342,8 +360,12 @@ if(process.argv[3]==='native-model-messages') {
   assert.equal(models().at(-1).query.turn_id,id);
   assert.equal(models().at(-1).query.model_request_seq,'1');
   assert.equal(models().at(-1).query.include_content,'true');
+  assert.equal(log().scrollTop,80);
+  log().scrollTop=147;findClass('trace-record-body').scrollTop=57;
   body({items:[model(1,'Retained SDK prompt')],next_cursor:null});await openBody;
   assert.match(pane().textContent,/Model input.*Model response.*Retained model response/s);
+  assert.equal(log().scrollTop,147,'late model read restores latest scroll, not the click position');
+  assert.equal(findClass('trace-record-body').scrollTop,57);
   await tab('Preview').click();
   assert.match(pane().textContent,/Retained SDK prompt.*Retained model response/s);
   assert.doesNotMatch(log().textContent,/Retained SDK prompt/);
@@ -364,6 +386,7 @@ if(process.argv[3]==='native-model-messages') {
   const reopenPage=deferred('GET /api/sessions/b'),reopen=node('activity-mode').click();await reopenPage.requested;
   reopenPage({items:[],next_cursor:null});await reopen;
   assert.match(timing().textContent,/Model.*No timing captured.*Tools.*No timing captured/s);
+  log().scrollTop=55;node('conversation-view').scrollTop=33;
   node('detail-turn').value=last;
   const priorPage=deferred('GET /api/sessions/b'),prior=node('detail-turn').onchange();await priorPage.requested;
   assert.equal(calls.at(-1).query.turn_id,last);
@@ -374,6 +397,8 @@ if(process.argv[3]==='native-model-messages') {
     event(3,'TOOL_RESULT','SUCCEEDED',{tool_name:'Measured without start or ID',occurred_at:tied,duration_ns:42000000}),
     event(4,'TOOL_RESULT','SUCCEEDED',{tool_name:'No measurement',occurred_at:tied}),
   ],next_cursor:null});await prior;
+  assert.equal(log().scrollTop,0,'changing turns starts the new event log at the top');
+  assert.equal(node('conversation-view').scrollTop,0);
   const tiedSpans=descendants(timing()).filter(item=>item.className.startsWith('trace-band-span'));
   assert.equal(tiedSpans.length,2,'recorded terminal timing renders despite tied timestamps or missing start/ID');
   assert.match(tiedSpans[0].title,/255.000 ms/);

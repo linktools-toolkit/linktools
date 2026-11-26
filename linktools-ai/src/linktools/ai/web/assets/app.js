@@ -258,6 +258,7 @@ function renderPage() {
   $('session-details').hidden=!sessions || Boolean(state.config?.turn_sessions);
   $('inspector').classList.toggle('trace-workspace-mode',Boolean(traceWorkspace));
   $('trace-stats').hidden=!traceWorkspace;
+  $('trace-earlier-turns').hidden=!traceWorkspace || !state.turnCursor;
   $('inspector-close').hidden=executions;
   $('inspector').classList.toggle('execution-page',executions || sessions && inspectorMode);
   if(executions || sessions && inspectorMode)showInspector(true);
@@ -1271,16 +1272,23 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
 async function moreTurns() {
   const generation=state.generation,id=state.selectedSession,cursor=state.turnCursor,noticeRevision=state.noticeRevision,key=`session:${id}:turns`;
   if(!id || !cursor || state.actionsPending.has(key))return;
-  state.actionsPending.add(key);$('turns-more').disabled=true;
+  state.actionsPending.add(key);$('turns-more').disabled=true;$('trace-earlier-turns').disabled=true;
   try {
     const payload=await api(sessionURL(id,"",{limit:"50",cursor}));
     if(generation!==state.generation || id!==state.selectedSession)return;
     // Earlier pages supply history only; their session owner may predate live readback.
     state.turns=mergePage(payload.timeline.items,state.turns,item=>item.turn_id || item.execution_id);state.turnCursor=payload.timeline.next_cursor;state.hasEarlierTurns=true;
-    renderConversation({prepend:true});
+    if(nativeTurnInspector() && state.conversationMode==='activity' && !$('inspector').hidden){
+      chooseOrdinaryInspectionTurn();
+      $('trace-earlier-turns').hidden=!state.turnCursor;
+    } else renderConversation({prepend:true});
   } catch(error) {
     if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
-  } finally {state.actionsPending.delete(key);$('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);}
+  } finally {
+    state.actionsPending.delete(key);
+    const pending=state.actionsPending.has(`session:${state.selectedSession}:turns`);
+    $('turns-more').disabled=pending;$('trace-earlier-turns').disabled=pending;
+  }
 }
 function renderTurnPickers() {
   if(nativeTurnInspector())return;
@@ -2224,9 +2232,20 @@ function traceItem(item) {
   const raw=rawDetail(item,'Original event record');raw.children[0].dataset.requestFocus=`trace:${key}:raw`;detail.append(raw);node.append(detail);return node;
 }
 function renderDetails() {
-  $('inspector-content').classList.remove('native-reader','turn-trace');
   const content=$('inspector-content'),requestFocus=requestFocusWithin(content);
-  const previousLog=content.querySelector('.trace-log')?.scrollTop ?? 0;
+  if(state.tab==='trace' && nativeTurnInspector()){
+    const workbench=$('conversation-view'),outerScroll=workbench.scrollTop;
+    const scroll=['.trace-log','.trace-record-body'].map(selector=>[selector,content.querySelector(selector)?.scrollTop ?? 0]);
+    clear('inspector-content');
+    renderOrdinaryTrace(content);
+    restoreRequestFocus(content,requestFocus);
+    for(const [selector,top] of scroll){
+      const pane=content.querySelector(selector);if(pane)pane.scrollTop=top;
+    }
+    workbench.scrollTop=outerScroll;
+    return;
+  }
+  content.classList.remove('native-reader','turn-trace');
   clear('inspector-content');
   if(['history','transcript','sdkmodels'].includes(state.tab)) {
     const note=element('div','source-note');
@@ -2238,11 +2257,6 @@ function renderDetails() {
   if(state.tab==='recovery' && !state.config.read_only) {
     const resume=button('Resume stopped execution',()=>executionAction('recover'));resume.id='resume-run';
     $('inspector-content').append(element('p','empty','Resume continues the original work and may call models or tools. To end it instead, use End stopped execution.'),resume);setDisabled();
-  }
-  if(state.tab==='trace' && nativeTurnInspector()){
-    renderOrdinaryTrace(content);
-    const log=content.querySelector('.trace-log');if(log)log.scrollTop=previousLog;
-    restoreRequestFocus(content,requestFocus);return;
   }
   if(state.tab==='models'){renderNativeTimeline($('inspector-content'));restoreRequestFocus($('inspector-content'),requestFocus);return;}
   if(!state.details.length) $('inspector-content').append(element('p','empty',terminal(state.execution?.status)?'No records for this selection.':'No committed detail yet; live progress may arrive first.'));
@@ -3117,6 +3131,8 @@ async function loadOrdinaryInspection(turnId,more=false) {
     ordinaryInspection={session,turnId,cursor:null};
     state.tab='trace';state.details=[];state.traceSelection=null;
     clear('trace-stats');
+    $('conversation-view').scrollTop=0;
+    $('trace-earlier-turns').hidden=!state.turnCursor;
     $('execution-meta').textContent='Turn '+short(turnId);
     $('inspector-content').classList.remove('native-reader','turn-trace');clear('inspector-content');
   }
@@ -3164,7 +3180,8 @@ $('activity-mode').onclick=()=>{
   showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();
   return (nativeTurnInspector()?loadOrdinaryInspection(chooseOrdinaryInspectionTurn()):loadDetail()).catch(showError);
 };
-$('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
+$('list-more').onclick=()=>loadList(true).catch(showError);
+$('trace-earlier-turns').onclick=$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>(
   nativeTurnInspector()?loadOrdinaryInspection(ordinaryInspection?.turnId,true):loadDetail(true,state.detailSelectors)
 ).catch(showError);
