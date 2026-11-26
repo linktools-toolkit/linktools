@@ -636,14 +636,14 @@ def test_strict_turn_sql_uses_only_exact_native_owner_routes() -> None:
     source = SqlTurnRows(metadata, store, scope, coowned=True)
     control = metadata.tables["ai_execution_records"]
     owner = metadata.tables["ai_state_records"]
-    assert owner.c.strict_turn_execution_id.type.length == 128
+    assert "strict_turn_execution_id" not in owner.c and "strict_turn_fence" not in owner.c
     assert control.c.turn_slot_key.type.length == control.c.turn_occupied_route.type.length == 64
-    assert owner.c.strict_turn_fence.nullable and control.c.turn_session_owner_id.nullable
+    assert "turn_session_owner_id" not in control.c
     assert control.c.turn_request_route.type.length == 64
     assert not control.c.turn_occupied_route.nullable and not control.c.turn_request_route.nullable
     indexes = {tuple(index.columns.keys()): index.unique for index in control.indexes}
     assert indexes["store_key", "turn_request_route"] and indexes["store_key", "turn_occupied_route"]
-    assert indexes["turn_session_owner_id", "turn_fence"] is False
+    assert ("turn_session_owner_id", "turn_fence") not in indexes
 
     request = "a" * 64
     proof = SqlTurnProof("execution", f"request:{request}", request, "b" * 64, "c" * 32,

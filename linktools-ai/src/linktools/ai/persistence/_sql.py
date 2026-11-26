@@ -1478,7 +1478,7 @@ class _SqlTransaction:
                 if publish is not None:
                     receipt = source.standalone_control_claim_values(proof, expiry=expires_at)
                     insertion = InitialExecutionAuthority(authority, timedelta(seconds=duration), receipt_values={
-                        "turn_session_owner_id": None, "turn_request_route": receipt["turn_request_route"],
+                        "turn_request_route": receipt["turn_request_route"],
                         "turn_receipt": receipt["turn_receipt"],
                     })
                     control_id = await publish(insertion)
@@ -1498,7 +1498,7 @@ class _SqlTransaction:
                     authority = ExecutionAuthority(scope, execution_id, session_key, token, fence)
                     values = source.standalone_control_claim_values(proof, expiry=expires_at)
                     insertion = InitialExecutionAuthority(authority, timedelta(seconds=duration), receipt_values={
-                        "turn_session_owner_id": None, "turn_request_route": values["turn_request_route"],
+                        "turn_request_route": values["turn_request_route"],
                         "turn_receipt": values["turn_receipt"],
                     }, shell_revision=(row["candidate_id"], revision))
                     control_id = await publish(insertion)
@@ -1779,7 +1779,7 @@ class _SqlTransaction:
             values = authority.shell_values(store_key=self._store_key, expiry=datetime.now(timezone.utc))
             values["turn_expiry"] = expiry
         if receipt_values is not None:
-            if receipt_values.keys() != {"turn_session_owner_id", "turn_request_route", "turn_receipt"}:
+            if receipt_values.keys() != {"turn_request_route", "turn_receipt"}:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.update(receipt_values)
         result = await self._execute(insert(table).values(values))
@@ -1807,7 +1807,7 @@ class _SqlTransaction:
                     if isinstance(expiry, timedelta) else expiry)
         try:
             if receipt_values is not None:
-                if receipt_values.keys() != {"turn_session_owner_id", "turn_request_route", "turn_receipt"}:
+                if receipt_values.keys() != {"turn_request_route", "turn_receipt"}:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values.update(receipt_values)
             write = {**values, **authority.authority_values(), "turn_expiry": deadline}
@@ -1816,8 +1816,7 @@ class _SqlTransaction:
                 (control_id,) = result.inserted_primary_key
             else:
                 kind, route = turn_session_address(authority.slot)
-                if (kind != STANDALONE or receipt_values is None or receipt_values["turn_request_route"] != route
-                        or receipt_values["turn_session_owner_id"] is not None):
+                if kind != STANDALONE or receipt_values is None or receipt_values["turn_request_route"] != route:
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 control_id, revision = shell_revision
                 c = table.c

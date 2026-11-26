@@ -151,13 +151,6 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
             "scan_kind", String(34), nullable=False,
             comment="Write-through kind and execution recovery candidate projection; never domain authority.",
         ))
-    if name == "ai_state_records":
-        columns[-2:-2] = [
-            Column("strict_turn_execution_id", LargeBinary(RESOURCE_ID_MAX_BYTES).with_variant(mysql.VARBINARY(RESOURCE_ID_MAX_BYTES), "mysql"),
-                   nullable=True, comment="Unpublished strict conversation turn owner, distinct from business session state."),
-            Column("strict_turn_fence", BigInteger, nullable=True,
-                   comment="Fencing generation for a same-group strict conversation; NULL has no such ownership."),
-        ]
     if name == "ai_execution_records":
         columns[-2:-2] = [
             Column("turn_slot_kind", SmallInteger, nullable=True, comment="Runtime slot family of the exact source owner."),
@@ -174,8 +167,6 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                    nullable=False, comment="Unique live request, parked standalone request, or row-local unoccupied address."),
             Column("turn_occupied_route", LargeBinary(TURN_SESSION_MAX_BYTES).with_variant(mysql.VARBINARY(TURN_SESSION_MAX_BYTES), "mysql"),
                    nullable=False, comment="Unique active or parked split-store session or row-local unoccupied address."),
-            Column("turn_session_owner_id", BigInteger, nullable=True,
-                   comment="Exact same-store strict SessionRecord row; never a portable address."),
             Column("turn_receipt", JSON(none_as_null=True), nullable=True,
                    comment="Compact retained coordination receipt, independent of the execution payload."),
         ]
@@ -190,7 +181,6 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
     if name == "ai_execution_records":
         sql_unique(records, "store_key", "turn_request_route")
         sql_unique(records, "store_key", "turn_occupied_route")
-        sql_query_index(records, "turn_session_owner_id", "turn_fence")
     if name == "ai_task_graphs":
         sql_query_index(records, "store_key", "state", "sort_prefix")
         sql_audit_indexes(records)

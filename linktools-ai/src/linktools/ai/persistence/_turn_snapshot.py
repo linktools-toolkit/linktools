@@ -7,12 +7,12 @@ from datetime import datetime, timezone
 
 from ..errors import AIError, ErrorCode
 from ..storage import TurnScopeIdentity
-from ._turn_sql import SESSION, STANDALONE, SqlTurnProof, turn_hex, turn_session_address, turn_session_identity
+from ._turn_sql import SESSION, STANDALONE, SqlTurnProof, turn_hex, turn_session_address
 from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, RUNTIME_TURN_SCOPE, unoccupied_turn_route
 from .state import StoredRecord, record_key, scope_key
 
 
-TURN_SNAPSHOT_KINDS = frozenset({"turn_slot", "turn_admission"})
+TURN_SNAPSHOT_KINDS = frozenset({"turn_admission"})
 GENERIC_TURN_SNAPSHOT_KINDS = frozenset({"turn_session", "turn_request", "turn_execution"})
 
 
@@ -43,21 +43,6 @@ def _utc(value: object) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
-def strict_session_snapshot_record(
-    session_key: bytes, execution: bytes | None, fence: int, *, namespace: str, tenant_id: str,
-) -> StoredRecord:
-    """Encode a logical strict Conversation pointer and fencing high-water."""
-    scope = TurnScopeIdentity(namespace, tenant_id, RUNTIME_TURN_SCOPE)
-    kind = "turn_slot"
-    identity = turn_session_identity(SESSION, session_key)
-    key, grouped = _address(scope, kind, identity)
-    return StoredRecord(key, grouped, None, kind, key, "ACTIVE" if execution is not None else "IDLE",
-                        0, None, fence, None, {
-        "scope": scope.scope, "session_key": identity, "session_record": True,
-        "execution_id": execution.decode("utf-8") if execution is not None else None,
-    })
-
-
 def execution_receipt_snapshot_record(
     row: Mapping[str, object], proof: SqlTurnProof, *, namespace: str, tenant_id: str, split_session: bool = False,
 ) -> StoredRecord:
@@ -84,7 +69,7 @@ def _decode_execution_receipt(record: StoredRecord, *, session_kind: int, sessio
             or set(data) - {"split_session"} != proof_fields | {"scope", "execution_id", "session_key", "request_key", "execution_receipt", "owner_kind"}
             or data["owner_kind"] not in ("execution", "execution_shell")
             or session_kind not in (SESSION, STANDALONE) or record.state not in ("ACTIVE", "PARKED", "RETIRED")
-            or session_kind == SESSION and not split_session and record.state == "PARKED"
+            or split_session != (session_kind == SESSION)
             or record.lease_fence < 1 or record.lease_expires_at is None):
         raise _integrity()
     request = turn_hex(data["request_key"], TURN_REQUEST_MAX_BYTES)
@@ -119,9 +104,9 @@ def _decode_execution_receipt(record: StoredRecord, *, session_kind: int, sessio
 
 def decode_turn_snapshot(
     records: Sequence[StoredRecord], *, namespace: str, tenant_id: str,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Validate logical cross-links before returning slot/admission restore values."""
-    slots, execution_receipts = {}, {}
+) -> list[dict[str, object]]:
+    """Validate current portable Execution receipts and their exact retained routes."""
+    execution_receipts = {}
     requests = set()
     for record in records:
         if record.kind not in TURN_SNAPSHOT_KINDS:
@@ -131,38 +116,21 @@ def decode_turn_snapshot(
             scope = TurnScopeIdentity(namespace, tenant_id, data["scope"])
             if scope.scope != RUNTIME_TURN_SCOPE:
                 raise _integrity()
-            is_slot = record.kind == "turn_slot"
-            identity = data["session_key"] if is_slot else data["execution_id"]
+            identity = data["execution_id"]
             key, grouped = _address(scope, record.kind, identity)
             if ((record.key, record.scope_key, record.sort_key) != (key, grouped, key)
                     or record.parent_key is not None or record.subject_id is not None
                     or record.payload_bytes is not None):
                 raise _integrity()
             session_kind, session_key = turn_session_address(data["session_key"])
-            if is_slot:
-                active = record.state == "ACTIVE"
-                if (set(data) != {"scope", "session_key", "execution_id", "session_record"}
-                        or data["session_record"] is not True or session_kind != SESSION
-                        or record.state not in ("ACTIVE", "IDLE") or (data["execution_id"] is not None) != active
-                        or record.lease_owner is not None or record.lease_expires_at is not None
-                        or record.storage_revision != 0 or active and record.lease_fence < 1):
-                    raise _integrity()
-                address = session_kind, session_key
-                if address in slots:
-                    raise _integrity()
-                slots[address] = {
-                    "session_kind": session_kind, "session_key": session_key, "lease_fence": record.lease_fence,
-                    "active_execution_id": _bytes(data["execution_id"], TURN_EXECUTION_MAX_BYTES) if active else None,
-                }
-            else:
-                receipt = _decode_execution_receipt(record, session_kind=session_kind, session_key=session_key)
-                execution = receipt["execution_id"]
-                route = receipt["turn_request_route"]
-                if execution in execution_receipts or route is not None and route in requests:
-                    raise _integrity()
-                execution_receipts[execution] = receipt
-                if route is not None:
-                    requests.add(route)
+            receipt = _decode_execution_receipt(record, session_kind=session_kind, session_key=session_key)
+            execution = receipt["execution_id"]
+            route = receipt["turn_request_route"]
+            if execution in execution_receipts or route is not None and route in requests:
+                raise _integrity()
+            execution_receipts[execution] = receipt
+            if route is not None:
+                requests.add(route)
         except (KeyError, TypeError, ValueError) as error:
             raise _integrity() from error
 
@@ -176,25 +144,11 @@ def decode_turn_snapshot(
     split_current = {}
     for row in split_rows:
         route = row["turn_occupied_route"]
-        if (SESSION, row["session_key"]) in slots or route is not None and route in split_current:
+        if route is not None and route in split_current:
             raise _integrity()
         if route is not None:
             split_current[route] = row["turn_fence"]
     if any(row["turn_occupied_route"] is None and split_current.get(row["session_key"], 0) <= row["turn_fence"]
            for row in split_rows):
         raise _integrity()
-    for execution, receipt in execution_receipts.items():
-        if receipt["session_kind"] == SESSION and not receipt["split_session"]:
-            owner = slots.get((SESSION, receipt["session_key"]))
-            if (owner is None or owner["lease_fence"] < receipt["turn_fence"]
-                    or receipt["turn_token"] is not None and (
-                        owner["active_execution_id"] != execution or owner["lease_fence"] != receipt["turn_fence"]
-                    )):
-                raise _integrity()
-    for address, row in slots.items():
-        if row["active_execution_id"] is not None:
-            receipt = execution_receipts.get(row["active_execution_id"])
-            if (receipt is None or (receipt["session_kind"], receipt["session_key"]) != address
-                    or receipt["turn_token"] is None or receipt["turn_fence"] != row["lease_fence"]):
-                raise _integrity()
-    return list(slots.values()), list(execution_receipts.values())
+    return list(execution_receipts.values())

@@ -160,54 +160,6 @@ class SqlTurnRows:
             clock.label("observed_at"),
         ).where(self._owns(control), control.c.turn_slot_kind == STANDALONE, control.c.turn_receipt.is_not(None), exact)
 
-    def parse_native_session_receipt(
-        self, row: Mapping[str, object], *, decode_time: Callable[[object], datetime],
-    ) -> tuple[SqlTurnProof, SqlTurnObservation | None]:
-        from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components
-
-        try:
-            key = row["key"]
-            *_, execution_id = decode_key_components(key, RECORD_KEY_MAX_BYTES)
-            logical = row["turn_slot_key"].decode("utf-8")
-            session_key = f"session:{logical}"
-            turn_session_address(session_key)
-            owner_key = record_key(self._scope.namespace, self._scope.tenant_id, "conversation", "session", (logical,))
-            owner_id = row["turn_session_owner_id"]
-            receipt = row["turn_receipt"]
-            token = row["turn_token"]
-            fence, revision = row["turn_fence"], row["turn_revision"]
-            active = token is not None
-            if (key != self.execution_key(execution_id) or row["key_locator"] != sha256(key).hexdigest()
-                    or row["kind"] not in ("execution", "execution_shell")
-                    or type(owner_id) is not int or owner_id < 1
-                    or row["session_owner_key"] != owner_key
-                    or row["session_owner_locator"] != sha256(owner_key).hexdigest()
-                    or not isinstance(receipt, Mapping)
-                    or receipt.keys() != {"request_key", "owner_id", "request_digest", "receipt_id", "receipt_kind", "cancel_requested"}
-                    or type(fence) is not int or fence < 1 or type(revision) is not int or revision < 0
-                    or type(receipt["cancel_requested"]) is not bool or row["turn_expiry"] is None
-                    or receipt["receipt_kind"] not in (("claim", "renew", "cancel") if active else ("release", "expire"))):
-                raise ValueError("invalid native session receipt")
-            request = receipt["request_key"]
-            route = turn_hex(request, TURN_REQUEST_MAX_BYTES)
-            if row["turn_request_route"] != (route if active else unoccupied_turn_route(row["key_locator"])):
-                raise ValueError("invalid native session request route")
-            for field, width in (("owner_id", 32), ("request_digest", 64), ("receipt_id", 32)):
-                turn_hex(receipt[field], width)
-            proof = SqlTurnProof(execution_id, session_key, request, receipt["request_digest"], receipt["owner_id"],
-                                 fence, receipt["cancel_requested"], receipt["receipt_id"], receipt["receipt_kind"], active)
-            if not active:
-                return proof, None
-            if (type(token) is not bytes or row["session_owner_fence"] != fence
-                    or row["session_owner_execution_id"] != self._key(execution_id, TURN_EXECUTION_MAX_BYTES)):
-                raise ValueError("invalid native session lease owner")
-            proof.validate_live_token(token)
-            return proof, SqlTurnObservation(
-                proof, revision, decode_time(row["turn_expiry"]) <= decode_time(row["observed_at"]),
-            )
-        except (KeyError, AttributeError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
     def parse_standalone_control_receipt(
         self, row: Mapping[str, object], *, decode_time: Callable[[object], datetime],
     ) -> tuple[SqlTurnProof, SqlTurnObservation | None]:

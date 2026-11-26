@@ -44,7 +44,6 @@ from ._native_event_reference import NativeEventReferences
 from ._sql import SqlStateStore
 from ._turn_snapshot import (
     GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, execution_receipt_snapshot_record,
-    strict_session_snapshot_record,
 )
 from ._turn_sql_schema import RUNTIME_TURN_SCOPE, unoccupied_turn_route
 from ._ordinary_snapshot import (
@@ -160,14 +159,12 @@ class _SnapshotReader(Protocol):
 class _StateSnapshotReader:
     def __init__(self, store: StateStore, *, native_run_scope: tuple[str, str] | None = None,
                  trace_scope: tuple[str, str] | None = None,
-                 turn_scope: tuple[str, str] | None = None,
-                 turn_conversation: SqlStateStore | None = None) -> None:
+                 turn_scope: tuple[str, str] | None = None) -> None:
         from ._trace_event_store import SqlTraceEventStore
         self._store = store
         scope = trace_scope or native_run_scope
         self._trace_scope = scope
         self._turn_scope = turn_scope
-        self._turn_conversation = turn_conversation
         self._trace_events = (SqlTraceEventStore(store, namespace=scope[0], tenant_id=scope[1])
                               if scope is not None and isinstance(store, SqlStateStore) else None)
         self._native_events = (NativeEventReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
@@ -216,19 +213,12 @@ class _StateSnapshotReader:
         if scope is None or not isinstance(store, SqlStateStore):
             return ()
         _require_turn_snapshot_partition(store, namespace=scope[0], tenant_id=scope[1])
-        captured = list(await self._capture_execution_receipts(
-            store, self._turn_conversation, scope=scope, budget=budget, page_size=page_size,
-        ))
-        if self._turn_conversation is not None:
-            captured.extend(await self._capture_strict_session_slots(
-                store, self._turn_conversation, scope=scope, budget=budget, page_size=page_size,
-            ))
-        return tuple(captured)
+        return await self._capture_execution_receipts(store, scope=scope, budget=budget, page_size=page_size)
 
     async def _capture_execution_receipts(
-        self, execution: SqlStateStore, conversation: SqlStateStore | None, *, scope: tuple[str, str], budget: "_SnapshotCaptureBudget", page_size: int,
+        self, execution: SqlStateStore, *, scope: tuple[str, str], budget: "_SnapshotCaptureBudget", page_size: int,
     ) -> tuple[StoredRecord, ...]:
-        from sqlalchemy import and_, select
+        from sqlalchemy import select
         from ..storage import TurnScopeIdentity
         from ._split_turn_anchor import SplitSessionTurnTransactions
         from ._turn_snapshot import _utc
@@ -243,21 +233,10 @@ class _StateSnapshotReader:
             control.c.id, control.c.key, control.c.key_locator, control.c.kind, control.c.turn_slot_kind, control.c.turn_slot_key,
             control.c.turn_request_route, control.c.turn_receipt, control.c.turn_token, control.c.turn_fence,
             control.c.turn_revision, control.c.turn_expiry, control.c.turn_expiry.label("observed_at"),
-            control.c.turn_session_owner_id, control.c.turn_occupied_route,
+            control.c.turn_occupied_route,
         ).where(
             control.c.store_key == execution.store_key, control.c.turn_receipt.is_not(None),
         ).order_by(control.c.id)
-        if conversation is not None:
-            owner = metadata.tables["ai_state_records"]
-            statement = statement.add_columns(
-                owner.c.key.label("session_owner_key"),
-                owner.c.key_locator.label("session_owner_locator"),
-                owner.c.strict_turn_execution_id.label("session_owner_execution_id"),
-                owner.c.strict_turn_fence.label("session_owner_fence"),
-            ).select_from(control.outerjoin(owner, and_(
-                owner.c.id == control.c.turn_session_owner_id, owner.c.store_key == conversation.store_key,
-                owner.c.kind == "session",
-            ))).where(control.c.turn_slot_kind.in_((STANDALONE, SESSION)))
         captured: list[StoredRecord] = []
         after = 0
         while True:
@@ -269,15 +248,11 @@ class _StateSnapshotReader:
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                 page = await transaction.read_sql_rows(execution.context, query)
                 for row in page:
-                    split = row["turn_slot_kind"] == SESSION and row["turn_session_owner_id"] is None
+                    split = row["turn_slot_kind"] == SESSION
                     if split:
                         proof, _ = SplitSessionTurnTransactions.parse_receipt(
                             row, scope=turn_scope, decode_time=_utc,
                         )
-                    elif row["turn_slot_kind"] == SESSION:
-                        if conversation is None:
-                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Native session receipt requires the shared Conversation group")
-                        proof, _ = rows.parse_native_session_receipt(row, decode_time=_utc)
                     elif row["turn_slot_kind"] == STANDALONE:
                         proof, _ = rows.parse_standalone_control_receipt(row, decode_time=_utc)
                     else:
@@ -292,49 +267,6 @@ class _StateSnapshotReader:
             count, after = await execution.read(read)
             if count < limit:
                 return tuple(captured)
-
-    async def _capture_strict_session_slots(
-        self, execution: SqlStateStore, conversation: SqlStateStore, *, scope: tuple[str, str],
-        budget: "_SnapshotCaptureBudget", page_size: int,
-    ) -> tuple[StoredRecord, ...]:
-        from sqlalchemy import select
-        from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components
-
-        metadata = execution.storage_group.metadata
-        owner = metadata.tables["ai_state_records"]
-        statement = select(owner.c.id, owner.c.key, owner.c.strict_turn_execution_id, owner.c.strict_turn_fence).where(
-            owner.c.store_key == conversation.store_key, owner.c.kind == "session", owner.c.strict_turn_fence.is_not(None),
-        ).order_by(owner.c.id)
-        captured: list[StoredRecord] = []
-        after = 0
-        while True:
-            limit = budget.page_size(page_size)
-            query = statement.where(owner.c.id > after).limit(limit)
-
-            async def read(transaction: StateTransaction):
-                if not isinstance(transaction, SqlStateRowReader):
-                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                return await transaction.read_sql_rows(execution.context, query)
-
-            page = await execution.read(read)
-            for value in page:
-                try:
-                    namespace, tenant = scope
-                    family, key_namespace, key_tenant, domain, kind, identity = decode_key_components(value["key"], RECORD_KEY_MAX_BYTES)
-                    if (family, key_namespace, key_tenant, domain, kind) != ("record", namespace, tenant, "conversation", "session"):
-                        raise ValueError("strict turn session scope")
-                    session_key = identity.encode("utf-8")
-                    active = value["strict_turn_execution_id"]
-                    record = strict_session_snapshot_record(
-                        session_key, active, value["strict_turn_fence"], namespace=namespace, tenant_id=tenant,
-                    )
-                except (AttributeError, KeyError, TypeError, ValueError) as error:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                budget.accept(encode_record(record))
-                captured.append(record)
-            if len(page) < limit:
-                return tuple(captured)
-            after = page[-1]["id"]
 
     async def capture_facts(
         self, *, budget: "_SnapshotCaptureBudget", page_size: int,
@@ -832,11 +764,7 @@ class RuntimeSnapshotOperations:
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
                                           if domain is PersistenceDomain.TRACE else None),
                         turn_scope=((self._resources.namespace, self._resources.tenant_id)
-                                    if domain is PersistenceDomain.EXECUTION else None),
-                        turn_conversation=(next((candidate for role, candidate in members
-                                                if role is PersistenceDomain.CONVERSATION
-                                                and isinstance(candidate, SqlStateStore)), None)
-                                           if domain is PersistenceDomain.EXECUTION else None))
+                                    if domain is PersistenceDomain.EXECUTION else None))
                     captured = await _capture_snapshot_reader(reader, budget=capture_budget)
                     readers[domain] = captured
                     for value in (*captured.records, *captured.facts, *captured.operations):
@@ -1974,12 +1902,6 @@ async def restore_snapshot(
             type(store) is SqlStateStore and store.storage_group is execution_store.storage_group
             for store in participants
         )
-        typed_sessions = any(
-            record.kind == "turn_slot" and record.data.get("session_record") is True
-            for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
-        )
-        if typed_sessions and (not coowned or PersistenceDomain.CONVERSATION not in decoded_domains):
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Strict session occupancy requires one SQL transaction group")
         split_sessions = any(
             record.kind == "turn_admission" and record.data.get("split_session") is True
             for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
@@ -2033,8 +1955,6 @@ async def restore_snapshot(
         if paired_split is not None:
             order = {PersistenceDomain.EXECUTION: 0, PersistenceDomain.CHECKPOINT: 1}
             domain_items = tuple(sorted(domain_items, key=lambda item: order.get(item[0], 2)))
-        if typed_sessions:
-            domain_items = tuple(sorted(domain_items, key=lambda item: item[0] is not PersistenceDomain.CONVERSATION))
         for domain, values in domain_items:
             records, facts, operations, sequences = values
             referenced_scopes = set()
@@ -2224,7 +2144,7 @@ async def restore_snapshot(
                     if not isinstance(store, SqlStateStore) or not isinstance(transaction, SqlStateTransaction):
                         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                     _require_turn_snapshot_partition(store, namespace=resources.namespace, tenant_id=resources.tenant_id)
-                    slots, receipts = decode_turn_snapshot(
+                    receipts = decode_turn_snapshot(
                         records, namespace=resources.namespace, tenant_id=resources.tenant_id,
                     )
                     # Snapshot transfers ownership evidence, never a live producer.
@@ -2234,9 +2154,8 @@ async def restore_snapshot(
                         from hashlib import sha256
                         from sqlalchemy import select, update
                         from ..storage import TurnScopeIdentity
-                        from .state import record_key
                         from ._execution_authority import ExecutionAuthority
-                        from ._turn_sql import SESSION, turn_session_identity
+                        from ._turn_sql import turn_session_identity
 
                         metadata = store.storage_group.metadata
                         control = metadata.tables["ai_execution_records"]
@@ -2264,17 +2183,6 @@ async def restore_snapshot(
                                 turn_receipt=admission["turn_receipt"],
                                 turn_occupied_route=admission["turn_occupied_route"] or unoccupied,
                             )
-                            if admission["session_kind"] == SESSION and not admission["split_session"]:
-                                table = metadata.tables["ai_state_records"]
-                                session_id = admission["session_key"].decode("utf-8")
-                                key = record_key(resources.namespace, resources.tenant_id, "conversation", "session", (session_id,))
-                                owner_id = (await session.execute(select(table.c.id).where(
-                                    table.c.store_key == conversation_store.store_key, table.c.kind == "session",
-                                    table.c.key_locator == sha256(key).hexdigest(), table.c.key == key,
-                                ))).scalar_one_or_none()
-                                if owner_id is None:
-                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                                values["turn_session_owner_id"] = owner_id
                             if owner is None and admission["owner_kind"] == "execution_shell":
                                 await session.execute(control.insert().values(
                                     {**authority.shell_values(store_key=store.store_key, expiry=expiry), **values},
@@ -2283,19 +2191,6 @@ async def restore_snapshot(
                                   and owner.turn_token is None and owner.turn_receipt is None):
                                 await session.execute(update(control).where(*identity).values(**values))
                             else:
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        for slot in slots:
-                            table = metadata.tables["ai_state_records"]
-                            session_id = slot["session_key"].decode("utf-8")
-                            key = record_key(resources.namespace, resources.tenant_id, "conversation", "session", (session_id,))
-                            changed = await session.execute(update(table).where(
-                                table.c.store_key == conversation_store.store_key, table.c.kind == "session",
-                                table.c.key_locator == sha256(key).hexdigest(), table.c.key == key,
-                                table.c.strict_turn_fence.is_(None), table.c.strict_turn_execution_id.is_(None),
-                            ).values(
-                                strict_turn_fence=slot["lease_fence"], strict_turn_execution_id=slot["active_execution_id"],
-                            ))
-                            if changed.rowcount != 1:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     state_records = tuple(row for row in records if row.kind not in TURN_SNAPSHOT_KINDS)
                 else:
@@ -2330,12 +2225,7 @@ async def restore_snapshot(
                         await trace.index_history_events_in_transaction(transaction, AgentRunRecord(run_id), events)
 
             try:
-                if typed_sessions and domain is PersistenceDomain.EXECUTION:
-                    await execution_store.storage_group.mutate(
-                        (conversation_store, execution_store), lambda group: publish(group.transaction(execution_store)),
-                    )
-                else:
-                    await resources.stores[domain].mutate(publish)
+                await resources.stores[domain].mutate(publish)
                 restored_native_backups.update({(target_scope, backup.store_key): backup for backup in domain_checkpoints.values()})
                 if paired_split is not None and domain is PersistenceDomain.EXECUTION:
                     split_source_restored = target_scope

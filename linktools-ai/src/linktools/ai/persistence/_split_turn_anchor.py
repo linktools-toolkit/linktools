@@ -65,7 +65,7 @@ class SplitSessionTurnTransactions:
             table.c.turn_revision, clock.label("observed_at"),
         ).where(
             table.c.store_key == self._store, family,
-            table.c.turn_session_owner_id.is_(None), table.c.turn_receipt.is_not(None), exact,
+            table.c.turn_receipt.is_not(None), exact,
         )
 
     @staticmethod
@@ -168,7 +168,7 @@ class SplitSessionTurnTransactions:
         table = self._table
         return table.update().where(
             self._match_execution(table, proof.execution_id), table.c.id == row["id"],
-            table.c.turn_slot_kind == SESSION, table.c.turn_session_owner_id.is_(None),
+            table.c.turn_slot_kind == SESSION,
             table.c.turn_occupied_route == row["turn_slot_key"],
             table.c.turn_slot_key == row["turn_slot_key"], table.c.turn_fence == proof.fence,
             table.c.turn_token == row["turn_token"], table.c.turn_revision == revision,
