@@ -319,8 +319,11 @@ function renderList() {
 }
 function stopStream() { state.stream?.abort(); state.stream=null;cancelLiveRender(); }
 let sessionWatch=null;
+function legacySessionWatch() {
+  return sessionWatch?.ordinary ? null : sessionWatch;
+}
 function hasExecutionStream(id) {
-  const watch=sessionWatch,execution=watch?.execution;
+  const watch=legacySessionWatch(),execution=watch?.execution;
   return Boolean(id && (state.stream || watch?.ready && (execution?.id===id && !execution.paused
     || watch.refresh.releasedTurn===id && !watch.refresh.failed)));
 }
@@ -825,9 +828,10 @@ function refreshActiveTurn(watch) {
 }
 function reconcileLiveHistory(timeline) {
   if(!timeline)return;
-  if(sessionWatch)for(const turn of timeline.items)if(turn.conversation_committed) {
-    sessionWatch.externalProcess.delete(turn.execution_id);
-    if(sessionWatch.refresh.releasedTurn===turn.execution_id)sessionWatch.refresh.releasedTurn=null;
+  const watch=legacySessionWatch();
+  if(watch)for(const turn of timeline.items)if(turn.conversation_committed) {
+    watch.externalProcess.delete(turn.execution_id);
+    if(watch.refresh.releasedTurn===turn.execution_id)watch.refresh.releasedTurn=null;
   }
   if(!timeline.items.some(turn=>turn.execution_id===state.observedExecution && turn.conversation_committed))return;
   if(state.view==='sessions' && state.conversationMode==='chat' && (liveRenderFrame!==null || liveRenderTimer!==null))renderLive();
@@ -1178,7 +1182,7 @@ function turnProcess() {
 }
 function conversationProcessRows(executionId, saved, live) {
   const rows=new Map((saved || []).map(row=>[row.key,row]));
-  for(const source of [sessionWatch?.externalProcess.get(executionId),live]) {
+  for(const source of [legacySessionWatch()?.externalProcess.get(executionId),live]) {
     if(source)for(const row of source.values())rows.set(row.key,mergeProcessRow(rows.get(row.key),row));
   }
   return [...rows.values()];
@@ -1485,7 +1489,10 @@ function renderLiveTools(live,wanted) {
   wanted.push(live.toolsNode);
 }
 function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
-  cancelLiveRender();const started=performance.now();
+  cancelLiveRender();
+  // Native chat renders its own live and committed parts in each turn.
+  if(state.view==='sessions' && state.conversationMode==='chat' && state.config?.turn_sessions)return;
+  const started=performance.now();
   try {
   let live=$('live');
   if(state.view==='executions'){live=$('execution-live');if(state.selectedExecution!==state.observedExecution){live.replaceChildren();return;}}
