@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -25,7 +25,7 @@ from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.turns import SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
-from ..session import SessionContext, SessionTurnAdmission, ToolProcessItem, project_tool_process_event
+from ..session import SessionContext, SessionTurnAdmission, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta
 from .agent_execution import resolve_execution_policy
@@ -319,9 +319,14 @@ class _RegenerableTurnRunner:
     def _terminal(
         self, turn: _AdmittedTurn | _AttachedGraphTurn, state: str, *, output: JsonValue = None,
         messages: tuple[ModelMessage, ...] = (), error_code: str | None = None,
-        activity: dict[str, JsonValue] | None = None,
+        output_ref: Sequence[int] | None = None,
     ) -> None:
         succeeded = state == "succeeded"
+        activity = {}
+        if succeeded:
+            from ..history import project_ordinary_turn_activity
+
+            activity = project_ordinary_turn_activity(messages, output=output, output_ref=output_ref)
         self._store.note_terminal_context(
             turn.key, turn_no=turn.number, prompt=(
                 "" if succeeded and turn.stored_input is not None
@@ -334,7 +339,7 @@ class _RegenerableTurnRunner:
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
             "generation": turn.generation, "revision": turn.revision + 1,
             "state": state, "prompt": turn.prompt, "attachments": list(turn.attachments), "output": output,
-            "error_code": error_code, **(activity or {}),
+            "error_code": error_code, **activity,
         })
         self._notice_lifecycle(turn.key, "terminal", turn.revision + 1)
 
@@ -1136,8 +1141,6 @@ class _RegenerableTurnRunner:
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
     ) -> None:
-        process: dict[str, ToolProcessItem] = {}
-
         fields = {"turn_id": turn.key.turn_id, "turn_no": turn.number,
                   "generation": turn.generation, "revision": turn.revision}
 
@@ -1188,10 +1191,21 @@ class _RegenerableTurnRunner:
                     if item.status == "FAILED" and error_code is None:
                         error_code = ErrorCode.TOOL_EXECUTION_FAILED
                     item = replace(item, error_code=error_code, error_message=None)
-                    process[item.key] = item
                     self._publish(turn.key.session_id, {
                         **fields, "type": "tool", "item": asdict(item),
                     })
+                elif (emission.event_type is ExecutionEventType.ASSISTANT_PART_COMPLETED
+                      and isinstance(emission.payload, Mapping)):
+                    payload = emission.payload
+                    key = model_key(payload)
+                    attempt, index = payload.get("stream_attempt_seq"), payload.get("part_index")
+                    elapsed = payload.get("thinking_elapsed_ms")
+                    if (key is not None and type(attempt) is int and attempts.get(key) == attempt
+                            and type(index) is int and index >= 0 and type(elapsed) is int and elapsed >= 0):
+                        self._publish(turn.key.session_id, {
+                            **fields, "type": "thinking_completed", "model_key": key, "attempt": attempt,
+                            "part_index": index, "elapsed_ms": elapsed,
+                        })
                 elif isinstance(emission.payload, Mapping) and emission.event_type in {
                     ExecutionEventType.MODEL_REQUEST_STARTED, ExecutionEventType.MODEL_REQUEST_FINISHED,
                 }:
@@ -1216,7 +1230,7 @@ class _RegenerableTurnRunner:
             await event_sink(emission)
 
         producer = asyncio.create_task(self.settle(
-            turn, binding=binding, context=context, limits=limits, event_sink=emit, thinking=thinking, process=process,
+            turn, binding=binding, context=context, limits=limits, event_sink=emit, thinking=thinking,
         ))
         self._producers[turn.key] = producer
         try:
@@ -1665,7 +1679,6 @@ class _RegenerableTurnRunner:
     async def settle(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
-        process: Mapping[str, ToolProcessItem] | None = None,
     ) -> bool:
         """Execute after durable admission and publish only if this producer still owns the turn."""
         from ..model.messages import canonical_structured_output_reference, encode_model_messages
@@ -1866,19 +1879,7 @@ class _RegenerableTurnRunner:
             **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "succeeded", captured=captured)),
         )
         if committed:
-            activity = None
-            if process:
-                items: list[JsonValue] = []
-                for message in messages[len(turn.history):]:
-                    if not isinstance(message, ModelResponse):
-                        continue
-                    for part in message.parts:
-                        if isinstance(part, TextPart):
-                            items.append({"item_kind": "assistant", "content": part.content})
-                        elif isinstance(part, ToolCallPart) and f"tool:{part.tool_call_id}" in process:
-                            items.append({"item_kind": "tool_call", "tool_call_id": part.tool_call_id})
-                activity = {"items": items, "process": [asdict(item) for item in process.values()]}
             self._terminal(
-                turn, "succeeded", output=output, messages=context_messages, activity=activity,
+                turn, "succeeded", output=output, messages=context_messages, output_ref=output_ref,
             )
         return committed

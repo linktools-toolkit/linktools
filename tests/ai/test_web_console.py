@@ -1503,13 +1503,18 @@ async def test_local_chat_streams_public_progress_then_reads_committed_turn_afte
                                         f"code={frame.get('error_code')}")
                         if frame["type"] == "progress":
                             saw_running |= frame["item"]["kind"] == "model" and frame["item"]["status"] == "RUNNING"
-                        if frame["type"] == "delta":
+                        if frame["type"] == "delta" and frame["delta_kind"] == "text":
                             assert frame["text"] == answer and saw_running and not release.is_set()
                             break
                     release.set()
                     while (terminal := await frames.get())["type"] != "terminal":
                         assert terminal["turn_id"] == turn_id
                     assert terminal["turn_id"] == turn_id and _turn_text(terminal) == answer + "and last"
+                    thinking, assistant = terminal["items"]
+                    assert thinking["item_kind"] == "thinking"
+                    assert thinking["content"] == "provider-internal reasoning"
+                    assert type(thinking["elapsed_ms"]) is int and thinking["elapsed_ms"] >= 0
+                    assert assistant["item_kind"] == "assistant"
                     assert not stream.done()
             finally:
                 release.set()
@@ -1523,6 +1528,7 @@ async def test_local_chat_streams_public_progress_then_reads_committed_turn_afte
         assert restored.status_code == 200, restored.text
         assert restored.json()["conversation_committed"]
         assert _turn_text(restored.json()) == _turn_text(terminal)
+        assert restored.json()["items"] == terminal["items"]
         assert signature not in restored.text
 
 
@@ -1592,6 +1598,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
                     async for frame in observer.events(turn_id):
                         if frame["type"] == "terminal":
                             assert frame["state"] == "succeeded"
+                            terminal = frame
                         if frame["type"] != "tool":
                             continue
                         item = frame["item"]
@@ -1615,7 +1622,11 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         assert [item["key"] for item in started] == ["tool:z", "tool:a"]
         assert [item["key"] for item in finished] == ["tool:a", "tool:z"]
         assert turn["conversation_committed"]
+        assert [item["item_kind"] for item in turn["items"]] == ["tool_call", "thinking", "tool_call", "assistant"]
         assert [item["tool_call_id"] for item in turn["items"] if item["item_kind"] == "tool_call"] == ["z", "a"]
+        assert turn["items"] == terminal["items"]
+        assert turn["process"] == terminal["process"]
+        assert all(item["content"] is None for item in turn["items"] if item["item_kind"] == "tool_call")
         assert _turn_text(turn) == "done"
         assert [item["key"] for item in turn["process"]] == ["tool:z", "tool:a"]
         saved = {item["key"]: tuple(item["position"]) for item in turn["process"]}
@@ -1629,6 +1640,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
     ) as runtime, client(create_app(runtime=runtime, local_workspace=True)) as http:
         restored = await http.get("/api/session", params={"session_id": "tools", "turn_id": turn_id})
         assert restored.status_code == 200, restored.text
+        assert restored.json()["items"] == terminal["items"]
         assert {item["key"]: item["elapsed_ms"] for item in restored.json()["process"]} == live_elapsed
 
 

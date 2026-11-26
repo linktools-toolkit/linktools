@@ -363,6 +363,17 @@ function ordinaryInput(prompt,attachments=[]) {
 function ordinaryTurnNode(turn, previous=null) {
   const node=element('article','turn');node.dataset.turn=turn.turn_id;
   node.toolRows=previous?.toolRows || new Map();
+  node.thinkingRows=new Map();
+  const appendThought=(part,text,elapsed,running=false,open=false)=>{
+    const card=previous?.thinkingRows?.get(part) || thinkingMessage('Thinking',text);
+    if(card.body.textContent!==text)card.body.textContent=text;
+    if(open)card.open=true;
+    card.classList.toggle('process-running',running);
+    showProcessElapsed(card,elapsed);
+    node.thinkingRows.set(part,card);
+    answers.append(card);
+    return card.body;
+  };
   node.append(userMessage(ordinaryInput(turn.user_input?.prompt,turn.user_input?.attachments)));
   const answers=element('div','turn-saved-answers');
   const items=turn.items?.length?turn.items:(turn.output?.text?[{item_kind:'assistant',content:turn.output.text}]:[]);
@@ -372,35 +383,39 @@ function ordinaryTurnNode(turn, previous=null) {
     if(!row || placed.has(row.key) || !Object.hasOwn(processToolStatus,row.status))return;
     placed.add(row.key);answers.append(toolProcessRow(node.toolRows,row,true));
   };
+  const openThoughts=new Map(),seenThoughts=new Set();
+  if(turn.conversation_committed && previous?.thinkingRows?.size){
+    for(const [part,card] of previous.thinkingRows){
+      const text=part.text ?? part.content;
+      openThoughts.set(text,!openThoughts.has(text) && card.open);
+    }
+    for(const item of items)if(item.item_kind==='thinking'){
+      if(seenThoughts.has(item.content))openThoughts.delete(item.content);
+      seenThoughts.add(item.content);
+    }
+  }
   for(const item of items) {
     if(item.item_kind==='assistant' && typeof item.content==='string')answers.append(markdownMessage(item.content));
+    if(item.item_kind==='structured_output')answers.append(rawDetail(item.content,'Structured output'));
     if(item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) {
-      const thought=thinkingMessage('Thinking',item.content);showProcessElapsed(thought,item.elapsed_ms);answers.append(thought);
+      appendThought(item,item.content,item.elapsed_ms,false,openThoughts.get(item.content));
     }
     if(item.item_kind==='tool_call')appendTool(tools.get(`tool:${item.tool_call_id}`));
   }
   const parts=(turn.conversation_committed?turn.interruptedPreview:turn.liveParts) || [];
   for(const part of parts){
     if(part.tool){appendTool(part.tool);continue;}
-    if(part.progress){
-      const status=processToolStatus[part.progress.status];
-      const card=thinkingMessage('Model request',status);
-      card.classList.toggle('process-running',part.progress.status==='RUNNING');
-      showProcessElapsed(card,part.progress.elapsed_ms);
-      answers.append(card);
-      continue;
-    }
-    const thought=part.kind==='thinking'?thinkingMessage('Thinking',part.text):null;
-    const body=thought?.body || element('div','message ordinary-live',part.text);
-    answers.append(thought || body);
+    const body=part.kind==='thinking'
+      ? appendThought(part,part.text,part.elapsedMs,!turn.conversation_committed && !part.done)
+      : element('div','message ordinary-live',part.text);
+    if(part.kind!=='thinking')answers.append(body);
     if(!turn.conversation_committed && part===parts.at(-1))node.liveDeltaBody=body;
   }
   for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
   node.append(answers);
   if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
-  if(turn.status!=='SUCCEEDED')node.append(element('div','turn-heading',
-    turn.status==='RECOVERY_REQUIRED'?'Recovery required'
-      :turn.status==='WAITING_DEFERRED'?'Waiting for approval or tool results':turn.status));
+  const heading={RECOVERY_REQUIRED:'Recovery required',WAITING_DEFERRED:'Waiting for approval or tool results',CANCELLING:'Cancelling…'}[turn.status];
+  if(heading)node.append(element('div','turn-heading',heading));
   return node;
 }
 function patchOrdinaryTurn(turn) {
@@ -522,13 +537,29 @@ function watchOrdinarySession(id) {
       patchOrdinaryTurn(turn);
       return;
     }
+    if(frame.type==='thinking_completed'){
+      const part=turn.liveParts.find(part=>part.kind==='thinking' && part.modelKey===frame.model_key
+        && part.attempt===frame.attempt && part.index===frame.part_index);
+      if(!part || !Number.isSafeInteger(frame.elapsed_ms) || frame.elapsed_ms<0)return;
+      part.done=true;part.elapsedMs=frame.elapsed_ms;
+      const node=[...$('conversation').children].find(row=>row.dataset.turn===turn.turn_id);
+      const card=node?.thinkingRows?.get(part);
+      if(card){
+        card.classList.remove('process-running');
+        showProcessElapsed(card,part.elapsedMs);
+      }
+      return;
+    }
     if(frame.type==='progress'){
       const item=frame.item;
       if(item?.kind!=='model' || typeof item.key!=='string'
         || !['RUNNING','SUCCEEDED','FAILED','CANCELLED'].includes(item.status))return;
-      const previous=turn.liveParts.find(part=>part.progress?.key===item.key);
-      if(previous)previous.progress=item;else turn.liveParts.push({progress:item});
-      patchOrdinaryTurn(turn);
+      if(item.status==='RUNNING')return;
+      const node=[...$('conversation').children].find(row=>row.dataset.turn===turn.turn_id);
+      for(const part of turn.liveParts)if(part.kind==='thinking' && part.modelKey===item.key){
+        part.done=true;
+        node?.thinkingRows?.get(part)?.classList.remove('process-running');
+      }
       return;
     }
     if(frame.type==='tool'){
@@ -549,6 +580,7 @@ function watchOrdinarySession(id) {
     if(typeof frame.text!=='string' || (kind!=='text' && kind!=='thinking') || !frame.text)return;
     const part=turn.liveParts.at(-1);
     if(part?.kind!==kind || part.modelKey!==frame.model_key || part.attempt!==frame.attempt || part.index!==frame.part_index){
+      if(part?.kind==='thinking')part.done=true;
       turn.liveParts.push({kind,text:frame.text,modelKey:frame.model_key,attempt:frame.attempt,index:frame.part_index});
       patchOrdinaryTurn(turn);
       return;
@@ -644,7 +676,7 @@ function watchOrdinarySession(id) {
         watch.readActive();
         if(watch.activeRead?.id===frame.turn_id)watch.activeRead.waiting=frame;
       }
-    } else if(['delta','tool','progress','preview_reset'].includes(frame.type)){
+    } else if(['delta','tool','progress','preview_reset','thinking_completed'].includes(frame.type)){
       if(state.turns.some(row=>row.turn_id===frame.turn_id)){
         applyPreview(frame);
       } else if(activeTurn()===frame.turn_id){
@@ -683,7 +715,6 @@ function watchOrdinarySession(id) {
         ? previous?.interruptedPreview || previous?.liveParts?.map(part=>{
           const interrupted=status==='CANCELLED'?'CANCELLED':'INTERRUPTED';
           if(part.tool?.status==='RUNNING')return {tool:{...part.tool,status:interrupted}};
-          if(part.progress?.status==='RUNNING')return {progress:{...part.progress,status:interrupted}};
           return part;
         }) : null;
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status,
@@ -1176,6 +1207,7 @@ const processToolStatus={RUNNING:'In progress',SUCCEEDED:'Completed',FAILED:'Fai
 const processToolReason=new Map([
   ['AUTHORIZATION_DENIED','Permission denied.'],
   ['TOOL_RETRY_REQUIRED','The tool requested a retry.'],
+  ['TOOL_EXECUTION_FAILED','Tool execution failed.'],
   ['STORAGE_NOT_FOUND','The requested resource was not found.'],
   ['REQUEST_FIELD_INVALID','The request was invalid.'],
 ]);

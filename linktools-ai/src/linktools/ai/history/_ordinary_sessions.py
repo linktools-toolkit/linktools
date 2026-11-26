@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from pydantic_ai.messages import ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ThinkingPart, ToolCallPart
 
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, CursorSigner, ExecutionStatus, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
@@ -20,11 +20,14 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import StoredUserInput
-from ..model.messages import CANONICAL_OUTPUT_TOOL_NAME, canonical_structured_output
+from ..model.messages import (
+    CANONICAL_OUTPUT_TOOL_NAME, THINKING_ELAPSED_MS_METADATA_KEY, canonical_structured_output,
+)
 from ..persistence.codec import decode_domain
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
 from ._projection import _trace_payload
-from ._session_timeline import _project_turn_tool_process, _timeline_items
+from ..session import SessionTurnItem
+from ._session_timeline import _project_turn_tool_process
 
 if TYPE_CHECKING:
     from sqlalchemy import RowMapping
@@ -97,31 +100,64 @@ def _multipart_prompt(value: StoredUserInput) -> dict[str, JsonValue]:
     return {"kind": "items", "items": text_items}
 
 
+def project_ordinary_turn_activity(
+    messages: tuple[ModelMessage, ...], *, output: JsonValue, output_ref: Sequence[int] | None,
+) -> dict[str, list[JsonValue]]:
+    """Project the retained public timeline identically for SSE and history."""
+    items: list[JsonValue] = []
+    output_position = None if output_ref is None else tuple(output_ref)
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, ModelResponse):
+            continue
+        durations = (message.metadata or {}).get(THINKING_ELAPSED_MS_METADATA_KEY)
+        for index, part in enumerate(message.parts):
+            ordinal = len(items) + 1
+            if isinstance(part, TextPart):
+                item = SessionTurnItem(ordinal, "assistant", part.content)
+            elif isinstance(part, ThinkingPart):
+                elapsed = durations.get(str(index)) if isinstance(durations, Mapping) else None
+                item = SessionTurnItem(
+                    ordinal, "thinking", part.content,
+                    elapsed_ms=elapsed if type(elapsed) is int and elapsed >= 0 else None,
+                )
+            elif isinstance(part, ToolCallPart):
+                if part.tool_name != CANONICAL_OUTPUT_TOOL_NAME:
+                    item = SessionTurnItem(ordinal, "tool_call", None, part.tool_name, part.tool_call_id)
+                elif (message_index, index) == output_position:
+                    item = SessionTurnItem(ordinal, "structured_output", output)
+                else:
+                    continue
+            else:
+                continue
+            items.append(asdict(item))
+    process = [
+        asdict(replace(
+            item, error_message=None,
+            error_code=(item.error_code or ErrorCode.TOOL_EXECUTION_FAILED)
+            if item.status == "FAILED" else item.error_code,
+        ))
+        for item in _project_turn_tool_process(messages) if item.tool_name != CANONICAL_OUTPUT_TOOL_NAME
+    ]
+    return {"items": items, "process": process}
+
+
 async def _turn_view(
     row: RowMapping, read_scalar_input: Callable[[StoredUserInput], Awaitable[str]],
 ) -> dict[str, JsonValue]:
     state = row["state"]
     result = row["result_json"]
     output = None
-    items: list[JsonValue] = []
-    process: list[JsonValue] = []
+    activity: dict[str, list[JsonValue]] = {"items": [], "process": []}
     if state == "succeeded":
         messages = row["messages"]
+        output_ref = result["output_ref"] if "output_ref" in result else None
         if "output_ref" in result:
-            output = canonical_structured_output(messages, result["output_ref"])
+            output = canonical_structured_output(messages, output_ref)
         else:
             if not messages or not isinstance(messages[-1], ModelResponse) or messages[-1].text is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             output = {"text": messages[-1].text}
-        items = [
-            asdict(replace(item, content=None) if item.item_kind == "tool_call" else item)
-            for item in _timeline_items(messages)
-            if item.item_kind != "tool_result" and item.tool_name != CANONICAL_OUTPUT_TOOL_NAME
-        ]
-        process = [
-            asdict(replace(item, error_message=None))
-            for item in _project_turn_tool_process(messages) if item.tool_name != CANONICAL_OUTPUT_TOOL_NAME
-        ]
+        activity = project_ordinary_turn_activity(messages, output=output, output_ref=output_ref)
     prompt = row["prompt"]
     attachments = []
     if row["stored_input"] is not None:
@@ -141,8 +177,7 @@ async def _turn_view(
         "updated_at": row["updated_at"].isoformat(),
         "user_input": {"version": 1, "prompt": prompt, "files": [], "attachments": attachments},
         "conversation_committed": state in ("succeeded", "failed", "cancelled"),
-        "items": items,
-        "process": process,
+        **activity,
         "output": output,
         "error_code": result.get("error_code") if isinstance(result, Mapping) else None,
         "safe_error_details": {},

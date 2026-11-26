@@ -92,6 +92,7 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
                     turn_id = accepted.json()["turn_id"]
                     seen = []
                     deltas = []
+                    thinking_timing = None
                     while True:
                         frame = await frames.get()
                         assert frame["turn_id"] == turn_id
@@ -99,11 +100,22 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
                         if frame["type"] == "delta":
                             assert "private-provider-signature" not in json.dumps(frame)
                             deltas.append((frame["delta_kind"], frame["text"]))
+                        if frame["type"] == "thinking_completed":
+                            thinking_timing = frame
                         if frame["type"] == "terminal":
                             break
                     assert seen[0] == "admitted"
                     assert deltas == [("thinking", "displayable thought"), ("text", "done")]
                     assert frame.get("error_code") is None
+                    assert thinking_timing is not None
+                    assert set(thinking_timing) == {
+                        "type", "turn_id", "turn_no", "generation", "revision",
+                        "model_key", "attempt", "part_index", "elapsed_ms",
+                    }
+                    assert thinking_timing["model_key"] == "model:1:1"
+                    assert thinking_timing["attempt"] == 1 and thinking_timing["part_index"] == 0
+                    assert isinstance(thinking_timing["elapsed_ms"], int) and thinking_timing["elapsed_ms"] >= 0
+                    assert seen.index("thinking_completed") < seen.index("terminal")
             finally:
                 disconnect.set()
                 await stream

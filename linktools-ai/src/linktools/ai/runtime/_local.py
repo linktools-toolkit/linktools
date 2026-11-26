@@ -6616,6 +6616,7 @@ class LocalExecutionBackend:
                     turn, committed.execution.status.value.lower(),
                     output=None if payload is None else payload.decode(),
                     messages=notice_messages, error_code=committed.execution.error_code,
+                    output_ref=output_ref,
                 )
             except Exception:
                 _logger.exception("attached Graph session terminal notice failed: execution=%s", current.execution_id)

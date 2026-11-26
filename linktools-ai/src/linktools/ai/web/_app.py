@@ -245,16 +245,20 @@ def _json(value: object, status: int = 200) -> JSONResponse:
 
 
 def _ordinary_turn_wire(turn: Mapping[str, object]) -> Mapping[str, object]:
-    """Keep one copy of the final text when the Web timeline already displays it."""
+    """Keep one copy of the final output when the Web timeline already displays it."""
     items, output = turn.get("items"), turn.get("output")
-    if not isinstance(items, list) or not isinstance(output, Mapping) or set(output) != {"text"}:
-        return turn
-    text = output["text"]
-    if not isinstance(text, str):
+    if not isinstance(items, list):
         return turn
     for item in reversed(items):
-        if isinstance(item, Mapping) and item.get("item_kind") == "assistant":
-            if item.get("content") == text:
+        if not isinstance(item, Mapping):
+            continue
+        kind, content = item.get("item_kind"), item.get("content")
+        if kind == "structured_output":
+            if content == output:
+                return {key: value for key, value in turn.items() if key != "output"}
+            break
+        if kind == "assistant":
+            if isinstance(content, str) and output == {"text": content}:
                 return {key: value for key, value in turn.items() if key != "output"}
             break
     return turn

@@ -351,9 +351,23 @@ if(process.argv[3]==='session-published-turn') {
   const live={turn_id:ordinaryTurn,generation:1,model_key:'model:1:1',attempt:1};
   emitTurn({type:'delta',...live,delta_kind:'thinking',part_index:0,text:'Stale thought'});
   emitTurn({type:'preview_reset',...live});
-  emitTurn({type:'delta',...live,attempt:2,delta_kind:'thinking',part_index:0,text:'Native thought'});
-  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:1,text:'Native preview'});
   await node('chat-mode').click();
+  const nativeThought=()=>descendants(node('conversation')).find(card=>card.tagName==='DETAILS' && card.body?.textContent==='Native thought');
+  emitTurn({type:'progress',...live,item:{kind:'model',key:live.model_key,status:'RUNNING'}});
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'thinking',part_index:0,text:'Native thought'});
+  assert.doesNotMatch(node('conversation').textContent,/Model request|STARTED/);
+  const liveThought=nativeThought();
+  assert.equal(Boolean(liveThought.open),false);
+  assert.ok(liveThought.className.split(' ').includes('process-running'));
+  liveThought.open=true;
+  emitTurn({type:'thinking_completed',...live,part_index:0,elapsed_ms:421});
+  assert.ok(liveThought.className.split(' ').includes('process-running'),'discard timing from a superseded attempt');
+  emitTurn({type:'thinking_completed',...live,attempt:2,part_index:0,elapsed_ms:15});
+  assert.equal(liveThought.className.split(' ').includes('process-running'),false);
+  assert.equal(liveThought.elapsedNode.textContent,'15 ms');
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:1,text:'Native preview'});
+  assert.equal(nativeThought(),liveThought);
+  assert.equal(liveThought.open,true);
   assert.equal(node('composer').hidden,false);
   assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native preview/s);
   assert.doesNotMatch(node('conversation').textContent,/Stale thought/);
@@ -363,8 +377,10 @@ if(process.argv[3]==='session-published-turn') {
   stopResponse({accepted:false});await stop;
   assert.match(node('notice').textContent,/Stop not confirmed/);
   emitTurn({type:'terminal',turn_id:ordinaryTurn,turn_no:1,revision:2,generation:1,state:'succeeded',
-    prompt:'Native question',items:[{item_kind:'thinking',content:'Native thought'}, {item_kind:'assistant',content:'Native finished'}]});
+    prompt:'Native question',items:[{item_kind:'thinking',content:'Native thought',elapsed_ms:15}, {item_kind:'assistant',content:'Native finished'}]});
   assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native finished/s);
+  assert.equal(nativeThought().open,true);
+  assert.equal(nativeThought().elapsedNode.textContent,'15 ms');
   assert.equal(node('conversation').textContent.split('Native thought').length,2);
   assert.doesNotMatch(node('conversation').textContent,/Native preview/);
   node('prompt').value='Next native question';
@@ -373,6 +389,10 @@ if(process.argv[3]==='session-published-turn') {
   const sentNative=calls.filter(call=>call.key==='/api/sessions/b/messages').at(-1);
   assert.match(sentNative.body.request_id,/^[A-Za-z0-9_-]{12}$/);
   nextNative({turn_id:'b-next-turn'});await sendNative;
+  emitTurn({type:'terminal',turn_id:'b-next-turn',turn_no:2,revision:3,generation:1,state:'succeeded',
+    prompt:'Next native question',items:[{item_kind:'structured_output',content:{count:2}}]});
+  assert.match(node('conversation').textContent,/Structured output.*"count": 2/s);
+  assert.equal(node('conversation').textContent.split('Structured output').length,2);
   assert.equal(calls.slice(beforeNative).filter(call=>call.key.startsWith('/api/executions/')).length,0);
   process.exit(0);
 }
