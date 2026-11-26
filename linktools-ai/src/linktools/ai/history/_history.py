@@ -409,11 +409,6 @@ class History:
             session_id, principal=principal, local_workspace=local_workspace,
         )
 
-    async def _lookup_runtime_turn_session(
-        self, session_id: str, *, principal: Principal,
-    ) -> dict[str, JsonValue] | None:
-        return await self._require_ordinary_sessions().lookup_runtime_session_state(session_id, principal=principal)
-
     async def turn_session(
         self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
         local_workspace: bool = False,

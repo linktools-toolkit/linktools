@@ -57,6 +57,17 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         assert "agent_id" not in snapshot and "active_execution_id" not in snapshot
 
         agent = runtime.agents.get()
+        with pytest.raises(AIError) as missing:
+            await agent.start("must not create a legacy session", principal=principal,
+                              session_id="absent", idempotency_key="missing")
+        assert missing.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert await state.conversation.sessions.get("absent", tenant_id=principal.tenant_id) is None
+        with pytest.raises(AIError) as missing:
+            await runtime.sessions.get("absent", principal=principal)
+        assert missing.value.code is ErrorCode.AUTHORIZATION_DENIED
+        native_created = await agent.create_session("agent-created", principal=principal)
+        assert (await native_created.inspect())["session_id"] == "agent-created"
+        assert await state.conversation.sessions.get("agent-created", tenant_id=principal.tenant_id) is None
         async with asyncio.timeout(10), opened.start("Hello", agent=agent, idempotency_key="send") as (turn, frames):
             assert turn.key.session_id == "chat"
             terminal = [frame async for frame in frames][-1]

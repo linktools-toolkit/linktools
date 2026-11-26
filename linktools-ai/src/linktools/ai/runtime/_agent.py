@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from .agent_execution import AgentExecutionPort
     from ..agent import CompiledAgent, AgentBinding, AgentBindingContract
     from ._runtime_service import Runtime
-    from ._native_session import _NativeSessionTurn, _NativeTurnResult
+    from ._native_session import _NativeSession, _NativeSessionTurn, _NativeTurnResult
 
 AppT = TypeVar("AppT")
 
@@ -336,7 +336,7 @@ class Agent(Generic[AppT]):
     ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
         if session_id is not None:
             sessions = self._runtime.sessions
-            if await sessions._has_native_session(session_id):
+            if sessions.supports_turn_sessions:
                 if input_context is not None or legacy_observation:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
                         "field": "input_context" if input_context is not None else "observation",
@@ -500,8 +500,16 @@ class Agent(Generic[AppT]):
         cwd: "str | None" = None,
         metadata: "Mapping[str, JsonValue] | None" = None,
         idempotency_key: "str | None" = None,
-    ) -> "Session[AppT]":
-        await self._runtime.sessions._require_agent_session(session_id)
+    ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
+        sessions = self._runtime.sessions
+        if sessions.supports_turn_sessions:
+            from ..session import CreateSessionRequest
+
+            return await sessions.create(CreateSessionRequest(
+                self._runtime._resolve_principal(principal), session_id,
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
+                cwd, {} if metadata is None else metadata,
+            ))
         await self._runtime._create_session_for_agent(
             self.id,
             session_id,

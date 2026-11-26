@@ -185,18 +185,6 @@ class _OrdinarySessionHistory:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return row
 
-    async def lookup_runtime_session_state(
-        self, session_id: str, *, principal: Principal,
-    ) -> dict[str, JsonValue] | None:
-        """Route the SDK to a native owner without applying its policy to a legacy ID."""
-        validate_session_id(session_id)
-        row = await self._store.get_session(session_id)
-        if row is None:
-            return None
-        self._require_access(principal, local_workspace=False)
-        await self._authorize_session(session_id, principal)
-        return _session_view(row)
-
     async def _authorize_lineage(
         self, row: RowMapping, principal: Principal,
     ) -> tuple[SessionTurnSegment, ...]:

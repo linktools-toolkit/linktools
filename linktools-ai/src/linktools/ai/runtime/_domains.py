@@ -560,36 +560,26 @@ class RuntimeSessions(Generic[AppT]):
             finally:
                 detach()
 
-    async def _has_native_session(self, session_id: str) -> bool:
-        if not self.supports_turn_sessions:
-            return False
-        validate_session_id(session_id)
-        runner, _ = self._require_turn_sessions()
-        return await runner._store.get_session(session_id) is not None
+    def _require_agent_session(self) -> None:
+        if self.supports_turn_sessions:
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT, "Use the native session API on this host")
 
-    async def _require_agent_session(self, session_id: str) -> None:
-        if await self._has_native_session(session_id):
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT, "Use start_turn for an existing native SQL session")
-
-    async def _lookup_native_session(
+    async def _inspect_native_session(
         self, session_id: str, principal: Principal | None,
-    ) -> "tuple[Principal, dict[str, JsonValue]] | None":
-        if not self.supports_turn_sessions:
-            return None
+    ) -> "tuple[Principal, dict[str, JsonValue]]":
         _, runtime = self._require_turn_sessions()
         history = runtime.history
         if history is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         actor = runtime._resolve_principal(principal)
-        snapshot = await history._lookup_runtime_turn_session(session_id, principal=actor)
-        return None if snapshot is None else (actor, snapshot)
+        return actor, await history.turn_session_state(session_id, principal=actor)
 
     async def get(
         self, session_id: str, *, principal: Principal | None = None,
     ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
-        native = await self._lookup_native_session(session_id, principal)
-        if native is not None:
-            return self._bind_native_session(session_id, principal=native[0], local_workspace=False)
+        if self.supports_turn_sessions:
+            actor, _ = await self._inspect_native_session(session_id, principal)
+            return self._bind_native_session(session_id, principal=actor, local_workspace=False)
         return await self._get_session(session_id, principal)
 
     @overload
@@ -626,7 +616,7 @@ class RuntimeSessions(Generic[AppT]):
                 planning=False if planning is None else planning, thinking=thinking,
             )
             return session._turn(receipt.turn_id, principal)
-        await self._require_agent_session(session_id)
+        self._require_agent_session()
         return await self._start_session(session_id, user_prompt, principal=principal,
             idempotency_key=idempotency_key, output=output, correlation=correlation,
             files=files, planning=planning, thinking=thinking)
@@ -636,8 +626,10 @@ class RuntimeSessions(Generic[AppT]):
     ) -> "SessionView | dict[str, JsonValue]":
         """Read the owning session's current state without constructing a handle."""
         self._ensure_open()
-        native = await self._lookup_native_session(session_id, principal)
-        return native[1] if native is not None else await self._inspect_agent_session(session_id, principal=principal)
+        if self.supports_turn_sessions:
+            _, state = await self._inspect_native_session(session_id, principal)
+            return state
+        return await self._inspect_agent_session(session_id, principal=principal)
 
     async def _inspect_agent_session(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()
@@ -737,7 +729,7 @@ class RuntimeSessions(Generic[AppT]):
     async def create_view(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
         """Return the authorized creation result without a separate session read."""
         self._ensure_open()
-        await self._require_agent_session(request.session_id)
+        self._require_agent_session()
         return await self._service.create(agent_id, request)
 
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
