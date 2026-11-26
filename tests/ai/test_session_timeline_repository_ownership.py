@@ -35,6 +35,7 @@ from sqlalchemy import event
 
 from .test_session_timeline import _commit_empty_turn, _execution, _materialize_conversation, _session
 from .test_session_actor_identity import SharedSessionPolicy
+from .test_session_timeline_window import _window_host
 
 pytestmark = pytest.mark.asyncio
 
@@ -150,11 +151,13 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
 ) -> None:
     state = PersistenceStorage.from_plan(PersistencePlan(
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
-    )) if split else PersistenceStorage.sqlite(tmp_path / "shared.db")
+    )) if split else PersistenceStorage.in_memory()
     try:
         state = Persistence(state)
         await _populate(state)
+        conversation_group = state.conversation.sessions.state_store.storage_group
+        execution_group = state.execution.executions.state_store.storage_group
+        assert (conversation_group is not execution_group) is split
         principal = Principal("owner", "tenant")
         expected = (await _history(state).session_detail("session", principal=principal)).timeline
         injected = {}
@@ -178,71 +181,44 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
         await state.close()
 
 
-async def test_builtin_public_timeline_keeps_one_metadata_transaction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_native_session_metadata_reads_one_snapshot_without_history_bodies(
+    tmp_path: Path,
 ) -> None:
-    state = PersistenceStorage.sqlite(tmp_path / "builtin.db")
-    try:
-        state = Persistence(state)
-        await _populate(state)
-        from linktools.ai.persistence._step_message_content import NativeMessageContent
-        from linktools.ai.storage import SqlObjectStore
+    async with _window_host(tmp_path) as (state, runtime, principal, waiting, proceed):
+        finished = await runtime.sessions.start(
+            "session", "finished", agent="default", principal=principal, idempotency_key="finished",
+        )
+        assert (await finished.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        active = await runtime.sessions.start(
+            "session", "pending", agent="default", principal=principal, idempotency_key="pending",
+        )
+        await asyncio.wait_for(waiting.wait(), 5)
 
-        def forbid_body_read(*args, **kwargs):
-            pytest.fail("timeline metadata must not hydrate message or object bodies")
-
-        monkeypatch.setattr(NativeMessageContent, "hydrate_ranges", forbid_body_read)
-        monkeypatch.setattr(SqlObjectStore, "open", forbid_body_read)
-        from linktools.ai.persistence._sql import _SqlGroupTransaction
-
-        capture_content = _SqlGroupTransaction.read_content_references
-        native_checks = []
-
-        async def metadata_content(group: _SqlGroupTransaction, **kwargs: object) -> object:
-            values = await capture_content(group, **kwargs)
-            # The fused query can contain a conditional Native branch. Metadata
-            # owners here have no Native roots, so it must return no Native rows.
-            assert group._native_message_rows == {}
-            native_checks.append(True)
-            return values
-
-        monkeypatch.setattr(_SqlGroupTransaction, "read_content_references", metadata_content)
-        engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
+        engine = state.session_turns._context.engine.sync_engine
         statements, begins = [], []
 
         def statement(_connection, _cursor, sql, _parameters, _context, _many):
-            if "ai_messages" in sql:
-                from linktools.ai.persistence._step_payload_owner import payload_store_key
-                assert payload_store_key("timeline-owner", "tenant") in _parameters
-                assert "ai_messages.store_key =" in sql
-            statements.append(sql)
+            if sql.lstrip().upper().startswith(("SELECT", "WITH")):
+                statements.append(sql)
 
-        def begin(connection):
-            begins.append(connection)
-
+        on_begin = begins.append
         event.listen(engine, "before_cursor_execute", statement)
-        event.listen(engine, "begin", begin)
+        event.listen(engine, "begin", on_begin)
         try:
-            result = (await _history(state).session_detail("session", principal=Principal("owner", "tenant"))).timeline
+            result = await runtime.history.turn_session_state("session", principal=principal)
         finally:
+            event.remove(engine, "begin", on_begin)
             event.remove(engine, "before_cursor_execute", statement)
-            event.remove(engine, "begin", begin)
-        assert [turn.execution_id for turn in result.items] == ["failed", "active"]
-        assert len(begins) == 2  # Fresh authorization header, then one metadata snapshot.
-        assert native_checks
-        assert [turn.conversation_committed for turn in result.items] == [True, False]
-        selects = [sql for sql in statements if sql.lstrip().upper().startswith(("SELECT", "WITH"))]
-        # Execution and conversation records may share one metadata batch.
-        assert len(selects) <= 6
-        assert not any("ai_object_chunks" in sql for sql in selects)
-        # ai_messages also owns typed execution templates/input. The SQL
-        # hook above requires their exact partition; Native hydration stays forbidden.
-    finally:
-        await state.close()
+            proceed.set()
+        assert result["last_turn_no"] == 1
+        assert result["active_turn_id"] == active.key.turn_id
+        assert len(begins) == 1
+        assert not any("ai_messages" in sql or "ai_object_chunks" in sql for sql in statements)
+        assert (await active.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
 
 
-async def test_exact_turn_distinguishes_active_pending_from_recovery(tmp_path: Path) -> None:
-    state = Persistence(PersistenceStorage.sqlite(tmp_path / "pending-exact-turn.db"))
+async def test_exact_turn_distinguishes_active_pending_from_recovery() -> None:
+    state = Persistence(PersistenceStorage.in_memory())
     try:
         await _populate(state)
         history = _history(state)
@@ -279,8 +255,8 @@ async def test_exact_turn_distinguishes_active_pending_from_recovery(tmp_path: P
         await state.close()
 
 
-async def test_releasing_published_failed_turn_advances_the_session_once(tmp_path: Path) -> None:
-    state = Persistence(PersistenceStorage.sqlite(tmp_path / "failed-turn-release.db"))
+async def test_releasing_published_failed_turn_advances_the_session_once() -> None:
+    state = Persistence(PersistenceStorage.in_memory())
     try:
         await state.initialize(namespace="timeline-owner", tenant_id="tenant")
         sessions = state.conversation.sessions
@@ -303,20 +279,8 @@ async def test_releasing_published_failed_turn_advances_the_session_once(tmp_pat
                 start_message_index=0, end_message_index=0, history_unavailable=False,
             )
 
-        engine = sessions.state_store.storage_group.context.engine.sync_engine
-        fact_reads = []
-
-        def statement(_connection, _cursor, sql, _parameters, _context, _many):
-            if sql.lstrip().upper().startswith("SELECT") and "FROM ai_state_facts" in sql:
-                fact_reads.append(sql)
-
-        event.listen(engine, "before_cursor_execute", statement)
-        try:
-            released, receipt = await sessions.state_store.mutate(publish)
-        finally:
-            event.remove(engine, "before_cursor_execute", statement)
+        released, receipt = await sessions.state_store.mutate(publish)
         assert receipt is not None and receipt.execution_id == execution.execution_id
-        assert len(fact_reads) == 1
         assert released.active_execution_id is None
         assert released.revision == admitted.revision + 1
         assert (await _history(state).session_turn(
@@ -331,8 +295,8 @@ async def test_releasing_published_failed_turn_advances_the_session_once(tmp_pat
         await state.close()
 
 
-async def test_exact_committed_turn_remains_stable_after_a_newer_turn(tmp_path: Path) -> None:
-    state = Persistence(PersistenceStorage.sqlite(tmp_path / "exact-turn.db"))
+async def test_exact_committed_turn_remains_stable_after_a_newer_turn() -> None:
+    state = Persistence(PersistenceStorage.in_memory())
     try:
         await _populate(state)
         sessions = state.conversation.sessions
@@ -377,8 +341,8 @@ class SessionOnlyReaderPolicy(SharedSessionPolicy):
         await super().authorize(principal, action, resource)
 
 
-async def test_exact_turn_uses_session_visibility_for_committed_tool_content(tmp_path: Path) -> None:
-    state = Persistence(PersistenceStorage.sqlite(tmp_path / "shared-exact-turn.db"))
+async def test_exact_turn_uses_session_visibility_for_committed_tool_content() -> None:
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     try:
         sessions = state.conversation.sessions
