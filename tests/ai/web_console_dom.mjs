@@ -388,10 +388,15 @@ if(process.argv[3]==='session-published-turn') {
   assert.equal(node('composer').hidden,false);
   assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native preview/s);
   assert.doesNotMatch(node('conversation').textContent,/Stale thought/);
-  assert.equal(node('send').disabled,true);
-  const stopResponse=deferred('POST /api/sessions/b/cancel'),stop=node('reader-stop').onclick();
+  assert.equal(node('send').type,'button');
+  assert.equal(node('send').textContent,'Stop');
+  assert.equal(node('send').disabled,false);
+  const stopResponse=deferred('POST /api/sessions/b/cancel'),stop=node('send').click();
   await stopResponse.requested;
+  assert.equal(node('send').disabled,true);
   stopResponse({accepted:false});await stop;
+  assert.equal(node('send').textContent,'Stop');
+  assert.equal(node('send').disabled,false);
   assert.match(node('notice').textContent,/Stop not confirmed/);
   const pendingTool={kind:'tool',key:'tool:pending',tool_name:'pending_tool',status:'RUNNING'};
   emitTurn({type:'tool',...live,item:pendingTool});
