@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Conversation descriptor capture preserves owner identity and fresh publication."""
+"""Non-SQL pending commits preserve descriptor identity and fresh publication."""
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.parametrize("damage", ("missing", "wrong_session", "wrong_history_id"))
 async def test_descriptor_failure_never_publishes_owners(tmp_path: Path, damage: str) -> None:
-    async with _turn_state("sqlite", tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         owner = state.storage.conversation.histories
         key = owner.history_record_key("history")
         async def damage_record(tx):
@@ -49,7 +49,7 @@ async def test_descriptor_failure_never_publishes_owners(tmp_path: Path, damage:
 async def test_post_capture_descriptor_change_is_rejected_by_fresh_comparison(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
 ) -> None:
-    async with _turn_state("sqlite", tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         owner = state.storage.conversation.histories
         archive = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
         original = archive.prepare_conversation_checkpoint
@@ -57,7 +57,8 @@ async def test_post_capture_descriptor_change_is_rejected_by_fresh_comparison(
         async def changed_after_capture(run, checkpoint, **kwargs):
             result = await original(run, checkpoint, **kwargs)
             assert active_state_scope() is None
-            assert kwargs.get("observed_records") is not None
+            assert result[0].agent_run_id == run.agent_run_id
+            assert len(result[1].checkpoints) == 1
             captured = await owner.get("history", tenant_id="tenant")
             assert captured.history_id == "history"
             key = owner.history_record_key("history")
@@ -75,7 +76,9 @@ async def test_post_capture_descriptor_change_is_rejected_by_fresh_comparison(
         monkeypatch.setattr(archive, "prepare_conversation_checkpoint", changed_after_capture)
         with pytest.raises(AIError) as raised:
             await _commit(state, _pending_turn(state))
-        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        assert raised.value.code is (
+            ErrorCode.STORAGE_INTEGRITY_ERROR if damage == "session_identity" else ErrorCode.STORAGE_CONFLICT
+        )
         assert len(snapshots) == 1 and await _snapshot(state) == snapshots[0]
 
 
@@ -83,12 +86,12 @@ async def test_post_capture_descriptor_change_is_rejected_by_fresh_comparison(
 async def test_unmatched_owner_keeps_original_read_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str,
 ) -> None:
-    async with _turn_state("sqlite", tmp_path / "first") as state:
+    async with _turn_state("memory", tmp_path / "first") as state:
         actual = state.storage.conversation.histories
         other = None
         calls = []
         if scope == "other_group":
-            other = Persistence(_storage("sqlite", tmp_path / "second"))
+            other = Persistence(_storage("memory", tmp_path / "second"))
             await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
             await other.conversation.sessions.create(state.session)
             owner = other.conversation.histories
@@ -129,7 +132,7 @@ async def test_unmatched_owner_keeps_original_read_path(
 async def test_late_winner_after_capture_remains_authoritative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity: str,
 ) -> None:
-    async with _turn_state("sqlite", tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         archive = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
         original = archive.prepare_conversation_checkpoint
         late = _pending_turn(state, execution_id="late-winner", answer="winner")
@@ -151,7 +154,8 @@ async def test_late_winner_after_capture_remains_authoritative(
             nonlocal injecting
             result = await original(run, checkpoint, **kwargs)
             if not injecting:
-                assert kwargs.get("observed_records") is not None
+                assert result[0].agent_run_id == contender.run.agent_run_id
+                assert len(result[1].checkpoints) == 1
                 injecting = True
                 winners.append(await _commit(state, late))
                 snapshots.append(await _snapshot(state))
@@ -171,11 +175,10 @@ async def test_late_winner_after_capture_remains_authoritative(
         assert active_state_scope() is None
 
 
-@pytest.mark.parametrize("backend", ("memory",))
-async def test_unsupported_group_keeps_descriptor_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+async def test_non_sql_group_reads_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         owner = state.storage.conversation.histories
         calls = []
         original = owner.get
