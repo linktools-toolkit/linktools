@@ -52,12 +52,24 @@ async def test_event_reference_lookup_does_not_scan_effect_ledger(tmp_path: Path
         await native.close()
 
 
-def _crash_before_tool_event(database: str, effects: str, native_database: str) -> None:
-    import os
-    from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-    from ._session_tool_test_helpers import _crash_session_process
+def _split_execution_features(effects: Path, native_database: Path, calls: list[str]):
+    from linktools.ai.capability import TraceCapability
+    from ._runtime_test_helpers import model_features, native_checkpoint
+    from ._session_tool_test_helpers import _application, _ToolModels
 
-    os.environ["LINKTOOLS_TEST_STEP_DATABASE"] = native_database
+    application = _application(calls, effect_policy="non_replay_safe", effect_log=effects)
+    application.capability(native_checkpoint(database=native_database), scope="runtime")
+    application.capability(TraceCapability(), scope="runtime")
+    return model_features(_ToolModels(), application)
+
+
+def _crash_before_tool_event(database: str, effects: str, native_database: str) -> None:
+    import asyncio
+    import os
+
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+
     publish = RuntimeToolOperationBridge._publish_native_event
 
     async def crash(self, event, **kwargs):
@@ -66,18 +78,29 @@ def _crash_before_tool_event(database: str, effects: str, native_database: str) 
         return await publish(self, event, **kwargs)
 
     RuntimeToolOperationBridge._publish_native_event = crash
-    _crash_session_process(database, effects, "sqlite", "before_tool_event")
+
+    async def run():
+        async with (
+            Persistence.open("split-tool-crash", storage=PersistenceStorage.sqlite(database)) as state,
+            Runtime.open(
+                persistence=state,
+                features=_split_execution_features(Path(effects), Path(native_database), []),
+                auto_recover=False,
+            ) as runtime,
+        ):
+            execution = await runtime.agents.get().start("inspect", idempotency_key="request")
+            await execution.wait(timeout_seconds=15)
+        raise AssertionError("tool event crash boundary was not reached")
+
+    asyncio.run(run())
 
 
 @pytest.mark.asyncio
 async def test_public_split_recovery_preserves_unknown_admission_after_process_exit(tmp_path: Path) -> None:
     import asyncio
     import multiprocessing
-    from linktools.ai.capability import TraceCapability
     from linktools.ai.core import ToolOperationStatus
     from linktools.ai.runtime import Runtime
-    from ._runtime_test_helpers import native_checkpoint, model_features
-    from ._session_tool_test_helpers import _application, _ToolModels
 
     database, effects, native_database = (tmp_path / name for name in ("runtime.db", "effects", "native.db"))
     process = multiprocessing.get_context("spawn").Process(target=_crash_before_tool_event,
@@ -92,12 +115,11 @@ async def test_public_split_recovery_preserves_unknown_admission_after_process_e
             await asyncio.to_thread(process.join)
     assert not effects.exists()
     calls: list[str] = []
-    app = _application(calls, effect_policy="non_replay_safe", effect_log=effects)
-    app.capability(native_checkpoint(database=native_database), scope="runtime")
-    app.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open("session-tool-crash", storage=PersistenceStorage.sqlite(database)) as state:
-        async with Runtime.open(persistence=state, features=model_features(_ToolModels(), app), auto_recover=False) as runtime:
-            execution = await runtime.agents.get("default").session("session").start("inspect", idempotency_key="turn-1")
+    async with Persistence.open("split-tool-crash", storage=PersistenceStorage.sqlite(database)) as state:
+        async with Runtime.open(
+            persistence=state, features=_split_execution_features(effects, native_database, calls), auto_recover=False,
+        ) as runtime:
+            execution = await runtime.agents.get().start("inspect", idempotency_key="request")
             tenant = runtime.default_principal.tenant_id
             before = await state.checkpoint.tools.list_by_execution(execution.execution_id, tenant_id=tenant)
             assert len(before) == 1 and before[0].status is ToolOperationStatus.CLAIMED

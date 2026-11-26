@@ -55,9 +55,11 @@ def test_terminal_worker_exit_retries_idempotent_effect_as_new_turn(tmp_path: Pa
             ) as runtime:
                 if mode != 'create':
                     assert await state.execution.executions.get((root / 'old-id').read_text(), tenant_id=runtime.tenant_id) is None
-                session = (await runtime.agents.get().create_session('session') if mode == 'create'
-                    else await runtime.sessions.get('session', principal=runtime.default_principal))
-                handle = await session.start('save seven', idempotency_key='create' if mode == 'create' else 'retry')
+                # The terminal-only buffer belongs to standalone Execution,
+                # not the canonical SQL Session owner.
+                handle = await runtime.agents.get().start(
+                    'save seven', idempotency_key='create' if mode == 'create' else 'retry',
+                )
                 if mode == 'create':
                     await asyncio.wait_for(entered.wait(), 5)
                     assert await state.execution.executions.get(handle.execution_id, tenant_id=runtime.tenant_id) is None
