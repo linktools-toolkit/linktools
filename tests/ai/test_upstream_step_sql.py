@@ -27,8 +27,8 @@ from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
 
-from linktools.ai.core import RESOURCE_ID_MAX_BYTES, validate_resource_id
-from linktools.ai.errors import AIError
+from linktools.ai.core import AGENT_RUN_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES, validate_resource_id
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_store import SqlStepStore
 
@@ -81,19 +81,20 @@ async def test_sql_lineage_filters_preserve_bounded_exact_identifiers_under_padd
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
     other = SqlStepStore(engine, namespace="steps", tenant_id="two")
     prefix = "共同前缀" + "x" * (RESOURCE_ID_MAX_BYTES - len("共同前缀".encode()) - 1)
+    parent = "界" * 21
     records = [
-        RunRecord(run_id="exact", conversation_id=prefix + "a", parent_run_id=prefix + "a"),
-        RunRecord(run_id="other-parent", conversation_id=prefix + "a", parent_run_id=prefix + "b"),
-        RunRecord(run_id="other-conversation", conversation_id=prefix + "b", parent_run_id=prefix + "a"),
+        RunRecord(run_id="exact", conversation_id=prefix + "a", parent_run_id=parent + "a"),
+        RunRecord(run_id="other-parent", conversation_id=prefix + "a", parent_run_id=parent + "b"),
+        RunRecord(run_id="other-conversation", conversation_id=prefix + "b", parent_run_id=parent + "a"),
         RunRecord(run_id="missing"),
     ]
     try:
         for record in records:
             await store.register_run(record)
         await other.register_run(records[0])
-        assert await store.list_runs(conversation_id=prefix + "a", parent_run_id=prefix + "a") == records[:1]
+        assert await store.list_runs(conversation_id=prefix + "a", parent_run_id=parent + "a") == records[:1]
         assert {record.run_id for record in await store.list_runs(conversation_id=prefix + "a")} == {"exact", "other-parent"}
-        assert {record.run_id for record in await store.list_runs(parent_run_id=prefix + "a")} == {"exact", "other-conversation"}
+        assert {record.run_id for record in await store.list_runs(parent_run_id=parent + "a")} == {"exact", "other-conversation"}
         assert await other.list_runs() == records[:1]
         assert len(await store.list_runs()) == len(records)
         for field in ("run_id", "conversation_id", "parent_run_id"):
@@ -177,7 +178,8 @@ async def test_snapshot_preserves_native_messages_and_official_continue_run(stor
 
 @pytest.mark.asyncio
 async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> None:
-    run_id = "run-" + "x" * (RESOURCE_ID_MAX_BYTES - 4)
+    run_id = "界" * 21 + "a"
+    assert len(run_id.encode()) == AGENT_RUN_ID_MAX_BYTES
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scopes.db'}")
     stores = [SqlStepStore(engine, namespace=namespace, tenant_id=tenant, tool_effect_store=InMemoryStepStore())
               for namespace, tenant in [("one", "a"), ("one", "b"), ("two", "a")]]
@@ -199,6 +201,30 @@ async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> No
     finally:
         for item in stores:
             await item.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_rejects_overlong_run_identity_before_initialization(tmp_path: Path, monkeypatch) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'bounds.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+
+    async def unexpected_initialization() -> None:
+        pytest.fail("invalid run identity must not reach storage")
+
+    too_long = "界" * 21 + "ab"
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "initialize", unexpected_initialization)
+            with pytest.raises(AIError) as error:
+                await store.register_run(RunRecord(run_id=too_long))
+            assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+            with pytest.raises(AIError) as error:
+                await store.save_snapshot(ContinuableSnapshot(run_id="run", parent_run_id=too_long,
+                                                               step_index=0, messages=[]))
+            assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    finally:
+        await store.close()
         await engine.dispose()
 
 
@@ -462,8 +488,9 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
     for name, lookups in expected.items():
         table = metadata.tables["ai_step_" + name]
         for column in ("run_id", "conversation_id", "parent_run_id"):
-            assert table.c[column].type.length == RESOURCE_ID_MAX_BYTES
-            assert "VARCHAR(128)" in str(table.c[column].type.compile(dialect=dialect))
+            width = RESOURCE_ID_MAX_BYTES if column == "conversation_id" else AGENT_RUN_ID_MAX_BYTES
+            assert table.c[column].type.length == width
+            assert f"VARCHAR({width})" in str(table.c[column].type.compile(dialect=dialect))
         indexes = {tuple(column.name for column in index.columns): index for index in table.indexes
                    if index.info.get("ddl_dialect") == kind}
         for columns, unique in lookups.items():

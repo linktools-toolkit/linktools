@@ -20,6 +20,7 @@ from ..core import (
     ToolOperationStatus,
     validate_lease_owner,
     validate_resource_id,
+    validate_tool_operation_id,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, StoredPayload
@@ -355,7 +356,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         return await self._store.read(operation)
 
     def _tool_key(self, identity: str) -> bytes:
-        return self._key("tool_operation", (identity,))
+        return self._key("tool_operation", (validate_tool_operation_id(identity),))
 
     async def _retry_storage_conflict(
         self,
@@ -826,7 +827,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         if isinstance(operation_ids, (str, bytes)):
             raise TypeError("operation_ids must be a sequence")
         ordered = tuple(dict.fromkeys(operation_ids))
-        keys = tuple(self._tool_key(validate_resource_id(identity)) for identity in ordered)
+        keys = tuple(self._tool_key(identity) for identity in ordered)
         if not keys:
             return ()
         async def read(transaction: StateTransaction) -> tuple[ToolOperationMetadata, ...]:
@@ -856,7 +857,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         ordered = tuple(dict.fromkeys(operation_ids))
         if not ordered:
             return ()
-        keys = tuple(self._tool_key(validate_resource_id(identity)) for identity in ordered)
+        keys = tuple(self._tool_key(identity) for identity in ordered)
         async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
             await self._tool_content.prefetch_owners(keys)
             records = await transaction.get_records(keys)

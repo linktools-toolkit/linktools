@@ -19,6 +19,7 @@ from ..core import (
     ResourceKind,
     validate_resource_id,
     validate_idempotency_key,
+    validate_execution_request_key,
     ResourceRef,
 )
 from ..errors import AIError, ErrorCode
@@ -119,7 +120,9 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _identity_key(self, scope: str, key: str) -> tuple[str, str]:
-        return validate_resource_id(scope), validate_idempotency_key(key)
+        validate_key = (validate_execution_request_key if self._resource_kind is ResourceKind.EXECUTION
+                        else validate_idempotency_key)
+        return validate_resource_id(scope), validate_key(key)
 
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
         _require_tenant(record, self._tenant_id)

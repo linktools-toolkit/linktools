@@ -75,6 +75,8 @@ from ..core import (
     overlay_correlation,
     principal_identity_payload,
     validate_idempotency_key,
+    validate_execution_id,
+    validate_execution_request_key,
     validate_resource_id,
 )
 from ..asset import AssetVersionRef
@@ -203,7 +205,7 @@ class ExecutionStartIdentity:
 
     def __post_init__(self) -> None:
         validate_resource_id(self.scope)
-        validate_idempotency_key(self.idempotency_key)
+        validate_execution_request_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -669,7 +671,7 @@ class DefaultExecutionService(TaskExecutionService):
         self, session_id: str, *, principal: Principal, idempotency_key: str,
     ) -> SessionAdmission | None:
         """Read one session request without changing pending execution ownership."""
-        key = validate_idempotency_key(idempotency_key)
+        key = validate_execution_request_key(idempotency_key)
         scope = "session.resume"
         pending_turns = self._runtime_bridge.pending_turns
         pending = pending_turns.peek_request(
@@ -1027,7 +1029,7 @@ class DefaultExecutionService(TaskExecutionService):
         parent_invocation_id: str,
     ) -> "ExecutionHandle | None":
         """Replay an already-established child using its own durable binding."""
-        idempotency_key = validate_idempotency_key(idempotency_key)
+        idempotency_key = validate_execution_request_key(idempotency_key)
         existing = await self._state.idempotency.get(
             "execution.subagent",
             idempotency_key,
@@ -1329,7 +1331,7 @@ class DefaultExecutionService(TaskExecutionService):
             )
             fork_base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
-        execution_id = self._operation_ids()
+        execution_id = validate_execution_id(self._operation_ids())
         if lineage_kind is not ExecutionLineageKind.SESSION_RESUME:
             await self._authorize_start_execution(request, execution_id)
         if request.session_context != "all" and session_id is None and graph_task is None:

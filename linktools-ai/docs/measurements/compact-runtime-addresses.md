@@ -23,9 +23,9 @@ including direct SQL insertion and portable restore.
 
 | Table | Key | Scope | Parent |
 | --- | --- | --- | --- |
-| `ai_task_graphs` | 416 bytes: six framed components with up to 128 bytes each for namespace, tenant and graph ID | Removed; graph headers have no scope | Removed; graph headers have no parent |
-| `ai_execution_records` | Keep 768; bounded service form is up to 420 bytes for an execution or 552 for an idempotency record | Keep 768; session and idempotency-resource lookups, service forms up to 442 bytes | Keep 768; subagent parent, service form up to 431 bytes |
-| `ai_step_run_admissions` | Keep 768; typed run key up to 423 bytes | Keep 768; conversation lookup, typed form up to 436 bytes | Keep 768; parent-run lookup, typed form up to 431 bytes |
+| `ai_task_graphs` | 352 bytes: six framed components, namespace and tenant at 128 bytes each and Graph ID at 64 | Removed; graph headers have no scope | Removed; graph headers have no parent |
+| `ai_execution_records` | Keep 768; bounded service form is up to 356 bytes for an execution or 488 for an idempotency record | Keep 768; session and idempotency-resource lookups, service forms up to 442 bytes | Keep 768; subagent parent, service form up to 367 bytes |
+| `ai_step_run_admissions` | Keep 768; typed run key up to 359 bytes | Keep 768; conversation lookup, typed form up to 436 bytes | Keep 768; parent-run lookup, typed form up to 367 bytes |
 | `ai_step_tool_operations` | Keep 768; built-in 64-byte operation ID yields a 362-byte key, but repository callers are not restricted to built-in IDs | Keep 768; agent-run lookup, typed form up to 436 bytes | Keep 768; execution lookup, typed form up to 437 bytes |
 
 The three wide dedicated owners still route some non-domain-shaped records
@@ -44,8 +44,9 @@ a superseded Task Graph owner layout, rebuild before switching schemas.
 
 Built-in ordinary operation addresses are at most 163 bytes and capability
 write receipt addresses are at most 301 bytes. The original caller key
-remains exact. A valid 128-byte graph or run ID alone already exceeds the
-64-byte target. Dropping the namespace/tenant/domain string merely because SQL
+remains exact. Execution, execution request, logical tool operation, Task Graph and native
+agent run IDs now have a 64 UTF-8 byte ingress limit. Provider tool-call IDs
+and independently named task/node IDs keep their own contracts. Dropping the namespace/tenant/domain string merely because SQL
 has a `store_key` is unsafe for public record and stream key generators:
 their contract is globally scoped and backups can stage multiple owners
 without the original SQL partition.

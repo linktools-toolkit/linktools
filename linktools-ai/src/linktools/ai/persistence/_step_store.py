@@ -257,6 +257,8 @@ class SqlStepStore:
             return result
 
     async def register_run(self, record: RunRecord) -> None:
+        validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                 parent_run_id=record.parent_run_id)
         await self.initialize()
 
         async def write(session: "AsyncSession") -> _RunFields:
@@ -412,6 +414,8 @@ class SqlStepStore:
 
     async def import_run(self, record: RunRecord) -> None:
         """Import metadata independently of native lifecycle-event publication."""
+        validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                 parent_run_id=record.parent_run_id)
         await self.initialize()
         source = await self._context.run_mutation(
             lambda session: self._import_run(session, record), domain="steps.run_metadata",
@@ -503,6 +507,8 @@ class SqlStepStore:
         if type(fixed_error_source) is not bool or fixed_error_source and (
                 event.kind != "tool_call_failed" or event.idempotency_key is None):
             raise ValueError("fixed error sources require keyed tool failure events")
+        validate_native_step_ids(run_id=event.run_id, conversation_id=event.conversation_id,
+                                 parent_run_id=event.parent_run_id)
         await self.initialize()
         replay_keys = {id(event): encode_native_replay_key(event.idempotency_key)}
 
@@ -1692,6 +1698,8 @@ class SqlStepStore:
         return receipt
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        validate_native_step_ids(run_id=snapshot.run_id, conversation_id=snapshot.conversation_id,
+                                 parent_run_id=snapshot.parent_run_id)
         await self.initialize()
         prepared = await self._prepare_snapshot(snapshot)
 

@@ -60,6 +60,22 @@ def _tool_record() -> ToolOperationRecord:
     )
 
 
+def test_tool_operation_ids_have_a_separate_utf8_budget_from_provider_calls() -> None:
+    identity = "界" * 21 + "x"
+    record = replace(_tool_record(), tool_operation_id=identity, tool_call_id="c" * 128)
+    admission = ToolOperationAdmission(
+        execution_id=record.execution_id, tool_operation_id=identity,
+        agent_run_id=record.agent_run_id, recovery_agent_run_id=None,
+        tool_call_id=record.tool_call_id, tool_name=record.tool_name,
+        arguments_digest=record.arguments_digest, binding_digest=record.binding_digest,
+        replay_safe=False, owner="worker",
+    )
+    assert record.tool_operation_id == admission.tool_operation_id == identity
+    for value in (record, admission):
+        with pytest.raises(ValueError, match="tool operation identity"):
+            replace(value, tool_operation_id=identity + "x")
+
+
 @pytest.mark.asyncio
 async def test_configured_runtime_mutation_requires_active_transaction() -> None:
     state = Persistence(PersistenceStorage.in_memory())

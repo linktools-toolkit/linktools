@@ -9,9 +9,14 @@ from ..errors import AIError, ErrorCode
 from ._json import JsonValue, canonical_json_bytes, normalize_json_value
 
 
+AGENT_RUN_ID_MAX_BYTES = 64
 LEASE_OWNER_MAX_BYTES = 64
 RESOURCE_ID_MAX_BYTES = 128
+TOOL_OPERATION_ID_MAX_BYTES = 64
+EXECUTION_ID_MAX_BYTES = 64
+EXECUTION_REQUEST_KEY_MAX_BYTES = 64
 SESSION_ID_MAX_BYTES = 64
+TASK_GRAPH_ID_MAX_BYTES = 64
 SESSION_REQUEST_KEY_MAX_BYTES = 64
 
 
@@ -88,14 +93,37 @@ def validate_principal_id(value: str) -> str:
     return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
 
 
+def validate_agent_run_id(value: str) -> str:
+    """Validate an internal agent run identifier before storage."""
+    return _text(value, AGENT_RUN_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
+
+
 def validate_resource_id(value: str) -> str:
     """Validate an exact resource identity of at most 128 UTF-8 bytes."""
     return _text(value, RESOURCE_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
 
 
+def validate_tool_operation_id(value: str) -> str:
+    """Validate the internal effect identity, not the provider's tool call ID."""
+    return _text(value, TOOL_OPERATION_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_execution_id(value: str) -> str:
+    return _text(value, EXECUTION_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_execution_request_key(value: str) -> str:
+    return _text(value, EXECUTION_REQUEST_KEY_MAX_BYTES, ErrorCode.IDEMPOTENCY_KEY_INVALID)
+
+
 def validate_session_id(value: str) -> str:
     """Validate a session identifier within the SQL address budget."""
     return _text(value, SESSION_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_task_graph_id(value: str) -> str:
+    """Validate an exact local Task Graph address of at most 64 UTF-8 bytes."""
+    return _text(value, TASK_GRAPH_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_session_request_key(value: str) -> str:
@@ -200,9 +228,15 @@ def _text(value: str, maximum: int, code: ErrorCode) -> str:
 
 
 __all__ = [
+    "AGENT_RUN_ID_MAX_BYTES",
+    "validate_agent_run_id",
     "LEASE_OWNER_MAX_BYTES",
     "RESOURCE_ID_MAX_BYTES",
+    "TOOL_OPERATION_ID_MAX_BYTES",
+    "EXECUTION_ID_MAX_BYTES",
+    "EXECUTION_REQUEST_KEY_MAX_BYTES",
     "SESSION_ID_MAX_BYTES",
+    "TASK_GRAPH_ID_MAX_BYTES",
     "SESSION_REQUEST_KEY_MAX_BYTES",
     "validate_agent_id",
     "validate_logical_id",
@@ -215,6 +249,8 @@ __all__ = [
     "validate_enum",
     "validate_external_payload",
     "validate_idempotency_key",
+    "validate_execution_id",
+    "validate_execution_request_key",
     "validate_lease_owner",
     "validate_lease_seconds",
     "validate_memory_scope",
@@ -225,9 +261,11 @@ __all__ = [
     "validate_principal_kind",
     "validate_resource_id",
     "validate_session_id",
+    "validate_task_graph_id",
     "validate_session_request_key",
     "validate_shell_timeout",
     "validate_tenant_id",
     "validate_tool_arguments",
+    "validate_tool_operation_id",
     "validate_user_prompt",
 ]

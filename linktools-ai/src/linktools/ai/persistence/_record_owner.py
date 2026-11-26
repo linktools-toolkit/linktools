@@ -5,7 +5,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from ..core import validate_lease_owner
+from ..core import TASK_GRAPH_ID_MAX_BYTES, validate_lease_owner
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
@@ -72,7 +72,7 @@ def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) ->
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
 EXECUTION_SORT_KEY_MAX_BYTES = 8 + RECORD_KEY_MAX_BYTES
 # Six framed components: record, namespace, tenant, task, task_graph, graph ID.
-TASK_GRAPH_KEY_MAX_BYTES = 416
+TASK_GRAPH_KEY_MAX_BYTES = 32 + 2 * 128 + TASK_GRAPH_ID_MAX_BYTES
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
 _EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}
@@ -100,7 +100,10 @@ def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
             return ("ai_messages" if store_key == encode_key_components(("state-group-archive",), 128)
                     else "ai_state_records")
     if len(parts) >= 6 and parts[0] == "record":
-        if parts[4] == "task_graph" and (len(parts) != 6 or parts[3] != "task" or len(key) > TASK_GRAPH_KEY_MAX_BYTES):
+        if parts[4] == "task_graph" and (
+                len(parts) != 6 or parts[3] != "task" or len(key) > TASK_GRAPH_KEY_MAX_BYTES
+                or len(parts[5].encode("utf-8")) > TASK_GRAPH_ID_MAX_BYTES
+        ):
             return "ai_state_records"
         if parts[4] in _EXECUTION_ADDRESS_LENGTHS and (
                 parts[3] != "execution" or len(parts) != _EXECUTION_ADDRESS_LENGTHS[parts[4]]):

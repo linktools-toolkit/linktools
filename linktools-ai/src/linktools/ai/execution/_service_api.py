@@ -41,6 +41,7 @@ from ..core import (
     normalize_execution_mode,
     normalize_thinking,
     validate_idempotency_key,
+    validate_execution_request_key,
     validate_memory_scope,
     validate_page_limit,
     validate_resource_id,
@@ -117,7 +118,7 @@ class ExecutionRequest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_owns_memory_scope"})
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
         files = normalize_input_files(self.files)
-        validate_idempotency_key(self.idempotency_key)
+        validate_execution_request_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
         mode = normalize_execution_mode(self.mode)
@@ -141,7 +142,7 @@ class RetryExecutionRequest:
     def __post_init__(self) -> None:
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
         files = normalize_input_files(self.files)
-        validate_idempotency_key(self.idempotency_key)
+        validate_execution_request_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
         object.__setattr__(self, "files", files)
 
@@ -160,7 +161,7 @@ class ForkExecutionRequest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
         files = normalize_input_files(self.files)
-        validate_idempotency_key(self.idempotency_key)
+        validate_execution_request_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
         object.__setattr__(self, "files", files)
 

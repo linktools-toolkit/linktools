@@ -23,6 +23,7 @@ from ..core import (
     ResourceRef,
     TaskStatus,
     canonical_sha256,
+    validate_task_graph_id,
     principal_identity_payload,
     validate_lease_owner,
     validate_lease_seconds,
@@ -384,7 +385,7 @@ class TaskRepositoryImpl(RepositoryBase):
         self._scheduler_definitions: tuple[str, tuple[TaskNode, ...]] | None = None
 
     def _graph_key(self, graph_id: str) -> bytes:
-        return self._key("task_graph", (graph_id,))
+        return self._key("task_graph", (validate_task_graph_id(graph_id),))
 
     def _definition_key(self, graph_id: str, node_id: str) -> bytes:
         return self._key("task_node_definition", (graph_id, node_id))

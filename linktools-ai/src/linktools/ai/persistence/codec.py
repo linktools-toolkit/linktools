@@ -38,7 +38,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart
 
 from ..asset import AssetVersionRef
 from ..spec import CapabilityRef, validate_logical_id
-from ..core import validate_resource_id
+from ..core import validate_resource_id, validate_tool_operation_id
 from ..evaluation import (
     CandidateContract,
     CandidateSlotRef,
@@ -1847,8 +1847,12 @@ def decode_tool_operation_metadata(value: Mapping[str, JsonValue]) -> ToolOperat
                 or type(payload["schema"]) is not int or payload["schema"] != envelope.version):
             raise ValueError("invalid tool operation projection")
         fields = payload["fields"]
-        identities = tuple(validate_resource_id(fields[name]) for name in
-                           ("tool_operation_id", "execution_id", "tool_call_id"))
+        try:
+            operation_id = validate_tool_operation_id(fields["tool_operation_id"])
+        except AIError as error:
+            raise ValueError("invalid tool operation identity") from error
+        identities = (operation_id, validate_resource_id(fields["execution_id"]),
+                      validate_resource_id(fields["tool_call_id"]))
         status = _decode_domain(fields["status"], ToolOperationStatus, codec, persisted=True)
         return ToolOperationMetadata(*identities, status)
     except (ValueError, TypeError, KeyError) as error:

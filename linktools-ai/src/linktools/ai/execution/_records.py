@@ -13,6 +13,7 @@ from ..asset import AssetVersionRef
 from ..core import (PersistenceDomain, RunBudget, ExecutionEventType, ExecutionLineageKind,
     ExecutionMode, ExecutionStatus, IdempotencyStatus, JsonValue, OperationStatus,
     ResourceKind, StopReason, ThinkingValue, UsageMetrics, canonical_sha256, validate_idempotency_key, validate_resource_id,
+    validate_execution_id, validate_execution_request_key,
     normalize_correlation, normalize_execution_mode, normalize_thinking, normalize_tool_effects, ToolEffects)
 from ..session import SessionContext, normalize_session_context
 from ..errors import AIError, ErrorDiagnostics
@@ -95,6 +96,11 @@ class ExecutionRecord:
     completed_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        validate_execution_id(self.execution_id)
+        validate_execution_id(self.root_execution_id)
+        for related in (self.parent_execution_id, self.previous_execution_id, self.fork_base_execution_id):
+            if related is not None:
+                validate_execution_id(related)
         if self.completed_at is not None and (not isinstance(self.completed_at, datetime)
                 or self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None):
             raise ValueError("execution completed_at must be timezone-aware")
@@ -440,7 +446,7 @@ class ExecutionStartClaim:
     def __post_init__(self) -> None:
         try:
             validate_resource_id(self.scope)
-            validate_idempotency_key(self.idempotency_key)
+            validate_execution_request_key(self.idempotency_key)
         except AIError as error:
             raise ValueError("idempotency identity is invalid") from error
 
@@ -458,7 +464,7 @@ class ExecutionStartUnknownCommit:
     def __post_init__(self) -> None:
         try:
             validate_resource_id(self.scope)
-            validate_idempotency_key(self.idempotency_key)
+            validate_execution_request_key(self.idempotency_key)
         except AIError as error:
             raise ValueError("idempotency identity is invalid") from error
 
@@ -513,7 +519,11 @@ class IdempotencyRecord:
     def __post_init__(self) -> None:
         try:
             validate_resource_id(self.scope)
-            validate_idempotency_key(self.idempotency_key)
+            if self.resource_kind is ResourceKind.EXECUTION:
+                validate_execution_id(self.resource_id)
+                validate_execution_request_key(self.idempotency_key)
+            else:
+                validate_idempotency_key(self.idempotency_key)
         except AIError as error:
             raise ValueError("idempotency identity is invalid") from error
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
@@ -602,7 +612,7 @@ class IdempotencyTerminalUpdate:
     def __post_init__(self) -> None:
         try:
             validate_resource_id(self.scope)
-            validate_idempotency_key(self.idempotency_key)
+            validate_execution_request_key(self.idempotency_key)
         except AIError as error:
             raise ValueError("idempotency identity is invalid") from error
 

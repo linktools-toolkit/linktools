@@ -95,8 +95,10 @@ from ..core import (
     validate_lease_owner,
     validate_memory_scope,
     validate_resource_id,
+    validate_task_graph_id,
     validate_idempotency_key,
     validate_tenant_id,
+    validate_tool_operation_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..spec import CapabilityRef
@@ -330,7 +332,7 @@ class TaskPreparedInputRecord:
 
     def __post_init__(self) -> None:
         try:
-            validate_resource_id(self.graph_id)
+            validate_task_graph_id(self.graph_id)
             validate_resource_id(self.node_id)
         except AIError as error:
             raise ValueError("prepared task identity is invalid") from error
@@ -1160,6 +1162,7 @@ class ToolOperationRecord:
         else:
             raise ValueError("tool operation status is invalid")
         try:
+            validate_tool_operation_id(self.tool_operation_id)
             validate_resource_id(self.execution_id)
             validate_resource_id(self.agent_run_id)
             validate_resource_id(self.tool_call_id)
@@ -1891,6 +1894,7 @@ class ToolOperationAdmission:
             raise ValueError("tool producer generation is invalid")
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
         try:
+            validate_tool_operation_id(self.tool_operation_id)
             validate_resource_id(self.execution_id)
             validate_resource_id(self.agent_run_id)
             validate_resource_id(self.tool_call_id)

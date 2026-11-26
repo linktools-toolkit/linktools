@@ -14,7 +14,7 @@ from ..session import SessionContext, normalize_session_context
 from ..capability import MemoryCapability
 from ._capabilities import runtime_feature_leaves
 from ..core import (BudgetUsage, OperationLedgerInput, OperationLedgerRecord, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
-                    normalize_thinking, overlay_correlation, validate_idempotency_key)
+                    normalize_thinking, overlay_correlation, validate_execution_request_key)
 from ..errors import AIError, ErrorCode
 from ..execution import (ExecutionHandle, Execution, ExecutionInputContext, ExecutionRequest,
     ExecutionView, ExecutionResult, CancelExecutionRequest, CancelExecutionResult, ExecutionHistoryService,
@@ -321,7 +321,7 @@ class AgentExecutionPort(Generic[AppT]):
         if session_context != "all" and session_id is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "session_context_requires_session"})
         key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
-        validate_idempotency_key(key)
+        validate_execution_request_key(key)
         if input_context is not None and session_id is not None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_requires_new_execution"})
         resolved_principal = self.default_principal if principal is None else principal

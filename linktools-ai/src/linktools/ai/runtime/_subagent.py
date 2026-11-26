@@ -164,9 +164,9 @@ class SubagentDispatcher:
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         child_mode: ExecutionMode = "plan" if mode == "plan" else "run"
-        idempotency_key = "subagent:" + canonical_sha256(
+        idempotency_key = canonical_sha256(
             {
-                "version": 1,
+                "kind": "subagent",
                 "parent_execution_id": parent_execution_id,
                 "invocation_id": invocation_id,
             }

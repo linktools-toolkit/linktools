@@ -13,7 +13,7 @@ from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._record_owner import record_owner_edge, record_owner_names, record_owner_table
 from linktools.ai.persistence.state import RecordQuery, record_key
 from tests.ai.test_task_recovery_index import _request
-from linktools.ai.task import TaskGraphAdmission
+from linktools.ai.task import TaskGraph, TaskGraphAdmission
 
 
 @pytest.mark.asyncio
@@ -61,7 +61,7 @@ def test_graph_owner_index_budget_and_constant_projection(dialect_name: str) -> 
     table.create(engine, checkfirst=False)
     indexes = [sql for sql in statements if sql.startswith("CREATE INDEX") or sql.startswith("CREATE UNIQUE INDEX")]
     assert len(table.c) == 16
-    assert table.c.key.type.length == 416
+    assert table.c.key.type.length == 352
     assert {"scope_key", "parent_key", "scope_locator", "parent_locator"}.isdisjoint(table.c.keys())
     import re
     constraints = re.findall(r"\b(?:PRIMARY KEY|UNIQUE) \([^()]+\)", " ".join(statements))
@@ -71,7 +71,14 @@ def test_graph_owner_index_budget_and_constant_projection(dialect_name: str) -> 
     key = record_key("n", "t", "task", "task_graph", ("g",))
     sql = str(select(record_owner_rows(metadata, keys=(key,))).compile(dialect=engine.dialect))
     assert "ai_task_graphs" in sql and "ai_state_records" not in sql
-    maximum = record_key("n" * 128, "t" * 128, "task", "task_graph", ("界" * 42 + "ab",))
-    assert len(maximum) == 416 and record_owner_table(maximum) == "ai_task_graphs"
-    assert record_owner_table(record_key("n" * 128, "t" * 128, "task", "task_graph", ("x" * 129,))) == "ai_state_records"
+    maximum = record_key("n" * 128, "t" * 128, "task", "task_graph", ("界" * 21 + "a",))
+    assert len(maximum) == 352 and record_owner_table(maximum) == "ai_task_graphs"
+    assert record_owner_table(record_key("n", "t", "task", "task_graph", ("界" * 21 + "ab",))) == "ai_state_records"
     assert record_owner_table(record_key("n", "t", "task", "task_graph", ("graph", "child"))) == "ai_state_records"
+
+
+def test_task_graph_id_byte_limit() -> None:
+    graph_id = "界" * 21 + "a"
+    assert TaskGraph(graph_id, ()).graph_id == graph_id
+    with pytest.raises(ValueError, match="task graph identity"):
+        TaskGraph(graph_id + "b", ())

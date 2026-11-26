@@ -373,6 +373,16 @@ def test_request_file_normalization_preserves_input_meaning(request_type: type, 
     assert "added-later.txt" not in request.files
 
 
+@pytest.mark.parametrize("request_type", (ExecutionRequest, RetryExecutionRequest, ForkExecutionRequest))
+def test_execution_request_keys_are_bounded_by_utf8_bytes(request_type: type) -> None:
+    request = _file_request(request_type, ())
+    for key in ("x" * 64, "é" * 32):
+        assert replace(request, idempotency_key=key).idempotency_key == key
+    with pytest.raises(AIError) as raised:
+        replace(request, idempotency_key="é" * 32 + "x")
+    assert raised.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
+
+
 def test_request_types_keep_distinct_identity_and_accept_positional_inputs() -> None:
     principal = Principal("user", "tenant", "local_trusted")
     options = dict(idempotency_key="file-input", correlation={"trace": "original"})

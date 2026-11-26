@@ -7,7 +7,7 @@ from functools import lru_cache
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from ..core import RESOURCE_ID_MAX_BYTES
+from ..core import AGENT_RUN_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES
 from ..steps import NATIVE_STORE_KEY_MAX_BYTES, NATIVE_REPLAY_KEY_MAX_BYTES
 from ..storage import (
     sql_audit_columns,
@@ -41,7 +41,8 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         return Column(name, sql_sort_key(), nullable=nullable, comment=comment)
 
     def identifier(name: str, comment: str, *, nullable: bool = True) -> "Column":
-        return Column(name, sql_text_key(RESOURCE_ID_MAX_BYTES), nullable=nullable, comment=comment)
+        width = AGENT_RUN_ID_MAX_BYTES if name in ("run_id", "parent_run_id") else RESOURCE_ID_MAX_BYTES
+        return Column(name, sql_text_key(width), nullable=nullable, comment=comment)
 
     def partition() -> "Column":
         return Column("store_key", LargeBinary(NATIVE_STORE_KEY_MAX_BYTES).with_variant(
