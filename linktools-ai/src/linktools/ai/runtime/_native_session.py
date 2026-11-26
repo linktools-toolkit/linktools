@@ -51,6 +51,8 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
     principal: Principal
     _sessions: RuntimeSessions[AppT]
     _read_result: Callable[[SessionTurnKey, Principal], Awaitable[ResultT]]
+    _runtime: Runtime[AppT]
+    _local_workspace: bool
 
     async def result(self) -> ResultT:
         return await self._read_result(self.key, self.principal)
@@ -60,6 +62,25 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
 
     async def recover(self) -> bool:
         return await self._sessions.recover_turn(self.key.session_id, self.key.turn_id, principal=self.principal)
+
+    async def observe(self, *, preview: bool = True) -> AsyncIterator[dict[str, JsonValue]]:
+        """Observe this admitted turn from now on; earlier deltas are not replayed."""
+        with TurnObserver(
+            self._runtime, self.key.session_id, self.principal,
+            local_workspace=self._local_workspace, preview=preview,
+        ) as observer:
+            # Subscribe before the authorized read to cover completion between
+            # opening this iterator and obtaining its durable current state.
+            initial = await self.result()
+            if initial.status.value in _END_STATES:
+                yield {**initial.view, "type": "terminal", "state": initial.status.value.lower()}
+                return
+            events = observer.events(self.key.turn_id)
+            try:
+                async for event in events:
+                    yield event
+            finally:
+                await events.aclose()
 
     async def _replay_events(self) -> AsyncIterator[dict[str, JsonValue]]:
         result = await self.result()
@@ -142,7 +163,10 @@ class _NativeSession(Generic[AppT, ResultT]):
         )
 
     def _turn(self, turn_id: str, actor: Principal) -> _NativeSessionTurn[AppT, ResultT]:
-        return _NativeSessionTurn(SessionTurnKey(self.session_id, turn_id), actor, self._sessions, self._read_result)
+        return _NativeSessionTurn(
+            SessionTurnKey(self.session_id, turn_id), actor, self._sessions, self._read_result,
+            self._runtime, self._local_workspace,
+        )
 
     @asynccontextmanager
     async def start(
