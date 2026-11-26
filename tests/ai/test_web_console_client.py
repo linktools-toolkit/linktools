@@ -5,6 +5,7 @@ from linktools.ai.persistence import Persistence
 """Deterministic Web client stream and projection invariants, without a model."""
 from ._runtime_test_helpers import model_features
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -102,7 +103,9 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
     for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "tools", "guided", "details", "minimal", "resume", "streaming", "attempts", "unavailable", "session-sync", "session-open-active", "snapshot-tail", "session-published-turn"):
         result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
-        assert result.returncode == 0, result.stderr
+        if result.returncode:
+            error = re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<web module>", result.stderr)
+            pytest.fail(f"{mode}: {error}", pytrace=False)
 
 
 def test_web_stream_attempts_preserve_request_and_replay_boundaries() -> None:

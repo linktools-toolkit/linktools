@@ -22,9 +22,11 @@ class Element {
   connect(value){this.isConnected=value;if(this.id){if(value)nodes.set(this.id,this);else if(nodes.get(this.id)===this)nodes.delete(this.id);}this.children.forEach(child=>child.connect?.(value));if(!value && document.activeElement===this)document.activeElement=null;}
   append(...children){children.forEach(child=>{if(child.parentElement)child.parentElement.children=child.parentElement.children.filter(item=>item!==child);});this.children.push(...children);children.forEach(child=>{child.parentElement=this;child.connect?.(this.isConnected);});}
   insertBefore(child,anchor){if(anchor===null){this.append(child);return;}const index=this.children.indexOf(anchor);assert.ok(index>=0);this.children.splice(index,0,child);child.parentElement=this;child.connect(this.isConnected);}
+  replaceWith(replacement){if(this.parentElement){this.parentElement.insertBefore(replacement,this);this.remove();}}
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(item=>item!==this);this.parentElement=null;this.connect(false);}
   replaceChildren(...children){this.children.forEach(child=>child.connect?.(false));this._text='';this.children=[];this.append(...children);}
   contains(node){return node===this || this.children.some(child=>child.contains?.(node));}
+  querySelector(selector){if(selector===':scope > .empty')return this.children.find(child=>child.className?.split(' ').includes('empty')) || null;return this.querySelectorAll(selector)[0] || null;}
   querySelectorAll(selector){const matches=[];for(const child of this.children){if(selector==='[data-request-focus]' && child.dataset?.requestFocus)matches.push(child);matches.push(...(child.querySelectorAll?.(selector)||[]));}return matches;}
   focus(){document.activeElement=this;}
   scrollIntoView(){}
@@ -348,11 +350,11 @@ if(process.argv[3]==='session-published-turn') {
   emitTurn({type:'delta',turn_id:ordinaryTurn,generation:1,delta_kind:'text',text:'Native preview'});
   await node('chat-mode').click();
   assert.equal(node('composer').hidden,false);
-  assert.match(node('conversation').textContent,/Native question.*Native preview/);
+  assert.match(node('conversation').textContent,/Native question.*Native preview/s);
   assert.equal(node('send').disabled,true);
   emitTurn({type:'terminal',turn_id:ordinaryTurn,turn_no:1,revision:2,generation:1,state:'succeeded',
     prompt:'Native question',items:[{item_kind:'assistant',content:'Native finished'}]});
-  assert.match(node('conversation').textContent,/Native question.*Native finished/);
+  assert.match(node('conversation').textContent,/Native question.*Native finished/s);
   assert.doesNotMatch(node('conversation').textContent,/Native preview/);
   assert.equal(calls.slice(beforeNative).filter(call=>call.key.startsWith('/api/executions/')).length,0);
   process.exit(0);
