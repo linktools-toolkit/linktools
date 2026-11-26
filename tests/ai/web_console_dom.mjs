@@ -417,6 +417,7 @@ if(process.argv[3]==='session-published-turn') {
   assert.equal(nativeThought().elapsedNode.textContent,'15 ms');
   assert.equal(node('conversation').textContent.split('Native thought').length,2);
   assert.doesNotMatch(node('conversation').textContent,/Native preview|pending_tool|Live preview is incomplete/);
+  emitTurn({type:'snapshot',session:{...ordinarySession,active_turn_id:null,last_turn_no:1,revision:2}});
   node('prompt').value='Next native question';
   const nextNative=deferred('POST /api/sessions/b/messages'),sendNative=node('composer').requestSubmit();
   await nextNative.requested;
