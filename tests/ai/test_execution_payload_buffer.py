@@ -81,6 +81,7 @@ async def test_execution_buffer_reads_full_payload_and_confirms_only_captured_pr
     latest, second_ids = await owner.read(first.execution.execution_id, seal=True)
     assert latest == second
     assert not set(first_ids).intersection(second_ids)
+    assert all(len(entry_id) == 12 and entry_id.isascii() for entry_id in (*first_ids, *second_ids))
     with pytest.raises(AIError) as rejected:
         await owner.append(_capture("too late"))
     assert rejected.value.code is ErrorCode.STORAGE_CONFLICT

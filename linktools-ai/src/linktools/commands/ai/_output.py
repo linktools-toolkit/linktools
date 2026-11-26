@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from secrets import token_urlsafe
 
 from rich import get_console
 from rich.console import Console
@@ -77,7 +77,7 @@ async def _emit_session_result(
         with TurnObserver(runtime, session_id, principal, local_workspace=True, preview=not as_json) as observer:
             turn_id = await runtime.sessions.start_turn(
                 session_id, prompt, agent="default", principal=principal,
-                idempotency_key=uuid4().hex, thinking=thinking,
+                idempotency_key=token_urlsafe(9), thinking=thinking,
             )
             async for frame in observer.events(turn_id):
                 kind = frame["type"]

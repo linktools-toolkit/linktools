@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
-from ._record_owner import EXECUTION_SORT_KEY_MAX_BYTES, SCAN_KIND_OWNERS, TASK_GRAPH_KEY_MAX_BYTES
+from ._record_owner import EXECUTION_SORT_KEY_MAX_BYTES, SCAN_KIND_OWNERS, TASK_GRAPH_KEY_MAX_BYTES, TOOL_OPERATION_KEY_MAX_BYTES
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 
 
@@ -36,7 +36,10 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
 
     if name in metadata.tables:
         return
-    record_key_width = TASK_GRAPH_KEY_MAX_BYTES if name == "ai_task_graphs" else RECORD_KEY_MAX_BYTES
+    record_key_width = {
+        "ai_task_graphs": TASK_GRAPH_KEY_MAX_BYTES,
+        "ai_step_tool_operations": TOOL_OPERATION_KEY_MAX_BYTES,
+    }.get(name, RECORD_KEY_MAX_BYTES)
     columns = [
         sql_id_column(),
         Column(

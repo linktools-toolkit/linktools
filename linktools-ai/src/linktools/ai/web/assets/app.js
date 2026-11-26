@@ -106,11 +106,16 @@ async function api(path, {body, signal}={}) {
   return payload;
   } catch(error) {error.path=path;error.context ||= `${body ? 'POST':'GET'} ${path.split('?')[0]}`;throw error;}
 }
-async function mutate(path, payload, {newAttemptOn=[],scope=''}={}) {
+// Nine random bytes encode to twelve unpadded URL-safe ASCII characters.
+function shortAttemptId() {
+  return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(9))))
+    .replaceAll('+','-').replaceAll('/','_');
+}
+async function mutate(path, payload, {newAttemptOn=[],scope='',shortRequest=false}={}) {
   const key = scope + path + JSON.stringify(payload);
   let operation = state.pending.get(key);
   if (operation?.running) return operation.running;
-  if (!operation) { operation={id:crypto.randomUUID()}; state.pending.set(key, operation); }
+  if (!operation) { operation={id:shortRequest?shortAttemptId():crypto.randomUUID()}; state.pending.set(key, operation); }
   operation.running=api(path, {body:{...payload, request_id:operation.id}});
   try { const result=await operation.running; state.pending.delete(key); return result; }
   catch(error) {
@@ -2388,7 +2393,7 @@ async function sendMessage(event) {
       options.agent_id=$('new-agent').value || 'default';
       if(files.length)options.files=files;
     } else options.planning=$('planning').checked;
-    const result=await mutate(sessionURL(sessionId,"messages"),options,{newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
+    const result=await mutate(sessionURL(sessionId,"messages"),options,{newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT'],shortRequest:Boolean(state.config?.turn_sessions)});
     if(generation!==state.generation){
       const draft=state.drafts.get(sessionId);
       if(draft?.prompt===promptValue && (!state.config?.turn_sessions || (draft.files || '')===fileText)){
@@ -2436,7 +2441,7 @@ async function sendMessage(event) {
 function openPlan() {
   if(!state.config?.turn_sessions || state.config.read_only)return;
   const dialog=$('plan-dialog');
-  dialog.dataset.attempt=crypto.randomUUID();
+  dialog.dataset.attempt=shortAttemptId();
   $('plan-error').hidden=true;$('start-plan').disabled=false;
   dialog.showModal();$('plan-prompt').focus();
 }

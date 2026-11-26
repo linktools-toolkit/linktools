@@ -1,6 +1,7 @@
 // Lightweight DOM interaction contract tests. This is not a browser/layout test.
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import {webcrypto} from 'node:crypto';
 import {resolve} from 'node:path';
 
 const readOnly=process.argv[3]==='readonly';
@@ -58,7 +59,7 @@ globalThis.requestAnimationFrame=callback=>setTimeout(()=>callback(performance.n
 globalThis.cancelAnimationFrame=clearTimeout;
 let hash='',hashChanged=Promise.resolve();
 globalThis.location={get hash(){return hash;},set hash(value){hash=value;hashChanged=Promise.resolve().then(()=>Promise.all(handlers.get('hashchange')?.map(handler=>handler()) || []));}};
-let counter=0;Object.defineProperty(globalThis,"crypto",{value:{randomUUID:()=>`request-${++counter}`},configurable:true});globalThis.confirm=()=>true;globalThis.prompt=()=> 'Retry prompt';
+let counter=0;Object.defineProperty(globalThis,"crypto",{value:{randomUUID:()=>`request-${++counter}`,getRandomValues:bytes=>webcrypto.getRandomValues(bytes)},configurable:true});globalThis.confirm=()=>true;globalThis.prompt=()=> 'Retry prompt';
 const networkFailures=new Set(),calls=[],delays=new Map(),timelineOverrides=new Map(),streamBlocks=new Map(),detailResponses=new Map(),unavailableTimelines=new Set();
 const info=(id,session_id=id[0])=>({execution_id:id,agent_id:'default',session_id,status:'SUCCEEDED',binding_kind:'agent',lineage_kind:'ROOT',created_at:'2026-01-01T00:00:00Z',started_at:'2026-01-01T00:00:00Z',terminal_at:'2026-01-01T00:00:01Z'});
 const sessionSources=[];
@@ -356,6 +357,12 @@ if(process.argv[3]==='session-published-turn') {
     prompt:'Native question',items:[{item_kind:'assistant',content:'Native finished'}]});
   assert.match(node('conversation').textContent,/Native question.*Native finished/s);
   assert.doesNotMatch(node('conversation').textContent,/Native preview/);
+  node('prompt').value='Next native question';
+  const nextNative=deferred('POST /api/sessions/b/messages'),sendNative=node('composer').requestSubmit();
+  await nextNative.requested;
+  const sentNative=calls.filter(call=>call.key==='/api/sessions/b/messages').at(-1);
+  assert.match(sentNative.body.request_id,/^[A-Za-z0-9_-]{12}$/);
+  nextNative({turn_id:'b-next-turn'});await sendNative;
   assert.equal(calls.slice(beforeNative).filter(call=>call.key.startsWith('/api/executions/')).length,0);
   process.exit(0);
 }

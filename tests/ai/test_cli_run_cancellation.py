@@ -100,6 +100,7 @@ async def test_ai_run_native_json_returns_canonical_turn_without_readback(capsys
 
     async def start_turn(session_id, prompt, **kwargs):
         assert session_id == "default" and prompt == "hello" and kwargs["agent"] == "default"
+        assert len(kwargs["idempotency_key"]) == 12 and kwargs["idempotency_key"].isascii()
         subscription[0]({"type": "terminal", "turn_id": "canonical-turn", "state": "succeeded",
                          "output": {"text": "answer"}})
         return "canonical-turn"

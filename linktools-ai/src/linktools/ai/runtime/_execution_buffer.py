@@ -71,6 +71,7 @@ class _Entry:
 class _Scope:
     id: str = field(default_factory=lambda: "execution:" + uuid4().hex)
     entries: list[_Entry] = field(default_factory=list)
+    next_entry: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     failure: BaseException | None = None
     cleanup_failure: BaseException | None = None
@@ -166,7 +167,11 @@ class _ExecutionPayloadBuffer:
                 raise scope.failure
             if scope.sealed or scope.released:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            entry = _Entry(uuid4().hex, hashlib.sha256(content).hexdigest())
+            # The backend addresses an entry within its producer scope.
+            if scope.next_entry >= 1 << 48:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE, safe_details={"phase": "execution_buffer_admission"})
+            entry = _Entry(f"{scope.next_entry:012x}", hashlib.sha256(content).hexdigest())
+            scope.next_entry += 1
             scope.entries.append(entry)
             scope.uncertain = (entry.id, execution_id, content)
             try:
