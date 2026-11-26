@@ -2582,6 +2582,22 @@ class TaskNodeExecutor(Generic[AppT]):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
+    async def settle_linked_graph_cancel(self, invocation: TaskNodeInvocation) -> None:
+        """Reconcile only a linked Agent cancellation, without retrying task effects."""
+        task_id, task_revision, _ = _parse_node(invocation.node, request=False)
+        handler = self._handler(
+            task_id, task_revision, graph_id=invocation.graph_id,
+            node_id=invocation.node.node_id, request=False,
+        )
+        if not isinstance(handler, _TaskRunnerAdapter) or not isinstance(handler.runner, AgentTaskRunner):
+            return
+        invocation, _ = await self._restore_invocation(invocation)
+        _, _, body = _parse_node(invocation.node, request=False)
+        if body.get("session_id") is not None and invocation.execution_id is not None and invocation.cancel_authority is not None:
+            await handler.runner.settle_bound_graph_cancel(
+                invocation, invocation.execution_id, invocation.cancel_authority,
+            )
+
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
         invocation, captured_input = await self._restore_invocation(invocation)
         graph_id = invocation.graph_id

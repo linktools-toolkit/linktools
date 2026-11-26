@@ -97,6 +97,11 @@ class _TaskDependencyPreparation(Protocol):
 
 
 @runtime_checkable
+class _LinkedGraphCancellation(Protocol):
+    async def settle_linked_graph_cancel(self, invocation: TaskNodeInvocation) -> None: ...
+
+
+@runtime_checkable
 class _RunnerBackgroundOwner(Protocol):
     @property
     def pending_background_tasks(self) -> "tuple[asyncio.Task[object], ...]": ...
@@ -910,10 +915,11 @@ class LocalTaskGraphLauncher:
             state = states.get(node_id)
             if state is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            # A durable requeue supersedes the read-only waiter; it cannot
-            # occupy the scheduler slot needed to claim the next producer.
+            # A resolved deferred turn supersedes its read-only waiter. A
+            # scheduled retry still owns its original local cleanup.
             requeued_waiter = (
                 state.status is TaskStatus.READY
+                and state.next_attempt_at is None
                 and state.execution_id is not None
                 and (inflight.lease_state is None
                      or inflight.lease_state.handed_off_execution_id == state.execution_id)
@@ -979,15 +985,12 @@ class LocalTaskGraphLauncher:
                     node = definitions.get(node_state.node_id)
                     if node is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if invoke_effects and cancel_authority is not None:
-                        try:
-                            await self._runner.cancel(TaskNodeInvocation(
-                                node, graph_id, launch.principal, launch.correlation, {},
-                                node_state.execution_id, cancel_authority=cancel_authority,
-                            ))
-                        except TaskNodeRunError as error:
-                            if error.code is not ErrorCode.TASK_EFFECT_UNKNOWN:
-                                raise
+                    if (invoke_effects and cancel_authority is not None
+                            and isinstance(self._runner, _LinkedGraphCancellation)):
+                        await self._runner.settle_linked_graph_cancel(TaskNodeInvocation(
+                            node, graph_id, launch.principal, launch.correlation, {},
+                            node_state.execution_id, cancel_authority=cancel_authority,
+                        ))
                     await self._settle_bound_node(
                         settlement_run,
                         node,

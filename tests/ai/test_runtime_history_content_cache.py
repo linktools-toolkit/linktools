@@ -268,7 +268,7 @@ async def test_borrowed_and_read_only_history_use_shared_result_cache(tmp_path: 
         history = _borrowed_runtime_history(
             SimpleNamespace(), tenant_id="tenant", state=storage, run_store=storage.run_store,
             authorization=TenantAuthorizationPolicy("tenant"), artifact=SimpleNamespace(),
-            enable_turn_sessions=False,
+            enable_turn_sessions=False, bind_native_turn_read=lambda _: None,
         )
         assert (await history.result("execution", principal=principal)).output == {"result": "persisted output"}
         assert (await history.result("execution", principal=principal)).output == {"result": "persisted output"}
@@ -305,7 +305,7 @@ async def test_history_result_confirms_source_membership_inside_body_cache_windo
         await _seed(storage, output=StoredPayload.object(reference))
         history = _borrowed_runtime_history(SimpleNamespace(), tenant_id="tenant", state=storage, run_store=storage.run_store,
                                            authorization=TenantAuthorizationPolicy("tenant"), artifact=SimpleNamespace(),
-                                           enable_turn_sessions=False)
+                                           enable_turn_sessions=False, bind_native_turn_read=lambda _: None)
         assert (await history.result("execution", principal=principal)).output == {"text": "retained result"}
         await objects.delete_object(reference.key, expected_digest=reference.digest)
         now[0] = 1002.0

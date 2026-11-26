@@ -19,7 +19,7 @@ from .test_task_io_measurements import _measure
 
 
 class _StopAtIdle(LocalTaskGraphLauncher):
-    async def _wait_scheduler(self, run, states) -> None:
+    async def _wait_scheduler(self, run, states, *, scheduler_generation: int) -> None:
         run.closed = True
 
 
