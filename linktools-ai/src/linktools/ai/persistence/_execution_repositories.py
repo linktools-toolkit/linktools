@@ -22,6 +22,7 @@ from ..core import (
     ResourceRef,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import ObjectRef
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
 from .codec import execution_prepared_handoff, decode_execution_observation, decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
@@ -204,6 +205,10 @@ _ContentValueT = TypeVar("_ContentValueT")
 
 
 class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
+    def bind_archive_object_reader(self, reader: Callable[[ObjectRef], Awaitable[bytes]]) -> None:
+        """Use the same physical archive for references shared by Execution and Session."""
+        self._execution_content.bind_archive_object_reader(reader)
+
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         super().__init__(
             store,

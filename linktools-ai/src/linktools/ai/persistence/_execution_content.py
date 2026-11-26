@@ -5,12 +5,12 @@
 import json
 from collections import Counter
 from weakref import ref
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+from ..storage import ObjectRef, StoredPayload
 from ..execution import ExecutionRecord, ExecutionTimelineRecord, PendingToolContinuation, RecoveryTerminalHandoff, ResultRecord
 from ..model import StoredUserInput, plain_text_input_content
 from ..agent import AgentBindingContract
@@ -209,11 +209,16 @@ class ExecutionContent:
         self._store, self._namespace, self._tenant_id = store, namespace, tenant_id
         self._pending_source = store
         self._content_archive: ContentArchive | None = None
+        self._archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None
         self._share_content = True
         # This cache saves immutable encoding work, never proves source existence.
         self._payload_encodings: dict[int, tuple[ref, ArchiveContentInput | tuple[str, bytes]]] = {}
         self._binding_encodings: dict[int, tuple[ref, ArchiveContentInput]] = {}
         self._projections: dict[int, tuple[ref, StoredRecord]] = {}
+
+    def bind_archive_object_reader(self, reader: Callable[[ObjectRef], Awaitable[bytes]]) -> None:
+        """Bind native attachment reads to this storage group's archive."""
+        self._archive_object_reader = reader
 
     def bind_pending_operation_source(self, source: StateStore) -> None:
         if source.storage_group is not self._store.storage_group:
@@ -247,7 +252,8 @@ class ExecutionContent:
         # Immutable Execution bodies stay in the database for atomic publication
         # and complete offline snapshot validation before state is admitted.
         self._content_archive = ContentArchive(store, scope, namespace=self._namespace,
-                                               tenant_id=self._tenant_id, object_store=None)
+                                               tenant_id=self._tenant_id, object_store=None,
+                                               object_reader=self._archive_object_reader)
 
     async def _archive(self, *, create: bool = False) -> ContentArchive:
         active = active_state_scope()

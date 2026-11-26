@@ -735,6 +735,11 @@ class RuntimeSnapshotOperations:
                     and checkpoint_store is not None and checkpoint_store.storage_group is group)
                 if pending_source_available:
                     execution_bindings.bind_pending_operation_source(checkpoint_store)
+                async def read_execution_archive_object(reference: ObjectRef) -> bytes:
+                    return await read_object(self._resources.archive_object_store(PersistenceDomain.EXECUTION),
+                        reference.key, expected_digest=reference.digest, expected_size=reference.size)
+
+                execution_bindings.bind_archive_object_reader(read_execution_archive_object)
                 await execution_bindings.initialize(create=False)
 
             async def capture_group(transaction: object) -> None:

@@ -32,6 +32,7 @@ from ._memory import InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import PersistenceDomain, PersistencePlan
 from .repositories import (
+    ExecutionRepositoryImpl,
     OperationLedgerRepositoryImpl,
     ToolRepositoryImpl,
     RepositoryBase,
@@ -262,6 +263,9 @@ async def materialize_runtime_storage(
         namespace=namespace, tenant_id=tenant_id,
     )
     register_cleanup((objects.drain_reads, objects.preflight_close))
+    executions = repositories.execution.executions
+    if type(executions) is ExecutionRepositoryImpl:
+        executions.bind_archive_object_reader(partial(objects.read_archive_object, PersistenceDomain.EXECUTION))
     tools = repositories.checkpoint.tools
     if type(tools) is ToolRepositoryImpl:
         tools.bind_archive_object_reader(partial(objects.read_archive_object, PersistenceDomain.CHECKPOINT))
