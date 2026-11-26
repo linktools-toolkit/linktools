@@ -49,8 +49,7 @@ async def test_source_execution_terminal_uses_buffer(tmp_path: Path, promotion: 
         async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
             backend = runtime._execution_service.runtime_backend()
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("question", idempotency_key="request")
+            execution = await runtime.agents.get().start("question", idempotency_key="request")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 if promotion:
@@ -375,8 +374,7 @@ async def test_pending_candidate_stops_for_cancel_during_context_prepare(
                 return await prepare(*args, **kwargs)
 
             monkeypatch.setattr(backend._context_archive, "prepare", gated_prepare)
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("question", idempotency_key="request")
+            execution = await runtime.agents.get().start("question", idempotency_key="request")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 assert buffer.captures[-1].terminal is not None
@@ -499,7 +497,7 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
     tmp_path: Path, reopen: bool,
 ) -> None:
     from contextlib import AsyncExitStack
-    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart, UserPromptPart
     from linktools.ai.core import ApprovalDecision, Principal
     from linktools.ai.execution import ApprovalDecisionRequest
     from linktools.ai.workspace import ToolPermissionPolicy, Workspace, WorkspacePolicy
@@ -515,7 +513,10 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
         if calls == 1:
             return ModelResponse(parts=[ToolCallPart("read_file", {"path": "data.txt"}, "read-1")])
         assert calls == 2
-        assert "approved body" in str(messages[-1])
+        parts = [part for message in messages for part in message.parts]
+        assert [part.content for part in parts if isinstance(part, UserPromptPart)] == ["read"]
+        returned, = (part for part in parts if isinstance(part, ToolReturnPart))
+        assert returned.tool_call_id == "read-1" and "approved body" in str(returned.content)
         return ModelResponse(parts=[TextPart("resumed")])
 
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")))
@@ -529,8 +530,7 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
         async with AsyncExitStack() as stack:
             context = Runtime.open(persistence=persistence, features=features, metrics=None)
             runtime = await stack.enter_async_context(context)
-            session = await runtime.agents.get("reader").create_session("session")
-            execution = await session.start("read", idempotency_key="request")
+            execution = await runtime.agents.get("reader").start("read", idempotency_key="request")
             tenant = runtime.tenant_id
             await _wait_for_committed(
                 lambda: persistence.execution.executions.get(execution.execution_id, tenant_id=tenant),
@@ -551,12 +551,10 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
             record = await persistence.execution.executions.get(execution.execution_id, tenant_id=tenant)
             assert record is not None and record.agent_run_seq == 2
             assert record.conversation and not record.restart_checkpoints and not record.durable_trace
-            from pydantic_ai.messages import ToolReturnPart, UserPromptPart
-            history = await runtime.history.messages("session", principal=runtime.default_principal, limit=100)
-            parts = [part for message in history.items for part in message.parts]
-            assert [part.content for part in parts if isinstance(part, UserPromptPart)] == ["read"]
-            assert len([part for part in parts if isinstance(part, ToolReturnPart)]) == 1
-            assert [part.content for part in parts if isinstance(part, TextPart)] == ["resumed"]
+            terminal, = (capture for capture in buffer.captures
+                         if capture.terminal is not None and capture.execution.status is ExecutionStatus.SUCCEEDED)
+            assert terminal.execution.execution_id == execution.execution_id
+            assert terminal.terminal.result.output.decode() == {"text": "resumed"}
         assert set(buffer.acknowledged) == set(buffer.accepted)
 
 

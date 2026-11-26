@@ -164,26 +164,23 @@ async def test_response_kind_survives_sqlite_reopen_without_invented_request(
     async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls, direct=_DirectResponse(model_id=model_id), direct_last=direct_last),
     ) as runtime:
-        session = await runtime.agents.get(name).create_session("session")
-        execution = await session.start(
+        execution = await runtime.agents.get(name).start(
             ("hello", BinaryContent(b"actual input bytes", media_type="text/plain"))
             if direct else "hello",
         )
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         execution_id, principal = execution.execution_id, runtime.default_principal
         original = await _assert_interaction(runtime, execution_id, principal, direct=direct, model_id=model_id, with_attachment=direct)
-        messages = (await runtime.history.messages("session", principal=principal)).items
-        assert [part.content for message in messages if isinstance(message, ModelResponse)
-                for part in message.parts if isinstance(part, TextPart)] == [f"{name} answer"]
+        messages = (await runtime.history.history(execution_id, principal=principal, include_content=True)).items
+        assert [item.content for item in messages if item.item_kind == "assistant"] == [f"{name} answer"]
     assert calls == ([] if direct else ["provider"])
     async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls),
     ) as runtime:
         restored = await _assert_interaction(runtime, execution_id, principal, direct=direct, model_id=model_id, with_attachment=direct)
         assert restored == original
-        messages = (await runtime.history.messages("session", principal=principal)).items
-        assert [part.content for message in messages if isinstance(message, ModelResponse)
-                for part in message.parts if isinstance(part, TextPart)] == [f"{name} answer"]
+        messages = (await runtime.history.history(execution_id, principal=principal, include_content=True)).items
+        assert [item.content for item in messages if item.item_kind == "assistant"] == [f"{name} answer"]
     assert calls == ([] if direct else ["provider"])
 
 
@@ -200,8 +197,7 @@ async def test_parallel_direct_and_provider_interactions_remain_distinct(tmp_pat
         persistence=persistence, features=features,
     ) as runtime:
         async def run(name: str) -> ModelInteractionItem:
-            session = await runtime.agents.get(name).create_session(name)
-            execution = await session.start("hello")
+            execution = await runtime.agents.get(name).start("hello")
             assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
             return await _assert_interaction(
                 runtime, execution.execution_id, runtime.default_principal, direct=name == "direct",
@@ -283,8 +279,7 @@ async def test_cancelled_wrapper_without_response_does_not_claim_direct_result(t
     async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
-        session = await runtime.agents.get("direct").create_session("session")
-        execution = await session.start("hello")
+        execution = await runtime.agents.get("direct").start("hello")
         await asyncio.wait_for(entered.wait(), timeout=5)
         await execution.cancel()
         result = (await execution.wait(timeout_seconds=10)).result
@@ -352,17 +347,15 @@ async def test_direct_tool_response_then_provider_result_keeps_both_interactions
         execution = await runtime.executions.get(execution_id, principal=principal)
         events = (await execution.list_events(include_content=True, limit=100)).items
         assert all("is_direct_result" not in event.payload for event in events)
-        messages = (await runtime.history.messages("session", principal=principal)).items
-        parts = [part for message in messages for part in message.parts]
-        assert sum(isinstance(part, ToolCallPart) for part in parts) == 1
-        assert sum(isinstance(part, ToolReturnPart) for part in parts) == 1
-        assert [part.content for part in parts if isinstance(part, TextPart)] == ["final answer"]
+        messages = (await runtime.history.history(execution_id, principal=principal, include_content=True)).items
+        assert [item.tool_call_id for item in messages if item.item_kind == "tool_call"] == ["lookup-once"]
+        assert [item.tool_call_id for item in messages if item.item_kind == "tool_result"] == ["lookup-once"]
+        assert [item.content for item in messages if item.item_kind == "assistant"] == ["final answer"]
 
     async with Persistence.open("direct-tool", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features,
     ) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("look up evidence")
+        execution = await runtime.agents.get().start("look up evidence")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         execution_id, principal = execution.execution_id, runtime.default_principal
         await check(runtime, execution_id, principal)
@@ -374,9 +367,9 @@ async def test_direct_tool_response_then_provider_result_keeps_both_interactions
 
 
 @pytest.mark.asyncio
-async def test_equal_provider_text_in_distinct_turns_is_not_deduplicated(tmp_path: Path) -> None:
+async def test_equal_provider_text_in_distinct_turns_is_not_deduplicated() -> None:
     calls: list[str] = []
-    storage = PersistenceStorage.sqlite(tmp_path / "repeated.sqlite")
+    storage = PersistenceStorage.in_memory()
     async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls),
     ) as runtime:
@@ -414,8 +407,7 @@ async def test_cancellation_during_direct_synthetic_events_keeps_single_captured
     async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=_features(calls, direct=PauseDirectEnd()),
     ) as runtime:
-        session = await runtime.agents.get("direct").create_session("session")
-        execution = await session.start("hello")
+        execution = await runtime.agents.get("direct").start("hello")
         await asyncio.wait_for(entered.wait(), timeout=5)
         execution_id, principal = execution.execution_id, runtime.default_principal
         captured_items = (await execution.model_interactions(include_content=True, include_client_requests=True)).items

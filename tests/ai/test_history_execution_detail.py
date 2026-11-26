@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session-bound execution observations retain authorization and result fences."""
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,10 +13,8 @@ from linktools.ai.core import AuthorizationAction, ExecutionStatus, Principal, T
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import ExecutionDetail, History
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence.state import active_state_transaction
 from linktools.ai.storage import InMemoryCacheBackend, StoredPayload
 
-from .test_incremental_projection_boundaries import _storage
 from .test_session_timeline import _commit_empty_turn, _execution, _session
 
 pytestmark = pytest.mark.asyncio
@@ -54,15 +53,14 @@ async def _seed(state, status=ExecutionStatus.SUCCEEDED, *, admitted=True, commi
     return record
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("status", (
     ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED,
     ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
 ))
 async def test_execution_detail_projects_session_state_and_committed_result(
-    tmp_path: Path, backend: str, status: ExecutionStatus,
+    status: ExecutionStatus,
 ) -> None:
-    state = Persistence(_storage(backend, tmp_path))
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-detail", tenant_id="tenant")
     try:
         record = await _seed(state, status)
@@ -250,51 +248,6 @@ async def test_execution_detail_uses_custom_result_owner_without_writes(monkeypa
         await state.close()
 
 
-async def test_nonterminal_execution_detail_reuses_cache_but_rechecks_policies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from sqlalchemy import event
-    from linktools.ai.persistence import _sql
-    from linktools.ai.storage import _write_cache
-
-    captured_at = _write_cache.time()
-    monkeypatch.setattr(_write_cache, "time", lambda: captured_at)
-    monkeypatch.setattr(_sql, "time", lambda: captured_at)
-
-    cache = InMemoryCacheBackend(max_bytes=2**20)
-    state = Persistence(PersistenceStorage.sqlite(tmp_path / "detail.db", cache=cache))
-    await state.initialize(namespace="execution-detail", tenant_id="tenant")
-    statements = []
-    actions = []
-
-    class Authorization(TenantAuthorizationPolicy):
-        async def authorize(self, principal, action, resource):
-            actions.append(action)
-            await super().authorize(principal, action, resource)
-
-    try:
-        await _seed(state, ExecutionStatus.STARTED)
-        reader = _reader(state, authorization=Authorization())
-        await reader.execution_detail("execution", session_id="session", principal=_OWNER)
-        actions.clear()
-        engine = state.execution.executions.state_store.storage_group.context.engine.sync_engine
-
-        def capture(_connection, _cursor, statement, *_args):
-            statements.append(statement)
-
-        event.listen(engine, "before_cursor_execute", capture)
-        try:
-            detail = await reader.execution_detail("execution", session_id="session", principal=_OWNER)
-        finally:
-            event.remove(engine, "before_cursor_execute", capture)
-        assert detail.execution.status is ExecutionStatus.STARTED
-        assert detail.result is None
-        assert actions == [AuthorizationAction.SESSION_READ, AuthorizationAction.EXECUTION_READ]
-        assert statements == []
-    finally:
-        await state.close()
-
-
 @pytest.mark.parametrize("source", ("changed_output", "nonterminal", "different_owner", "missing"))
 async def test_execution_detail_never_returns_a_stale_terminal_record(
     monkeypatch: pytest.MonkeyPatch, source: str,
@@ -370,3 +323,162 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
                     assert (await reader.result("execution", principal=_OWNER)).output == {"source": "fresh"}
     finally:
         await state.close()
+
+
+class _SqlTurnAuthorization(TenantAuthorizationPolicy):
+    """Production-style host authorization, with an independently denied turn."""
+
+    def __init__(self):
+        super().__init__()
+        self.actions = []
+        self.deny_execution = False
+
+    async def authorize(self, principal, action, resource):
+        self.actions.append(action)
+        await super().authorize(principal, action, resource)
+        if self.deny_execution and action is AuthorizationAction.EXECUTION_READ:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+
+@pytest.mark.parametrize("outcome", ("active", "producer-stopped", "success", "failure", "cancel"))
+async def test_sqlite_turn_detail_reads_authoritative_session_result(tmp_path: Path, outcome: str) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart
+
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        if outcome == "failure":
+            raise AIError(ErrorCode.MODEL_UNAVAILABLE)
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = RuntimeFeatures("detail")
+    features.agent("default", model="default", allow_tools=())
+    storage = PersistenceStorage.sqlite(tmp_path / "detail.db")
+    policy = _SqlTurnAuthorization()
+    async with (
+        Persistence.open("execution-detail", storage=storage, tenant_id=_OWNER.tenant_id) as state,
+        Runtime.open(persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
+                     authorization=policy) as runtime,
+    ):
+        await runtime.sessions.create_turn_session("session", principal=_OWNER)
+        await runtime.sessions.create_turn_session("other", principal=_OWNER)
+        turn = await runtime.agents.get().start(
+            "question", session_id="session", principal=_OWNER, idempotency_key="request",
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            active = await turn.result()
+            assert active.key == turn.key
+            assert active.status is ExecutionStatus.PENDING_START
+            assert active.view["output"] is None and active.view["conversation_committed"] is False
+            assert (await runtime.history.turn_session_state("session", principal=_OWNER))[
+                "active_turn_id"
+            ] == turn.key.turn_id
+            with pytest.raises(AIError) as binding:
+                await runtime.history.turn_result("other", turn.key.turn_id, principal=_OWNER)
+            assert binding.value.code is ErrorCode.AUTHORIZATION_DENIED
+            if outcome == "producer-stopped":
+                row = await state.session_turns.get_turn(turn.key)
+                with pytest.raises(AIError) as stopped:
+                    await runtime.history.turn_result(
+                        "session", turn.key.turn_id, principal=_OWNER, producer_stopped_generation=row["generation"],
+                    )
+                assert stopped.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+                assert await state.session_turns.get_turn(turn.key) == row
+            elif outcome == "cancel":
+                assert await turn.cancel()
+        finally:
+            release.set()
+
+        terminal = await turn.wait_final(timeout_seconds=5)
+        assert terminal.status is {
+            "failure": ExecutionStatus.FAILED, "cancel": ExecutionStatus.CANCELLED,
+        }.get(outcome, ExecutionStatus.SUCCEEDED)
+        assert terminal.view["conversation_committed"] is True
+        assert terminal.view["output"] == ({"text": "done"} if terminal.status is ExecutionStatus.SUCCEEDED else None)
+        if outcome in ("failure", "cancel"):
+            assert terminal.view["error_code"] == {
+                "failure": ErrorCode.MODEL_UNAVAILABLE, "cancel": ErrorCode.EXECUTION_CANCELLED,
+            }[outcome].value
+        assert (await runtime.history.turn_session_state("session", principal=_OWNER))["active_turn_id"] is None
+        assert await state.execution.executions.get(turn.key.turn_id, tenant_id=_OWNER.tenant_id) is None
+
+    async with (
+        Persistence.open("execution-detail", storage=storage, tenant_id=_OWNER.tenant_id, read_only=True) as state,
+        History.open(persistence=state, authorization=policy) as history,
+    ):
+        assert await history.turn_result("session", turn.key.turn_id, principal=_OWNER) == terminal.view
+    assert calls == 1
+
+
+async def test_native_turn_detail_rechecks_read_policies_and_does_not_freeze_active_result(tmp_path: Path) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from sqlalchemy import event
+
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def model(_messages, _info):
+        entered.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = RuntimeFeatures("detail")
+    features.agent("default", model="default", allow_tools=())
+    storage = PersistenceStorage.sqlite(tmp_path / "detail.db", cache=InMemoryCacheBackend(max_bytes=2**20))
+    policy = _SqlTurnAuthorization()
+    async with (
+        Persistence.open("execution-detail", storage=storage, tenant_id=_OWNER.tenant_id) as state,
+        Runtime.open(persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
+                     authorization=policy) as runtime,
+    ):
+        await runtime.sessions.create_turn_session("session", principal=_OWNER)
+        turn = await runtime.agents.get().start(
+            "question", session_id="session", principal=_OWNER, idempotency_key="request",
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            before = await turn.result()
+            assert before.status is ExecutionStatus.PENDING_START
+            policy.actions.clear()
+            statements = []
+            engine = state.session_turns._context.engine.sync_engine
+
+            def capture(_connection, _cursor, statement, *_args):
+                statements.append(statement.lstrip().upper())
+
+            event.listen(engine, "before_cursor_execute", capture)
+            try:
+                assert (await turn.result()).view == before.view
+            finally:
+                event.remove(engine, "before_cursor_execute", capture)
+            assert policy.actions == [AuthorizationAction.SESSION_READ, AuthorizationAction.EXECUTION_READ]
+            assert any(stmt.startswith("SELECT") for stmt in statements)
+            assert not any(stmt.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")) for stmt in statements)
+            assert not any("AI_MESSAGES" in stmt for stmt in statements)
+            policy.deny_execution = True
+            try:
+                with pytest.raises(AIError) as denied:
+                    await turn.result()
+                assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            finally:
+                policy.deny_execution = False
+        finally:
+            release.set()
+
+        terminal = await turn.wait_final(timeout_seconds=5)
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        assert terminal.view["output"] == {"text": "done"}
+        assert (await turn.result()).view == terminal.view

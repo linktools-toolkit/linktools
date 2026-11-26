@@ -13,7 +13,7 @@ from linktools.ai.persistence.contracts import ExecutionRecoveryState
 from linktools.ai.persistence._runtime_commands import StateCommands
 
 from .test_pending_turn_commit import _NAMESPACE, _commit, _pending_turn, _snapshot, _turn_state
-from .test_pending_turn_sessionless import _standalone
+from .test_pending_turn_sessionless import _conversation, _sessionless_state, _standalone
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,14 +43,17 @@ async def _publish(state, turn, *, sessionless=False):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
+@pytest.mark.parametrize(("backend", "sessionless"), (
+    ("memory", False), ("memory", True), ("sqlite", True),
+), ids=("memory-session", "memory-independent", "sqlite-independent"))
 @pytest.mark.parametrize("status", (ExecutionStatus.FAILED, ExecutionStatus.CANCELLED))
-@pytest.mark.parametrize("sessionless", (False, True))
 @pytest.mark.parametrize("sequence", (0, 1))
 async def test_pending_unsuccessful_outcome_and_source_replay(
     tmp_path: Path, backend: str, status: ExecutionStatus, sessionless: bool, sequence: int,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    fixture = _sessionless_state if sessionless else _turn_state
+    async with fixture(backend, tmp_path) as state:
+        unrelated = await _conversation(state) if sessionless else None
         turn = _outcome(state, status, sessionless=sessionless, sequence=sequence)
         result = await _publish(state, turn, sessionless=sessionless)
         assert result.execution.status is status
@@ -67,7 +70,9 @@ async def test_pending_unsuccessful_outcome_and_source_replay(
         assert recovery.recovery.agent_run_id == (None if sequence == 0 else agent_run_id(
             namespace=_NAMESPACE, tenant_id="tenant", execution_id=result.execution.execution_id, agent_run_seq=1,
         ))
-        if not sessionless:
+        if sessionless:
+            assert await _conversation(state) == unrelated
+        else:
             session = await state.storage.conversation.sessions.get(state.session.session_id, tenant_id="tenant")
             assert session.continuation == state.session.continuation
             assert session.history_quality == state.session.history_quality
@@ -186,3 +191,45 @@ async def test_pending_failure_requires_conversation_repository(tmp_path: Path, 
             await commands.commit_pending_turn(turn.reservation, turn.commit, expected_session=state.session)
         assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
         assert await _snapshot(state) == before
+
+
+@pytest.mark.parametrize(("status", "code"), (
+    ("failed", ErrorCode.MODEL_API_ERROR),
+    ("cancelled", ErrorCode.EXECUTION_CANCELLED),
+))
+async def test_native_unsuccessful_outcome_releases_session_without_replacing_prior_history(
+    tmp_path: Path, status: str, code: ErrorCode,
+) -> None:
+    from linktools.ai.persistence import Persistence
+    from linktools.ai.persistence.turns import SessionTurnKey
+
+    from .test_incremental_projection_boundaries import _storage
+    from .test_session_turn_sql import _TRANSCRIPT, accept
+
+    storage = _storage("sqlite", tmp_path)
+    prior = SessionTurnKey("chat", "prior")
+    failed = SessionTurnKey("chat", "failed")
+    async with Persistence.open(_NAMESPACE, tenant_id="tenant", storage=storage) as state:
+        turns = state.session_turns
+        await turns.create("chat", config={})
+        assert await accept(turns, prior.turn_id, request="prior")
+        assert await turns.finish(prior, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT)
+        prior_view = await turns.get_history_turn(prior, lineage=())
+        revision = (await turns.get_session("chat"))["revision"]
+        assert await accept(turns, failed.turn_id, revision=revision, through=1, request="failed")
+        if status == "cancelled":
+            assert await turns.request_cancel(failed)
+        assert await turns.finish(failed, generation=1, turn_no=2, state=status, result={"error_code": code.value})
+
+    async with Persistence.open(_NAMESPACE, tenant_id="tenant", storage=storage) as reopened:
+        turns = reopened.session_turns
+        session = await turns.get_session("chat")
+        assert session["active_turn_id"] is None and session["last_turn_no"] == 2
+        assert await turns.get_history_turn(prior, lineage=()) == prior_view
+        terminal = await turns.get_history_turn(failed, lineage=())
+        assert terminal["state"] == status and not terminal.get("messages")
+        assert terminal["result_json"] == {"error_code": code.value}
+        assert not await turns.finish(failed, generation=1, turn_no=2, state=status, result={"error_code": code.value})
+        assert await turns.get_history_turn(failed, lineage=()) == terminal
+        assert await turns.get_session("chat") == session
+        assert await reopened.execution.executions.get(failed.turn_id, tenant_id="tenant") is None
