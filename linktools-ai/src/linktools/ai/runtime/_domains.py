@@ -420,6 +420,9 @@ class RuntimeSessions(Generic[AppT]):
         await runtime._authorization.authorize(
             principal, action, ResourceRef(ResourceKind.SESSION, session_id, runtime.tenant_id),
         )
+        # The write must use the snapshot read before policy evaluation.
+        if row["revision"] != expected_revision:
+            return False
         if action is AuthorizationAction.SESSION_CLOSE:
             return await store.close_session(
                 session_id, expected_revision=expected_revision,
