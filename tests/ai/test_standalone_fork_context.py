@@ -33,8 +33,7 @@ from linktools.ai.core import CommitPolicy
 from linktools.ai.model.messages import encode_model_messages
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
-from .test_pending_turn_commit import _turn_state
-from .test_pending_turn_sessionless import _commit, _standalone
+from .test_pending_turn_sessionless import _commit, _sessionless_state, _standalone
 
 
 @pytest.mark.asyncio
@@ -173,7 +172,7 @@ async def _damage_fork_context(store, damage: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("damage", ("absent", "corrupt", "agent_run_id", "projection_digest", "transcript_message_count"))
 async def test_pending_confirmation_rejects_missing_or_corrupt_fork_context(tmp_path: Path, damage: str) -> None:
-    async with _turn_state("sqlite", tmp_path) as state:
+    async with _sessionless_state("sqlite", tmp_path) as state:
         turn = _standalone(state)
         await _commit(state, turn)
         original = await state.commands.read_pending_turn(turn.reservation, expected_session=None)

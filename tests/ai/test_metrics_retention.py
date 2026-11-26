@@ -105,8 +105,12 @@ async def test_retention_preserves_identity_and_atomic_batch_contract(retention_
 
 
 async def _assert_namespace_partitions(store: MetricStore) -> None:
-    namespaces = ("A", "a", "é", "e\u0301", "测" * 42 + "ab", "😀" * 32,
-                  "n" * 127 + "a", "n" * 127 + "b")
+    namespaces = ("A", "a", "é", "e\u0301", "测" * 21 + "a", "😀" * 16,
+                  "n" * 63 + "a", "n" * 63 + "b")
+    for namespace in ("n" * 65, "测" * 21 + "ab", "😀" * 16 + "a"):
+        with pytest.raises(AIError) as rejected:
+            Metrics.from_store(store, namespace=namespace)
+        assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
     definition = MetricDefinition(
         name="partition", revision=1, observation_kind="app.retention",
         source=MetricSource.observation_count(), metric_type=MetricType.COUNTER,

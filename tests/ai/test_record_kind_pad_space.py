@@ -32,14 +32,13 @@ async def test_mysql_padded_kind_preserves_both_owners_and_raw_cursor(
             canonical = replace(
                 _record(1),
                 key=record_key("kind-padding", "tenant", "task", "task_graph", ("graph",)),
-                kind="task_graph", state="PENDING",
+                kind="task_graph", state="PENDING", scope_key=None,
             )
             opaque = replace(_record(2), kind="task_graph", state="PENDING")
             unrelated = replace(_record(3), kind="task_graph_extra", state="PENDING")
             await store.mutate(lambda transaction: transaction.insert_records((canonical, opaque, unrelated)))
 
-            query = RecordQuery(kind="task_graph ", states=frozenset({"PENDING"}),
-                                scope_key=canonical.scope_key, limit=1)
+            query = RecordQuery(kind="task_graph ", states=frozenset({"PENDING"}), limit=1)
             first = await store.read(lambda transaction: transaction.list_records(query))
             assert first == (canonical,)
             query = replace(query, after_sort_key=first[0].sort_key, after_key=first[0].key)

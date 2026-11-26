@@ -253,9 +253,13 @@ async def test_session_starts_with_unreachable_separate_trace(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("split_trace", (False, True))
-async def test_model_messages_select_earlier_turns_after_sqlite_reopen(tmp_path: Path, split_trace: bool) -> None:
+async def test_model_messages_select_earlier_turns_after_sqlite_reopen(
+    tmp_path: Path, split_trace: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from pydantic_ai.messages import UserPromptPart
 
+    from linktools.ai.persistence.runs import ModelInteractionStateStepArchive
+    from linktools.ai.runtime._lossy_session_trace import LossySessionTrace, SessionTraceBatch
     from linktools.ai.web import create_app
 
     from .test_web_console import client
@@ -284,6 +288,20 @@ async def test_model_messages_select_earlier_turns_after_sqlite_reopen(tmp_path:
     features.agent("default", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     turns = []
+    trace_writes: asyncio.Queue[tuple[str, Exception | None]] = asyncio.Queue()
+    append = LossySessionTrace._append
+
+    async def observe_commit(archive: ModelInteractionStateStepArchive, batch: SessionTraceBatch) -> None:
+        turn_id = batch.capture.run.agent_run_id
+        try:
+            await append(archive, batch)
+        except Exception as error:
+            trace_writes.put_nowait((turn_id, error))
+            raise
+        else:
+            trace_writes.put_nowait((turn_id, None))
+
+    monkeypatch.setattr(LossySessionTrace, "_append", staticmethod(observe_commit))
 
     async def verify(history):
         reads = []
@@ -325,10 +343,13 @@ async def test_model_messages_select_earlier_turns_after_sqlite_reopen(tmp_path:
                 )
                 assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
                 turn_id = turn.key.turn_id
-                await _wait_for_committed(
-                    lambda: runtime.history.turn_trace("chat", turn_id, principal=principal),
-                    lambda page: len(page.items) == 2,
-                )
+                # An overlapping SQLite reader can block the optional no-wait Trace commit.
+                written_turn, error = await asyncio.wait_for(trace_writes.get(), timeout=5)
+                assert written_turn == turn_id
+                if error is not None:
+                    raise error
+                traces = await runtime.history.turn_trace("chat", turn_id, principal=principal)
+                assert len(traces.items) == 2
                 turns.append(turn_id)
             assert provider_history == [
                 ["question-1"],
