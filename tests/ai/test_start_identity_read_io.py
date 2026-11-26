@@ -42,7 +42,7 @@ async def test_start_identity_reads_once_unless_local_settlement_publishes_owner
     async with Persistence.open("start-identity-reads", storage=storage) as state:
         async with Runtime.open(persistence=state,
             features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-            session = await runtime.agents.get().create_session("session")
+            agent = runtime.agents.get()
             service = runtime._execution_service
             repository = service._state.idempotency
             read = repository.get
@@ -54,7 +54,7 @@ async def test_start_identity_reads_once_unless_local_settlement_publishes_owner
 
             monkeypatch.setattr(repository, "get", record_read)
             try:
-                execution = await session.start("question", idempotency_key="same")
+                execution = await agent.start("question", idempotency_key="same")
                 # Terminal admission checks source again after acquiring its live claim.
                 assert len(reads) == (2 if terminal else 1)
                 await asyncio.wait_for(entered.wait(), 5)
@@ -75,7 +75,7 @@ async def test_start_identity_reads_once_unless_local_settlement_publishes_owner
                         return await lookup(**kwargs)
 
                     monkeypatch.setattr(pending, "lookup", settle_then_lookup)
-                replay = await session.start("question", idempotency_key="same")
+                replay = await agent.start("question", idempotency_key="same")
                 assert replay.execution_id == execution.execution_id
                 assert len(reads) == (2 if settle_during_lookup else 1)
             finally:
