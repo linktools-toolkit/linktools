@@ -556,11 +556,13 @@ class SqlStateStorageGroup:
         uses_archive: bool = False,
         native_content_index: bool = False,
         archive_cache: CacheBackend | None = None,
+        defer_write_access_probe: bool = False,
     ) -> None:
         self._context = context
         self._metadata = metadata
         self._owns_context = owns_context
         self._read_only = read_only
+        self._defer_write_access_probe = defer_write_access_probe
         self._mutation_lock = (
             asyncio.Lock() if context.dialect.single_writer else None
         )
@@ -790,7 +792,8 @@ class SqlStateStorageGroup:
         if self._initialized:
             return
         await self._context.initialize()
-        if not self._read_only:
+        # Detached observation still validates writer access in its actual mutation.
+        if not self._read_only and not self._defer_write_access_probe:
             await self._context.require_write_access()
         self._initialized = True
         _logger.info(

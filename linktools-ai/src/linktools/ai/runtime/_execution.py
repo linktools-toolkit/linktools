@@ -1688,6 +1688,10 @@ class DefaultExecutionService(TaskExecutionService):
         durable_trace = (policy.durable_trace
                          or requires_task_invocation_capture and (graph_task is None or native_source is None)
                          or parent is not None and parent.durable_trace)
+        if _native_parent is not None and not self._execution_trace_atomic:
+            # The session keeps its own Trace. Its delegated leaf cannot open
+            # an independent execution Trace across the storage boundary.
+            durable_trace = False
         _require_atomic_execution_trace(durable_trace, self._execution_trace_atomic)
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(

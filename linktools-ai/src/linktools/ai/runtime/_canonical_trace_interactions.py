@@ -47,8 +47,8 @@ class _CapturedTurnInteractions:
             {digest: staging.staged_payload(turn_id, digest) for digest in dependencies},
         )
 
-    async def prepare_terminal_append(self, archive: ModelInteractionStateStepArchive):
-        """Only used with the existing exact canonical terminal commit callback."""
+    async def prepare_append(self, archive: ModelInteractionStateStepArchive):
+        """Prepare this observation batch for the independent Trace transaction."""
         prepared = PreparedArchive()
         content = await archive.transcript_repository.content_archive(create=True)
         if content.store.storage_group is not archive.state_store.storage_group:

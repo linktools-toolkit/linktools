@@ -136,7 +136,7 @@ class LossySessionTrace:
             agent_conversation_id=capture.run.agent_conversation_id, agent_id=capture.run.agent_id,
             metadata={"outcome": batch.outcome, **({} if batch.error_code is None else {"error_code": batch.error_code})},
         )
-        content_store, append = await capture.prepare_terminal_append(archive)
+        content_store, append = await capture.prepare_append(archive)
         stores = tuple(dict.fromkeys((archive.state_store, content_store)))
 
         async def write(transaction):

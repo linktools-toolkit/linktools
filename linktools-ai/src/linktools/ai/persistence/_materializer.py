@@ -130,6 +130,10 @@ async def materialize_runtime_storage(
             name=domain.value,
             route=plan.route(domain),
             configure_schema=partial(configure_schema, domain),
+            defer_write_access_probe=(
+                not read_only and domain is PersistenceDomain.TRACE
+                and plan.route(PersistenceDomain.CONVERSATION).kind in {"sqlite", "sql"}
+            ),
             native_content_index=domain in {
                 PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION,
                 PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT,

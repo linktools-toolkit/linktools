@@ -121,8 +121,12 @@ async def test_session_trace_sink_cannot_hold_or_fail_authoritative_turn(
                     if sink == "healthy":
                         traces = await _wait_for_committed(
                             lambda: runtime.history.turn_trace("chat", turn.key.turn_id, principal=principal),
-                            lambda page: bool(page.items),
+                            lambda page: {item.payload["kind"] for item in page.items}
+                            >= {"MODEL_REQUEST", "MODEL_RESPONSE"},
                         )
+                        assert [(item.payload["kind"], item.payload["status"]) for item in traces.items] == [
+                            ("MODEL_REQUEST", "STARTED"), ("MODEL_RESPONSE", "SUCCEEDED"),
+                        ]
                         assert all(item.turn_id == turn.key.turn_id for item in traces.items)
                         assert routed_statements
                     if sink == "off":
@@ -156,3 +160,52 @@ async def test_session_trace_sink_cannot_hold_or_fail_authoritative_turn(
     finally:
         await trace_engine.dispose()
         await primary_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_starts_with_unreachable_separate_trace(tmp_path: Path) -> None:
+    primary = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'session.db'}")
+    trace = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'trace.db'}")
+    attempts = asyncio.Event()
+
+    def unavailable(_dialect, _connection_record, _args, _kwargs):
+        attempts.set()
+        raise OSError("synthetic Trace connection outage")
+
+    async def model(_messages, _info):
+        return ModelResponse(parts=[TextPart("available")])
+
+    features = RuntimeFeatures("trace-startup-outage")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    features.capability(TraceCapability(), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(_UsageFunctionModel(model)), features)
+    plan = replace(
+        PersistencePlan.from_default(StorageRoute.sql(primary)), trace=StorageRoute.sql(trace),
+    )
+    policy = _SessionPolicy()
+    try:
+        await provision_database(primary)
+        await provision_database(trace)
+        await trace.dispose()
+        event.listen(trace.sync_engine, "do_connect", unavailable)
+        try:
+            async with (
+                Persistence.open("trace-startup-outage", storage=PersistenceStorage.from_plan(plan)) as state,
+                Runtime.open(persistence=state, features=features, authorization=policy) as runtime,
+            ):
+                assert not attempts.is_set()
+                session = await runtime.agents.get().create_session("chat")
+                turn = await session.start("question", idempotency_key="request")
+                terminal = await turn.wait_final(timeout_seconds=5)
+                assert terminal.status is ExecutionStatus.SUCCEEDED
+                assert terminal.view["output"] == {"text": "available"}
+                await asyncio.wait_for(attempts.wait(), 5)
+                assert (await runtime.history.turn_session_state(
+                    "chat", principal=runtime.default_principal,
+                ))["active_turn_id"] is None
+        finally:
+            event.remove(trace.sync_engine, "do_connect", unavailable)
+    finally:
+        await trace.dispose()
+        await primary.dispose()

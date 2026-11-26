@@ -73,7 +73,9 @@ group. It can use another storage route and may lose observations on write failu
 overload or process exit. Neither start, stop, recovery nor terminal publication
 waits for Trace storage. The original Step checkpoints and tool receipts are the
 only recovery inputs besides the session turn itself; an uncertain effect is never
-replayed to fill an observation gap.
+replayed to fill an observation gap. The optional writer retains settled
+observations from the first attempt only; it does not reconstruct Trace after
+cold recovery or guarantee that a cancelled attempt leaves observations.
 
 An explicitly configured split storage group keeps its existing text-only
 session modes: no tools, or one fixed approval tool. It is not a fallback for
