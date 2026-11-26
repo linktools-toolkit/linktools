@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """Current SQLite history survives reopening and snapshot restoration."""
-from ._runtime_test_helpers import model_features
 
 import json
 from pathlib import Path
@@ -12,72 +10,80 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus, Principal
+from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.history import History
-from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 
 from . import _runtime_test_helpers as helpers
 
 
-async def _seed_current_history(path: Path) -> None:
+class _HostAuthorization(TenantAuthorizationPolicy):
+    """Authorize this test's explicitly trusted local SQLite owner."""
+
+
+def _features(*, trace: bool = False) -> RuntimeFeatures:
     application = RuntimeFeatures("application")
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    application.capability(TraceCapability(), scope="runtime")
+    if trace:
+        application.capability(TraceCapability(commit=CommitPolicy.sync()), scope="runtime")
     application.agent("default", model="default", allow_tools=())
-    async with Persistence.open("legacy-history", storage=PersistenceStorage.sqlite(path)) as persistence:
-        async with Runtime.open(persistence=persistence,
-                                  features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
-            session = await runtime.agents.get("default").create_session("session")
-            result = await session.run("retained old question", timeout_seconds=10)
-            assert result.result.status is ExecutionStatus.SUCCEEDED
+    return helpers.model_features(helpers.RuntimeUsageModels(), application)
 
 
+async def _seed_current_history(path: Path) -> tuple[Principal, str]:
+    async with (
+        Persistence.open("sqlite-history", storage=PersistenceStorage.sqlite(path)) as state,
+        Runtime.open(persistence=state, features=_features(trace=True), authorization=_HostAuthorization()) as runtime,
+    ):
+        session = await runtime.agents.get("default").create_session("session")
+        result = await _run(runtime, "retained old question", "original")
+        assert result.view == (await session.timeline())["items"][0]
+        await helpers._wait_for_committed(
+            lambda: runtime.history.turn_model_interactions("session", result.key.turn_id, principal=runtime.default_principal),
+            lambda page: len(page.items) == 1,
+        )
+        return runtime.default_principal, result.key.turn_id
 
-async def _execution_evidence(
-    history: History, execution_id: str, principal: Principal,
-) -> dict[str, object]:
-    interactions = await history.model_interactions(
-        execution_id, principal=principal, include_content=True,
+
+async def _run(runtime: Runtime, prompt: str, request_key: str):
+    turn = await runtime.sessions.start(
+        "session", prompt, agent="default", principal=runtime.default_principal, idempotency_key=request_key,
     )
-    assert len(interactions.items) == 1
-    interaction = interactions.items[0]
-    assert interaction.status == "SUCCEEDED"
-    assert interaction.model_request_seq == 1
-    assert (interaction.agent_run_seq, interaction.step_index, interaction.purpose) == (1, 1, "agent")
-    metadata = await history.model_interactions(execution_id, principal=principal)
-    assert len(metadata.items) == 1
-    assert metadata.items[0].request == {}
-    assert metadata.items[0].response is None
-    assert metadata.items[0].usage == interaction.usage
-    assert interaction.request["messages"]
-    assert "retained old question" in json.dumps(interaction.request)
-    assert interaction.response is not None
-    assert "done" in json.dumps(interaction.response)
-    assert interaction.usage is not None
-    assert (interaction.usage.input_tokens, interaction.usage.output_tokens) == (101, 202)
-    usage = await history.usage(execution_id, principal=principal)
-    assert (usage.logical_requests, usage.succeeded_requests) == (1, 1)
-    assert (usage.input_tokens, usage.output_tokens) == (101, 202)
-    assert (usage.cache_read_tokens, usage.cache_write_tokens) == (303, 404)
-    trace = await history.trace(
-        execution_id, principal=principal, agent_run_seq=1, model_request_seq=1,
+    result = await turn.wait_final(timeout_seconds=10)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    return result
+
+
+async def _turn_evidence(history: History, turn_id: str, principal: Principal) -> dict[str, object]:
+    interactions = await history.turn_model_interactions(
+        "session", turn_id, principal=principal, local_workspace=True, include_content=True,
     )
-    assert [item.step_event_seq for item in trace.items] == [2, 3]
+    interaction, = interactions.items
+    assert interaction["status"] == "SUCCEEDED"
+    assert interaction["model_request_seq"] == 1
+    assert (interaction["agent_run_seq"], interaction["step_index"], interaction["purpose"]) == (1, 1, "agent")
+    metadata = await history.turn_model_interactions("session", turn_id, principal=principal)
+    metadata_item, = metadata.items
+    assert metadata_item["request"] == {} and metadata_item["response"] is None
+    assert metadata_item["usage"] == interaction["usage"]
+    assert interaction["request"]["messages"]
+    assert "retained old question" in json.dumps(interaction["request"])
+    assert "done" in json.dumps(interaction["response"])
+    usage = interaction["usage"]
+    assert (usage["input_tokens"], usage["output_tokens"]) == (101, 202)
+    assert (usage["cache_read_tokens"], usage["cache_write_tokens"]) == (303, 404)
+    trace = await history.turn_trace("session", turn_id, principal=principal)
     assert [item.payload["kind"] for item in trace.items] == ["MODEL_REQUEST", "MODEL_RESPONSE"]
-    unfiltered_trace = await history.trace(execution_id, principal=principal)
-    assert unfiltered_trace.items == trace.items
-    assert trace.items[-1].payload["message_seq"] == 2
-    messages = await history.history(
-        execution_id, principal=principal, include_content=True,
-        agent_run_seq=1, model_request_seq=1,
-    )
-    assert [(item.item_kind, item.content) for item in messages.items] == [("assistant", "done")]
-    assert messages.items[0].step_index == 1
-    return {"interactions": interactions.items, "usage": usage, "trace": trace.items, "messages": messages.items}
+    assert [item.payload["status"] for item in trace.items] == ["STARTED", "SUCCEEDED"]
+    assert all(item.turn_id == turn_id for item in trace.items)
+    result = await history.turn_result("session", turn_id, principal=principal)
+    assert result["conversation_committed"]
+    assert result["user_input"]["prompt"] == "retained old question"
+    assert result["output"] == {"text": "done"}
+    assert [(item["item_kind"], item["content"]) for item in result["items"]] == [("assistant", "done")]
+    return {"interactions": interactions.items, "trace": trace.items, "turn": result}
 
 
 @pytest.mark.asyncio
@@ -85,48 +91,43 @@ async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "history.db"
-    await _seed_current_history(path)
-
-    observed_prompts: list[str] = []
+    principal, turn_id = await _seed_current_history(path)
+    observed: list[list[str]] = []
     original_model = helpers._runtime_usage_model
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        observed_prompts.extend(
-            part.content
-            for message in messages
-            for part in message.parts
+        observed.append([
+            part.content for message in messages for part in message.parts
             if isinstance(part, UserPromptPart) and isinstance(part.content, str)
-        )
+        ])
         return await original_model(messages, info)
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    application = RuntimeFeatures("application")
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    application.agent("default", model="default", allow_tools=())
-    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path)) as persistence_109, Runtime.open(persistence=persistence_109, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
-        session = runtime.agents.get("default").session("session")
-        old = await session.history()
-        old_execution_id = (await session.timeline()).items[0].execution_id
-        evidence = await _execution_evidence(runtime.history, old_execution_id, runtime.default_principal)
-        assert [(item.item_kind, item.content) for item in old.items if item.item_kind != "system"] == [
-            ("user", "retained old question"), ("assistant", "done"),
-        ]
-        result = (await session.run("new question", timeout_seconds=10)).result
-        assert result.status is ExecutionStatus.SUCCEEDED
-        assert "retained old question" in observed_prompts
-        assert "new question" in observed_prompts
-        appended = await session.history()
-        assert await _execution_evidence(runtime.history, old_execution_id, runtime.default_principal) == evidence
-        assert appended.items[:len(old.items)] == old.items
-        assert [(item.item_kind, item.content) for item in appended.items if item.item_kind != "system"] == [
-            ("user", "retained old question"), ("assistant", "done"),
-            ("user", "new question"), ("assistant", "done"),
-        ]
+    async with (
+        Persistence.open("sqlite-history", storage=PersistenceStorage.sqlite(path)) as state,
+        Runtime.open(persistence=state, features=_features(), authorization=_HostAuthorization()) as runtime,
+    ):
+        session = await runtime.sessions.get("session", principal=principal)
+        evidence = await _turn_evidence(runtime.history, turn_id, principal)
+        old = await session.timeline()
+        assert old["items"] == [evidence["turn"]]
+        result = await _run(runtime, "new question", "next")
+        replay = await _run(runtime, "new question", "next")
+        assert replay.key == result.key and replay.view == result.view
+        assert observed == [["retained old question", "new question"]]
+        appended = await session.timeline()
+        assert appended["items"] == [*old["items"], result.view]
+        assert result.view["user_input"]["prompt"] == "new question"
+        assert result.view["output"] == {"text": "done"}
+        assert await _turn_evidence(runtime.history, turn_id, principal) == evidence
 
-    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path)) as persistence_132, Runtime.open(persistence=persistence_132, features=model_features(helpers.RuntimeUsageModels(), application)) as reopened:
-        restored = await reopened.agents.get("default").session("session").history()
-        assert restored.items == appended.items
-        assert await _execution_evidence(reopened.history, old_execution_id, reopened.default_principal) == evidence
+    async with (
+        Persistence.open("sqlite-history", storage=PersistenceStorage.sqlite(path), read_only=True) as state,
+        History.open(persistence=state, authorization=_HostAuthorization()) as history,
+    ):
+        restored = (await history.turn_session("session", principal=principal))["timeline"]
+        assert restored == appended
+        assert await _turn_evidence(history, turn_id, principal) == evidence
 
 
 @pytest.mark.asyncio
@@ -169,30 +170,23 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     from linktools.ai.storage import InMemoryObjectStore
 
     path = tmp_path / "history.db"
-    await _seed_current_history(path)
-    principal = Principal("runtime", "default", "local_trusted")
-    async with Persistence.open('legacy-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_184, History.open(persistence=history_persistence_184) as history:
-        timeline = (await history.session_detail("session", principal=principal)).timeline
-        execution_id = timeline.items[0].execution_id
-        evidence = await _execution_evidence(history, execution_id, principal)
-    state = Persistence(PersistenceStorage.sqlite(path))
-    await state.initialize(namespace="legacy-history", tenant_id="default", read_only=True)
+    principal, turn_id = await _seed_current_history(path)
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
-    try:
+    async with Persistence.open("sqlite-history", storage=PersistenceStorage.sqlite(path), read_only=True) as state:
+        async with History.open(persistence=state, authorization=_HostAuthorization()) as history:
+            timeline = (await history.turn_session("session", principal=principal))["timeline"]
+            evidence = await _turn_evidence(history, turn_id, principal)
+            assert timeline["items"] == [evidence["turn"]]
         snapshot = await state.export_snapshot(object_store=objects, limits=limits)
-    finally:
-        await state.close()
     restored_root = tmp_path / "restored"
     await Persistence.restore_snapshot(
         snapshot, object_store=objects, root=restored_root, limits=limits,
     )
-    application = RuntimeFeatures("application")
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    application.agent("default", model="default", allow_tools=())
-    async with Persistence.open('legacy-history', storage=PersistenceStorage.from_root(restored_root)) as persistence_206, Runtime.open(persistence=persistence_206, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
-        assert await _execution_evidence(runtime.history, execution_id, runtime.default_principal) == evidence
-        history = await runtime.agents.get("default").session("session").history()
-        assert [(item.item_kind, item.content) for item in history.items if item.item_kind != "system"] == [
-            ("user", "retained old question"), ("assistant", "done"),
-        ]
+    async with (
+        Persistence.open("sqlite-history", storage=PersistenceStorage.from_root(restored_root)) as state,
+        Runtime.open(persistence=state, features=_features(), authorization=_HostAuthorization()) as runtime,
+    ):
+        assert await _turn_evidence(runtime.history, turn_id, principal) == evidence
+        session = await runtime.sessions.get("session", principal=principal)
+        assert await session.timeline() == timeline

@@ -41,6 +41,8 @@ from pydantic import TypeAdapter
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import RunRecord
 from ._native_event_reference import NativeEventReferences
+from ._native_run_reference import is_native_run_reference
+from ._step_contracts import AgentRunRecord
 from ._sql import SqlStateStore
 from ._turn_snapshot import (
     GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, execution_receipt_snapshot_record,
@@ -111,6 +113,7 @@ from ._snapshot_validation import (
 )
 from .codec import (
     _decode_enveloped_domain,
+    _decode_step_envelope,
     iter_runtime_object_dependencies,
     decode_fact,
     decode_operation,
@@ -181,13 +184,12 @@ class _StateSnapshotReader:
                                if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
 
     async def validate_trace_prefix(self, records: Sequence[StoredRecord], facts: Sequence[StoredFact]) -> None:
-        from ._step_contracts import AgentRunRecord
         from .state import stream_key
         if self._trace_scope is None:
             return
         namespace, tenant_id = self._trace_scope
         streams = tuple(stream_key(namespace, tenant_id, "trace", "event", (
-            RunRegistrationReference.from_data(record.data).run_id,
+            _trace_run_id(record),
         )) for record in records if record.kind == "agent_run")
         counts = {}
         for fact in facts:
@@ -942,9 +944,8 @@ class RuntimeSnapshotOperations:
 
         # Registrations are immutable and published before their references.
         # Read the detached closure after group snapshots to avoid nested owner sessions.
-        references = [RunRegistrationReference.from_data(record.data)
-                      for captured in readers.values() for record in captured.records
-                      if record.kind == "agent_run"]
+        references = [reference for domain, captured in readers.items() for record in captured.records
+                      if (reference := _snapshot_run_reference(record, domain)) is not None]
         missing = tuple(dict.fromkeys(reference.run_id for reference in references
                                       if reference.run_id not in run_registrations))
         if missing:
@@ -1136,7 +1137,7 @@ async def _export_snapshot(
                     {group: (rows[1], rows[2]) for group, rows in (source.native_rows or {}).items()},
                     source.native_payloads or {}, namespace=source.namespace, tenant_id=source.tenant_id,
                     event_backups=source.native_checkpoints or {})
-                semantic_value = _expand_run_reference(semantic_value, source.run_registrations or {})
+                semantic_value = _expand_run_reference(semantic_value, source.run_registrations or {}, domain)
                 semantic_value = expand_snapshot_execution_content(semantic_value, binding_contents,
                     namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes,
                     operations=pending_operation_values(value, pending_owners, namespace=source.namespace, tenant_id=source.tenant_id))
@@ -1664,7 +1665,7 @@ async def restore_snapshot(
             _expand_run_reference(_expand_snapshot_native_content(record,
                 {group: (entry["sequences"], entry["messages"]) for group, entry in native_entries.items()},
                 native_encoded_payloads, namespace=namespace, tenant_id=tenant_id,
-                event_backups=native_checkpoints), run_registrations), binding_contents,
+                event_backups=native_checkpoints), run_registrations, domain), binding_contents,
             namespace=namespace, tenant_id=tenant_id,
             operations=pending_operation_values(record, pending_owners, namespace=namespace, tenant_id=tenant_id)), binding_contents,
             namespace=namespace, tenant_id=tenant_id) for record in records)
@@ -1744,9 +1745,9 @@ async def restore_snapshot(
         namespace=namespace, tenant_id=tenant_id, require_bindings=True)
     if required_checkpoint_groups != set(native_checkpoints):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    referenced_runs = {RunRegistrationReference.from_data(record.data).run_id
-                       for records, _facts, _operations, _sequences in decoded_domains.values() for record in records
-                       if record.kind == "agent_run"}
+    referenced_runs = {reference.run_id
+                       for domain, (records, _, _, _) in decoded_domains.items() for record in records
+                       if (reference := _snapshot_run_reference(record, domain)) is not None}
     referenced_runs.update(row["run_id"] for backup in native_checkpoints.values() for row in backup.runs)
     if referenced_runs != set(run_registrations):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2502,10 +2503,34 @@ def _run_from_native_row(row: Mapping[str, object]) -> RunRecord:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _expand_run_reference(record: StoredRecord, runs: Mapping[str, RunRecord]) -> StoredRecord:
+def _trace_owned_run(record: StoredRecord) -> AgentRunRecord:
+    run = _decode_step_envelope(record.data)
+    if not isinstance(run, AgentRunRecord):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return run
+
+
+def _snapshot_run_reference(record: StoredRecord, domain: PersistenceDomain) -> RunRegistrationReference | None:
     if record.kind != "agent_run":
+        return None
+    if domain is PersistenceDomain.TRACE and not is_native_run_reference(record.data):
+        _trace_owned_run(record)
+        return None
+    return RunRegistrationReference.from_data(record.data)
+
+
+def _trace_run_id(record: StoredRecord) -> str:
+    if is_native_run_reference(record.data):
+        return RunRegistrationReference.from_data(record.data).run_id
+    return _trace_owned_run(record).agent_run_id
+
+
+def _expand_run_reference(
+    record: StoredRecord, runs: Mapping[str, RunRecord], domain: PersistenceDomain,
+) -> StoredRecord:
+    reference = _snapshot_run_reference(record, domain)
+    if reference is None:
         return record
-    reference = RunRegistrationReference.from_data(record.data)
     source = runs.get(reference.run_id)
     if source is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
