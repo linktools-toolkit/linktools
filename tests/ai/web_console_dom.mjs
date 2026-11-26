@@ -347,7 +347,9 @@ if(process.argv[3]==='session-published-turn') {
   assert.notEqual(ordinaryWatch,source);
   assert.equal(ordinaryWatch.id,'b');
   const emitTurn=frame=>ordinaryWatch.listeners.get('turn')({data:JSON.stringify(frame)});
-  emitTurn({type:'snapshot',session:{...ordinarySession}});
+  emitTurn({type:'snapshot',session:{...ordinarySession,metadata:{title:'SSE title'},cwd:'fixture'}});
+  assert.equal(node('conversation-title').textContent,'SSE title');
+  assert.equal(node('conversation-meta').textContent,'fixture');
   const live={turn_id:ordinaryTurn,generation:1,model_key:'model:1:1',attempt:1};
   emitTurn({type:'delta',...live,delta_kind:'thinking',part_index:0,text:'Stale thought'});
   emitTurn({type:'preview_reset',...live});
@@ -373,7 +375,14 @@ if(process.argv[3]==='session-published-turn') {
   emitTurn({type:'thinking_completed',...live,attempt:2,part_index:0,elapsed_ms:15});
   assert.equal(liveThought.className.split(' ').includes('process-running'),false);
   assert.equal(liveThought.elapsedNode.textContent,'15 ms');
-  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:2,text:'Native preview'});
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:2,text:'**Native preview'});
+  const liveAnswer=()=>descendants(node('conversation')).find(item=>item.className==='markdown' && item.textContent.includes('Native preview'));
+  const answerBody=liveAnswer();
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:2,text:'** <img src=x>'});
+  await until('live assistant Markdown is painted',()=>answerBody.innerHTML.includes('<strong>Native preview</strong>'));
+  assert.equal(liveAnswer(),answerBody);
+  assert.match(answerBody.innerHTML,/&lt;img src=x&gt;/);
+  assert.doesNotMatch(answerBody.innerHTML,/<img/);
   assert.equal(nativeThought(),liveThought);
   assert.equal(liveThought.open,true);
   assert.equal(node('composer').hidden,false);
@@ -401,6 +410,13 @@ if(process.argv[3]==='session-published-turn') {
     prompt:'Next native question',items:[{item_kind:'structured_output',content:{count:2}}]});
   assert.match(node('conversation').textContent,/Structured output.*"count": 2/s);
   assert.equal(node('conversation').textContent.split('Structured output').length,2);
+  const gapRead=deferred('GET /api/sessions/b');
+  emitTurn({type:'gap'});
+  await gapRead.requested;
+  gapRead({session:{...ordinarySession,metadata:{title:'Gap title'},cwd:'next',
+    active_turn_id:null,last_turn_no:2,revision:4},timeline:{items:[],next_cursor:null}});
+  await until('gap metadata refreshes the open header',()=>node('conversation-title').textContent==='Gap title');
+  assert.equal(node('conversation-meta').textContent,'next');
   assert.equal(calls.slice(beforeNative).filter(call=>call.key.startsWith('/api/executions/')).length,0);
   process.exit(0);
 }

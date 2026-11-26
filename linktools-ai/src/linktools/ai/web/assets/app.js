@@ -408,10 +408,15 @@ function ordinaryTurnNode(turn, previous=null) {
   const parts=(turn.conversation_committed?turn.interruptedPreview:turn.liveParts) || [];
   for(const part of parts){
     if(part.tool){appendTool(part.tool);continue;}
-    const body=part.kind==='thinking'
-      ? appendThought(part,part.text,part.elapsedMs,!turn.conversation_committed && !part.done)
-      : element('div','message ordinary-live',part.text);
-    if(part.kind!=='thinking')answers.append(body);
+    let body;
+    if(part.kind==='thinking'){
+      body=appendThought(part,part.text,part.elapsedMs,!turn.conversation_committed && !part.done);
+    } else {
+      body=previous?.livePartBodies?.get(part);
+      if(body)updateMarkdownMessage(body,part.text);
+      else body=markdownMessage(part.text);
+      answers.append(body);
+    }
     if(!turn.conversation_committed)node.livePartBodies.set(part,body);
   }
   for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
@@ -469,7 +474,7 @@ async function readOrdinaryGap(watch,current) {
   if(!current())return;
   // A newer read may already own occupancy. This authorized page still
   // fills its range of committed history, regardless of read generation.
-  acceptSession(payload);
+  if(acceptSession(payload))renderSessionHeader();
   watch.readActive();
   if(!payload.timeline)return;
   const through=payload.session.last_turn_no;
@@ -604,7 +609,9 @@ function watchOrdinarySession(id) {
         const node=[...$('conversation').children].find(item=>item.dataset.turn===activeTurn());
         for(const part of dirtyParts){
           const body=node?.livePartBodies?.get(part);
-          if(body)body.textContent=part.text;
+          if(!body)continue;
+          if(part.kind==='thinking')body.textContent=part.text;
+          else updateMarkdownMessage(body,part.text);
         }
       }
       dirtyParts.clear();
@@ -638,7 +645,10 @@ function watchOrdinarySession(id) {
       const snapshot=frame.session;
       if(snapshot && snapshot.revision >= (watch.snapshot?.revision ?? -1)){
         watch.snapshot={...snapshot,status:ordinaryStatus(snapshot.status ?? snapshot.state)};
-        if(state.session && watch.snapshot.revision>=state.session.revision)Object.assign(state.session,watch.snapshot);
+        if(state.session && watch.snapshot.revision>=state.session.revision){
+          Object.assign(state.session,watch.snapshot);
+          renderSessionHeader();
+        }
       }
       setDisabled();renderList();
       if(reconnected){
