@@ -83,7 +83,9 @@ class TurnObserver:
         self._queue.put_nowait((frame, size))
         self._bytes += size
 
-    async def events(self, turn_id: str, *, final_only: bool = False) -> "AsyncIterator[dict[str, JsonValue]]":
+    async def events(
+        self, turn_id: str, *, final_only: bool = False, append_only: bool = True,
+    ) -> "AsyncIterator[dict[str, JsonValue]]":
         self._turn_id = turn_id
         end_states = _FINAL_STATES if final_only else _END_STATES
         while True:
@@ -131,7 +133,9 @@ class TurnObserver:
                     yield {**result, "type": "terminal", "state": status.lower()}
                     return
             elif kind == "preview_reset":
-                self.incomplete = True
+                if append_only:
+                    # Text sinks cannot retract text from the replaced attempt.
+                    self.incomplete = True
                 yield frame
             elif not self.incomplete or kind == "tool":
                 yield frame

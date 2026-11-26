@@ -95,6 +95,11 @@ async def test_native_turn_observe_projects_live_status_without_extra_reads(prev
             "item": {"kind": "model", "key": "1:1", "status": "SUCCEEDED", "elapsed_ms": 410},
         },
     ]
+    identity = {"turn_id": "turn", "turn_no": 1, "generation": 1, "revision": 2, "model_key": "model:1:1"}
+    frames.extend((
+        {**identity, "type": "preview_reset", "attempt": 2},
+        {**identity, "type": "delta", "attempt": 3, "part_index": 0, "delta_kind": "text", "text": "replacement"},
+    ))
     terminal = {"type": "terminal", "turn_id": "turn", "state": "succeeded"}
     subscribe = Mock(return_value=unsubscribe)
 
@@ -137,3 +142,38 @@ async def test_native_turn_observe_projects_live_status_without_extra_reads(prev
         emit(terminal)
         assert [frame async for frame in observer.events("turn")] == [tool, terminal]
     gap_read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("append_only", (True, False))
+@pytest.mark.parametrize("disruption", ("preview_reset", "gap", "overflow"))
+async def test_preview_replacement_only_continues_for_reset_aware_observers(append_only, disruption):
+    principal = Principal("local", "viewer")
+    unsubscribe = Mock()
+    subscribe = Mock(return_value=unsubscribe)
+    read_back = AsyncMock()
+    runtime = SimpleNamespace(
+        sessions=SimpleNamespace(observe_turn_session=subscribe),
+        history=SimpleNamespace(turn_result=read_back),
+    )
+    reset = {"type": "preview_reset", "turn_id": "turn", "model_key": "1:1", "attempt": 1}
+    replacement = {"type": "delta", "turn_id": "turn", "model_key": "1:1", "attempt": 2, "text": "replacement"}
+    terminal = {"type": "terminal", "turn_id": "turn", "state": "succeeded"}
+    with TurnObserver(runtime, "session", principal, local_workspace=False) as observer:
+        _, emit = subscribe.call_args.args
+        if disruption == "overflow":
+            for _ in range(257):
+                emit(replacement)
+        else:
+            emit(reset if disruption == "preview_reset" else {"type": "gap"})
+        emit(replacement)
+        emit(terminal)
+        frames = [frame async for frame in observer.events("turn", append_only=append_only)]
+    if disruption == "preview_reset":
+        assert frames == ([reset, terminal] if append_only else [reset, replacement, terminal])
+        assert observer.incomplete is append_only
+    else:
+        assert frames == [{"type": "gap"}, terminal]
+        assert observer.incomplete
+    read_back.assert_not_awaited()
+    unsubscribe.assert_called_once_with()

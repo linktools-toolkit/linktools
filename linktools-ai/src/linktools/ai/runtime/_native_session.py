@@ -107,7 +107,7 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
         """Observe live previews (including thinking timing and model status) and settlement.
 
         With preview disabled, observe settlement and delivery gaps only.
-        Earlier previews are not replayed.
+        A preview reset precedes replacement deltas. Earlier previews are not replayed.
         """
         with TurnObserver(
             self._runtime, self.key.session_id, self.principal,
@@ -119,7 +119,7 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
             if initial.status.value in _END_STATES:
                 yield {**initial.view, "type": "terminal", "state": initial.status.value.lower()}
                 return
-            events = observer.events(self.key.turn_id)
+            events = observer.events(self.key.turn_id, append_only=False)
             try:
                 async for event in events:
                     yield event

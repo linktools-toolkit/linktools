@@ -24,7 +24,6 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import InMemoryCacheBackend
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
-from .test_runtime_storage_io_session import _listen_sql, _record_selects
 from .test_transcript_sparse_windows import _history
 
 
@@ -48,15 +47,20 @@ async def test_nonzero_transcript_window_batches_head_and_seek(tmp_path: Path, h
                     )
             await repository._store.mutate(change_hint)
         engine = repository._store.storage_group.context.engine
-        statements = []
-        listener = _listen_sql(engine, statements)
+        metadata_reads: list[str] = []
+
+        def capture(_connection, _cursor, statement, parameters, _context, _executemany):
+            sql = statement.lstrip().upper()
+            if sql.startswith("SELECT") and "AI_STATE_RECORDS" in sql and repository._store.store_key in parameters:
+                metadata_reads.append(sql)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
             values = [message async for message in repository.iter_message_range("history", start=1, end=3)]
         finally:
-            event.remove(engine.sync_engine, "before_cursor_execute", listener)
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert [message.parts[0].content for message in values] == ["1", "2"]
-        metadata = [item for item in _record_selects(statements) if repository._store.store_key in item[1]]
-        assert len(metadata) == 1
+        assert len(metadata_reads) == 1
     finally:
         await state.close()
 
