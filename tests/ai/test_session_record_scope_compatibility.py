@@ -13,6 +13,7 @@ import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence
+from linktools.ai.persistence._session_turn_sql import decode_instruction_scopes
 from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -94,11 +95,10 @@ def test_scope_compatibility_rejects_malformed_explicit_scope_memory(scopes: obj
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_session_repository_reads_scope_compatible_record_without_rewriting(
-    tmp_path: Path, backend: str,
+async def test_memory_session_repository_reads_scope_compatible_record_without_rewriting(
+    tmp_path: Path,
 ) -> None:
-    state = Persistence(_storage(backend, tmp_path))
+    state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="session-scope-compatibility", tenant_id="tenant")
     try:
         repository = state.conversation.sessions
@@ -126,3 +126,37 @@ async def test_session_repository_reads_scope_compatible_record_without_rewritin
         assert await repository.get(record.session_id, tenant_id="tenant") == updated
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_native_sql_scope_defaults_read_without_mutation_and_survive_cold_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage("sqlite", tmp_path)
+    namespace = "session-scope-compatibility"
+    async with Persistence.open(namespace, storage=storage, tenant_id="tenant") as state:
+        assert state.conversation.sessions is None
+        turns = state.session_turns
+        config = {"cwd": "src"}
+        await turns.create("native-session", config=config)
+
+        async def no_mutation(*args, **kwargs):
+            pytest.fail("reading remembered scopes must not update the session")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(type(turns._context), "run_mutation", no_mutation)
+            before = await turns.get_session("native-session")
+            assert before["config_json"] == config
+            assert decode_instruction_scopes(before["config_json"]) == ()
+            assert await turns.get_session("native-session") == before
+
+        with_scopes = {**config, "instruction_scopes": ["src", "src/component"]}
+        assert await turns.update_session("native-session", expected_revision=before["revision"], config=with_scopes)
+        assert not await turns.update_session("native-session", expected_revision=before["revision"], config=config)
+
+    async with Persistence.open(namespace, storage=storage, tenant_id="tenant", read_only=True) as state:
+        assert state.session_turns is None
+        after = await state.session_turn_reader.get_session("native-session")
+        assert after["revision"] == before["revision"] + 1
+        assert after["config_json"] == with_scopes
+        assert decode_instruction_scopes(after["config_json"]) == ("src", "src/component")

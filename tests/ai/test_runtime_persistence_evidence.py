@@ -361,7 +361,9 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         )).result
         assert result.status is ExecutionStatus.SUCCEEDED and result.view["output"] == expected
         assert (await loaded.inspect())["active_turn_id"] is None
-        assert await persistence.conversation.sessions.get(created.session_id, tenant_id=runtime.tenant_id) is None
+        assert persistence.conversation.sessions is None
+        records = await persistence.conversation.histories.state_store.read(lambda transaction: transaction.scan_records())
+        assert not any(record.kind in {"session", "session_turn_commit"} for record in records)
         assert await persistence.execution.executions.get(result.key.turn_id, tenant_id=runtime.tenant_id) is None
         principal = runtime.default_principal
     async with (
