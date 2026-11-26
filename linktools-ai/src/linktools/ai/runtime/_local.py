@@ -124,6 +124,7 @@ from ._tool import (
     RuntimeToolOperationBridge,
     _ToolOperationRuntimeRepository,
 )
+from ._tool_boundary import _NativeDelegateInterruption
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ._budget import RunBudgetContext
 from ..execution import ExecutionRequest
@@ -1301,7 +1302,7 @@ class LocalExecutionBackend:
     @asynccontextmanager
     async def canonical_subagent_parent(
         self, key: "SessionTurnKey", generation: int, principal: Principal,
-        *, stop_children: Callable[[], Awaitable[bool]],
+        *, stop_children: Callable[[str | None], Awaitable[bool]],
     ) -> AsyncIterator[None]:
         """Stop durable children before abandoning their local owners on explicit cancellation."""
         identity = key.turn_id
@@ -1313,17 +1314,14 @@ class LocalExecutionBackend:
         self._native_parents[identity] = parent
         try:
             yield
-        except (AIError, asyncio.CancelledError) as error:
-            if isinstance(error, AIError) and error.code not in {
-                ErrorCode.EXECUTION_CANCELLED, ErrorCode.STORAGE_CONFLICT, ErrorCode.TOOL_EFFECT_UNKNOWN,
-            }:
-                raise
+        except (_NativeDelegateInterruption, asyncio.CancelledError) as error:
             parent.stopping = True
-            stopping = asyncio.create_task(stop_children(), name=f"ai-native-child-stop-{identity}")
+            invocation_id = error.call_id if isinstance(error, _NativeDelegateInterruption) else None
+            stopping = asyncio.create_task(stop_children(invocation_id), name=f"ai-native-child-stop-{identity}")
             stopped, _ = await self._await_checkpoint_task(stopping, label="native child stop")
-            if stopped and isinstance(error, AIError):
-                # Fencing the delegate after Stop can change the local signal;
-                # the original tool receipt remains exactly as written.
+            if stopped and invocation_id is not None:
+                # The exact delegated child is durably terminal. Leave its
+                # original tool receipt intact while propagating the user's Stop.
                 raise asyncio.CancelledError from error
             raise
         finally:

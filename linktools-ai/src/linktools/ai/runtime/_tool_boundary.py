@@ -155,6 +155,14 @@ _ClaimedLeaf = Callable[
 ]
 
 
+class _NativeDelegateInterruption(AIError):
+    """A typed failure from the exact claimed native delegate, not an ordinary tool."""
+
+    def __init__(self, error: AIError, call_id: str) -> None:
+        super().__init__(error.code, str(error), operation_id=error.operation_id, safe_details=error.safe_details)
+        self.call_id = call_id
+
+
 class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     """Apply workspace policy and effect durability at the final leaf call."""
 
@@ -419,7 +427,19 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
 
         async def invoke(args: dict[str, Any]) -> Any:
             if claimed_leaf is None:
-                result = await raw_toolset.call_tool(name, args if physical_args is None else physical_args, ctx, raw_tool)
+                try:
+                    result = await raw_toolset.call_tool(
+                        name, args if physical_args is None else physical_args, ctx, raw_tool,
+                    )
+                except ApprovalRequired:
+                    # An effect-free Python tool may ask for approval itself.
+                    # Park its validated input, without inventing an effect claim.
+                    if (descriptor.effect_owner == "none" and decision is None
+                            and isinstance(bridge, RuntimeToolOperationBridge)):
+                        await bridge.defer_before_effect(
+                            call, final_args, replay_safe=replay_safe, capability_ref=descriptor.capability_ref,
+                        )
+                    raise
             else:
                 # Checked before entering: never invoke a native child for a
                 # cached result, a staged split operation, or an unmanaged leaf.
@@ -467,8 +487,9 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             await bridge.unknown(decision, error)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
 
+        entered = False
+
         async def invoke_and_settle() -> Any:
-            entered = False
             def entering() -> None:
                 nonlocal entered
                 entered = True
@@ -549,7 +570,14 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             except BaseException:
                 await bridge.defer(decision)
                 raise
-            return await invoke_and_settle()
+            try:
+                return await invoke_and_settle()
+            except AIError as error:
+                if entered and claimed_leaf is not None and error.code in {
+                    ErrorCode.EXECUTION_CANCELLED, ErrorCode.STORAGE_CONFLICT, ErrorCode.TOOL_EFFECT_UNKNOWN,
+                }:
+                    raise _NativeDelegateInterruption(error, call_id) from error
+                raise
         finally:
             if observation is not None and self._tool_metrics is not None:
                 await self._tool_metrics.record(observation)

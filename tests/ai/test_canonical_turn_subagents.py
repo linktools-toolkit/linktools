@@ -14,7 +14,9 @@ from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
-from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
+from linktools.ai.core import (
+    ApprovalDecision, ApprovalStatus, ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus, service_principal,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -82,13 +84,14 @@ def _model(role, fn):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "cancel,trace,recover,wrapped_cancel",
-    ((False, False, False, False), (True, False, False, False), (True, False, False, True),
-     (False, True, False, False), (False, True, True, False)),
-    ids=("success", "cancel", "cancel-wrapped", "cli-default-trace", "recover-completed-trace"),
+    "cancel,trace,recover,wrapped_cancel,ordinary",
+    ((False, False, False, False, False), (True, False, False, False, False), (True, False, False, True, False),
+     (False, True, False, False, False), (False, True, True, False, False), (True, False, False, True, True)),
+    ids=("success", "cancel", "cancel-wrapped", "cli-default-trace", "recover-completed-trace", "ordinary-unknown"),
 )
 async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool, trace: bool, recover: bool, wrapped_cancel: bool,
+    ordinary: bool,
 ) -> None:
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
@@ -122,6 +125,16 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
             raise
         return _CHILD_OUTPUT
 
+    async def ordinary_effect() -> str:
+        calls.append("ordinary effect")
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            tool_cancelled.set()
+            raise
+        return "ordinary result"
+
     async def child(messages, info):
         calls.append("child model")
         prompts = [part.content for message in messages for part in message.parts if isinstance(part, UserPromptPart)]
@@ -145,6 +158,8 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
             returned_ids.append(result.content["execution_id"])
             return ModelResponse(parts=[TextPart(_ANSWER)])
         assert "delegate_task" in {tool.name for tool in info.function_tools}
+        if ordinary:
+            return ModelResponse(parts=[ToolCallPart("ordinary_effect", {}, tool_call_id="ordinary-call")])
         return ModelResponse(parts=[ToolCallPart(
             "delegate_task", {"subagent_id": "reviewer", "task": _CHILD_TASK}, tool_call_id=_DELEGATE_CALL,
         )])
@@ -156,7 +171,10 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(StepPersistenceCapability(), scope="runtime")
     features.tool(lookup, effect_policy="none")
-    features.agent("default", model="parent", allow_subagents=("reviewer",), allow_tools=(), allow_skills=())
+    if ordinary:
+        features.tool(ordinary_effect, effect_policy="non_replay_safe")
+    features.agent("default", model="parent", allow_subagents=("reviewer",),
+                   allow_tools=("ordinary_effect",) if ordinary else (), allow_skills=())
     features.agent("reviewer", model="child", allow_subagents=(), allow_tools=("lookup",), allow_skills=())
     if trace:
         # Like the CLI, use the default unbuffered Trace policy with SQL Step.
@@ -225,20 +243,29 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                             continue
                         if frame["type"] == "tool" and frame["item"]["key"] == f"tool:{_DELEGATE_CALL}":
                             tool_statuses.append(frame["item"]["status"])
+                        if ordinary and frame["type"] == "gap" and frame.get("phase") == "producer_stopped":
+                            break
                         if frame["type"] == "gap" and recover:
                             break
                         if frame["type"] == "terminal":
-                            assert not recover
+                            assert not recover and not ordinary, frame
                             assert frame["state"] == ("cancelled" if cancel else "succeeded"), frame
                             if not cancel:
                                 assert_answer(frame)
                             break
-                    if cancel:
+                    if cancel and not ordinary:
                         assert tool_statuses and tool_statuses[0] == "RUNNING" and "SUCCEEDED" not in tool_statuses
-                    else:
+                    elif not ordinary:
                         assert tool_statuses == ["RUNNING", "SUCCEEDED"]
             finally:
                 release.set()
+        if ordinary:
+            assert calls == ["parent model", "ordinary effect"]
+            [operation] = await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=runtime.tenant_id)
+            assert (operation.tool_call_id, operation.status) == ("ordinary-call", ToolOperationStatus.EFFECT_UNKNOWN)
+            assert not await state.execution.executions.list_children(turn_id, tenant_id=runtime.tenant_id)
+            assert (await state.session_turns.get_turn(SessionTurnKey(_SESSION, turn_id)))["state"] == "cancelling"
+            return
         assert calls == expected_calls
         [child_id] = child_ids
         assert child_id != turn_id and returned_ids == ([] if cancel else [child_id])
@@ -295,7 +322,8 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
 
 
 @pytest.mark.asyncio
-async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path) -> None:
+@pytest.mark.parametrize("effect_policy", ("none", "replay_safe"))
+async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path, effect_policy: str) -> None:
     calls: list[str] = []
     child_ids: list[str] = []
 
@@ -338,7 +366,7 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path)
     features.model("child", _model("child", child))
     features.capability(ExecutionCapability(retain_history=True))
     features.capability(StepPersistenceCapability())
-    features.tool(confirm_fixture, effect_policy="replay_safe")
+    features.tool(confirm_fixture, effect_policy=effect_policy)
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="parent", allow_subagents=("reviewer",),
                    allow_tools=("confirm_fixture",), allow_skills=())
@@ -347,7 +375,7 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path)
         Persistence.open(name, storage=PersistenceStorage.from_root(tmp_path)) as state,
         Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
     ):
-        principal = runtime.default_principal
+        principal = service_principal(runtime.tenant_id, "approval-fixture")
         await runtime.sessions.create_turn_session(_SESSION, principal=principal)
         turn = await runtime.sessions.start(
             _SESSION, "Confirm fixture A first", agent="default", principal=principal, idempotency_key="original",

@@ -1036,14 +1036,15 @@ async def _build_local_components(
                     or tools.state_store.storage_group is not turn_state.storage_group
                     or executions.state_store.storage_group is not turn_state.storage_group):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            async def stop_children() -> bool:
+            async def stop_children(invocation_id: str | None) -> bool:
                 row = await turns.get_turn(turn.key)
                 if row is None or row["generation"] != turn.generation or row["state"] != "cancelling":
                     return False
                 # Handoff also cancels the coroutine, but only a committed
                 # Stop authorizes durable child cancellation.
-                await dispatcher.cancel_native_children(executions, turn.key, principal, principal)
-                return True
+                return await dispatcher.cancel_native_children(
+                    executions, turn.key, principal, principal, invocation_id=invocation_id,
+                )
 
             async with backend.canonical_subagent_parent(
                 turn.key, turn.generation, principal, stop_children=stop_children,
