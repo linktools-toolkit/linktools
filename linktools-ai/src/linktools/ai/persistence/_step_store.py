@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy, deepcopy
 from dataclasses import dataclass, field, fields, replace
+from functools import partial
 from itertools import groupby
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary, WeakSet, ref
@@ -1296,6 +1297,60 @@ class SqlStepStore:
         if integrity is None or integrity[0] != raw_digest:
             return False
         return self._seed_snapshot_baseline(run_id, root.sequence, integrity)
+
+    def _seed_retained_checkpoint_prefix(
+        self, root: NativeMessageRoot, run_id: str, history: Sequence[ModelMessage],
+    ) -> bool:
+        """Authenticate a cold same-owner checkpoint against the already restored context."""
+        if root.count > len(history) or len(root.slices) != 1:
+            return False
+        messages = self._frozen_messages.snapshot(history[:root.count])
+        proof = self._message_content.adopt_checkpoint_prefix(root, messages)
+        if proof is None:
+            return False
+        integrity = messages.encoded_digest()
+        self._remember_message_proof(proof, integrity=integrity, messages=messages)
+        return self._seed_snapshot_baseline(run_id, proof.root, integrity)
+
+    def _retained_checkpoint_seed(
+        self, row: Mapping[str, object],
+    ) -> Callable[[str, Sequence[ModelMessage]], bool] | None:
+        if row.get("prefix_root") is None:
+            return None
+        try:
+            root = self.message_root(self.snapshot_message_sequence({
+                "messages": row["prefix_messages"], "sequence_root": row["prefix_root"],
+            }))
+        except ValueError:
+            # This unrelated optional checkpoint is not a source of conversation truth.
+            return None
+        return partial(self._seed_retained_checkpoint_prefix, root)
+
+    def _can_project_checkpoint_prefix(self) -> bool:
+        # The indexed text comparison plus exact byte match uses these dialects' casts.
+        return self._max_cached_messages > 0 and self._context.engine.dialect.name in {"sqlite", "mysql"}
+
+    def _project_checkpoint_prefix(self, statement: "Select", turns: "Table", *, session_id: str, through: int) -> "Select":
+        """Project the one prior local Step descriptor without a separate read."""
+        from sqlalchemy import LargeBinary, String, and_, cast, false, select
+
+        snapshots = self._table("snapshots")
+        source = snapshots.alias("prior_complete")
+        scope = (source.c.store_locator == self._store_locator, source.c.store_key == self._store_key)
+        latest = select(source.c.id).where(
+            *scope, source.c.run_id == cast(turns.c.turn_id, String()),
+            cast(source.c.run_id, LargeBinary()) == turns.c.turn_id,
+            source.c.conversation_id == session_id,
+            cast(source.c.conversation_id, LargeBinary()) == turns.c.session_key,
+            source.c.pruned == false(), source.c.state == "complete",
+        ).order_by(source.c.id.desc()).limit(1).correlate(turns).scalar_subquery()
+        return statement.select_from(turns.outerjoin(snapshots, and_(
+            turns.c.turn_no == through, turns.c.state == "succeeded", turns.c.split_source_receipt.is_(None),
+            turns.c.request_json["graph_execution"].as_string().is_(None),
+            snapshots.c.id == latest,
+        ))).add_columns(
+            snapshots.c.messages.label("prefix_messages"), snapshots.c.sequence_root.label("prefix_root"),
+        )
 
     def inherit_snapshot_baseline(self, run_id: str, *, source_run_id: str) -> bool:
         """Carry a committed or read-back source run's content into its next attempt."""

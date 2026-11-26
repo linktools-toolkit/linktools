@@ -101,6 +101,7 @@ class SessionContextTurn:
     transcript_bytes: int
     reset_context: bool = False
     interrupted: bool = False
+    seed_checkpoint_prefix: Callable[[str, Sequence[ModelMessage]], bool] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -744,6 +745,7 @@ class SqlSessionTurnReader:
 
     async def recent_context(
         self, session_id: str, *, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
+        checkpoint: SqlStepStore | None = None,
     ) -> tuple[SessionContextTurn, ...]:
         """Read bounded candidates after the caller authorizes the current session head."""
         start = max(0, through - _CONTEXT_POSITIONS)
@@ -760,17 +762,23 @@ class SqlSessionTurnReader:
         if after == through:
             return turns
 
-        turns += await self.read_context_range(session_id, after=after, through=through, lineage=lineage)
+        turns += await self.read_context_range(
+            session_id, after=after, through=through, lineage=lineage,
+            checkpoint=checkpoint if cached is None and not lineage else None,
+        )
         for index in range(len(turns) - 1, -1, -1):
             if turns[index].reset_context:
                 turns = turns[index:]
                 break
-        self._remember_context(session_id, after=start, through=through, turns=turns)
+        self._remember_context(session_id, after=start, through=through, turns=tuple(
+            turn if turn.seed_checkpoint_prefix is None else replace(turn, seed_checkpoint_prefix=None)
+            for turn in turns
+        ))
         return turns
 
     async def read_context_range(
         self, session_id: str, *, after: int, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
-        missing: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR,
+        missing: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR, checkpoint: SqlStepStore | None = None,
     ) -> tuple[SessionContextTurn, ...]:
         """Read finalized input and only the confirmed conversation transcripts."""
         from sqlalchemy import case, select, type_coerce
@@ -796,6 +804,15 @@ class SqlSessionTurnReader:
                               after=after, through=through),
             columns.state.in_(("succeeded", "failed", "cancelled")),
         ).order_by(columns.turn_no).limit(_CONTEXT_POSITIONS)
+        if checkpoint is not None:
+            if checkpoint.storage_context.engine is not self._context.engine:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if checkpoint._can_project_checkpoint_prefix():
+                statement = checkpoint._project_checkpoint_prefix(
+                    statement, self._turns, session_id=session_id, through=through,
+                )
+            else:
+                checkpoint = None
         rows = await self._read_transcripts(statement, display=False)
         if len(rows) != through - after:
             raise AIError(missing, "The finalized session context range is incomplete")
@@ -805,6 +822,7 @@ class SqlSessionTurnReader:
                 row["messages"] if row["state"] == "succeeded" else (),
                 reset_context=row["state"] == "succeeded" and row["reset_context"] is True,
                 interrupted=row["state"] != "succeeded",
+                seed_checkpoint_prefix=None if checkpoint is None else checkpoint._retained_checkpoint_seed(row),
             )
             for row in rows
         )
@@ -813,11 +831,12 @@ class SqlSessionTurnReader:
     def _context_turn(
         turn_id: str, turn_no: int, prompt: str, stored_input: JsonValue, messages: Sequence[ModelMessage], *,
         reset_context: bool = False, interrupted: bool = False,
+        seed_checkpoint_prefix: Callable[[str, Sequence[ModelMessage]], bool] | None = None,
     ) -> SessionContextTurn:
         request = {"prompt": prompt, **({"input": stored_input} if stored_input is not None else {})}
         transcript_bytes = len(encode_model_messages(messages))
         size = max(1024, len(canonical_json_bytes(request)) + transcript_bytes)
-        return SessionContextTurn(turn_id, turn_no, request, tuple(messages), size, transcript_bytes, reset_context, interrupted)
+        return SessionContextTurn(turn_id, turn_no, request, tuple(messages), size, transcript_bytes, reset_context, interrupted, seed_checkpoint_prefix)
 
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],

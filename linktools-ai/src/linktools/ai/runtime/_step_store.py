@@ -175,10 +175,13 @@ class RuntimeStepStore:
         store._canonical_split_source = split_source
         return store
 
-    def inherit_canonical_context(self, key: "SessionTurnKey", source_turn_id: str) -> None:
-        """Offer a prior same-owner proof; actual snapshot input must match its bytes."""
-        if self._canonical_turn_boundary and isinstance(self._store, SqlStepStore):
-            self._store.inherit_snapshot_baseline(key.turn_id, source_run_id=source_turn_id)
+    def canonical_context_checkpoint(self) -> SqlStepStore | None:
+        return self._store if self._canonical_turn_boundary and isinstance(self._store, SqlStepStore) else None
+
+    def inherit_canonical_context(self, key: "SessionTurnKey", source_turn_id: str) -> bool:
+        """Inherit only a source already verified by the same native owner."""
+        native = self.canonical_context_checkpoint()
+        return native is not None and native.inherit_snapshot_baseline(key.turn_id, source_run_id=source_turn_id)
 
     def require_interrupted_checkpoint(self) -> str:
         """Return the exact confirmed checkpoint occurrence, never the latest query."""

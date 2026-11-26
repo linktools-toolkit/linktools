@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from ..inputs import ExecutionInputMaterializer
     from ..spec import RepositoryInstructionResolver
     from ..workspace import Workspace
+    from ..persistence import SqlStepStore
     from ..persistence.turns import SqlSessionTurns
     from ..persistence.repositories import ExecutionRepositoryImpl
     from ..persistence.runs import StateStepArchive
@@ -1828,9 +1829,11 @@ class _RegenerableTurnRunner:
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
-        context_from, history, interrupted, baseline_turn_id = await self._admission_history(
+        checkpoint = (None if native_step is None or split is not None
+                      else native_step[0].store.canonical_context_checkpoint())
+        context_from, history, interrupted, baseline = await self._admission_history(
             key, through=through, lineage=lineage, session_context=session_context,
-            remaining=_CONTEXT_BYTES - input_size,
+            remaining=_CONTEXT_BYTES - input_size, checkpoint=checkpoint,
             remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
         )
         if interrupted:
@@ -1846,8 +1849,10 @@ class _RegenerableTurnRunner:
             **({} if scopes == instruction_scopes else {"_instruction_scopes": scopes}),
         ):
             return None
-        if baseline_turn_id is not None and native_step is not None and split is None:
-            native_step[0].store.inherit_canonical_context(key, baseline_turn_id)
+        if baseline is not None and checkpoint is not None:
+            source_turn_id, seed_checkpoint_prefix = baseline
+            if not native_step[0].store.inherit_canonical_context(key, source_turn_id) and seed_checkpoint_prefix is not None:
+                seed_checkpoint_prefix(key.turn_id, history)
         return _AdmittedTurn(
             key, through + 1, text,
             history, terminal_bytes, revision + 1,
@@ -1860,13 +1865,13 @@ class _RegenerableTurnRunner:
 
     async def _admission_history(
         self, key: SessionTurnKey, *, through: int, lineage: tuple[SessionTurnSegment, ...],
-        session_context: SessionContext, remaining: int, remaining_media: int,
-    ) -> tuple[int, list[ModelMessage], bool, str | None]:
+        session_context: SessionContext, remaining: int, remaining_media: int, checkpoint: SqlStepStore | None = None,
+    ) -> tuple[int, list[ModelMessage], bool, tuple[str, Callable[[str, Sequence[ModelMessage]], bool] | None] | None]:
         history: list[tuple[ModelMessage, ...]] = []
-        baseline_turn_id = None
+        baseline = None
         context_from = through + 1
         candidates = (() if session_context == "current_turn"
-                      else await self._store.recent_context(key.session_id, through=through, lineage=lineage))
+                      else await self._store.recent_context(key.session_id, through=through, lineage=lineage, checkpoint=checkpoint))
         interrupted = bool(candidates and candidates[-1].turn_no == through and candidates[-1].interrupted)
         for candidate in reversed(candidates):
             if not isinstance(candidate.request, dict) or not isinstance(candidate.request.get("prompt"), str):
@@ -1879,12 +1884,12 @@ class _RegenerableTurnRunner:
                 break
             restored = await self._restore_prompt(candidate_prompt, stored)
             if not history and not candidate.interrupted:
-                baseline_turn_id = candidate.turn_id
+                baseline = candidate.turn_id, candidate.seed_checkpoint_prefix
             history.append(self._context_messages(restored, candidate.messages, interrupted=candidate.interrupted))
             remaining -= size
             remaining_media -= media_bytes
             context_from = candidate.turn_no
-        return context_from, [message for messages in reversed(history) for message in messages], interrupted, baseline_turn_id
+        return context_from, [message for messages in reversed(history) for message in messages], interrupted, baseline
 
     @staticmethod
     def _context_messages(

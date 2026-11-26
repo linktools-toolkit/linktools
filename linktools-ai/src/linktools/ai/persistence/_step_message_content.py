@@ -283,6 +283,34 @@ class NativeMessageContent:
         self._proofs.add(result)
         return result
 
+    @staticmethod
+    def _append_frontier(frontier: deque[ImmutableSequenceNode], identity: str) -> ImmutableSequenceNode:
+        first = frontier[0] if frontier else None
+        second = frontier[1] if len(frontier) > 1 else None
+        node = ImmutableSequenceNode.extend(identity, first, second)
+        if first is not None and second is not None and first.tree_count == second.tree_count:
+            frontier.popleft()
+            frontier.popleft()
+        frontier.appendleft(node)
+        return node
+
+    def adopt_checkpoint_prefix(
+        self, root: NativeMessageRoot, messages: MessageSnapshot,
+    ) -> CommittedNativeMessages | None:
+        """Prove the bytes of a retained complete snapshot selected by its SQL owner."""
+        self._scope(root)
+        span, = root.slices
+        if span.start != 0 or span.end != span.count or span.count != len(messages):
+            return None
+        frontier: deque[ImmutableSequenceNode] = deque()
+        for raw in messages.encoded_payloads():
+            self._append_frontier(frontier, hashlib.sha256(raw).hexdigest())
+        if not frontier or frontier[0].identity != span.first:
+            return None
+        proof = CommittedNativeMessages(root.sequence, tuple(frontier), self._generation)
+        self._proofs.add(proof)
+        return proof
+
     async def prepare_append(
         self, delta: MessageSnapshot, *,
         prepare_payload: Callable[[bytes], Awaitable[PreparedMessagePayload]],
@@ -339,13 +367,7 @@ class NativeMessageContent:
                 messages[identity] = payload.content
                 if archive is not None and reuse_payload is not None:
                     additions[identity] = payload.content
-            first = frontier[0] if frontier else None
-            second = frontier[1] if len(frontier) > 1 else None
-            node = ImmutableSequenceNode.extend(identity, first, second)
-            if first is not None and second is not None and first.tree_count == second.tree_count:
-                frontier.popleft()
-                frontier.popleft()
-            frontier.appendleft(node)
+            node = self._append_frontier(frontier, identity)
             if not use_cache or node.identity not in self._known_nodes:
                 nodes[node.identity] = node
             count = _count(count + 1)
