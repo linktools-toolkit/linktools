@@ -124,8 +124,8 @@ async def test_large_pending_input_is_materialized_only_at_source_boundary(tmp_p
     async with Persistence.open("payload-placement", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start(prompt, idempotency_key="first")
+        agent = runtime.agents.get()
+        execution = await agent.start(prompt, idempotency_key="first")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             source = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -151,7 +151,7 @@ async def test_large_pending_input_is_materialized_only_at_source_boundary(tmp_p
         assert source is not None
         assert source.stored_user_input.payload.kind == "inline"
         assert tuple(await runtime._execution_service.runtime_backend().restore_user_input(source)) == prompt
-        replay = await session.start(prompt, idempotency_key="first")
+        replay = await agent.start(prompt, idempotency_key="first")
         assert replay.execution_id == execution.execution_id
         assert (await replay.wait()).result.output == result.output
 

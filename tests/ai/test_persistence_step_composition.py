@@ -105,8 +105,7 @@ async def test_local_native_factory_runs_checkpointed_agent_and_reopens(tmp_path
             features.capability(StepPersistence(store=native, capture_frontier=True))
             features.agent("default", model="default", allow_tools=())
             async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-                session = await runtime.agents.get().create_session("session")
-                execution = await session.start("question", idempotency_key="input")
+                execution = await runtime.agents.get().start("question", idempotency_key="input")
                 assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
                 with pytest.raises(AIError):
                     await persistence.close()
@@ -299,7 +298,7 @@ async def test_local_native_handoff_backup_recovers_same_execution(tmp_path: Pat
         native = await persistence.create_step_store()
         try:
             async with Runtime.open(persistence=persistence, features=features(native, blocked)) as owner:
-                execution = await (await owner.agents.get().create_session("session")).start("Remember blue", idempotency_key="first")
+                execution = await owner.agents.get().start("Remember blue", idempotency_key="first")
                 await asyncio.wait_for(entered.wait(), 5)
                 await asyncio.wait_for(owner.handoff(), 5)
             await asyncio.to_thread(_backup, source / "runtime.db", target / "runtime.db")
@@ -319,8 +318,7 @@ async def test_local_native_handoff_backup_recovers_same_execution(tmp_path: Pat
                 assert recovered.execution_id == execution.execution_id
                 await successor.executions.wait(recovered.execution_id, principal=principal, timeout_seconds=5)
                 assert (await successor.executions.inspect(recovered.execution_id, principal=principal)).status is ExecutionStatus.SUCCEEDED
-                session = successor.agents.get().session("session")
-                replay = await session.start("Remember blue", idempotency_key="first")
+                replay = await successor.agents.get().start("Remember blue", idempotency_key="first")
                 assert replay.execution_id == execution.execution_id
         finally:
             await native.close()

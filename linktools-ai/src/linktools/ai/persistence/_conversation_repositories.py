@@ -939,38 +939,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
         return existing_target, True
 
-    async def capture_timeline_window(
-        self, session_id: str, *, tenant_id: str, before: int | None,
-        limit: int, pending: bool,
-    ) -> tuple[int, tuple[SessionTurnRef, ...]] | None:
-        """Capture a built-in SQL timeline page without separating its counter read."""
-        from ._sql import SqlStateStore
-        from .state import SqlStateSequenceReader
-
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        if type(self._store) is not SqlStateStore:
-            return None
-
-        async def capture(transaction: StateTransaction):
-            if not isinstance(transaction, SqlStateSequenceReader):
-                return None
-            head, facts = await transaction.read_sequence_window(
-                self._timeline_stream(session_id), before=before, limit=limit,
-                include_next=pending,
-            )
-            display_head = head + int(pending)
-            page_end = display_head + 1 if before is None else before
-            if page_end < 1 or page_end > display_head + 1:
-                raise AIError(ErrorCode.CURSOR_INVALID)
-            start = max(1, page_end - limit)
-            start = min(start, head) if pending and head else start
-            end = min(page_end, head + 1)
-            if tuple(fact.sequence for fact in facts) != tuple(range(start, end)):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return head, tuple(self._decode_timeline_turn(session_id, fact) for fact in facts)
-
-        return await self._store.read(capture)
-
     async def timeline_head(self, session_id: str, *, tenant_id: str) -> int:
         _require_repository_tenant(tenant_id, self._tenant_id)
         return await self._store.read(

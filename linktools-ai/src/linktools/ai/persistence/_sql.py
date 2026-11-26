@@ -1946,49 +1946,6 @@ class _SqlTransaction:
             self._record_cache.setdefault(key, None)
         return tuple(result)
 
-    async def read_sequence_window(
-        self, key: bytes, *, before: int | None, limit: int, include_next: bool = False,
-    ) -> tuple[int, tuple[StoredFact, ...]]:
-        """Read the sequence counter and a preceding bounded fact window together.
-
-        Reserving the next sequence also captures its durable predecessor, so
-        the caller can validate an observation against the last admitted fact.
-        Empty pages still carry the counter's physical identity and value.
-        """
-        from sqlalchemy import and_, case, func, literal, select
-
-        validate_stream_key(key)
-        counters, facts = self._table("ai_state_counters"), self._table("ai_state_facts")
-        seed = select(literal(1).label("seed")).subquery()
-        source = select(counters.c.stream_key.label("counter_key"),
-                        counters.c.stream_locator.label("counter_locator"),
-                        counters.c.value.label("counter_value")).select_from(seed.outerjoin(counters, and_(
-                            counters.c.store_key == self._store_key,
-                            counters.c.stream_locator == _key_locator(key),
-                        ))).subquery()
-        head = func.coalesce(source.c.counter_value, 0)
-        page_before = head + 1 + int(include_next) if before is None else literal(before)
-        page_start = case((page_before - limit > 1, page_before - limit), else_=1)
-        read_start = case((and_(literal(include_next), head > 0, head < page_start), head), else_=page_start)
-        read_end = case((head + 1 < page_before, head + 1), else_=page_before)
-        statement = select(source, *facts.c).select_from(source.outerjoin(facts, and_(
-            facts.c.store_key == self._store_key,
-            _key_matches(facts.c.stream_key, key),
-            facts.c.sequence >= read_start, facts.c.sequence < read_end,
-        ))).order_by(facts.c.sequence)
-        rows = await self.read_sql_rows(self._context, statement)
-        first = rows[0]
-        value = 0
-        if first["counter_key"] is not None:
-            if first["counter_key"] != key:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _validate_locators({"stream_key": first["counter_key"],
-                                "stream_locator": first["counter_locator"]}, "stream_key")
-            value = _row_nonnegative_int(first["counter_value"])
-        if before is not None and not 1 <= before <= value + int(include_next) + 1:
-            return value, ()
-        return value, tuple(_fact_from_row(row) for row in rows if row["sequence"] is not None)
-
     async def read_joined_facts(
         self, context: SqlStorageContext, statement: "Select",
     ) -> tuple[tuple[StoredFact, Mapping[str, "SqlValue"]], ...]:

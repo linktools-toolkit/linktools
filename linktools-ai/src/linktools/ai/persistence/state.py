@@ -840,17 +840,6 @@ class SqlStateFactReader(Protocol):
 
 
 @runtime_checkable
-class SqlStateSequenceReader(Protocol):
-    """Optional same-snapshot counter and bounded fact-window source."""
-
-    async def read_sequence_window(
-        self, key: bytes, *, before: int | None, limit: int, include_next: bool = False,
-    ) -> tuple[int, tuple[StoredFact, ...]]:
-        """Capture a counter and bounded facts; include_next reserves one observed tail."""
-        ...
-
-
-@runtime_checkable
 class SqlStateTransaction(Protocol):
     """Execute prepared SQL inside the current writable storage callback.
 
@@ -904,13 +893,6 @@ class _ReadOnlyStateTransaction(StateTransaction):
         if not isinstance(self._transaction, SqlStateRecordReader):
             raise StateTransactionNestingError("joined record reads require SQL storage")
         return await self._transaction.read_joined_records(context, statement, keys=keys, sequence_keys=sequence_keys)
-
-    async def read_sequence_window(
-        self, key: bytes, *, before: int | None, limit: int, include_next: bool = False,
-    ) -> tuple[int, tuple[StoredFact, ...]]:
-        if not isinstance(self._transaction, SqlStateSequenceReader):
-            raise StateTransactionNestingError("sequence window reads require SQL storage")
-        return await self._transaction.read_sequence_window(key, before=before, limit=limit, include_next=include_next)
 
     async def read_joined_facts(
         self, context: "SqlStorageContext", statement: "Select",
@@ -1524,4 +1506,4 @@ STATE_GROUP_METADATA_KEY = _encode_key_components(("state-group-metadata",), STO
 STATE_GROUP_ARCHIVE_KEY = _encode_key_components(("state-group-archive",), STORE_KEY_MAX_BYTES)
 
 
-__all__ = ["StateContentDependencies", "state_content_members", 'STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationReader', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'SqlStateSequenceReader', 'StateTransactionNestingError', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ["StateContentDependencies", "state_content_members", 'STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationReader', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

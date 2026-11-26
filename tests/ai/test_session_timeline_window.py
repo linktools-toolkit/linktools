@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import event
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 
-from linktools.ai.capability import SessionCapability
+from linktools.ai.capability import ExecutionCapability, SessionCapability
 from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -137,20 +137,29 @@ async def test_window_keeps_corruption_checks(tmp_path, damage):
 
 
 @pytest.mark.asyncio
-async def test_memory_window_uses_existing_fallback():
-    async with Persistence.open("window", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as state:
-        assert await state.conversation.sessions.capture_timeline_window(
-            "session", tenant_id="tenant", before=None, limit=1, pending=False,
-        ) is None
+async def test_memory_window_pages_committed_turns() -> None:
+    features = RuntimeFeatures("window")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
 
+    async def respond(_messages, _info):
+        return ModelResponse(parts=[TextPart("answer")])
 
-def test_joined_fact_adapter_does_not_require_sequence_windows():
-    from linktools.ai.persistence.state import SqlStateFactReader, SqlStateSequenceReader
-
-    class JoinedOnly:
-        async def read_joined_facts(self, context, statement):
-            return ()
-
-    adapter = JoinedOnly()
-    assert isinstance(adapter, SqlStateFactReader)
-    assert not isinstance(adapter, SqlStateSequenceReader)
+    model_features(_Models(_UsageFunctionModel(respond)), features)
+    async with (
+        Persistence.open("window", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as state,
+        Runtime.open(persistence=state, features=features) as runtime,
+    ):
+        principal = Principal("owner", "tenant")
+        session = await runtime.agents.get().create_session("session", principal=principal)
+        execution_ids = []
+        for index in range(2):
+            turn = await session.start(f"turn-{index}", idempotency_key=f"key-{index}")
+            assert (await turn.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+            execution_ids.append(turn.execution_id)
+        newest = await runtime.sessions.timeline("session", principal=principal, limit=1)
+        assert [turn.execution_id for turn in newest.items] == [execution_ids[1]]
+        assert newest.next_cursor is not None
+        earlier = await runtime.sessions.timeline("session", principal=principal, limit=1, cursor=newest.next_cursor)
+        assert [turn.execution_id for turn in earlier.items] == [execution_ids[0]]
+        assert earlier.next_cursor is None

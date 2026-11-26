@@ -208,12 +208,7 @@ async def _timeline_blocks(
             if current.owner_principal_id != root.owner_principal_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         pending = pending_execution if coordinate is None and source_id == root.session_id else None
-        captured = (await conversation.sessions.capture_timeline_window(
-            source_id, tenant_id=tenant_id, before=source_before,
-            limit=remaining, pending=pending is not None,
-        ) if type(conversation.sessions) is SessionRepositoryImpl else None)
-        head = (await conversation.sessions.timeline_head(source_id, tenant_id=tenant_id)
-                if captured is None else captured[0])
+        head = await conversation.sessions.timeline_head(source_id, tenant_id=tenant_id)
         display_head = head + (pending is not None)
         before = display_head + 1 if source_before is None else source_before
         if before < 1 or before > display_head + 1:
@@ -222,7 +217,7 @@ async def _timeline_blocks(
         if available:
             count = min(remaining, available)
             start = before - count
-            values = captured[1] if captured is not None else await conversation.sessions.list_timeline_turns(
+            values = await conversation.sessions.list_timeline_turns(
                 source_id,
                 tenant_id=tenant_id,
                 start_turn_seq=min(start, head) if pending is not None and head else start,

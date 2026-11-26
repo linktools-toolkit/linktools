@@ -1871,200 +1871,149 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
         await runtime._state.close()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("phase", "expected_status"),
-    (
-        ("handoff_prepared", ExecutionStatus.STARTED),
-        ("terminal_before_handoff_complete", ExecutionStatus.SUCCEEDED),
-    ),
-)
-async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restart(
-    tmp_path: Path,
-    phase: str,
-    expected_status: ExecutionStatus,
-) -> None:
-    database = tmp_path / "handoff-restart.db"
-    effect_log = tmp_path / "handoff-effects.txt"
-    await _exit_at_boundary(database, effect_log, "split_sqlite", phase)
-    committed_effects = effect_log.read_text().splitlines()
-    assert len(committed_effects) == 1
-    execution_id = committed_effects[0]
+def _split_terminal_setup(root):
+    from linktools.ai.capability import StepPersistenceCapability
+    from linktools.ai.persistence import PersistencePlan
+    from linktools.ai.storage import StorageRoute
 
-    inspection = _split_sqlite_storage(database)
-    inspection = Persistence(inspection)
-    await inspection.initialize(
-        namespace="session-tool-crash",
-        tenant_id="default",
-    )
-    current = await inspection.execution.executions.get(
-        execution_id,
-        tenant_id="default",
-    )
-    checkpoint = await inspection.execution.executions.get(
-        execution_id,
-        tenant_id="default",
-    )
-    assert current is not None
-    assert current.status is expected_status
-    assert checkpoint is not None
-    assert checkpoint.recovery_state.value == "handoff"
-    assert checkpoint.recovery.handoff_phase.value == "prepared"
-    await inspection.close()
+    async def model(_messages, _info):
+        with (root / "provider.log").open("a") as output:
+            output.write("model\n")
+        return ModelResponse(parts=[TextPart("durable answer")])
 
-    state = _split_sqlite_storage(database)
-    calls: list[str] = []
-    application = _application(
-        calls,
-        effect_policy="non_replay_safe",
-        effect_log=effect_log,
+    step = StorageRoute.sqlite(root / "step.db")
+    storage = PersistenceStorage(PersistencePlan(
+        conversation=StorageRoute.sqlite(root / "conversation.db"), execution=step, checkpoint=step,
+    ))
+    features = RuntimeFeatures("application")
+    features.capability(StepPersistenceCapability(), scope="runtime")
+    features.agent("default", model="default", allow_tools=(), allow_subagents=())
+    return storage, model_features(_Models(_UsageFunctionModel(model)), features)
+
+
+async def _send_split_terminal(runtime):
+    return await runtime.sessions.start(
+        "session", "question", agent="default", principal=runtime.default_principal, idempotency_key="first",
     )
-    try:
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-crash', storage=state) as persistence_2161, Runtime.open(persistence=persistence_2161, features=model_features(_ToolModels(), application), auto_recover=True) as runtime:
-            session = runtime.agents.get("default").session("session")
-            execution = await session.start("inspect", idempotency_key="turn-1")
-            result = (await execution.wait(timeout_seconds=15)).result
-            assert execution.execution_id == execution_id
-            assert result.status is ExecutionStatus.SUCCEEDED
-            assert calls == []
-            assert effect_log.read_text().splitlines() == committed_effects
-            completed = await runtime._state.execution.executions.get(
-                execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert completed is not None
-            assert completed.recovery_state.value == "completed"
-            assert completed.recovery.handoff_phase.value == "completed"
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            history = await session.history()
-            assert _relevant_kinds(history.items) == [
-                "user",
-                "tool_call",
-                "tool_result",
-                "assistant",
-            ]
-    finally:
-        await runtime._state.close()
+
+
+def _crash_split_terminal(root, phase):
+    import os
+
+    from linktools.ai.persistence.turns import SqlSessionTurns
+
+    publish = SqlSessionTurns.publish_split_terminal
+
+    async def crashing_publish(store, key, **kwargs):
+        assert kwargs["source"].phase == "sealed" and kwargs["state"] == "succeeded"
+        (root / "turn-id").write_text(key.turn_id)
+        if phase == "target-committed":
+            assert await publish(store, key, **kwargs)
+        os._exit(91)
+
+    SqlSessionTurns.publish_split_terminal = crashing_publish
+
+    async def main():
+        storage, features = _split_terminal_setup(root)
+        async with (
+            Persistence.open("split-terminal", storage=storage) as state,
+            Runtime.open(persistence=state, features=features, authorization=_NativeSessionPolicy()) as runtime,
+        ):
+            await runtime.sessions.create_turn_session("session", principal=runtime.default_principal)
+            turn = await _send_split_terminal(runtime)
+            await turn.wait_final(timeout_seconds=10)
+        raise AssertionError("expected subprocess exit")
+
+    asyncio.run(main())
 
 
 @pytest.mark.asyncio
-async def test_split_storage_success_handoff_wins_cancel_race(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    state = _split_sqlite_storage(tmp_path / "handoff-cancel-race.db")
-    calls: list[str] = []
-    handoff_started = asyncio.Event()
-    release_handoff = asyncio.Event()
-    application = _application(calls)
-    original_resolve = LocalExecutionBackend._resolve_handoff_conversation
+@pytest.mark.parametrize("phase", ("source-sealed", "target-committed"))
+async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restart(tmp_path: Path, phase: str) -> None:
+    from linktools.ai.persistence.turns import SessionTurnKey
 
-    async def pause_handoff(
-        backend: LocalExecutionBackend,
-        checkpoint: Any,
-        handoff: Any,
-    ) -> None:
-        handoff_started.set()
-        await release_handoff.wait()
-        await original_resolve(backend, checkpoint, handoff)
+    from .test_session_tool_process_recovery import _expire, _run_until_crash
 
-    monkeypatch.setattr(
-        LocalExecutionBackend,
-        "_resolve_handoff_conversation",
-        pause_handoff,
-    )
-    try:
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('split-storage-handoff-cancel-race', storage=state) as persistence_2226, Runtime.open(persistence=persistence_2226, features=model_features(_ToolModels(), application)) as runtime:
-            assert (
-                runtime._state.execution.executions.state_store.storage_group
-                is runtime._state.execution.executions.state_store.storage_group
-            )
-            assert (
-                runtime._state.execution.executions.state_store.storage_group
-                is not runtime._state.conversation.sessions.state_store.storage_group
-            )
-            await runtime.agents.get("default").create_session("session")
-            session = runtime.agents.get("default").session("session")
-            execution = await session.start("inspect", idempotency_key="turn-1")
-            await asyncio.wait_for(handoff_started.wait(), timeout=10)
+    await _run_until_crash(_crash_split_terminal, tmp_path, phase)
+    key = SessionTurnKey("session", (tmp_path / "turn-id").read_text())
+    storage, features = _split_terminal_setup(tmp_path)
+    async with (
+        Persistence.open("split-terminal", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        turns = state.session_turns
+        source = await runtime.sessions._turn_runner._split_recovery_source()
+        sealed = await source._read_pin(source._identity(key, 1))
+        assert sealed.phase == "sealed" and sealed.pin.terminal_state == "succeeded"
+        row = await turns.get_turn(key)
+        if phase == "source-sealed":
+            assert row["state"] == "accepted" and row["split_source_receipt"] is None
+            assert (await turns.get_session("session"))["active_turn_id"] == key.turn_id.encode()
+            await _expire(turns, key, generation=1)
+            assert await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+            published = await source._read_pin(source._identity(key, 1))
+            assert published.phase == "published" and published.pin == sealed.pin
+        else:
+            assert (row["state"], row["split_source_receipt"]) == ("succeeded", sealed.pin.receipt_id.encode())
+        assert not await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+        replay = await _send_split_terminal(runtime)
+        assert replay.key == key
+        terminal = await replay.wait_final(timeout_seconds=10)
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        assert terminal.view["output"] == {"text": "durable answer"}
+        row = await turns.get_turn(key)
+        assert (row["state"], row["generation"]) == ("succeeded", 1)
+        assert row["split_source_receipt"] == sealed.pin.receipt_id.encode()
+        assert row["result_json"]["transcript"] == sealed.pin.transcript.to_json()
+        page = await runtime.history.turn_session("session", principal=principal)
+        assert page["session"]["active_turn_id"] is None and page["timeline"]["items"] == [terminal.view]
+    assert (tmp_path / "provider.log").read_text().splitlines() == ["model"]
 
-            prepared = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert prepared is not None
-            assert prepared.recovery.handoff_phase.value == "prepared"
-            current = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert current is not None
-            assert current.status is ExecutionStatus.FINALIZING
 
-            first_cancel = await execution.cancel(
-                idempotency_key="cancel-during-success-handoff"
-            )
-            assert first_cancel.cancelled is False
-            replayed_cancel = await execution.cancel(
-                idempotency_key="cancel-during-success-handoff"
-            )
-            assert replayed_cancel.cancelled is False
+@pytest.mark.asyncio
+async def test_split_storage_success_handoff_wins_cancel_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence._split_step_source import SqlSplitStepSource
 
-            release_handoff.set()
-            result = (await execution.wait(timeout_seconds=15)).result
-            assert result.status is ExecutionStatus.SUCCEEDED
-            final_execution = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
+    target_committed = asyncio.Event()
+    release = asyncio.Event()
+    reconcile = SqlSplitStepSource.reconcile
+
+    async def paused(source, connection, **kwargs):
+        target_committed.set()
+        await release.wait()
+        return await reconcile(source, connection, **kwargs)
+
+    monkeypatch.setattr(SqlSplitStepSource, "reconcile", paused)
+    storage, features = _split_terminal_setup(tmp_path)
+    async with (
+        Persistence.open("split-terminal", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turn = await _send_split_terminal(runtime)
+        try:
+            await asyncio.wait_for(target_committed.wait(), 10)
+            source = await runtime.sessions._turn_runner._split_recovery_source()
+            sealed = await source._read_pin(source._identity(turn.key, 1))
+            assert sealed.phase == "sealed"
+            row = await state.session_turns.get_turn(turn.key)
+            assert (row["state"], row["generation"], row["split_source_receipt"]) == (
+                "succeeded", 1, sealed.pin.receipt_id.encode(),
             )
-            assert final_execution is not None
-            assert final_execution.status is ExecutionStatus.SUCCEEDED
-            completed = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert completed is not None
-            assert completed.recovery_state.value == "completed"
-            assert completed.recovery.handoff_phase.value == "completed"
-            events = await execution.list_events(limit=100)
-            terminal_types = [
-                item.event_type
-                for item in events.items
-                if item.event_type
-                in {
-                    ExecutionEventType.EXECUTION_SUCCEEDED,
-                    ExecutionEventType.EXECUTION_FAILED,
-                    ExecutionEventType.EXECUTION_CANCELLED,
-                }
-            ]
-            assert terminal_types == [ExecutionEventType.EXECUTION_SUCCEEDED]
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            assert session_record.continuation is not None
-            history = await session.history()
-            assert _relevant_kinds(history.items) == [
-                "user",
-                "tool_call",
-                "tool_result",
-                "assistant",
-            ]
-            assert calls == ["lookup"]
-    finally:
-        release_handoff.set()
-        await runtime._state.close()
+            assert not await turn.cancel()
+            assert not await turn.cancel()
+        finally:
+            release.set()
+        terminal = await turn.wait_final(timeout_seconds=10)
+        published = await source._read_pin(source._identity(turn.key, 1))
+        assert published.phase == "published" and published.pin == sealed.pin
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        assert terminal.view["output"] == {"text": "durable answer"}
+        page = await runtime.history.turn_session("session", principal=principal)
+        assert page["session"]["active_turn_id"] is None and page["timeline"]["items"] == [terminal.view]
+    assert (tmp_path / "provider.log").read_text().splitlines() == ["model"]
 
 
 @pytest.mark.asyncio

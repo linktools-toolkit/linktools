@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.exceptions import ApprovalRequired
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai_harness.step_persistence import RunRecord, StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.capability import AgentContext, ExecutionCapability
-from linktools.ai.core import ApprovalDecision, AuthorizationPolicy, ExecutionStatus, Principal
+from linktools.ai.core import ApprovalDecision, AuthorizationPolicy, ExecutionStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.migrate import provision_database
 from linktools.ai.model.messages import decode_model_messages
@@ -47,11 +47,9 @@ async def _runtime(database: Path, model, tool, *, restart_checkpoints: bool = T
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("conversation", (False, True))
 @pytest.mark.parametrize(("unstarted_attempts", "registered_attempt"), ((0, False), (2, False), (0, True)))
 async def test_cold_runtime_recovers_settled_tool_in_new_attempt(
     tmp_path: Path, unstarted_attempts: int, registered_attempt: bool,
-    conversation: bool,
 ) -> None:
     effects = []
     blocked = asyncio.Event()
@@ -68,9 +66,7 @@ async def test_cold_runtime_recovers_settled_tool_in_new_attempt(
 
     database = tmp_path / "runtime.db"
     async with _runtime(database, interrupted, work) as (runtime, persistence, steps):
-        agent = runtime.agents.get()
-        runner = await agent.create_session("session") if conversation else agent
-        execution = await runner.start("question", idempotency_key="start")
+        execution = await runtime.agents.get().start("question", idempotency_key="start")
         await asyncio.wait_for(blocked.wait(), 5)
         await asyncio.wait_for(runtime.handoff(), 5)
         source = await persistence.execution.executions.get_recovery(execution.execution_id, tenant_id="default")
@@ -124,12 +120,70 @@ async def test_cold_runtime_recovers_settled_tool_in_new_attempt(
         assert len({run.run_id for run in runs}) == len(runs)
         assert source_run_id in {run.run_id for run in runs}
         assert effects == ["performed"] and len(calls) == 1
-        if conversation:
-            page = await runtime.history.messages("session", principal=runtime.default_principal, limit=100)
-            parts = [part for message in page.items for part in message.parts]
-            assert [part.content for part in parts if isinstance(part, UserPromptPart)] == ["question"]
-            assert [part.content for part in parts if isinstance(part, ToolReturnPart)] == ["saved result"]
-            assert [part.content for part in parts if isinstance(part, TextPart)] == ["recovered"]
+
+class _RecoverySessionPolicy(TenantAuthorizationPolicy):
+    """Explicit owner for public SQL Session recovery."""
+
+
+@pytest.mark.asyncio
+async def test_cold_session_recovers_settled_tool_using_original_step_receipt(tmp_path: Path) -> None:
+    from .test_session_tool_process_recovery import _expire
+
+    blocked = asyncio.Event()
+    effects = []
+
+    async def work(_context: AgentContext[None]) -> str:
+        effects.append("performed")
+        return "saved result"
+
+    async def interrupted(messages, _info):
+        if any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+            blocked.set()
+            await asyncio.Event().wait()
+        return ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id="work-1")])
+
+    database = tmp_path / "session.db"
+    authorization = _RecoverySessionPolicy()
+    async with _runtime(database, interrupted, work, authorization=authorization) as (runtime, state, steps):
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turn = await runtime.sessions.start(
+            "session", "question", agent="default", principal=principal, idempotency_key="start",
+        )
+        await asyncio.wait_for(blocked.wait(), 5)
+        [original] = await state.checkpoint.tools.list_by_execution(turn.key.turn_id, tenant_id=principal.tenant_id)
+        assert original.status is ToolOperationStatus.COMPLETED
+        row = await state.session_turns.get_turn(turn.key)
+        assert row["generation"] == 1
+        assert [run.run_id for run in await steps.list_runs()] == [turn.key.turn_id]
+        await asyncio.wait_for(runtime.handoff(), 5)
+
+    calls = []
+
+    async def recovered(messages, _info):
+        calls.append(messages)
+        assert [part.content for message in messages for part in message.parts
+                if isinstance(part, ToolReturnPart)] == ["saved result"]
+        return ModelResponse(parts=[TextPart("recovered")])
+
+    async with _runtime(database, recovered, work, authorization=authorization) as (runtime, state, steps):
+        await _expire(state.session_turns, turn.key, generation=1)
+        assert await runtime.sessions.recover_turn("session", turn.key.turn_id, principal=principal)
+        replay = await runtime.sessions.start(
+            "session", "question", agent="default", principal=principal, idempotency_key="start",
+        )
+        assert replay.key == turn.key
+        result = await replay.wait_final(timeout_seconds=5)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert result.view["output"] == {"text": "recovered"}
+        assert result.view["user_input"]["prompt"] == "question"
+        assert (await state.session_turns.get_turn(turn.key))["generation"] == 2
+        assert await state.checkpoint.tools.list_by_execution(turn.key.turn_id, tenant_id=principal.tenant_id) == (original,)
+        assert [run.run_id for run in await steps.list_runs()] == [turn.key.turn_id]
+        history = await runtime.history.turn_session("session", principal=principal)
+        assert history["session"]["active_turn_id"] is None and history["timeline"]["items"] == [result.view]
+        assert await state.execution.executions.get(turn.key.turn_id, tenant_id=principal.tenant_id) is None
+    assert effects == ["performed"] and len(calls) == 1
 
 
 @pytest.mark.asyncio
