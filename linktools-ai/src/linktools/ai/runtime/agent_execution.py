@@ -373,6 +373,7 @@ class AgentExecutionPort(Generic[AppT]):
                     task_invocation=task_invocation,
                     task_admission=task_admission,
                     dependency_hold_id=dependency_hold_id,
+                    binding_contract=binding.binding_contract,
                     resolved_binding=binding,
                     budget_scope_id=budget_scope_id,
                 )
