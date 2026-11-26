@@ -428,7 +428,7 @@ class RuntimeSessions(Generic[AppT]):
         if replace_cwd:
             config["cwd"] = await runner.canonicalize_cwd(cwd)
         return await store.update_session(
-            session_id, expected_revision=expected_revision, config=config,
+            session_id, expected_revision=expected_revision, config=config, metadata_only=not replace_cwd,
         )
 
     async def start_turn(

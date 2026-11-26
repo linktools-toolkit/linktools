@@ -23,6 +23,7 @@ from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes
 from ..errors import AIError, ErrorCode
+from ..execution import ExecutionInputContext
 from ..inputs import stored_input_attachment_views, stored_user_input_view
 from ..model.messages import binary_content_usage, encode_model_messages
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
@@ -153,6 +154,7 @@ class _AdmittedTurn:
     split_source: _CanonicalSplitStep | None = None
     preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = ()
     native_stopped_delegates: set[tuple[str, str, int, str]] = field(default_factory=set)
+    original_session_metadata: Mapping[str, JsonValue] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1094,7 +1096,7 @@ class _RegenerableTurnRunner:
                 instruction_resolver.validate(repository_instructions)
             try:
                 context = AgentContext(
-                    app, admitted, namespace, key.session_id, key.turn_id, request["session_metadata"],
+                    app, admitted, namespace, key.session_id, key.turn_id, session["config_json"].get("metadata", {}),
                     agent_id=binding.compiled_agent.spec.id, correlation=request.get("correlation", {}),
                 )
             except (TypeError, ValueError) as error:
@@ -1270,6 +1272,7 @@ class _RegenerableTurnRunner:
                 split_source=split,
                 preload_skill_inputs=tuple(request.get("preload_skills", ())),
                 previous_turn_interrupted=request.get("previous_turn_interrupted") is True,
+                original_session_metadata=request["session_metadata"],
             )
             self._admitted(turn)
             try:
@@ -2100,12 +2103,24 @@ class _RegenerableTurnRunner:
 
         structured = binding.output_binding.mode == "structured"
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
-        if turn.native_step is not None and turn.split_source is None and isinstance(model_prompt, str):
-            # Recovery has already resolved this admitted scalar; the tool view
-            # does not need another read or duplicate durable payload.
-            context = replace(
-                context, original_input=stored_user_input_view(self._input_materializer.capture(model_prompt)),
-            )
+        if (turn.native_step is not None and turn.split_source is None and not turn.completed_checkpoint):
+            compiled = binding.compiled_agent
+            wants_context = bool(compiled.selected_tools or compiled.selected_capabilities)
+            if isinstance(model_prompt, str) or wants_context:
+                context = replace(context, original_input=stored_user_input_view(
+                    self._input_materializer.capture(model_prompt),
+                ))
+            if wants_context:
+                # Derive the accepted view from the existing turn data, without
+                # persisting a second context. Live metadata stays separate.
+                admitted_metadata = (context.session_metadata if turn.original_session_metadata is None
+                                     else turn.original_session_metadata)
+                context = replace(context, input_context=ExecutionInputContext.from_messages(
+                    turn.history, session_metadata=admitted_metadata,
+                    repository_instructions=(None if turn.repository_instructions is None
+                                             else turn.repository_instructions.to_payload()),
+                    preload_skills=turn.preload_skill_inputs,
+                ))
         usage = None
         compacted_context = None
         try:

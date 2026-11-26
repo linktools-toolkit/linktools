@@ -1134,14 +1134,25 @@ class SqlSessionTurns(SqlSessionTurnReader):
         return await self._context.run_mutation(write, domain="session.fork")
 
     async def update_session(
-        self, session_id: str, *, expected_revision: int, config: JsonValue,
+        self, session_id: str, *, expected_revision: int, config: JsonValue, metadata_only: bool = False,
     ) -> bool:
-        """Replace inactive session configuration at the caller’s authorized revision."""
+        """Update at the authorized revision; only metadata may change during a parked turn."""
+        from sqlalchemy import or_, select
+
+        sessions, turns = self._sessions.c, self._turns.c
+        inactive = sessions.active_turn_id.is_(None)
+        allowed = inactive
+        if metadata_only:
+            parked = select(turns.id).where(
+                turns.scope_key == sessions.scope_key, turns.session_key == sessions.session_key,
+                turns.turn_id == sessions.active_turn_id, turns.state.in_(("waiting", "ready")),
+            ).exists()
+            allowed = or_(inactive, parked)
+
         async def write(connection: AsyncSession) -> bool:
             result = await connection.execute(self._sessions.update().filter_by(
-                **self._session_values(session_id),
-                status="open", revision=expected_revision, active_turn_id=None,
-            ).values(config_json=config, revision=expected_revision + 1))
+                **self._session_values(session_id), status="open", revision=expected_revision,
+            ).where(allowed).values(config_json=config, revision=expected_revision + 1))
             return result.rowcount == 1
 
         return await self._context.run_mutation(write, domain="session.update")
