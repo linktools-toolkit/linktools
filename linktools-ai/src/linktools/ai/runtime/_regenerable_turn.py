@@ -9,9 +9,10 @@ import secrets
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
 
 from linktools.core import environ
-from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -369,10 +370,10 @@ class _RegenerableTurnRunner:
             activity = project_ordinary_turn_activity(messages, output=output, output_ref=output_ref, local_tool_feedback=True)
         self._store.note_terminal_context(
             turn.key, turn_no=turn.number, prompt=(
-                "" if succeeded and turn.stored_input is not None
+                "" if turn.stored_input is not None
                 and decode_domain(turn.stored_input, StoredUserInput).codec == "text" else turn.prompt
-            ) if succeeded else None,
-            stored_input=turn.stored_input if succeeded else None, messages=messages, succeeded=succeeded,
+            ),
+            stored_input=turn.stored_input, messages=messages, succeeded=succeeded,
             reset_context=turn.session_context == "current_turn",
         )
         self._publish(turn.key.session_id, {
@@ -1530,8 +1531,6 @@ class _RegenerableTurnRunner:
             missing=ErrorCode.STORAGE_RECOVERY_REQUIRED,
         )
         for position in positions:
-            if position.interrupted:
-                continue
             prior = position.request
             prior_input = self._stored_input(prior)
             input_bytes, media_bytes = self._input_usage(prior["prompt"], prior_input)
@@ -1540,7 +1539,7 @@ class _RegenerableTurnRunner:
             if remaining < 0 or remaining_media < 0:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
             restored = await self._restore_prompt(prior["prompt"], prior_input)
-            history.extend(restore_turn_prompt(restored, position.messages))
+            history.extend(self._context_messages(restored, position.messages, interrupted=position.interrupted))
         return tuple(history)
 
     async def _reserve_attached_graph_turn(
@@ -1821,8 +1820,6 @@ class _RegenerableTurnRunner:
                       else await self._store.recent_context(key.session_id, through=through, lineage=lineage))
         interrupted = bool(candidates and candidates[-1].turn_no == through and candidates[-1].interrupted)
         for candidate in reversed(candidates):
-            if candidate.interrupted:
-                continue
             if not isinstance(candidate.request, dict) or not isinstance(candidate.request.get("prompt"), str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Missing admitted session input")
             candidate_prompt = candidate.request["prompt"]
@@ -1832,11 +1829,27 @@ class _RegenerableTurnRunner:
             if size > remaining or media_bytes > remaining_media:
                 break
             restored = await self._restore_prompt(candidate_prompt, stored)
-            history.append(restore_turn_prompt(restored, candidate.messages))
+            history.append(self._context_messages(restored, candidate.messages, interrupted=candidate.interrupted))
             remaining -= size
             remaining_media -= media_bytes
             context_from = candidate.turn_no
         return context_from, [message for messages in reversed(history) for message in messages], interrupted
+
+    @staticmethod
+    def _context_messages(
+        prompt: str | Sequence[UserContent], messages: Sequence[ModelMessage], *, interrupted: bool,
+    ) -> tuple[ModelMessage, ...]:
+        if interrupted:
+            # Keep an explicit historical boundary: the SDK can merge adjacent
+            # requests when reloading an already completed exchange.
+            content = prompt if isinstance(prompt, str) else list(prompt)
+            timestamp = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            return (
+                ModelRequest(parts=[UserPromptPart(content, timestamp=timestamp)]),
+                ModelResponse(parts=[TextPart("[Runtime: This turn was interrupted before a final answer.]")],
+                              timestamp=timestamp),
+            )
+        return restore_turn_prompt(prompt, messages)
 
     @staticmethod
     def _stored_input(request: Mapping[str, JsonValue]) -> StoredUserInput | None:

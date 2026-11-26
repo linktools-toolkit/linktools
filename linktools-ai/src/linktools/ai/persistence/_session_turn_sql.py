@@ -770,7 +770,7 @@ class SqlSessionTurnReader:
         self, session_id: str, *, after: int, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
         missing: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR,
     ) -> tuple[SessionContextTurn, ...]:
-        """Read an exact finalized interval, omitting non-success bodies."""
+        """Read finalized input and only the confirmed conversation transcripts."""
         from sqlalchemy import case, select, type_coerce
 
         if not 0 <= through - after <= _CONTEXT_POSITIONS or after < 0:
@@ -780,15 +780,12 @@ class SqlSessionTurnReader:
 
         columns = self._turns.c
         succeeded = columns.state == "succeeded"
-        prompt = case((succeeded, columns.request_json["prompt"].as_string())).label("prompt")
+        prompt = columns.request_json["prompt"].as_string().label("prompt")
         result = type_coerce(case((succeeded, columns.result_json)), columns.result_json.type).label("result_json")
-        stored_input = type_coerce(
-            case((succeeded, columns.request_json["input"])), columns.request_json.type,
-        ).label("stored_input")
+        stored_input = columns.request_json["input"].label("stored_input")
         reset = (columns.request_json["session_context"].as_string() == "current_turn").label("reset_context")
-        interrupted = (columns.result_json["abandoned"].as_boolean().is_(True)).label("interrupted")
         statement = select(
-            columns.turn_no, columns.state, prompt, stored_input, result, columns.binding_key, reset, interrupted,
+            columns.turn_no, columns.state, prompt, stored_input, result, columns.binding_key, reset,
             columns.turn_id, columns.session_key, columns.generation, columns.split_source_receipt,
             columns.request_json["graph_execution"].as_string().label("graph_execution"),
         ).where(
@@ -801,23 +798,24 @@ class SqlSessionTurnReader:
         if len(rows) != through - after:
             raise AIError(missing, "The finalized session context range is incomplete")
         return tuple(
-            (SessionContextTurn(row["turn_no"], {}, (), 1024, 0, interrupted=True)
-             if row["state"] == "failed" else self._context_turn(
-                 row["turn_no"], row["prompt"], row["stored_input"], row["messages"],
-                 reset_context=row["reset_context"] is True,
-             ))
-            for row in rows if row["state"] == "succeeded" or (row["state"] == "failed" and row["interrupted"] is True)
+            self._context_turn(
+                row["turn_no"], row["prompt"], row["stored_input"],
+                row["messages"] if row["state"] == "succeeded" else (),
+                reset_context=row["state"] == "succeeded" and row["reset_context"] is True,
+                interrupted=row["state"] != "succeeded",
+            )
+            for row in rows
         )
 
     @staticmethod
     def _context_turn(
         turn_no: int, prompt: str, stored_input: JsonValue, messages: Sequence[ModelMessage], *,
-        reset_context: bool = False,
+        reset_context: bool = False, interrupted: bool = False,
     ) -> SessionContextTurn:
         request = {"prompt": prompt, **({"input": stored_input} if stored_input is not None else {})}
         transcript_bytes = len(encode_model_messages(messages))
         size = max(1024, len(canonical_json_bytes(request)) + transcript_bytes)
-        return SessionContextTurn(turn_no, request, tuple(messages), size, transcript_bytes, reset_context)
+        return SessionContextTurn(turn_no, request, tuple(messages), size, transcript_bytes, reset_context, interrupted)
 
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],
@@ -939,12 +937,12 @@ class SqlSessionTurns(SqlSessionTurnReader):
             return
         else:
             turns = tuple(turn for turn in cached.turns if turn.turn_no > after)
-        if succeeded:
-            if prompt is None:
-                return
-            turns += (self._context_turn(
-                turn_no, prompt, stored_input, messages, reset_context=reset_context,
-            ),)
+        if prompt is None:
+            return
+        turns += (self._context_turn(
+            turn_no, prompt, stored_input, messages if succeeded else (),
+            reset_context=succeeded and reset_context, interrupted=not succeeded,
+        ),)
         self._remember_context(key.session_id, after=after, through=turn_no, turns=turns)
 
     async def create(self, session_id: str, *, config: JsonValue) -> None:

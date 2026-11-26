@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """Session model context is selected before old message bodies are loaded."""
 
+import asyncio
+from contextlib import AsyncExitStack
+
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import TenantAuthorizationPolicy
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._session_turn_sql import SessionTurnKey, SqlSessionTurnReader
@@ -25,6 +28,56 @@ pytestmark = pytest.mark.asyncio
 
 class _SessionAuthorization(TenantAuthorizationPolicy):
     """Authorize sessions in the fixture's isolated namespace."""
+
+
+@pytest.mark.parametrize("state", ("cancelled", "failed"))
+@pytest.mark.parametrize("reopen", (False, True))
+async def test_interrupted_turn_retains_the_request_for_continue(tmp_path, state, reopen):
+    entered = asyncio.Event()
+    attempts = []
+
+    async def model(messages, info):
+        prompts = [part for message in messages for part in message.parts if isinstance(part, UserPromptPart)]
+        attempts.append([part.content for part in prompts])
+        if len(attempts) == 1:
+            if state == "failed":
+                raise RuntimeError("synthetic provider failure")
+            entered.set()
+            await asyncio.Future()
+        assert attempts[-1] == ["Inspect my files", "Continue"]
+        assert "The previous turn was interrupted." in (info.instructions or "")
+        return ModelResponse(parts=[TextPart("Continuing file inspection")])
+
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+
+    async def open_runtime(stack):
+        persistence = await stack.enter_async_context(Persistence.open("interrupted-context", storage=storage))
+        return await stack.enter_async_context(Runtime.open(
+            persistence=persistence, features=_features(model), authorization=_SessionAuthorization(),
+        ))
+
+    async with AsyncExitStack() as stack:
+        runtime = await open_runtime(stack)
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        first = await runtime.sessions.start(
+            "session", "Inspect my files", agent="default", principal=principal, idempotency_key="inspect",
+        )
+        if state == "cancelled":
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert await first.cancel()
+        assert (await first.wait_final(timeout_seconds=5)).status is (
+            ExecutionStatus.CANCELLED if state == "cancelled" else ExecutionStatus.FAILED
+        )
+        if reopen:
+            await stack.aclose()
+            runtime = await open_runtime(stack)
+            principal = runtime.default_principal
+        second = await runtime.sessions.start(
+            "session", "Continue", agent="default", principal=principal, idempotency_key="continue",
+        )
+        result = await second.wait_final(timeout_seconds=5)
+        assert result.view["output"] == {"text": "Continuing file inspection"}
 
 
 @pytest.mark.parametrize("selection,expected_messages", (("all", 3), ("current_turn", 1)))

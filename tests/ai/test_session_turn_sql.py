@@ -284,7 +284,8 @@ async def test_takeover_fences_old_writer_and_cancel_precedes_success(store):
     sequences = native_message_sql_tables()["ai_message_sequences"]
     async with engine.connect() as connection:
         assert (await connection.execute(select(func.count()).select_from(sequences))).scalar_one() == 0
-    assert await turns.read_context_range("chat", after=0, through=1) == ()
+    [context] = await turns.read_context_range("chat", after=0, through=1)
+    assert context.interrupted and context.request == {"prompt": "turn"} and not context.messages
 
 
 @pytest.mark.asyncio
@@ -320,7 +321,8 @@ async def test_reopened_store_recovers_expired_cancellation_once(store):
 
             visible = await restarted.get_history_turn(key, lineage=())
             assert (visible["turn_id"], visible["state"], visible["result_json"]) == (b"turn", "cancelled", None)
-            assert await restarted.read_context_range("chat", after=0, through=1) == ()
+            [context] = await restarted.read_context_range("chat", after=0, through=1)
+            assert context.interrupted and context.request == {"prompt": "turn"} and not context.messages
             assert await accept(restarted, "next", revision=2, through=1, request="new")
     finally:
         await restarted_engine.dispose()
@@ -399,7 +401,8 @@ async def test_recent_context_reads_latest_positions_and_reuses_covered_history(
         fresh = SqlSessionTurns(create_sql_storage_context(engine), metadata, namespace="test", tenant_id="a")
         fresh.bind_transcript_reader(*turns._transcript_source)
         assert await fresh.recent_context("chat", through=130) == warm
-        assert [turn.turn_no for turn in warm] == list(range(3, 130))
+        assert [turn.turn_no for turn in warm] == list(range(3, 131))
+        assert warm[-1].interrupted and warm[-1].request == {"prompt": "turn-130"} and not warm[-1].messages
         assert (len(reads), len(body_reads), len(binding_reads)) == (3, 2, 2)
         # Cancelled turn 130 advances the range without needing a body read.
         assert {value for value in reads[1] if type(value) is int and value > 128} == {129, 130}
@@ -442,7 +445,8 @@ async def test_context_reset_is_committed_success_only_in_warm_and_cold_history(
         return reader
 
     before_reset = await turns.recent_context("chat", through=3)
-    assert [turn.turn_no for turn in before_reset] == [1, 3]
+    assert [turn.turn_no for turn in before_reset] == [1, 2, 3]
+    assert before_reset[1].interrupted and before_reset[1].request == {"prompt": "context-2"}
     assert await cold_reader().recent_context("chat", through=3) == before_reset
 
     reset = await publish(4, reset=True)
@@ -450,12 +454,12 @@ async def test_context_reset_is_committed_success_only_in_warm_and_cold_history(
     await publish(6)
 
     after_reset = await turns.recent_context("chat", through=6)
-    assert [(turn.turn_no, turn.reset_context) for turn in after_reset] == [(4, True), (6, False)]
+    assert [(turn.turn_no, turn.reset_context) for turn in after_reset] == [(4, True), (5, False), (6, False)]
     assert await cold_reader().recent_context("chat", through=6) == after_reset
 
     # Reset changes the model's default candidates, not exact replay windows or
     # the ability to read public history from before the reset.
-    assert [turn.turn_no for turn in await turns.read_context_range("chat", after=0, through=6)] == [1, 3, 4, 6]
+    assert [turn.turn_no for turn in await turns.read_context_range("chat", after=0, through=6)] == list(range(1, 7))
     admitted = await turns.get_turn(reset)
     assert admitted["context_from"] == admitted["context_through"] + 1
     assert await turns.read_context_range(

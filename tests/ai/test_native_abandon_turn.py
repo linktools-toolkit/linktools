@@ -180,8 +180,8 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         )
         new_key = SessionTurnKey("session", next_id)
         row = await _wait_for_committed(lambda: turns.get_turn(new_key), lambda value: value["state"] != "accepted")
-        assert row["state"] == "succeeded"
-        assert prompts == ["new prompt"]
+        assert row["state"] == "succeeded", row["result_json"]
+        assert prompts == ["discard this prompt", "new prompt"]
         notice = "The previous turn was interrupted."
         assert len(instructions) == 1 and notice in instructions[0]
         assert (await turns.get_turn(key)) == old
@@ -191,5 +191,5 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
             )
             later_key = SessionTurnKey("session", later)
             row = await _wait_for_committed(lambda: turns.get_turn(later_key), lambda value: value["state"] != "accepted")
-            assert row["state"] == "succeeded"
+            assert row["state"] == "succeeded", row["result_json"]
             assert len(instructions) == 2 and notice not in instructions[1]
