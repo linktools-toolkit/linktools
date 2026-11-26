@@ -59,6 +59,7 @@ class _Components:
     input_captures = None
     history = None
     memory_scope = None
+    native_turn_read = None
     asset_sources = {}
 
     def __init__(self, close_callback) -> None:
