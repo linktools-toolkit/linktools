@@ -1403,6 +1403,7 @@ class _RegenerableTurnRunner:
                   "generation": turn.generation, "revision": turn.revision}
 
         attempts: dict[str, int] = {}
+        output_preview: tuple[str, int] | None = None
 
         def model_key(position: Mapping[str, JsonValue]) -> str | None:
             run, request = position.get("agent_run_seq"), position.get("model_request_seq")
@@ -1411,13 +1412,18 @@ class _RegenerableTurnRunner:
             return None
 
         def reset_preview(key: str, attempt: int) -> None:
+            nonlocal output_preview
+            if output_preview == (key, attempt):
+                output_preview = None
             self._publish(turn.key.session_id, {
                 **fields, "type": "preview_reset", "model_key": key, "attempt": attempt,
             })
 
         async def emit(emission: AgentEmission) -> None:
+            nonlocal output_preview
             if isinstance(emission, LiveDelta) and emission.event_type in (
                 ExecutionDeltaType.ASSISTANT_TEXT_DELTA, ExecutionDeltaType.ASSISTANT_THINKING_DELTA,
+                ExecutionDeltaType.ASSISTANT_OUTPUT_PREVIEW,
             ):
                 position = emission.position or {}
                 key = model_key(position)
@@ -1432,11 +1438,22 @@ class _RegenerableTurnRunner:
                         reset_preview(key, previous)
                     attempts[key] = attempt
                     scope = {"model_key": key, "attempt": attempt}
-                part_index = position.get("part_index")
-                if type(part_index) is int and part_index >= 0:
-                    scope["part_index"] = part_index
-                kind = "thinking" if emission.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA else "text"
-                if emission.content:
+                if emission.event_type is ExecutionDeltaType.ASSISTANT_OUTPUT_PREVIEW:
+                    name, sequence = position.get("preview_field"), position.get("preview_seq")
+                    if (key is not None and type(attempt) is int and attempt > 0
+                            and isinstance(name, str) and type(sequence) is int and sequence > 0):
+                        if output_preview is not None and output_preview != (key, attempt):
+                            reset_preview(*output_preview)
+                        output_preview = (key, attempt)
+                        self._publish(turn.key.session_id, {
+                            **fields, **scope, "type": "output_preview", "field": name,
+                            "preview_seq": sequence, "text": emission.content,
+                        })
+                elif emission.content:
+                    part_index = position.get("part_index")
+                    if type(part_index) is int and part_index >= 0:
+                        scope["part_index"] = part_index
+                    kind = "thinking" if emission.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA else "text"
                     self._publish(turn.key.session_id, {
                         **fields, **scope, "type": "delta", "delta_kind": kind, "text": emission.content,
                     })
@@ -1474,6 +1491,11 @@ class _RegenerableTurnRunner:
                     if (key is not None
                             and (status == "RUNNING" if emission.event_type is ExecutionEventType.MODEL_REQUEST_STARTED
                                  else status in ("SUCCEEDED", "FAILED", "CANCELLED"))):
+                        if status == "RUNNING" and output_preview is not None and output_preview[0] != key:
+                            # A new request supersedes an uncommitted candidate,
+                            # including when the previous provider call succeeded
+                            # but output validation requested a retry.
+                            reset_preview(*output_preview)
                         if status != "RUNNING":
                             attempt = attempts.pop(key, None)
                             if status != "SUCCEEDED" and attempt is not None:

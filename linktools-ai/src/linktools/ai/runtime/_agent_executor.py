@@ -1696,8 +1696,13 @@ def _event_stream_capability(
                 )
                 if elapsed_ms is not None:
                     position["thinking_elapsed_ms"] = elapsed_ms
-            if preview is not None:
-                attempt = (position.get("model_request_seq"), position.get("stream_attempt_seq"))
+            if preview is not None and "message_seq" not in position:
+                request_seq = position.get("model_request_seq")
+                if type(request_seq) is int:
+                    direct_attempt_seq = recorder.direct_stream_attempt_seq(request_seq)
+                    if direct_attempt_seq is not None:
+                        position["stream_attempt_seq"] = direct_attempt_seq
+                attempt = (request_seq, position.get("stream_attempt_seq"))
                 if preview_attempt is not None and preview_attempt != attempt:
                     preview = preview.new_stream()
                 preview_attempt = attempt

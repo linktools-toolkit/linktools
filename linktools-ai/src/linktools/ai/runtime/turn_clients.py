@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 _PREVIEW_BYTES = 256 * 1024
-_PREVIEW_TYPES = ("delta", "tool", "progress", "preview_reset", "thinking_completed")
+_PREVIEW_TYPES = ("delta", "tool", "progress", "preview_reset", "thinking_completed", "output_preview")
 _WAITING_STATES = {"WAITING_DEFERRED", "WAITING_RETRY"}
 _FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "RECOVERY_REQUIRED"}
 _END_STATES = _FINAL_STATES | _WAITING_STATES

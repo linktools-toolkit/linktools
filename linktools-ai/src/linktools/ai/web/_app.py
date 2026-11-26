@@ -269,6 +269,9 @@ def _native_turn_event_wire(
 ) -> Mapping[str, object] | None:
     """Project native preview events to fields used by the browser."""
     event_type = value.get("type")
+    if event_type == "output_preview":
+        fields = ("type", "turn_id", "generation", "model_key", "attempt", "field", "preview_seq", "text")
+        return {key: value[key] for key in fields}
     if event_type in _NATIVE_TURN_PREVIEWS:
         frame = {key: item for key, item in value.items() if key not in ("turn_no", "revision")}
         if event_type in ("progress", "tool"):

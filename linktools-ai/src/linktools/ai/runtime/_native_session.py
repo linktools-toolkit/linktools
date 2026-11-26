@@ -107,7 +107,9 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
         """Observe live previews (including thinking timing and model status) and settlement.
 
         With preview disabled, observe settlement and delivery gaps only.
-        A preview reset precedes replacement deltas. Earlier previews are not replayed.
+        Structured output previews carry only the chosen string field as a
+        replacement snapshot, not a validated result. A preview reset precedes
+        replacement deltas. Earlier previews are not replayed.
         """
         with TurnObserver(
             self._runtime, self.key.session_id, self.principal,

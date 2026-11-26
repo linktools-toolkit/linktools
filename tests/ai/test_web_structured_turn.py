@@ -97,3 +97,83 @@ async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, c
         assert replay.status_code == 200, replay.text
         assert replay.json()["items"] == terminal["items"]
         assert "output" not in replay.json() and CANONICAL_OUTPUT_TOOL_NAME not in replay.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opted_in", (False, True))
+async def test_native_structured_preview_is_live_selected_and_replaced_on_validation_retry(tmp_path, opted_in):
+    from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+
+    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.web._app import _native_turn_event_wire
+
+    class Policy(TenantAuthorizationPolicy):
+        pass
+
+    class Answer(BaseModel):
+        message: str
+        internal: str
+
+    requests = 0
+    finish_first_attempt = asyncio.Event()
+
+    async def respond(_messages, info):
+        nonlocal requests
+        requests += 1
+        [tool] = info.output_tools
+        if requests == 1:
+            yield {0: DeltaToolCall(name=tool.name, json_args='{"message":"first', tool_call_id="wrong")}
+            yield {0: DeltaToolCall(json_args=' draft')}
+            if opted_in:
+                # Do not complete the JSON before the selected preview is observed.
+                await finish_first_attempt.wait()
+            yield {0: DeltaToolCall(json_args='"}')}
+        else:
+            yield {0: DeltaToolCall(name=tool.name, json_args='{"internal":"no live leakage","message":"final',
+                                    tool_call_id="valid")}
+            yield {0: DeltaToolCall(json_args=' answer"}')}
+
+    features = _persistence_capabilities()
+    features.capability(ExecutionCapability(output_preview_field="message" if opted_in else None))
+    features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
+    model_features(_Models(FunctionModel(stream_function=respond)), features)
+    storage = PersistenceStorage.sqlite(tmp_path / "structured-preview.db")
+    expected = {"message": "final answer", "internal": "no live leakage"}
+
+    async with Runtime.open("structured-preview", storage=storage, features=features, authorization=Policy()) as runtime:
+        actor = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=actor)
+        frames = []
+        with TurnObserver(runtime, "session", actor, local_workspace=False) as observer:
+            turn = await runtime.sessions.start("session", "answer", agent="default", principal=actor,
+                                                idempotency_key="run", output=Answer)
+            try:
+                async with asyncio.timeout(10):
+                    async for frame in observer.events(turn.key.turn_id, append_only=False):
+                        frames.append(frame)
+                        if frame.get("type") == "output_preview" and frame.get("text") == "first draft":
+                            assert requests == 1
+                            assert (await turn.result()).view["conversation_committed"] is False
+                            finish_first_attempt.set()
+            finally:
+                finish_first_attempt.set()
+        terminal = frames[-1]
+        assert terminal["type"] == "terminal" and terminal["state"] == "succeeded"
+        assert terminal["output"] == expected and requests == 2
+        previews = [(i, frame) for i, frame in enumerate(frames) if frame["type"] == "output_preview"]
+        if not opted_in:
+            assert previews == []
+        else:
+            [(first, old), (second, new)] = [(i, value) for i, value in previews
+                                            if value["text"] in {"first draft", "final answer"}]
+            assert all(value["field"] == "message" and "no live leakage" not in str(value)
+                       for _, value in previews)
+            assert old["model_key"] != new["model_key"]
+            assert any(value["type"] == "preview_reset" and (value["model_key"], value["attempt"])
+                       == (old["model_key"], old["attempt"]) for value in frames[first + 1:second])
+            assert _native_turn_event_wire({**new, "raw_args": "secret"}) == {
+                key: new[key] for key in ("type", "turn_id", "generation", "model_key", "attempt",
+                                          "field", "preview_seq", "text")
+            }
+        replay = [value async for value in turn.observe()]
+        assert len(replay) == 1 and replay[0]["type"] == "terminal" and replay[0]["output"] == expected
