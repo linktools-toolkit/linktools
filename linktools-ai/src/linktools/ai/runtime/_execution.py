@@ -843,10 +843,14 @@ class DefaultExecutionService(TaskExecutionService):
         dependency_hold_id: str | None = None, binding_contract: "AgentBindingContract | None" = None,
         resolved_binding: AgentBinding | None = None, budget_scope_id: str | None = None,
     ) -> ExecutionHandle | None:
-        """Dispatch an actual Task node to its canonical session, if present."""
+        """Dispatch a session-bound Task through the configured Graph owner."""
         detect = self._canonical_graph_session
-        session_row = None if detect is None else await detect(session_id, request.principal)
+        if detect is None:
+            return None
+        session_row = await detect(session_id, request.principal)
         if session_row is None:
+            if self._start_attached_graph is not None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             return None
         if self._start_attached_graph is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)

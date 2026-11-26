@@ -83,6 +83,15 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
         engine = await stack.enter_async_context(TaskEngine.open(
             task, persistence=state, context=runtime.context, authorization=authorization,
         ))
+        if attachment == "none":
+            missing = TaskGraph("missing-session-graph", (TaskNode(
+                "agent", task=task, input=AgentTaskInput("not admitted", session_id="missing"),
+            ),))
+            refused = await engine.start(missing, principal=principal, idempotency_key="missing-session")
+            failed = (await refused.wait(timeout_seconds=10)).result
+            assert failed.node_states[0].error_code == "AUTHORIZATION_DENIED"
+            assert await state.conversation.sessions.get("missing", tenant_id=principal.tenant_id) is None
+            assert calls == 0
         graph = TaskGraph("source-graph", (TaskNode(
             "agent", task=task, input=AgentTaskInput(prompt, files=files, session_id=created.session_id),
         ),))
