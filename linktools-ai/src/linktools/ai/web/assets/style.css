@@ -288,7 +288,7 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 @media(max-width:620px){.conversation-nav{padding:0 16px;gap:22px}.conversation-nav button{font-size:12px}.native-toolbar{gap:8px;min-height:50px}.native-toolbar select{font-size:11px}.native-turn{max-width:75px}.native-status{font-size:10px}.native-message{grid-template-columns:1fr;gap:8px;padding:14px 0}.native-text{font-size:14px;line-height:23px}.native-literal{font-size:12px}.native-tool-heading{font-size:12px}.native-tool-result>.native-text{font-size:12px;line-height:20px}}
 
 .composer-bar>.composer-settings{display:flex;align-items:center;gap:8px;min-width:0}
-.thinking-control{display:flex;align-items:center;gap:6px;font-size:12px;min-width:0;white-space:nowrap}
+.thinking-control{display:flex;flex-flow:row nowrap;align-items:center;gap:6px;font-size:12px;min-width:0;white-space:nowrap}
 .thinking-control output{color:var(--muted);text-align:right}
 .thinking-control input{width:clamp(40px,9vw,108px);min-width:36px;margin:0;padding:0;accent-color:var(--accent)}
 .planning-control{display:flex;flex-direction:row;align-items:center;gap:6px;white-space:nowrap;font-size:12px}
