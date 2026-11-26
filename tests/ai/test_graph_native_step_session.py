@@ -24,7 +24,7 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("attachment", ("none", "file", "binary"))
+@pytest.mark.parametrize("attachment", ("none", "file", "binary", "mixed"))
 async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: Path, attachment: str) -> None:
     calls = 0
     seen: list[bytes] = []
@@ -32,10 +32,22 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
     workspace.mkdir()
     file = workspace / "source.txt"
     file.write_bytes(b"workspace-file")
-    files = ("source.txt",) if attachment == "file" else ()
-    binary = b"binary-content"
-    prompt = ("graph question", BinaryContent(binary, media_type="application/octet-stream")) if attachment == "binary" else "graph question"
-    expected = {"none": [], "file": [b"workspace-file"], "binary": [binary]}[attachment]
+    second = workspace / "second.txt"
+    second.write_bytes(b"second-file")
+    files = {"file": ("source.txt",), "mixed": ("source.txt", "second.txt")}.get(attachment, ())
+    binary, tail = b"binary-content", b"binary-tail"
+    prompt: str | tuple[str | BinaryContent, ...] = "graph question"
+    if attachment == "binary":
+        prompt = ("graph question", BinaryContent(binary, media_type="application/octet-stream"))
+    elif attachment == "mixed":
+        prompt = (
+            "graph question", BinaryContent(binary, media_type="application/octet-stream"),
+            "following text", BinaryContent(tail, media_type="application/octet-stream"),
+        )
+    expected = {
+        "none": [], "file": [b"workspace-file"], "binary": [binary],
+        "mixed": [b"workspace-file", b"second-file", binary, tail],
+    }[attachment]
 
     async def model(_messages, _info):
         nonlocal calls
@@ -88,6 +100,7 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
         assert await state.conversation.sessions.get(created.session_id, tenant_id=principal.tenant_id) is None
 
     file.unlink()
+    second.unlink()
     async with (
         Persistence.open(namespace, storage=storage) as reopened,
         History.open(persistence=reopened, authorization=authorization) as history,
@@ -95,6 +108,7 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
         turn = await history.turn_result(created.session_id, execution_id, principal=principal)
         assert turn["conversation_committed"] and turn["output"] == {"text": "retained graph output"}
         projected = turn["user_input"]["attachments"]
-        assert [item["size"] for item in projected] == [len(item) for item in expected]
+        assert sorted(item["size"] for item in projected) == sorted(map(len, expected))
+        assert all(set(item) == {"attachment_id", "source", "media_type", "size", "position"} for item in projected)
     assert calls == 1
     assert seen == expected

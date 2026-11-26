@@ -23,7 +23,7 @@ from pydantic_ai.messages import (
 
 from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
-from . import ReferencedContent, ReferencedInputOrigin
+from ._referenced_content import ReferencedContent, ReferencedInputOrigin
 from ._wire_fields import decode_fields
 from ._json_snapshot import stable_json_snapshot
 

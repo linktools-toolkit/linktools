@@ -15,7 +15,8 @@ from ._referenced_content import ReferencedContent, ReferencedInputOrigin
 from ._referenced_input import ReferencedInputModel
 from ._response import project_model_attempts, project_model_response_attempts
 
-from ._user_input import (capture_native_graph_input, native_graph_input_content, native_graph_input_metadata, capture_plain_text_input, plain_text_input_content, StoredUserInput, CanonicalUserInput, MaterializedUserContent, append_user_input_text, UserPromptInput, validate_user_content, validate_user_input, normalize_input_files)
+from ._graph_input import capture_native_graph_input, native_graph_input_content, native_graph_input_metadata
+from ._user_input import (capture_plain_text_input, plain_text_input_content, StoredUserInput, CanonicalUserInput, MaterializedUserContent, append_user_input_text, UserPromptInput, validate_user_content, validate_user_input, normalize_input_files)
 
 __all__ = [
     "capture_plain_text_input", "plain_text_input_content",
