@@ -126,7 +126,7 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
             refused = await engine.start(missing, principal=principal, idempotency_key="missing-session")
             failed = (await refused.wait(timeout_seconds=10)).result
             assert failed.node_states[0].error_code == "AUTHORIZATION_DENIED"
-            assert await state.conversation.sessions.get("missing", tenant_id=principal.tenant_id) is None
+            assert state.conversation.sessions is None
             assert calls == 0
         graph = TaskGraph("source-graph", (TaskNode(
             "agent", task=task, input=AgentTaskInput(prompt, files=files, session_id=created.session_id),
@@ -142,7 +142,7 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
         execution = await state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
         assert execution is not None and execution.requires_task_invocation_capture
         assert execution.restart_checkpoints and not execution.durable_trace and execution.session_id is None
-        assert await state.conversation.sessions.get(created.session_id, tenant_id=principal.tenant_id) is None
+        assert state.conversation.sessions is None
 
     file.unlink()
     second.unlink()

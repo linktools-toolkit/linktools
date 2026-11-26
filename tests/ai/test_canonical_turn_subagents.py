@@ -311,7 +311,7 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
             assert original.tool_call_id == _DELEGATE_CALL and original.status.value == "EFFECT_UNKNOWN"
 
         assert await state.execution.executions.get(turn_id, tenant_id=runtime.tenant_id) is None
-        assert await state.conversation.sessions.get(_SESSION, tenant_id=runtime.tenant_id) is None
+        assert state.conversation.sessions is None
 
     async with open_host() as (state, runtime, _, http):
         if recover:
@@ -470,7 +470,7 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path,
         [child_id] = child_ids
         assert child_id != turn.key.turn_id
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id=runtime.tenant_id) is None
-        assert await state.conversation.sessions.get(_SESSION, tenant_id=runtime.tenant_id) is None
+        assert state.conversation.sessions is None
         replay = await runtime.sessions.start(
             _SESSION, "Confirm fixture A first", agent="default", principal=principal, idempotency_key="original",
         )

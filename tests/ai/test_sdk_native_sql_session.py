@@ -63,13 +63,13 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
             await agent.start("must not create a legacy session", principal=principal,
                               session_id="absent", idempotency_key="missing")
         assert missing.value.code is ErrorCode.AUTHORIZATION_DENIED
-        assert await state.conversation.sessions.get("absent", tenant_id=principal.tenant_id) is None
+        assert state.conversation.sessions is None
         with pytest.raises(AIError) as missing:
             await runtime.sessions.get("absent", principal=principal)
         assert missing.value.code is ErrorCode.AUTHORIZATION_DENIED
         native_created = await agent.create_session("agent-created", principal=principal)
         assert (await native_created.inspect())["session_id"] == "agent-created"
-        assert await state.conversation.sessions.get("agent-created", tenant_id=principal.tenant_id) is None
+        assert state.conversation.sessions is None
         async with asyncio.timeout(10), opened.start("Hello", agent=agent, idempotency_key="send") as (turn, frames):
             assert turn.key.session_id == "chat"
             terminal = [frame async for frame in frames][-1]
@@ -149,7 +149,7 @@ async def test_sql_host_without_session_authorization_does_not_fall_back(tmp_pat
             with pytest.raises(AIError) as missing:
                 await operation()
             assert missing.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-        assert await state.conversation.sessions.get("chat", tenant_id=principal.tenant_id) is None
+        assert state.conversation.sessions is None
         standalone = await agent.start("no session requested")
         assert (await standalone.wait(timeout_seconds=5)).result.output == {"text": "standalone"}
 
@@ -270,7 +270,7 @@ async def test_agent_bound_native_session_mutations_use_canonical_revisions(tmp_
         assert (await child.inspect())["status"] == "CLOSED"
         assert (await bound.inspect())["status"] == "OPEN"
         for session_id in ("source", "child", "stale"):
-            assert await state.conversation.sessions.get(session_id, tenant_id=runtime.tenant_id) is None
+            assert state.conversation.sessions is None
 
         with pytest.raises(AIError) as invalid:
             await bound.close(expected_revision=source_revision + 1, force=True)
