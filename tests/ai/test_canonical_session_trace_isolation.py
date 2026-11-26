@@ -249,3 +249,99 @@ async def test_session_starts_with_unreachable_separate_trace(tmp_path: Path) ->
     finally:
         await trace.dispose()
         await primary.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split_trace", (False, True))
+async def test_model_messages_select_earlier_turns_after_sqlite_reopen(tmp_path: Path, split_trace: bool) -> None:
+    from pydantic_ai.messages import UserPromptPart
+
+    from linktools.ai.web import create_app
+
+    from .test_web_console import client
+
+    primary = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'history.db'}")
+    trace = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'trace.db'}") if split_trace else primary
+    route = StorageRoute.sql(primary)
+    plan = PersistencePlan.from_default(route)
+    if split_trace:
+        plan = replace(plan, trace=StorageRoute.sql(trace))
+    storage = PersistenceStorage.from_plan(plan)
+    policy = _SessionPolicy()
+    namespace = "session-trace-multiple-turns"
+    provider_history = []
+
+    async def model(messages, _info):
+        provider_history.append([
+            part.content for message in messages for part in message.parts
+            if isinstance(part, (UserPromptPart, TextPart))
+        ])
+        return ModelResponse(parts=[TextPart(f"answer-{len(provider_history)}")])
+
+    features = RuntimeFeatures(namespace)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    features.capability(TraceCapability(commit=CommitPolicy.sync()), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(_UsageFunctionModel(model)), features)
+    turns = []
+
+    async def verify(history):
+        reads = []
+        async with client(create_app(history=history, local_workspace=True)) as http:
+            for number, turn_id in reversed(list(enumerate(turns, 1))):
+                params = {"session_id": "chat", "turn_id": turn_id}
+                events = await http.get("/api/session", params={**params, "trace": "true"})
+                assert events.status_code == 200, events.text
+                evidence = events.json()["items"]
+                assert [(item["turn_id"], item["payload"]["kind"]) for item in evidence] == [
+                    (turn_id, "MODEL_REQUEST"), (turn_id, "MODEL_RESPONSE"),
+                ]
+                response = await http.get("/api/session", params={
+                    **params, "models": "true", "model_request_seq": 1, "include_content": "true",
+                })
+                assert response.status_code == 200, response.text
+                item, = response.json()["items"]
+                assert item["turn_id"] == turn_id
+                assert all(value in str(item["request"]["messages"]) for value in provider_history[number - 1])
+                assert f"question-{number + 1}" not in str(item["request"]["messages"])
+                assert f"answer-{number}" in str(item["response"])
+                reads.append((evidence, item))
+        return reads
+
+    try:
+        await provision_database(primary)
+        if split_trace:
+            await provision_database(trace)
+        async with (
+            Persistence.open(namespace, storage=storage) as state,
+            Runtime.open(persistence=state, features=features, authorization=policy) as runtime,
+        ):
+            principal = runtime.default_principal
+            session = await runtime.agents.get().create_session("chat", principal=principal)
+            for number in range(1, 4):
+                turn = await runtime.sessions.start(
+                    session.session_id, f"question-{number}", agent=runtime.agents.get(), principal=principal,
+                    idempotency_key=f"request-{number}",
+                )
+                assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+                turn_id = turn.key.turn_id
+                await _wait_for_committed(
+                    lambda: runtime.history.turn_trace("chat", turn_id, principal=principal),
+                    lambda page: len(page.items) == 2,
+                )
+                turns.append(turn_id)
+            assert provider_history == [
+                ["question-1"],
+                ["question-1", "answer-1", "question-2"],
+                ["question-1", "answer-1", "question-2", "answer-2", "question-3"],
+            ]
+            warm = await verify(runtime.history)
+        async with (
+            Persistence.open(namespace, storage=storage, read_only=True) as state,
+            History.open(persistence=state, authorization=policy) as history,
+        ):
+            assert await verify(history) == warm
+    finally:
+        if split_trace:
+            await trace.dispose()
+        await primary.dispose()
