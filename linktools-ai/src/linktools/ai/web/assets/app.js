@@ -2994,7 +2994,8 @@ function renderOrdinaryTrace(container) {
     band.append(element('span','',label),track);
     for(const {from,to,last,elapsed} of spans){
       const span=element('span',`trace-band-span ${label.toLowerCase()}${['FAILED','EFFECT_UNKNOWN'].includes(last.status)?' failed':''}`);
-      span.setAttribute('style',`left:${100*(from-start)/range}%;width:${100*(to-from)/range}%`);
+      span.style.left=`${100*(from-start)/range}%`;
+      span.style.width=`${100*(to-from)/range}%`;
       span.title=`${last.tool_name || (last.model_request_seq!=null?'Request '+last.model_request_seq:label)} · ${duration(elapsed)}`;
       track.append(span);
     }

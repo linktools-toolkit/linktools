@@ -8,7 +8,7 @@ const readOnly=process.argv[3]==='readonly';
 const root=process.argv[2], html=readFileSync(resolve(root,'index.html'),'utf8');
 class Element {
   constructor(tag='div') {
-    this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.hidden=false;this.disabled=false;
+    this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.style={};this.hidden=false;this.disabled=false;
     this.isConnected=false;this.value='';this.checked=false;this.open=false;this.className='';this.scrollTop=0;this.clientHeight=300;this._text='';
     if(this.tagName==='DETAILS')Object.defineProperty(this,'name',{get:()=>this.getAttribute('name') || '',set:value=>this.setAttribute('name',typeof value==='object'?'[object HTMLElement]':value)});
     this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on??!names.has(name))names.add(name);else names.delete(name);this.className=[...names].join(' ');},remove:name=>this.classList.toggle(name,false),add:name=>this.classList.toggle(name,true)};
@@ -378,7 +378,8 @@ if(process.argv[3]==='native-model-messages') {
   assert.equal(tiedSpans.length,2,'recorded terminal timing renders despite tied timestamps or missing start/ID');
   assert.match(tiedSpans[0].title,/255.000 ms/);
   assert.match(tiedSpans[1].title,/Measured without start or ID.*42.000 ms/);
-  assert.match(tiedSpans[0].getAttribute('style'),/width:100%/);
+  assert.equal(tiedSpans[0].style.width,'100%');
+  assert.equal(tiedSpans[0].getAttribute('style') ?? null,null,'do not set an inline style attribute under CSP');
   const missingPage=deferred('GET /api/sessions/b'),missing=rows().find(row=>row.getAttribute('aria-label')==='Model request 3').click();await missingPage.requested;
   assert.equal(models().at(-1).query.turn_id,last);assert.equal(models().at(-1).query.model_request_seq,'3');
   missingPage({items:[],next_cursor:null});await missing;
