@@ -566,10 +566,11 @@ class _Console:
             if (models != "true" or not self.turn_sessions or include_timeline != "true"
                     or "execution_id" in request.query_params or "trace" in request.query_params):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Model interactions require an exact canonical turn")
+            sequence = request.query_params.get("model_request_seq")
             return _json(await history.turn_model_interactions(
                 identity, _text(request.query_params, "turn_id"), principal=self.principal,
                 local_workspace=self.local_turn_workspace, include_content=_content(request),
-                **_paging(request),
+                model_request_seq=None if sequence is None else int(sequence), **_paging(request),
             ))
         trace = request.query_params.get("trace")
         if trace is not None:

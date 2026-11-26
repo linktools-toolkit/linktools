@@ -169,9 +169,15 @@ async def test_session_trace_sink_cannot_hold_or_fail_authoritative_turn(
                     metadata = await http.get("/api/session", params=params)
                     assert metadata.status_code == 200, metadata.text
                     exact = await http.get("/api/session", params={
-                        **params, "include_content": "true",
+                        **params, "include_content": "true", "model_request_seq": 1,
                     })
                     assert exact.status_code == 200, exact.text
+                    assert exact.json()["next_cursor"] is None
+                    absent = await http.get("/api/session", params={**params, "model_request_seq": 2})
+                    assert absent.status_code == 200 and absent.json() == {"items": [], "next_cursor": None}
+                    for selection in ({"model_request_seq": 0}, {"model_request_seq": 1, "cursor": "invalid"}):
+                        malformed = await http.get("/api/session", params={**params, **selection})
+                        assert malformed.status_code == 400, malformed.text
                     wrong_session = await http.get("/api/session", params={**params, "session_id": "other"})
                     assert wrong_session.status_code == 404
                     if sink == "healthy":
@@ -185,7 +191,7 @@ async def test_session_trace_sink_cannot_hold_or_fail_authoritative_turn(
                     else:
                         assert exact.json() == {"items": [], "next_cursor": None}
                 async with client(create_app(history=history, local_workspace=False)) as http:
-                    denied = await http.get("/api/session", params={**params, "include_content": "true"})
+                    denied = await http.get("/api/session", params={**params, "include_content": "true", "model_request_seq": 1})
                     assert denied.status_code == 404
         assert calls == 1
     finally:

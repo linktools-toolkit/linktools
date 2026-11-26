@@ -379,23 +379,31 @@ class _OrdinarySessionHistory:
     async def turn_model_interactions(
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
         source: StateStepArchive | None, cursor: str | None, limit: int,
-        include_content: bool,
+        include_content: bool, model_request_seq: int | None,
     ) -> Page[dict[str, JsonValue]]:
         await self._authorize_turn_trace(session_id, turn_id, principal, local_workspace=local_workspace)
         if include_content and not local_workspace:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         limit = validate_page_limit(limit)
         kind = "SESSION_TURN_MODELS"
-        digest = canonical_sha256({
-            "session": session_id, "turn": turn_id, "principal": principal_identity_payload(principal),
-            "include_content": include_content,
-        })
-        after = self._cursor_position(cursor, kind, digest) if cursor is not None else 0
+        digest = None
+        if model_request_seq is None:
+            digest = canonical_sha256({
+                "session": session_id, "turn": turn_id, "principal": principal_identity_payload(principal),
+                "include_content": include_content,
+            })
+            after = self._cursor_position(cursor, kind, digest) if cursor is not None else 0
+            read_limit = limit + 1
+        else:
+            if type(model_request_seq) is not int or not 0 < model_request_seq <= (1 << 63) - 1 or cursor is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            after = model_request_seq - 1
+            read_limit = 1
         if not isinstance(source, ModelInteractionStateStepArchive):
             return Page((), None)
         run, rows = await source.read_model_interactions_with_run(
             agent_run_id=turn_id, after_model_request_seq=after,
-            limit=limit + 1,
+            limit=read_limit,
         )
         if run is None:
             if rows:
@@ -406,7 +414,8 @@ class _OrdinarySessionHistory:
         previous = after
         for value in rows:
             if (not isinstance(value, ModelInteractionRecord) or value.agent_run_id != turn_id
-                    or value.model_request_seq <= previous):
+                    or value.model_request_seq <= previous
+                    or model_request_seq is not None and value.model_request_seq != model_request_seq):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             previous = value.model_request_seq
         selected = rows[:limit]
@@ -418,7 +427,8 @@ class _OrdinarySessionHistory:
             ))
             del projected["execution_id"]
             items.append({"turn_id": turn_id, **projected})
-        next_cursor = self._next_cursor(selected[-1].model_request_seq, kind, digest) if len(rows) > limit else None
+        next_cursor = (self._next_cursor(selected[-1].model_request_seq, kind, digest)
+                       if digest is not None and len(rows) > limit else None)
         return Page(tuple(items), next_cursor)
 
     async def turn_result(
