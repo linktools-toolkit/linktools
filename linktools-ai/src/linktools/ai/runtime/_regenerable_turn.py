@@ -638,7 +638,7 @@ class _RegenerableTurnRunner:
         await authorization.authorize(
             principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id),
         )
-        turn = await self._store.get_turn(key)
+        turn = await self._store.get_turn_for_recovery(key)
         if turn is None:
             return False
         await authorization.authorize(
