@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import CommitPolicy, ExecutionStatus, IdempotencyStatus, canonical_sha256
+from linktools.ai.core import CommitPolicy, ExecutionStatus, IdempotencyStatus, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage, StateTurnResources
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -32,166 +32,168 @@ async def _runtime(path, model):
         yield persistence, runtime
 
 
+class _HostAuthorization(TenantAuthorizationPolicy):
+    """Supply explicit session authorization to the canonical SQL runtime."""
+
+
+@asynccontextmanager
+async def _native_runtime(path, model):
+    features = RuntimeFeatures("native-admission")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(_UsageFunctionModel(model)), features)
+    async with (
+        Persistence.open("native-admission", storage=PersistenceStorage.from_root(path)) as state,
+        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
+    ):
+        yield state, runtime
+
+
+async def _native_start(runtime, *, prompt="question", request_id="request"):
+    return await runtime.sessions.start(
+        "session", prompt, principal=runtime.default_principal,
+        agent=runtime.agents.get(), idempotency_key=request_id,
+    )
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["owned", "not_committed", "retired"])
-async def test_grouped_admission_confirms_both_receipts_after_unknown_ack(tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize("committed", [False, True], ids=("rolled-back", "committed"))
+async def test_native_admission_reads_exact_receipt_after_unknown_ack(tmp_path, monkeypatch, committed):
     launched = 0
 
-    async def model(messages, info):
+    async def model(_messages, _info):
         nonlocal launched
         launched += 1
         return ModelResponse(parts=[TextPart("answer")])
 
-    async with _runtime(tmp_path / "state.db", model) as (persistence, runtime):
+    async with _native_runtime(tmp_path, model) as (state, runtime):
         await runtime.agents.get().create_session("session")
-        tenant = runtime.default_principal.tenant_id
-        backend = runtime._execution_service.runtime_backend()
-        source = persistence.execution.executions.state_store.storage_group
-        original_mutate = source.mutate
-        original_command = backend._runtime_commands.claim_and_reserve_start
-        injecting = False
-        attempted = 0
+        turns = state.session_turns
+        original = turns.accept
+        attempted = []
         unknown = AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
-        async def command(*args, **kwargs):
-            nonlocal injecting
-            injecting = True
-            try:
-                return await original_command(*args, **kwargs)
-            finally:
-                injecting = False
+        async def lose_ack(key, **kwargs):
+            attempted.append(key)
+            if committed:
+                assert await original(key, **kwargs)
+            raise unknown
 
-        async def mutate(stores, callback):
-            nonlocal attempted, injecting
-            if injecting:
-                attempted += 1
-                if outcome != "not_committed":
-                    confirmed = await original_mutate(stores, callback)
-                    assert confirmed[0].lease is not None and confirmed[1].created
-                    if outcome == "retired":
-                        injecting = False
-                        assert await persistence.coordination_backend.release_turn(confirmed[0].lease)
-                raise unknown
-            return await original_mutate(stores, callback)
-
-        monkeypatch.setattr(backend._runtime_commands, "claim_and_reserve_start", command)
-        monkeypatch.setattr(source, "mutate", mutate)
-        if outcome == "owned":
-            handle = await runtime.sessions.start(
-                "session", "question", principal=runtime.default_principal, idempotency_key="request",
-            )
-            assert (await handle.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
-            receipt = await persistence.execution.idempotency.get("session.resume", "request", tenant_id=tenant)
-            assert receipt.resource_id == handle.execution_id
-            assert launched == 1
-        else:
-            with pytest.raises(AIError) as failure:
-                await runtime.sessions.start(
-                    "session", "question", principal=runtime.default_principal, idempotency_key="request",
-                )
-            assert failure.value is unknown
-            receipt = await persistence.execution.idempotency.get("session.resume", "request", tenant_id=tenant)
-            if outcome == "retired":
-                assert receipt is not None and receipt.status is IdempotencyStatus.STARTED
+        with monkeypatch.context() as patch:
+            patch.setattr(turns, "accept", lose_ack)
+            if committed:
+                recovered_receipt = await _native_start(runtime)
             else:
-                assert receipt is None
-            assert launched == 0
-        assert attempted == 1
+                with pytest.raises(AIError) as rejected:
+                    await _native_start(runtime)
+                assert rejected.value is unknown
+
+        [first_key] = attempted
+        assert launched == 0
+        session = await turns.get_session("session")
+        row = await turns.find_request("session", "request")
+        if committed:
+            assert recovered_receipt.key == first_key
+            assert row["turn_id"] == session["active_turn_id"] == first_key.turn_id.encode()
+            accepted_row = await turns.get_turn(first_key)
+            assert accepted_row["generation"] == 1 and accepted_row["state"] == "accepted"
+            same = await _native_start(runtime)
+            assert same.key == first_key and launched == 0
+            assert not await runtime.sessions.recover_turn("session", first_key.turn_id, principal=runtime.default_principal)
+            # Deterministically move only the fixture's lease to the past. The
+            # public recovery call must acquire the next generation itself.
+            async with turns._context.engine.begin() as connection:
+                changed = await connection.execute(turns._turns.update().filter_by(
+                    **turns._turn_values(first_key), generation=1, state="accepted",
+                ).values(lease_until=0))
+                assert changed.rowcount == 1
+            assert await runtime.sessions.recover_turn("session", first_key.turn_id, principal=runtime.default_principal)
+            assert (await same.wait_final(timeout_seconds=8)).status is ExecutionStatus.SUCCEEDED
+            assert (await turns.get_turn(first_key))["generation"] == 2
+        else:
+            assert row is None and session["active_turn_id"] is None
+            retry = await _native_start(runtime)
+            assert retry.key != first_key
+            assert (await retry.wait_final(timeout_seconds=8)).status is ExecutionStatus.SUCCEEDED
+        assert launched == 1
 
 
 @pytest.mark.asyncio
-async def test_grouped_admission_caller_cancel_does_not_change_committed_turn(tmp_path, monkeypatch):
-    entered, settle = asyncio.Event(), asyncio.Event()
+async def test_native_admission_caller_cancel_does_not_cancel_committed_turn(tmp_path, monkeypatch):
+    committed, release = asyncio.Event(), asyncio.Event()
     launched = 0
 
-    async def model(messages, info):
+    async def model(_messages, _info):
         nonlocal launched
         launched += 1
         return ModelResponse(parts=[TextPart("answer")])
 
-    async with _runtime(tmp_path / "state.db", model) as (persistence, runtime):
+    async with _native_runtime(tmp_path, model) as (state, runtime):
         await runtime.agents.get().create_session("session")
-        tenant = runtime.default_principal.tenant_id
-        backend = runtime._execution_service.runtime_backend()
-        commands = backend._runtime_commands
-        original = commands.claim_and_reserve_start
+        turns = state.session_turns
+        original = turns.accept
+        keys = []
 
-        async def delayed_ack(*args, **kwargs):
-            result = await original(*args, **kwargs)
-            assert result is not None and result[0].lease is not None and result[1].created
-            entered.set()
-            await settle.wait()
-            return result
+        async def delay_ack(key, **kwargs):
+            accepted = await original(key, **kwargs)
+            assert accepted
+            keys.append(key)
+            committed.set()
+            await release.wait()
+            return accepted
 
-        monkeypatch.setattr(commands, "claim_and_reserve_start", delayed_ack)
-        task = asyncio.create_task(runtime.sessions.start(
-            "session", "question", principal=runtime.default_principal, idempotency_key="request",
-        ))
+        monkeypatch.setattr(turns, "accept", delay_ack)
+        sending = asyncio.create_task(_native_start(runtime))
         try:
-            await asyncio.wait_for(entered.wait(), 8)
-            task.cancel()
+            await asyncio.wait_for(committed.wait(), 8)
+            sending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await sending
+            duplicate = await _native_start(runtime)
+            assert keys == [duplicate.key] and launched == 0
         finally:
-            settle.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        monkeypatch.setattr(commands, "claim_and_reserve_start", original)
-        replay = await runtime.sessions.start(
-            "session", "question", principal=runtime.default_principal, idempotency_key="request",
-        )
-        owner = backend._turn_owners.get(replay.execution_id)
-        assert (await replay.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
-        if owner is not None:
-            await asyncio.wait_for(owner.closed.wait(), 8)
-        receipt = await persistence.execution.idempotency.get("session.resume", "request", tenant_id=tenant)
-        assert receipt.status is IdempotencyStatus.COMPLETED and receipt.resource_id == replay.execution_id
+            release.set()
+            await asyncio.gather(sending, return_exceptions=True)
+
+        result = await duplicate.wait_final(timeout_seconds=8)
+        assert result.status is ExecutionStatus.SUCCEEDED and result.key == duplicate.key
         assert launched == 1
-        assert (await runtime.sessions.inspect("session", principal=runtime.default_principal)).active_execution_id is None
+        assert (await turns.get_session("session"))["active_turn_id"] is None
 
 
 @pytest.mark.asyncio
-async def test_grouped_admission_live_owner_conflict_never_consumes_another_key(tmp_path):
+async def test_native_live_owner_conflict_never_consumes_another_request(tmp_path):
     entered, finish = asyncio.Event(), asyncio.Event()
     runs = 0
 
-    async def model(messages, info):
+    async def model(_messages, _info):
         nonlocal runs
         runs += 1
         entered.set()
         await finish.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    path = tmp_path / "state.db"
     async with (
-        _runtime(path, model) as (_, owner),
-        _runtime(path, model) as (source, contender),
+        _native_runtime(tmp_path, model) as (_, owner),
+        _native_runtime(tmp_path, model) as (state, contender),
     ):
         await owner.agents.get().create_session("session")
-        await owner.agents.get().create_session("another")
-        tenant = owner.default_principal.tenant_id
-        first = await owner.sessions.start(
-            "session", "original", principal=owner.default_principal, idempotency_key="first",
-        )
+        first = await _native_start(owner)
         try:
             await asyncio.wait_for(entered.wait(), 8)
-            duplicate = await contender.sessions.start(
-                "session", "original", principal=contender.default_principal, idempotency_key="first",
-            )
-            assert duplicate.execution_id == first.execution_id
+            duplicate = await _native_start(contender)
+            assert duplicate.key == first.key
             with pytest.raises(AIError) as busy:
-                await contender.sessions.start(
-                    "session", "new", principal=contender.default_principal, idempotency_key="unused",
-                )
+                await _native_start(contender, prompt="new", request_id="unused")
             assert busy.value.code is ErrorCode.SESSION_BUSY
-            assert await source.execution.idempotency.get("session.resume", "unused", tenant_id=tenant) is None
+            assert await state.session_turns.find_request("session", "unused") is None
             with pytest.raises(AIError) as conflict:
-                await contender.sessions.start(
-                    "another", "original", principal=contender.default_principal, idempotency_key="first",
-                )
+                await _native_start(contender, prompt="changed")
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
             assert runs == 1
         finally:
             finish.set()
-        assert (await first.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
+        assert (await first.wait_final(timeout_seconds=8)).status is ExecutionStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
