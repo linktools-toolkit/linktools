@@ -258,6 +258,14 @@ def test_json_without_dry_run_fails_before_side_effects(fresh_manager, monkeypat
     assert calls == []
 
 
+def test_up_prune_dry_run_describes_cleanup_without_deploying(fresh_manager, monkeypatch, capsys):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.compose_operations, "up", lambda **kwargs: pytest.fail("unexpected deployment"))
+    cntr_main.command.on_command_up(names=["portainer"], pull=True, prune=True, dry_run=True, as_json=True)
+    result = json.loads(capsys.readouterr().out)
+    assert any("only replaced" in warning for warning in result["warnings"])
+
+
 def test_cntr_help_has_no_removed_plan_command():
     result = subprocess.run(
         [sys.executable, "-m", "linktools.cntr.__main__", "--help"],
