@@ -157,7 +157,24 @@ jobs:
             rm -f "$check_log"
             check_log=
           }
-          # Keep the bounded diagnostics when cancellation interrupts a running check.
+          run_check() {
+            case " $PYTEST_ADDOPTS " in
+              *" --test-shard=1/5 "*)
+                # The runner can kill the shell before its exit trap flushes.
+                # Show bounded progress without changing the check or its result.
+                python manage.py check "$1" --skip-compatibility --test-tier "$TEST_TIER" 2>&1 |
+                  tee "$check_log" |
+                  LC_ALL=C awk 'used < 8192 {
+                    line = substr($0, 1, 256)
+                    if (used + length(line) + 1 <= 8192) { print line; fflush() }
+                    used += length(line) + 1
+                  }'
+                ;;
+              *)
+                python manage.py check "$1" --skip-compatibility --test-tier "$TEST_TIER" >"$check_log" 2>&1
+                ;;
+            esac
+          }
           trap finish_check_log EXIT
           trap 'exit 130' INT
           trap 'exit 143' TERM
@@ -167,7 +184,7 @@ jobs:
           for package in "${packages[@]}"; do
             echo "::group::$package"
             check_log=$(mktemp)
-            if python manage.py check "$package" --skip-compatibility --test-tier "$TEST_TIER" >"$check_log" 2>&1; then
+            if run_check "$package"; then
               code=0
               result=success
             else
