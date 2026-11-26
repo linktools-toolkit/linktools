@@ -44,7 +44,7 @@ from ...task import (
     TaskResultRef,
 )
 from ...inputs import decode_task_prompt_draft, merge_captured_input_files, task_prompt_draft
-from ...execution import ExecutionInputContext, StoredUserInput
+from ...execution import Execution, ExecutionInputContext, StoredUserInput
 from ...persistence.codec import encode_domain
 from ...inputs import (
     AgentTaskInput,
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from ...runtime.agent_execution import AgentExecutionPort
     from ...core import RunBudget
     from ...task import RecoverGraphRequest, TaskNodeView
-    from ...execution import Execution, ExecutionRecord, ExecutionView
+    from ...execution import ExecutionRecord, ExecutionView
     from ...persistence import Persistence
     from ...persistence.contracts import TaskAdmissionRepository, BudgetRepository
     from ._runner import TaskNodeExecutor
@@ -719,7 +719,9 @@ class AgentTaskRunner(Generic[AppT]):
         elif current != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await control.handoff_execution(execution_id)
-        capture_confirmed = capture_confirmed or execution.task_invocation_captured
+        capture_confirmed = capture_confirmed or (
+            isinstance(execution, Execution) and execution.task_invocation_captured
+        )
         if not capture_confirmed:
             await self._capture_invocation(execution, execution_id, invocation)
         if capture_confirmed or linked_waiting:

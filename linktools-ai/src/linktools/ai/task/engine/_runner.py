@@ -1401,7 +1401,7 @@ class TaskNodeExecutor(Generic[AppT]):
         for node, node_state, execution, agent_runner in candidates:
             node_state = await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
             await agent_runner.bind_existing_execution(execution.execution_id, admission.principal)
-            if await agent_runner.execution_port.is_linked_graph_turn(
+            if node.input.get("session_id") is not None and await agent_runner.execution_port.is_linked_graph_turn(
                 execution.execution_id, principal=request.principal,
             ):
                 deadline = agent_runner.deadline_policy(node, execution.started_at, self._budget_scopes.get(graph_id))
@@ -2630,8 +2630,8 @@ class TaskNodeExecutor(Generic[AppT]):
             node_id=node.node_id,
             request=False,
         )
-        if (isinstance(handler, _TaskRunnerAdapter) and isinstance(handler.runner, AgentTaskRunner)
-                and invocation.cancel_authority is not None):
+        if (body.get("session_id") is not None and isinstance(handler, _TaskRunnerAdapter)
+                and isinstance(handler.runner, AgentTaskRunner) and invocation.cancel_authority is not None):
             if await handler.runner.settle_bound_graph_cancel(
                 invocation, execution_id, invocation.cancel_authority,
             ):

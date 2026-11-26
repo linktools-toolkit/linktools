@@ -560,10 +560,21 @@ class RuntimeSessions(Generic[AppT]):
             finally:
                 detach()
 
+    async def _has_native_session(self, session_id: str) -> bool:
+        if not self.supports_turn_sessions:
+            return False
+        validate_resource_id(session_id)
+        runner, _ = self._require_turn_sessions()
+        return await runner._store.get_session(session_id) is not None
+
+    async def _require_agent_session(self, session_id: str) -> None:
+        if await self._has_native_session(session_id):
+            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT, "Use start_turn for an existing native SQL session")
+
     async def get(
         self, session_id: str, *, principal: Principal | None = None,
     ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
-        if self._uses_turn_sessions:
+        if await self._has_native_session(session_id):
             _, runtime = self._require_turn_sessions()
             session = self._bind_native_session(
                 session_id, principal=runtime._resolve_principal(principal), local_workspace=False,
@@ -578,23 +589,15 @@ class RuntimeSessions(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
         planning: bool | None = None, thinking: "ThinkingValue | None" = None,
     ) -> "Execution[AppT]":
-        """Start a non-SQL session execution using its bound Agent."""
-        self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use start_turn with an explicit Agent for SQL sessions")
+        """Start a turn on an existing authorized session using its current Agent."""
+        await self._require_agent_session(session_id)
         return await self._start_session(session_id, user_prompt, principal=principal,
             idempotency_key=idempotency_key, output=output, correlation=correlation,
             files=files, planning=planning, thinking=thinking)
 
-    async def inspect(self, session_id: str, *, principal: Principal) -> "SessionView | dict[str, JsonValue]":
+    async def inspect(self, session_id: str, *, principal: Principal) -> SessionView:
         """Read current session state without constructing a bound handle."""
         self._ensure_open()
-        if self._uses_turn_sessions:
-            _, runtime = self._require_turn_sessions()
-            history = runtime.history
-            if history is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            return await history.turn_session_state(session_id, principal=principal)
         return await self._service.get(session_id, principal=principal)
 
     @contextmanager
@@ -607,8 +610,6 @@ class RuntimeSessions(Generic[AppT]):
         committed turn through History when needed. This is not current state.
         """
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use native turn observation for SQL sessions")
         with self._service.capture_published_turn(session_id, execution_id, principal=principal) as captured:
             async def read() -> PublishedSessionTurn | None:
                 self._ensure_open()
@@ -624,8 +625,6 @@ class RuntimeSessions(Generic[AppT]):
         perform I/O. Unsubscribe when done; Runtime close removes subscriptions.
         """
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use observe_turn_session for SQL sessions")
         return self._service.observe_changes(session_id, on_invalidate)
 
     def observe_turns(
@@ -640,22 +639,16 @@ class RuntimeSessions(Generic[AppT]):
         provided. Read current state through the authorized API as needed.
         """
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use observe_turn_lifecycle for SQL sessions")
         return self._service.observe_turns(handler)
 
     def invalidate(self, session_id: str) -> None:
         """Wake existing local watches to reread current authorized session state."""
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use invalidate_turn_session with the exact turn for SQL sessions")
         self._service.invalidate(session_id)
 
     def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
         """Observe this Runtime's session changes; external writes need explicit refresh."""
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use the native session handle to watch SQL occupancy")
         return self._service.watch(session_id, principal=principal)
 
     async def lookup_admission(
@@ -668,8 +661,6 @@ class RuntimeSessions(Generic[AppT]):
         Callers must still compare their original request with the frozen input.
         """
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Read-only admission lookup is not provided by the legacy SQL session API")
         return await self._service.lookup_admission(
             session_id, principal=principal, idempotency_key=idempotency_key,
         )
@@ -683,8 +674,8 @@ class RuntimeSessions(Generic[AppT]):
     async def create(
         self, agent_id: str | CreateSessionRequest, request: CreateSessionRequest | None = None,
     ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
-        if self._uses_turn_sessions:
-            if not isinstance(agent_id, CreateSessionRequest) or request is not None:
+        if isinstance(agent_id, CreateSessionRequest):
+            if request is not None:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "SQL sessions require only a create request")
             request = agent_id
             session = self._bind_native_session(
@@ -701,16 +692,13 @@ class RuntimeSessions(Generic[AppT]):
         return self._bind_session(view, request.principal)
 
     async def create_view(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
-        """Create and return a non-SQL session view without a second read."""
+        """Return the authorized creation result without a separate session read."""
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use create_turn_session for a SQL session view")
+        await self._require_agent_session(request.session_id)
         return await self._service.create(agent_id, request)
 
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use recover_turn for the exact SQL turn")
         return await self._service.reconcile(session_id, principal=principal)
 
     async def wait_inactive(
@@ -719,63 +707,36 @@ class RuntimeSessions(Generic[AppT]):
     ) -> SessionView:
         """Wait for a non-consuming, point-in-time inactive session observation."""
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use the native session handle to observe SQL occupancy")
         return await self._service.wait_inactive(
             session_id, principal=principal, timeout_seconds=timeout_seconds,
             observation_timeout_seconds=observation_timeout_seconds,
         )
 
-    async def refresh(
-        self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100, max_age: float = 0,
-    ) -> "SessionDetail | dict[str, JsonValue]":
+    async def refresh(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100, max_age: float = 0) -> SessionDetail:
         """Refresh a session; opt in to bounded stale display with positive max_age."""
         self._ensure_open()
-        if self._uses_turn_sessions:
-            if max_age != 0:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Native SQL session refresh is always authoritative")
-            session = self._bind_native_session(session_id, principal=principal, local_workspace=False)
-            return await session.history(cursor=cursor, limit=limit)
         return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit, max_age=max_age)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "List SQL sessions through History.turn_sessions with explicit scope")
         return await self._service.list(request)
 
-    async def history(
-        self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
-    ) -> "Page[SessionHistoryItem] | dict[str, JsonValue]":
-        if self._uses_turn_sessions:
-            session = self._bind_native_session(session_id, principal=principal, local_workspace=False)
-            return await session.history(cursor=cursor, limit=limit)
+    async def history(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100) -> Page[SessionHistoryItem]:
         return await self._service.history(session_id, principal=principal, cursor=cursor, limit=limit)
 
-    async def timeline(
-        self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
-    ) -> "Page[SessionTurn] | dict[str, JsonValue]":
-        if self._uses_turn_sessions:
-            session = self._bind_native_session(session_id, principal=principal, local_workspace=False)
-            return await session.timeline(cursor=cursor, limit=limit)
+    async def timeline(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100) -> Page[SessionTurn]:
         return await self._service.timeline(session_id, principal=principal, cursor=cursor, limit=limit)
 
     async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> "Session[AppT]":
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use fork_turn_session with a source revision for SQL sessions")
         view = await self._service.fork(agent_id, session_id, request)
         return self._bind_session(view, request.principal)
 
     async def update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use update_turn_session for SQL sessions")
         return await self._service.update(agent_id, session_id, request)
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
         self._ensure_open()
-        if self._uses_turn_sessions:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Use close_turn_session with a source revision for SQL sessions")
         return await self._service.close(session_id, request)
 
 

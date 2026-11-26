@@ -250,6 +250,8 @@ class _LocalSessionFeed:
             ):
                 self.runtime.sessions.invalidate_turn_session(session_id, turn_id, revision=revision, phase=phase)
             return
+        if self.runtime.sessions.supports_turn_sessions:
+            return
         kind, session_id, execution_id = value.get("kind"), value.get("session_id"), value.get("execution_id")
         if not isinstance(session_id, str) or not session_id or not isinstance(execution_id, str) or not execution_id:
             return
@@ -278,10 +280,6 @@ async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "
         receiver = None if feed is None else await stack.enter_async_context(session_notice_receiver(runtime_root, feed.receive))
         offer = await stack.enter_async_context(session_notice_publisher(runtime_root, exclude=receiver))
 
-        def publish(notice: "SessionTurnNotice") -> None:
-            offer(asdict(notice), discover=notice.kind != "tool")
-
-        stack.callback(local.runtime.sessions.observe_turns(publish))
         if local.runtime.sessions.supports_turn_sessions:
             def publish_lifecycle(notice: "dict[str, JsonValue]") -> None:
                 offer({
@@ -289,6 +287,11 @@ async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "
                 })
 
             stack.callback(local.runtime.sessions.observe_turn_lifecycle(publish_lifecycle))
+        else:
+            def publish(notice: "SessionTurnNotice") -> None:
+                offer(asdict(notice), discover=notice.kind != "tool")
+
+            stack.callback(local.runtime.sessions.observe_turns(publish))
         yield feed
 
 
