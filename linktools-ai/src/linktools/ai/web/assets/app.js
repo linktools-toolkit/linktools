@@ -2951,40 +2951,58 @@ function renderOrdinaryTrace(container) {
     } else rows.push({events:[item]});
   }
 
+  const timestamps=events.map(({payload})=>Date.parse(payload.occurred_at)).filter(Number.isFinite);
+  const origin=timestamps.reduce((earliest,time)=>Math.min(earliest,time),Infinity);
+  const end=timestamps.reduce((latest,time)=>Math.max(latest,time-origin),0);
+  let start=0;
+  const bands=[];
+  for(const [label,started,finished] of [
+    ['Model','MODEL_REQUEST',['MODEL_RESPONSE']],
+    ['Tools','TOOL_CALL',['TOOL_RESULT','TOOL_ERROR']],
+  ]){
+    const spans=[];let unmatchedStart=false;
+    for(const {events:captured=[]} of rows){
+      let first=null;
+      for(const {payload:last} of captured){
+        if(last.kind===started){first=last;continue;}
+        if(!finished.includes(last.kind))continue;
+        const to=Date.parse(last.occurred_at)-origin,observedFrom=Date.parse(first?.occurred_at)-origin;
+        const measured=Number.isFinite(last.duration_ns) && last.duration_ns>0?last.duration_ns:null;
+        const from=measured==null?observedFrom:to-measured/1e6;
+        if(Number.isFinite(from) && to>from){
+          start=Math.min(start,from);
+          spans.push({from,to,last,elapsed:measured ?? (to-from)*1e6});
+        }
+        first=null;
+      }
+      unmatchedStart ||= Boolean(first);
+    }
+    bands.push({label,spans,unmatchedStart});
+  }
+
+  const range=end-start;
   clear('trace-stats');
   const heading=$('trace-stats');
-  const timestamps=events.map(({payload})=>Date.parse(payload.occurred_at)).filter(Number.isFinite);
-  const start=Math.min(...timestamps),end=Math.max(...timestamps),range=end-start;
   heading.append(element('span','',range>0?`◷ ${duration(range*1e6)} observed`:'◷ Timing unavailable'),
     element('span','',`${events.length} events`),element('span','',`${groups.size} model calls`));
   if(turn?.status)heading.append(element('span','trace-log-state',turn.status.replaceAll('_',' ').toLowerCase()));
-  if(range>0){
-    const timings=element('div','trace-bands');timings.setAttribute('aria-label','Observed timing');
-    for(const [label,owners,started,finished] of [
-      ['Model',[...groups.values()].map(row=>row.events),'MODEL_REQUEST',['MODEL_RESPONSE']],
-      ['Tools',[...toolGroups.values()].map(row=>row.events),'TOOL_CALL',['TOOL_RESULT','TOOL_ERROR']],
-    ]){
-      const band=element('div','trace-band'),track=element('div','trace-band-track');
-      band.append(element('span','',label),track);
-      for(const captured of owners){
-        let first=null;
-        for(const {payload:last} of captured){
-          if(last.kind===started){first=last;continue;}
-          if(!first || !finished.includes(last.kind))continue;
-          const from=Date.parse(first.occurred_at),to=Date.parse(last.occurred_at);
-          if(to>from){
-            const span=element('span',`trace-band-span ${label.toLowerCase()}${['FAILED','EFFECT_UNKNOWN'].includes(last.status)?' failed':''}`);
-            span.setAttribute('style',`left:${100*(from-start)/range}%;width:${100*(to-from)/range}%`);
-            span.title=`${first.tool_name || (first.model_request_seq!=null?'Request '+first.model_request_seq:label)} · ${duration((to-from)*1e6)}`;
-            track.append(span);
-          }
-          first=null;
-        }
-      }
-      if(track.children.length)timings.append(band);
+
+  const timings=element('div','trace-bands');timings.setAttribute('aria-label','Observed timing');
+  const running=state.session?.active_turn_id===inspection.turnId && !terminal(turn?.status);
+  for(const {label,spans,unmatchedStart} of bands){
+    const band=element('div','trace-band'),track=element('div','trace-band-track');
+    band.append(element('span','',label),track);
+    for(const {from,to,last,elapsed} of spans){
+      const span=element('span',`trace-band-span ${label.toLowerCase()}${['FAILED','EFFECT_UNKNOWN'].includes(last.status)?' failed':''}`);
+      span.setAttribute('style',`left:${100*(from-start)/range}%;width:${100*(to-from)/range}%`);
+      span.title=`${last.tool_name || (last.model_request_seq!=null?'Request '+last.model_request_seq:label)} · ${duration(elapsed)}`;
+      track.append(span);
     }
-    if(timings.children.length)container.append(timings);
+    if(!spans.length)track.append(element('span','trace-band-empty',
+      unmatchedStart && running?'In progress · no completed timing':'No timing captured'));
+    timings.append(band);
   }
+  container.append(timings);
 
   const workspace=element('div','trace-workspace'),log=element('div','trace-log');
   log.setAttribute('aria-label','Captured turn events');

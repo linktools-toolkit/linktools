@@ -307,6 +307,9 @@ if(process.argv[3]==='native-model-messages') {
   first({items:[event(1,'MODEL_REQUEST','STARTED',{model_request_seq:1}),
     event(2,'TOOL_CALL','STARTED',{tool_name:'trace only tool',tool_call_id:'t1'})],next_cursor:'more-trace'});await open;
   assert.equal(models().length,0,'opening Trace does not load model bodies');
+  const timing=()=>descendants(node('inspector-content')).find(item=>item.className==='trace-bands');
+  assert.match(timing().textContent,/Model.*In progress.*Tools.*In progress/s);
+  assert.equal(descendants(timing()).filter(item=>item.className.startsWith('trace-band-span')).length,0);
   const next=deferred('GET /api/sessions/b'),more=node('detail-more').click();
   await next.requested;
   assert.equal(calls.at(-1).query.cursor,'more-trace');
@@ -360,10 +363,22 @@ if(process.argv[3]==='native-model-messages') {
 
   const reopenPage=deferred('GET /api/sessions/b'),reopen=node('activity-mode').click();await reopenPage.requested;
   reopenPage({items:[],next_cursor:null});await reopen;
+  assert.match(timing().textContent,/Model.*No timing captured.*Tools.*No timing captured/s);
   node('detail-turn').value=last;
   const priorPage=deferred('GET /api/sessions/b'),prior=node('detail-turn').onchange();await priorPage.requested;
   assert.equal(calls.at(-1).query.turn_id,last);
-  priorPage({items:[event(1,'MODEL_REQUEST','STARTED',{model_request_seq:3})],next_cursor:null});await prior;
+  const tied='2026-01-01T00:00:10.000Z';
+  priorPage({items:[
+    event(1,'MODEL_REQUEST','STARTED',{model_request_seq:3,occurred_at:tied}),
+    event(2,'MODEL_RESPONSE','SUCCEEDED',{model_request_seq:3,occurred_at:tied,duration_ns:255000000}),
+    event(3,'TOOL_RESULT','SUCCEEDED',{tool_name:'Measured without start or ID',occurred_at:tied,duration_ns:42000000}),
+    event(4,'TOOL_RESULT','SUCCEEDED',{tool_name:'No measurement',occurred_at:tied}),
+  ],next_cursor:null});await prior;
+  const tiedSpans=descendants(timing()).filter(item=>item.className.startsWith('trace-band-span'));
+  assert.equal(tiedSpans.length,2,'recorded terminal timing renders despite tied timestamps or missing start/ID');
+  assert.match(tiedSpans[0].title,/255.000 ms/);
+  assert.match(tiedSpans[1].title,/Measured without start or ID.*42.000 ms/);
+  assert.match(tiedSpans[0].getAttribute('style'),/width:100%/);
   const missingPage=deferred('GET /api/sessions/b'),missing=rows().find(row=>row.getAttribute('aria-label')==='Model request 3').click();await missingPage.requested;
   assert.equal(models().at(-1).query.turn_id,last);assert.equal(models().at(-1).query.model_request_seq,'3');
   missingPage({items:[],next_cursor:null});await missing;
