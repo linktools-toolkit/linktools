@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import Principal
+from linktools.ai.core import Principal, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.history import History
@@ -32,11 +32,17 @@ async def test_history_snapshot_borrow_persistence_without_execution_producers(
     principal = Principal("reader", "tenant", "service")
     objects = InMemoryObjectStore("portable")
     limits = SnapshotLimits(10000, 10 * 1024 * 1024)
-    async with Persistence.open("history", storage=storage, tenant_id="tenant"):
+    class HostAuthorization(TenantAuthorizationPolicy):
         pass
+
+    authorization = HostAuthorization()
+    async with Persistence.open("history", storage=storage, tenant_id="tenant") as writer:
+        await writer.session_turns.create("snapshot-session", config={"metadata": {"preserved": True}})
     async with Persistence.open("history", storage=storage, tenant_id="tenant", read_only=True) as persistence:
-        async with History.open(persistence=persistence) as history:
-            assert (await history.list_sessions(principal=principal)).items == ()
+        async with History.open(persistence=persistence, authorization=authorization) as history:
+            original = await history.turn_sessions(principal=principal, session_ids=("snapshot-session",))
+            assert [item["session_id"] for item in original["items"]] == ["snapshot-session"]
+            assert original["items"][0]["metadata"] == {"preserved": True}
         assert persistence.ready
         reference = await Snapshot.create(
             persistence=persistence, object_store=objects,
@@ -47,8 +53,8 @@ async def test_history_snapshot_borrow_persistence_without_execution_producers(
             reference, object_store=objects, target=tmp_path / "restored",
             namespace="history", tenant_id="tenant", limits=limits,
         )
-        async with restored.open_history() as history:
-            assert (await history.list_sessions(principal=principal)).items == ()
+        async with restored.open_history(authorization=authorization) as history:
+            assert await history.turn_sessions(principal=principal, session_ids=("snapshot-session",)) == original
         assert persistence.ready
     assert not persistence.ready
 

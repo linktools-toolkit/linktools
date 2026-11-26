@@ -1333,6 +1333,30 @@ async def _export_snapshot(
     await _put_snapshot_object(object_store, key, payload)
     return ObjectRef(object_store.store_id, key, digest, len(payload))
 
+def parse_storage_snapshot_manifest(payload: bytes) -> dict[str, object]:
+    """Decode the manifest shared by portable snapshot publication and restore."""
+    try:
+        manifest = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(manifest, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if manifest.get("kind") != "runtime-storage-snapshot":
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    format_version = manifest.get("format_version")
+    if (
+        isinstance(format_version, bool)
+        or not isinstance(format_version, int)
+        or format_version < 1
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if format_version not in (1, 4) or (format_version == 4) != ("ordinary_sessions" in manifest):
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    if not isinstance(manifest.get("domains"), dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return manifest
+
+
 async def restore_snapshot(
     ref: ObjectRef,
     *,
@@ -1354,25 +1378,8 @@ async def restore_snapshot(
         expected_digest=ref.digest,
         expected_size=ref.size,
     )
-    try:
-        manifest = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(manifest, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if manifest.get("kind") != "runtime-storage-snapshot":
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    format_version = manifest.get("format_version")
-    if (
-        isinstance(format_version, bool)
-        or not isinstance(format_version, int)
-        or format_version < 1
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if format_version not in (1, 4) or (format_version == 4) != ("ordinary_sessions" in manifest):
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if not isinstance(manifest.get("domains"), dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    manifest = parse_storage_snapshot_manifest(payload)
+    format_version = manifest["format_version"]
     namespace = manifest.get("namespace")
     tenant_id = manifest.get("tenant_id")
     if not isinstance(namespace, str) or not isinstance(tenant_id, str):
@@ -2927,4 +2934,4 @@ async def _put_snapshot_object(
 from ._capability_marker import ensure_capability_partition_marker
 from ._snapshot import snapshot_object_ref_from_payload, snapshot_object_ref_payload
 
-__all__ = ['RunRegistrationCleanupResult', 'snapshot_manifest_usage', 'snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']
+__all__ = ['RunRegistrationCleanupResult', 'parse_storage_snapshot_manifest', 'snapshot_manifest_usage', 'snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']
