@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """Plural Runtime domain entry points."""
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
-from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn, SessionService, SessionContext, normalize_session_context
+from ..session import SessionTurnNotice, SessionAdmission, SessionTurnAdmission, PublishedSessionTurn, SessionService, SessionContext, normalize_session_context
 from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, overlay_correlation,
@@ -15,6 +16,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..persistence.turns import SessionTurnKey
 from ..observe import WaitResult, RuntimeMetricsControl
+from ..observe.stream import validate_timeout
 from ..inputs import CaptureInputRequest, ExecutionInputCaptureRef, InputCaptures
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ListExecutionRequest, ModelInteractionItem, Page, RetryExecutionRequest, UsageReadCutoff, ExecutionService
@@ -702,7 +704,7 @@ class RuntimeSessions(Generic[AppT]):
 
     async def lookup_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,
-    ) -> SessionAdmission | None:
+    ) -> SessionAdmission | SessionTurnAdmission | None:
         """Read an accepted request without starting or reconciling execution.
 
         None means no retained admission. An uncertain admission raises
@@ -710,6 +712,13 @@ class RuntimeSessions(Generic[AppT]):
         Callers must still compare their original request with the frozen input.
         """
         self._ensure_open()
+        if self._uses_turn_sessions:
+            runner, runtime = self._require_turn_sessions()
+            validate_session_request_key(idempotency_key)
+            await self._inspect_native_session(session_id, principal)
+            return await runner.lookup_admission(
+                session_id, idempotency_key, principal=principal, authorization=runtime._authorization,
+            )
         return await self._agent_session_service().lookup_admission(
             session_id, principal=principal, idempotency_key=idempotency_key,
         )
@@ -752,13 +761,42 @@ class RuntimeSessions(Generic[AppT]):
     async def wait_inactive(
         self, session_id: str, *, principal: Principal, timeout_seconds: float | None = None,
         observation_timeout_seconds: float | None = None,
-    ) -> SessionView:
+    ) -> "SessionView | dict[str, JsonValue]":
         """Wait for a non-consuming, point-in-time inactive session observation."""
         self._ensure_open()
-        return await self._agent_session_service().wait_inactive(
-            session_id, principal=principal, timeout_seconds=timeout_seconds,
-            observation_timeout_seconds=observation_timeout_seconds,
-        )
+        if not self._uses_turn_sessions:
+            return await self._agent_session_service().wait_inactive(
+                session_id, principal=principal, timeout_seconds=timeout_seconds,
+                observation_timeout_seconds=observation_timeout_seconds,
+            )
+        validate_timeout(timeout_seconds)
+        validate_timeout(observation_timeout_seconds)
+        wake = asyncio.Event()
+
+        def changed(frame: dict[str, JsonValue]) -> None:
+            if frame.get("type") == "terminal" or (
+                frame.get("type") == "gap"
+                and frame.get("phase") not in ("waiting", "cancelling", "producer_stopped")
+            ):
+                wake.set()
+
+        deadline = asyncio.timeout(timeout_seconds)
+        unsubscribe = self.observe_turn_session(session_id, changed)
+        try:
+            async with deadline:
+                while True:
+                    wake.clear()
+                    async with asyncio.timeout(observation_timeout_seconds):
+                        _, view = await self._inspect_native_session(session_id, principal)
+                    if view["active_turn_id"] is None:
+                        return view
+                    await wake.wait()
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise
+            raise AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"scope": "session", "resource_id": session_id}) from error
+        finally:
+            unsubscribe()
 
     async def refresh(
         self, session_id: str, *, principal: Principal, cursor: str | None = None,

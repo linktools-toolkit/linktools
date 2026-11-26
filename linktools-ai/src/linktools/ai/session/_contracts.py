@@ -204,6 +204,14 @@ class SessionAdmission:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionTurnAdmission:
+    """An accepted native turn and its original model-visible input."""
+
+    turn_id: str
+    user_input: CanonicalUserInput
+
+
+@dataclass(frozen=True, slots=True)
 class SessionTurn:
     execution_id: str
     status: ExecutionStatus
@@ -490,6 +498,7 @@ __all__ = [
     "SessionTurnItem",
     "SessionTurn",
     "SessionAdmission",
+    "SessionTurnAdmission",
     "SessionHistoryReader",
     "CreateSessionRequest",
     "ListSessionRequest",

@@ -25,7 +25,7 @@ from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.turns import SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
-from ..session import SessionContext, ToolProcessItem, project_tool_process_event
+from ..session import SessionContext, SessionTurnAdmission, ToolProcessItem, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta
 from .agent_execution import resolve_execution_policy
@@ -423,6 +423,28 @@ class _RegenerableTurnRunner:
             source_id, target_id, expected_revision=expected_revision, request_id=request_id,
             config={"metadata": config.get("metadata", {}), "cwd": config.get("cwd")},
         )
+
+    async def lookup_admission(
+        self, session_id: str, request_key: str, *, principal: Principal, authorization: AuthorizationPolicy,
+    ) -> SessionTurnAdmission | None:
+        row = await self._store.read_admission_input(session_id, request_key)
+        if row is None:
+            return None
+        turn_id = row["turn_id"].decode("utf-8")
+        await authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_READ,
+            ResourceRef(ResourceKind.EXECUTION, turn_id, principal.tenant_id, row["principal_id"]),
+        )
+        stored = await self._store.read_native_admission_input(row, turn_id)
+        if stored is not None:
+            content = native_graph_input_content(stored)
+            if content is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        else:
+            manifest = row["input"]
+            stored = None if manifest is None else decode_domain(manifest, StoredUserInput)
+            content = await self._restore_prompt(row["prompt"], stored)
+        return SessionTurnAdmission(turn_id, content)
 
     async def start_session(
         self, session_id: str, *, agent_id: str, principal: Principal, namespace: str, tenant_id: str,
@@ -1091,7 +1113,8 @@ class _RegenerableTurnRunner:
 
     async def close(self) -> None:
         self._closed = True
-        for listeners in self._observers.values():
+        for session_id, listeners in tuple(self._observers.items()):
+            self._publish(session_id, {"type": "gap"})
             count = len(listeners)
             listeners.clear()
             _OBSERVER_SLOTS.release(count)

@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from .contracts import BudgetRepository
     from ._archive import ContentArchive
     from ..execution import PendingToolContinuation
+    from ..model import StoredUserInput
     from .state import StateGroupTransaction, StateStore, StateTransaction
     from ..storage import SqlStorageContext
     from ._split_step_source import SplitStepSourceObservation, SplitStepWaiting
@@ -639,6 +640,47 @@ class SqlSessionTurnReader:
         if row["state"] != "succeeded" or "usage" not in result:
             return row
         return {**row, "usage": decode_session_turn_usage(result["usage"])}
+
+    async def read_admission_input(self, session_id: str, request_key: str) -> RowMapping | None:
+        """Read the exact input descriptor without opening binding or transcript bodies."""
+        from sqlalchemy import select
+
+        columns = self._turns.c
+        request = columns.request_json
+        statement = select(
+            columns.turn_id, request["prompt"].as_string().label("prompt"),
+            request["input"].label("input"),
+            request["graph_execution"].as_string().label("graph_execution"),
+            request["principal"]["principal_id"].as_string().label("principal_id"),
+        ).where(
+            columns.scope_key == self._scope,
+            columns.session_key == self._key(session_id, TURN_SESSION_MAX_BYTES),
+            columns.request_key == self._key(request_key, SESSION_REQUEST_KEY_MAX_BYTES),
+        )
+        async with self._context.engine.connect() as connection:
+            return (await connection.execute(statement)).mappings().one_or_none()
+
+    async def read_native_admission_input(self, row: RowMapping, turn_id: str) -> StoredUserInput | None:
+        """Read only the immutable input message owned by a Graph admission."""
+        reference = decode_session_input_reference(row, turn_id)
+        if reference is None:
+            return None
+        if self._transcript_source is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        store, archive_provider, capture = self._transcript_source
+        group = store.storage_group
+        archive = await archive_provider(create=False)
+        if archive.store.storage_group is not group:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def read(transaction):
+            return await capture((reference.root,), transaction=transaction.transaction(archive.store))
+
+        load = await group.read_many((archive.store,), read)
+        (parts,) = await load()
+        if len(parts) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return restore_native_user_input(reference, parts[0])
 
     async def find_request(self, session_id: str, request_key: str) -> Mapping[str, object] | None:
         from sqlalchemy import select
