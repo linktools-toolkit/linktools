@@ -575,13 +575,13 @@ async def test_handoff_retry_retains_admitted_execution_identity(tmp_path: Path,
 def test_resident_runtime_finishes_prepared_result_without_model_replay(tmp_path: Path, keyed: bool) -> None:
     from ._runtime_process_test_helpers import _RuntimeProcess
 
-    owner = _RuntimeProcess(tmp_path / "finalizing.db", phase="finalizing")
+    owner = _RuntimeProcess(tmp_path / "finalizing.db", mode="standalone", phase="finalizing")
     successor = None
     try:
-        assert owner.initial["status"] == "FINALIZING"
-        successor = _RuntimeProcess(tmp_path / "finalizing.db", phase="finalizing",
+        assert owner.initial["status"] == "STARTED" and owner.initial["handoff_phase"] == "prepared"
+        successor = _RuntimeProcess(tmp_path / "finalizing.db", mode="standalone", phase="finalizing",
             execution_id=owner.initial["execution_id"], auto_recover=False)
-        assert successor.initial["status"] == "FINALIZING"
+        assert successor.initial["status"] == "STARTED" and successor.initial["handoff_phase"] == "prepared"
         owner.process.kill()
         owner.process.join(10)
         command = "recover_keyed" if keyed else "recover"
@@ -602,7 +602,7 @@ def test_resident_runtime_finishes_prepared_result_without_model_replay(tmp_path
 @pytest.mark.parametrize("synchronized,ordered_publication", (
     pytest.param(False, False, id="natural_concurrent_takeover"),
     pytest.param(True, False, id="prepared_contenders_rendezvous"),
-    pytest.param(False, True, id="cursor_advanced_before_terminal"),
+    pytest.param(False, True, id="ordered_terminal_publication"),
 ))
 def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
     tmp_path: Path, synchronized: bool, ordered_publication: bool,
@@ -611,14 +611,14 @@ def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
     import multiprocessing
     from ._runtime_process_test_helpers import _RuntimeProcess
 
-    owner = _RuntimeProcess(tmp_path / "race.db", phase="finalizing")
+    owner = _RuntimeProcess(tmp_path / "race.db", mode="standalone", phase="finalizing")
     successors = []
     context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(2) if synchronized else None
     publication_events = tuple(context.Event() for _ in range(3)) if ordered_publication else ()
     try:
         for role in ("delayed", "first"):
-            successors.append(_RuntimeProcess(tmp_path / "race.db", phase="finalizing",
+            successors.append(_RuntimeProcess(tmp_path / "race.db", mode="standalone", phase="finalizing",
                 execution_id=owner.initial["execution_id"], auto_recover=False, recovery_barrier=barrier,
                 publication_order=(role, *publication_events) if ordered_publication else None))
         owner.process.kill()
@@ -641,18 +641,25 @@ def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
             successor.close()
 
 
-def test_recovery_receipt_waits_for_committed_result_publication(tmp_path: Path) -> None:
+@pytest.mark.parametrize("boundary", ("before_terminal", "before_publication"))
+def test_recovery_receipt_waits_for_committed_result_publication(tmp_path: Path, boundary: str) -> None:
     from ._runtime_process_test_helpers import _RuntimeProcess
 
-    owner = _RuntimeProcess(tmp_path / "publication.db", phase="finalizing")
-    successor = _RuntimeProcess(tmp_path / "publication.db", phase="finalizing",
+    owner = _RuntimeProcess(tmp_path / "publication.db", mode="standalone", phase="finalizing")
+    successor = _RuntimeProcess(tmp_path / "publication.db", mode="standalone", phase="finalizing",
         execution_id=owner.initial["execution_id"], auto_recover=False)
     try:
         owner.process.kill()
         owner.process.join(10)
-        interrupted = successor.request("recover_before_publication")
-        assert interrupted["status"] == "SUCCEEDED"
+        interrupted = successor.request("recover_" + boundary)
+        assert interrupted["error_code"] == "STORAGE_RECOVERY_REQUIRED"
+        assert interrupted["status"] == ("STARTED" if boundary == "before_terminal" else "SUCCEEDED")
         assert interrupted["handoff_phase"] == "prepared"
+        successor.close(check=True)
+        successor = _RuntimeProcess(tmp_path / "publication.db", mode="standalone", phase="finalizing",
+            execution_id=owner.initial["execution_id"], auto_recover=False)
+        assert successor.initial["status"] == interrupted["status"]
+        assert successor.initial["handoff_phase"] == "prepared"
         result = successor.request("recover_keyed")
         assert result["status"] == "SUCCEEDED"
         assert result["handoff_phase"] == "completed"

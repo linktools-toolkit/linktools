@@ -237,7 +237,7 @@ from ._agent_run import (
     _AgentRunLifecycle,
     _WorkerFailure,
 )
-from ._recovery_coordinator import _DeferredResume, _RecoveryCoordinator
+from ._recovery_coordinator import _DeferredResume, _RecoveryCoordinator, _is_standalone_prepared_terminal
 from ._repository_instructions import (
     _RepositoryInstructionBoundary,
     _repository_instructions_contain,
@@ -7698,13 +7698,13 @@ class LocalExecutionBackend:
         if receipt is not None:
             current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
             if (receipt.status is OperationStatus.RUNNING and receipt.result_ref is None
-                    and current is not None and current.status in {
-                        ExecutionStatus.FINALIZING, ExecutionStatus.SUCCEEDED,
-                        ExecutionStatus.CANCELLED, ExecutionStatus.FAILED,
-                    }):
-                if current.status is not ExecutionStatus.FINALIZING:
+                    and current is not None):
+                if current.status in (ExecutionStatus.SUCCEEDED, ExecutionStatus.CANCELLED, ExecutionStatus.FAILED):
                     return await self._finish_terminal_recovery(current, receipt)
-                expected_revision = current.revision
+                if current.status is ExecutionStatus.FINALIZING or _is_standalone_prepared_terminal(current):
+                    expected_revision = current.revision
+                else:
+                    return await self._replay_recovery(receipt)
             else:
                 return await self._replay_recovery(receipt)
         if not self._accepting:

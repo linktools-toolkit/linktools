@@ -74,6 +74,22 @@ _logger = environ.get_logger("ai.runtime.local")
 _T = TypeVar("_T")
 
 
+def _is_standalone_prepared_terminal(execution: ExecutionRecord) -> bool:
+    recovery = execution.recovery
+    return (
+        execution.status is ExecutionStatus.STARTED
+        and execution.session_id is None
+        and execution.conversation
+        and execution.parent_execution_id is None
+        and not execution.requires_task_invocation_capture
+        and recovery is not None
+        and recovery.handoff_phase is RecoveryHandoffPhase.PREPARED
+        and recovery.terminal_handoff is not None
+        and recovery.terminal_handoff.conversation is None
+        and recovery.terminal_handoff.outcome.terminal_status is ExecutionStatus.SUCCEEDED
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _DeferredResume:
     execution: ExecutionRecord
@@ -1023,7 +1039,7 @@ class _RecoveryCoordinator:
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return latest, launched
-        if current.status is ExecutionStatus.FINALIZING:
+        if current.status is ExecutionStatus.FINALIZING or _is_standalone_prepared_terminal(current):
             if (current.recovery is None or current.recovery.terminal_handoff is None
                     or current.recovery.handoff_phase is RecoveryHandoffPhase.NONE):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

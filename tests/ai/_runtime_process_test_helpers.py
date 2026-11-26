@@ -21,7 +21,7 @@ from linktools.ai.capability import ExecutionCapability, TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage, PersistencePlan
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.execution import CancelExecutionRequest
 
@@ -90,7 +90,7 @@ def _runtime_process(
         # Retained Conversation alone exercises a real split standalone handoff.
         features = _capabilities(
             conversation=mode == "session", native_database=native_database,
-            retain_only=mode == "standalone" and phase == "handoff",
+            retain_only=mode == "standalone" and phase in {"handoff", "finalizing"},
         )
         async with (
             Persistence.open(_NAMESPACE, storage=state) as persistence,
@@ -127,7 +127,7 @@ def _runtime_process(
 
                 backend._reconcile_handoff = synchronized_reconcile
             if publication_order is not None:
-                role, prepared, cursor_committed, publication_finished = publication_order
+                role, prepared, terminal_ready, publication_finished = publication_order
                 backend = runtime._execution_service.runtime_backend()
                 original_terminal = backend._commit_reconciled_terminal
                 original_conversation = backend._resolve_handoff_conversation
@@ -140,7 +140,7 @@ def _runtime_process(
                     waiting = False
                     if role == "delayed":
                         prepared.set()
-                        assert await asyncio.to_thread(cursor_committed.wait, 15)
+                        assert await asyncio.to_thread(terminal_ready.wait, 15)
                     else:
                         assert await asyncio.to_thread(prepared.wait, 15)
                     try:
@@ -151,12 +151,12 @@ def _runtime_process(
 
                 async def ordered_terminal(*args, **kwargs):
                     if role == "first":
-                        cursor_committed.set()
+                        terminal_ready.set()
                         assert await asyncio.to_thread(publication_finished.wait, 15)
                     return await original_terminal(*args, **kwargs)
 
-                # Conversation content is durable before PREPARED. Race the real
-                # cursor reconciliation boundary, before terminal/result commit.
+                # Race two readers after the retained source is sealed but before
+                # their terminal/result commits.
                 backend._resolve_handoff_conversation = ordered_conversation
                 backend._commit_reconciled_terminal = ordered_terminal
             if execution_id is None:
@@ -269,14 +269,16 @@ def _runtime_process(
                         "local_producer": backend._live_broker.is_local_producer(execution_id),
                         "worker_failure": None if failure is None else failure.code.value,
                     })
-                elif command == "recover_before_publication":
+                elif command in {"recover_before_terminal", "recover_before_publication"}:
                     backend = runtime._execution_service.runtime_backend()
-                    original_validate = backend._validate_committed_handoff
+                    name = ("_commit_reconciled_terminal" if command == "recover_before_terminal"
+                            else "_validate_committed_handoff")
+                    original = getattr(backend, name)
 
-                    async def unavailable(checkpoint):
+                    async def unavailable(*args, **kwargs):
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
-                    backend._validate_committed_handoff = unavailable
+                    setattr(backend, name, unavailable)
                     try:
                         await runtime.executions.recover(execution_id,
                             principal=runtime.default_principal, idempotency_key="owner-handoff")
@@ -285,7 +287,7 @@ def _runtime_process(
                     else:
                         raise AssertionError("unfinished publication must not be acknowledged")
                     finally:
-                        backend._validate_committed_handoff = original_validate
+                        setattr(backend, name, original)
                 elif command == "try_recover_keyed":
                     try:
                         await runtime.executions.recover(execution_id,
@@ -296,9 +298,19 @@ def _runtime_process(
                         connection.send(await snapshot())
                 elif command == "history":
                     from pydantic_ai.messages import TextPart
-                    page = await runtime.history.messages("session", principal=runtime.default_principal)
-                    connection.send({"answers": [part.content for message in page.items
-                        for part in message.parts if isinstance(part, TextPart)]})
+                    if mode == "standalone":
+                        record = await persistence.execution.executions.get(
+                            execution_id, tenant_id=runtime.default_principal.tenant_id,
+                        )
+                        handoff = record.recovery.terminal_handoff
+                        assert handoff.source_agent_run_id is not None
+                        archive = persistence.run_store.read_store(PersistenceDomain.CONVERSATION)
+                        messages = [message async for message in archive.iter_messages(agent_run_id=handoff.source_agent_run_id)]
+                    else:
+                        page = await runtime.history.messages("session", principal=runtime.default_principal)
+                        messages = page.items
+                    connection.send({"answers": [part.content for message in messages
+                                                for part in message.parts if isinstance(part, TextPart)]})
                 elif command in {"recover", "recover_keyed"}:
                     await runtime.executions.recover(
                         execution_id, principal=runtime.default_principal,
