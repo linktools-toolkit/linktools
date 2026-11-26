@@ -418,7 +418,7 @@ class AgentExecutor:
             ("skills", compiled.skill_definitions and (not canonical_step or split_step)),
             ("mcp", compiled.mcp_servers and (not canonical_step or split_step)),
             ("subagents", compiled.selected_subagents and (
-                not native_subagents or not canonical_step or split_step or canonical_trace
+                not native_subagents or not canonical_step or split_step
             )),
             ("checkpoints", policy.restart_checkpoints != canonical_step),
             ("trace", policy.durable_trace != canonical_trace),

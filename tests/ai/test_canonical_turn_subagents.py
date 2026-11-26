@@ -12,7 +12,7 @@ import pytest
 from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -78,8 +78,11 @@ def _model(role, fn):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", (False, True), ids=("success", "cancel"))
-async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(tmp_path: Path, cancel: bool):
+@pytest.mark.parametrize("cancel,trace", ((False, False), (True, False), (False, True)),
+                         ids=("success", "cancel", "cli-default-trace"))
+async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
+    tmp_path: Path, cancel: bool, trace: bool,
+) -> None:
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
 
@@ -136,7 +139,9 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(tmp_
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="parent", allow_subagents=("reviewer",), allow_tools=(), allow_skills=())
     features.agent("reviewer", model="child", allow_subagents=(), allow_tools=("lookup",), allow_skills=())
-    # Runtime and child use the same SQL group; no Trace capability is needed.
+    if trace:
+        # Like the CLI, use the default unbuffered Trace policy with SQL Step.
+        features.capability(TraceCapability(), scope="runtime")
     storage = PersistenceStorage.from_root(tmp_path)
     params = {"session_id": _SESSION}
     payload = {"prompt": "Use the reviewer to inspect fixture A", "request_id": "turn-once"}
@@ -210,7 +215,7 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(tmp_
         assert await state.execution.executions.get(turn_id, tenant_id=runtime.tenant_id) is None
         assert await state.conversation.sessions.get(_SESSION, tenant_id=runtime.tenant_id) is None
 
-    async with open_host() as (_, _, _, http):
+    async with open_host() as (_, runtime, _, http):
         assert await request(http) == turn_id
         stored = await http.get("/api/session", params={**params, "turn_id": turn_id})
         assert stored.status_code == 200, stored.text
@@ -220,6 +225,18 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(tmp_
             assert_answer(published)
         assert calls == expected_calls and child_ids == [child_id]
         assert returned_ids == ([] if cancel else [child_id])
+        if trace:
+            principal = runtime.default_principal
+            parent_trace = await runtime.history.turn_trace(_SESSION, turn_id, principal=principal)
+            child_trace = await runtime.history.trace(child_id, principal=principal)
+            assert parent_trace.items and all(item.turn_id == turn_id for item in parent_trace.items)
+            assert child_trace.items and all(item.execution_id == child_id for item in child_trace.items)
+            parent_tools = {item.payload.get("tool_call_id") for item in parent_trace.items
+                            if item.payload["kind"] == "TOOL_RESULT"}
+            child_tools = {item.payload.get("tool_call_id") for item in child_trace.items
+                           if item.payload["kind"] == "TOOL_RESULT"}
+            assert parent_tools == {_DELEGATE_CALL}
+            assert child_tools == {"lookup-A"}
 
 
 

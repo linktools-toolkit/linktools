@@ -950,12 +950,14 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             subagent_topology = self._allows_native_subagents(
                 binding, native_step, mode=mode, planning=planning, budgeted=budget is not None,
-                trace=canonical_trace, split=split is not None,
+                split=split is not None,
             )
             # Cold recovery may settle proven history, but only an exact approval
             # frontier grants a live subagent toolset to a resumed producer.
             native_subagents = ready is not None and subagent_topology
-            settle_subagents = ready is None and subagent_topology and self._recover_subagent is not None
+            # Cold child settlement does not reconstruct missing parent Trace events.
+            settle_subagents = (ready is None and subagent_topology and not canonical_trace
+                                and self._recover_subagent is not None)
             self._executor.require_regenerable(
                 binding, canonical_step=native_step is not None, canonical_trace=canonical_trace,
                 split_step=split is not None, native_subagents=native_subagents or settle_subagents,
@@ -1505,14 +1507,14 @@ class _RegenerableTurnRunner:
 
     def _allows_native_subagents(
         self, binding: AgentBinding, native_step: tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None,
-        *, mode: ExecutionMode, planning: bool, budgeted: bool, trace: bool, split: bool,
+        *, mode: ExecutionMode, planning: bool, budgeted: bool, split: bool,
     ) -> bool:
         contract = binding.binding_contract
         return (
             bool(contract.subagents)
             and self._prepare_subagents is not None and self._cancel_subagents is not None
             and native_step is not None and native_step[0].capture_frontier
-            and mode == "run" and not planning and not budgeted and not trace and not split
+            and mode == "run" and not planning and not budgeted and not split
             and set(contract.subagent_binding_map) == set(contract.subagent_ids)
         )
 
@@ -1537,7 +1539,7 @@ class _RegenerableTurnRunner:
         trace_enabled = self._require_turn_trace(binding, canonical_step=native_step is not None)
         native_subagents = self._allows_native_subagents(
             binding, native_step, mode=mode, planning=planning, budgeted=budget is not None,
-            trace=trace_enabled, split=split is not None,
+            split=split is not None,
         )
         self._executor.require_regenerable(
             binding, canonical_step=native_step is not None, canonical_trace=trace_enabled,
