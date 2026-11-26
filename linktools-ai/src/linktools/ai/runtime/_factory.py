@@ -1009,11 +1009,11 @@ async def _build_local_components(
                 ),
             )
 
-        async def cancel_native_subagents(key, admitted: Principal, actor: Principal) -> None:
+        async def cancel_native_subagents(key, admitted: Principal, actor: Principal) -> frozenset[str]:
             repository = state.execution.executions
             if type(repository) is not ExecutionRepositoryImpl:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            await dispatcher.cancel_native_children(repository, key, admitted, actor)
+            return await dispatcher.cancel_native_children(repository, key, admitted, actor)
 
         native_subagent_topology = (
             type(state.checkpoint.tools) is ToolRepositoryImpl
@@ -1042,9 +1042,8 @@ async def _build_local_components(
                     return False
                 # Handoff also cancels the coroutine, but only a committed
                 # Stop authorizes durable child cancellation.
-                return await dispatcher.cancel_native_children(
-                    executions, turn.key, principal, principal, invocation_id=invocation_id,
-                )
+                children = await dispatcher.cancel_native_children(executions, turn.key, principal, principal)
+                return invocation_id is None or invocation_id in children
 
             async with backend.canonical_subagent_parent(
                 turn.key, turn.generation, principal, stop_children=stop_children,

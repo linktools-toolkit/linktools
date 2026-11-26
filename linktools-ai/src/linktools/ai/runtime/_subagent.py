@@ -460,8 +460,7 @@ class SubagentDispatcher:
 
     async def cancel_native_children(
         self, repository: ExecutionRepositoryImpl, key: SessionTurnKey, admitted: Principal, actor: Principal,
-        *, invocation_id: str | None = None,
-    ) -> bool:
+    ) -> frozenset[str]:
         """Drain durable children after the authorized native turn enters cancelling."""
         if admitted.tenant_id != actor.tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -480,7 +479,7 @@ class SubagentDispatcher:
                 self._background_failures.pop(child.execution_id, None)
             else:
                 await self.cancel_child(child.execution_id, parent_execution_id=key.turn_id, principal=actor)
-        return invocation_id is None or any(child.parent_invocation_id == invocation_id for child in children)
+        return frozenset(child.parent_invocation_id for child in children if child.parent_invocation_id is not None)
 
     async def cancel_children(
         self,

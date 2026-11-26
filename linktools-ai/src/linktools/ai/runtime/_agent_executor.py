@@ -1007,6 +1007,9 @@ class AgentExecutor:
                             for operation in operations
                             if operation.status
                             not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+                            and not (scope.canonical_step is not None
+                                     and isinstance(scope.tool_operations, RuntimeToolOperationBridge)
+                                     and scope.tool_operations.reported_interruption(operation))
                         )
                         requires_checkpoint = (
                             not isinstance(scope.run_store, RuntimeAgentRunStore)

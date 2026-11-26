@@ -20,12 +20,14 @@ from sqlalchemy.exc import IntegrityError
 
 from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
-from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
+from ..capability._subagent import SUBAGENT_CAPABILITY_ID
+from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.contracts import ToolOperationRecord
+from ..persistence.repositories import ToolRepositoryImpl
 from ..persistence.turns import CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
 from ..session import SessionContext, SessionTurnAdmission, project_tool_process_event
 from ..spec import RepositoryInstructions
@@ -149,7 +151,7 @@ class _RegenerableTurnRunner:
         prepare_step: Callable[[AgentBinding, SessionTurnKey, int], Awaitable[
             tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None]] | None = None,
         abandon_child_repository: ExecutionRepositoryImpl | None = None,
-        cancel_subagents: Callable[[SessionTurnKey, Principal, Principal], Awaitable[None]] | None = None,
+        cancel_subagents: Callable[[SessionTurnKey, Principal, Principal], Awaitable[frozenset[str]]] | None = None,
         prepare_subagents: Callable[
             [_AdmittedTurn, AgentBinding, Principal, Callable[[], RepositoryInstructions | None]],
             AbstractAsyncContextManager[_NativeSubagentLeaf],
@@ -1162,14 +1164,15 @@ class _RegenerableTurnRunner:
                                 for part in message.parts:
                                     if isinstance(part, (ToolReturnPart, RetryPromptPart)):
                                         pending.pop(part.tool_call_id, None)
-                    if checkpoint.state != "complete" and not pending:
+                    if ready is not None and checkpoint.state != "complete" and not pending:
                         self._gap(key)
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     if ready is None:
                         if not pending and checkpoint.state == "complete":
                             events = await steps.list_events(run_id=key.turn_id)
                             completed_checkpoint = any(event.kind == "run_completed" for event in events)
-                        if settle_subagents and canonical_trace:
+                        delegate_pending = "delegate_task" in pending.values()
+                        if settle_subagents and canonical_trace and (delegate_pending or not pending):
                             # A cold Trace continuation can only append the terminal
                             # marker to an already complete, retained parent run.
                             if not completed_checkpoint or not continuation or not isinstance(continuation[-1], ModelResponse):
@@ -1183,10 +1186,7 @@ class _RegenerableTurnRunner:
                                 key, continuation[-1], event_head=trace_event_base,
                                 request_head=trace_interaction_base,
                             )
-                        elif settle_subagents and not completed_checkpoint:
-                            if "delegate_task" not in pending.values():
-                                self._gap(key)
-                                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        elif settle_subagents and not completed_checkpoint and delegate_pending:
                             recover_subagent = self._recover_subagent
                             assert recover_subagent is not None
 
@@ -1199,7 +1199,24 @@ class _RegenerableTurnRunner:
                             async def recover_native_results():
                                 return await tools.resume_canonical_effects(pending, recover_delegate=recover_delegate)
                         if recover_native_results is None:
-                            deferred_results = await tools.resume_canonical_effects(pending)
+                            retained_returns = tuple(part for message in continuation if isinstance(message, ModelRequest)
+                                                     for part in message.parts if isinstance(part, ToolReturnPart))
+                            deferred_results = await tools.resume_canonical_effects(
+                                pending, interrupted_generation=generation, retained_returns=retained_returns,
+                            )
+                            if not pending and not completed_checkpoint:
+                                latest_ids = (frozenset(part.tool_call_id for part in continuation[latest_response].parts
+                                                       if isinstance(part, ToolCallPart)) if latest_response >= 0 else frozenset())
+                                if (continuation and isinstance(continuation[-1], ModelRequest)
+                                        and any(isinstance(part, ToolReturnPart) and part.tool_call_id in latest_ids
+                                                and tools.has_checkpoint_interruption(part)
+                                                for part in continuation[-1].parts)):
+                                    # The SDK skips original tool returns already
+                                    # present in the retained last request.
+                                    deferred_results = DeferredToolResults()
+                                elif checkpoint.state != "complete":
+                                    self._gap(key)
+                                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     else:
                         if (checkpoint.state != "interrupted"
                                 or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
@@ -1478,10 +1495,32 @@ class _RegenerableTurnRunner:
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                 # A worker handoff only drains local tasks. Durable child
                 # cancellation is authorized by this committed parent state.
+                terminal_children: frozenset[str] = frozenset()
                 if binding.binding_contract.subagents:
                     if self._cancel_subagents is None:
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                    await self._cancel_subagents(turn.key, context.principal, context.principal)
+                    terminal_children = await self._cancel_subagents(turn.key, context.principal, context.principal)
+                if turn.native_step is not None and turn.split_source is None:
+                    # A bare CancelledError after tool tasks have drained is
+                    # not evidence that an ordinary business effect settled.
+                    _, tools = turn.native_step
+                    if type(tools._repository) is not ToolRepositoryImpl:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    unsettled = await tools._repository.list_by_execution(
+                        turn.key.turn_id, tenant_id=context.principal.tenant_id,
+                        _states=frozenset({ToolOperationStatus.CLAIMED.value, ToolOperationStatus.EFFECT_UNKNOWN.value}),
+                    )
+                    if any(
+                        operation.status is not ToolOperationStatus.EFFECT_UNKNOWN
+                        or operation.producer_generation != turn.generation
+                        or operation.tool_name != "delegate_task"
+                        or operation.capability_ref is None
+                        or operation.capability_ref.kind != "capability"
+                        or operation.capability_ref.id != SUBAGENT_CAPABILITY_ID
+                        or operation.tool_call_id not in terminal_children
+                        for operation in unsettled
+                    ):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                 code = ErrorCode.EXECUTION_CANCELLED.value
                 if await self._finish_retained_turn(
                     turn, state="cancelled",

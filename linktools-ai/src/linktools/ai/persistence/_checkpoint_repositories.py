@@ -818,15 +818,16 @@ class ToolRepositoryImpl(_RepositoryBase):
         execution_id: str,
         *,
         tenant_id: str,
+        _states: frozenset[str] | None = None,
     ) -> tuple[ToolOperationRecord, ...]:
         async def read(_transaction):
             if tenant_id != self._tenant_id:
                 return ()
             parent = self._parent("tool_operation", "execution", (execution_id,))
             records = await self._tool_content.prefetch_owners(
-                (), query=RecordQuery(kind="tool_operation", parent_key=parent))
+                (), query=RecordQuery(kind="tool_operation", parent_key=parent, states=_states))
             if records is None:
-                records = await self._records("tool_operation", parent=parent)
+                records = await self._records("tool_operation", parent=parent, states=_states)
             values = tuple(
                 [await self._decode(record, ToolOperationRecord) for record in await self._tool_content.expand_many(records)]
             )

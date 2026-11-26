@@ -360,9 +360,11 @@ class RuntimeStepStore:
             source = self._message_archive.snapshot(snapshot.messages)
             previous = self._checkpoint_messages
             shared = 0 if previous is None else source.shared_prefix_length(previous[0])
+            suffix = native_checkpoint_messages(source[shared:])
+            if self._canonical_turn_boundary and isinstance(self._tool_operations, RuntimeToolOperationBridge):
+                suffix = self._tool_operations.checkpoint_interruptions(suffix)
             messages = self._message_archive.concatenate(
-                () if previous is None else previous[1][:shared],
-                native_checkpoint_messages(source[shared:]),
+                () if previous is None else previous[1][:shared], suffix,
             )
             self._checkpoint_messages = source, messages
         else:

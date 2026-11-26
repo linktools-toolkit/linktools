@@ -84,14 +84,17 @@ def _model(role, fn):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "cancel,trace,recover,wrapped_cancel,ordinary",
-    ((False, False, False, False, False), (True, False, False, False, False), (True, False, False, True, False),
-     (False, True, False, False, False), (False, True, True, False, False), (True, False, False, True, True)),
-    ids=("success", "cancel", "cancel-wrapped", "cli-default-trace", "recover-completed-trace", "ordinary-unknown"),
+    "cancel,trace,recover,wrapped_cancel,ordinary,bare_cancel",
+    ((False, False, False, False, False, False), (True, False, False, False, False, False),
+     (True, False, False, True, False, False), (False, True, False, False, False, False),
+     (False, True, True, False, False, False), (True, False, False, True, True, False),
+     (True, False, False, True, True, True), (True, False, False, True, False, True)),
+    ids=("success", "cancel", "cancel-wrapped", "cli-default-trace", "recover-completed-trace",
+         "ordinary-unknown", "ordinary-unknown-bare-stop", "delegate-unknown-bare-stop"),
 )
 async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool, trace: bool, recover: bool, wrapped_cancel: bool,
-    ordinary: bool,
+    ordinary: bool, bare_cancel: bool,
 ) -> None:
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
@@ -107,6 +110,23 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                 raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
 
         monkeypatch.setattr(RuntimeToolOperationBridge, "unknown", wrapped_unknown)
+
+    if bare_cancel:
+        from linktools.ai.runtime._agent_executor import AgentExecutor
+
+        invoke = AgentExecutor.execute_regenerable
+
+        async def drain_without_wrapped_error(executor, **kwargs):
+            # Simulate outer cancellation discarding the error without
+            # changing the already-retained receipt of the business tool.
+            try:
+                return await invoke(executor, **kwargs)
+            except AIError as error:
+                if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
+                    raise asyncio.CancelledError from None
+                raise
+
+        monkeypatch.setattr(AgentExecutor, "execute_regenerable", drain_without_wrapped_error)
 
     entered, release, tool_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     calls: list[str] = []

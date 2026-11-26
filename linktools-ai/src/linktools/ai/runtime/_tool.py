@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent, StepStore, ToolEffectRecord
 from linktools.core import environ
 from pydantic_ai.messages import (
+    ModelMessage,
     ModelRequest,
     ToolCallPart,
     ToolReturnPart,
@@ -61,6 +62,8 @@ _logger = environ.get_logger("ai.runtime.tool")
 
 
 TOOL_CAPABILITY_REF_METADATA_KEY = "linktools.ai.capability_ref"
+_INTERRUPTED_TOOL_RECEIPT = "linktools.ai.interrupted_tool_receipt"
+_INTERRUPTED_TOOL_MESSAGE = "Task interrupted; tool outcome unknown. Do not retry this tool call automatically."
 
 
 def tool_capability_ref(tool: ToolDefinition) -> CapabilityRef | None:
@@ -423,6 +426,7 @@ class RuntimeToolOperationBridge:
         if producer_generation is not None and terminal_commands is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         self._effect_receipts: dict[str, Observed[ToolOperationRecord]] = {}
+        self._reported_interruptions: dict[str, ToolOperationRecord] = {}
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._decision_fingerprints: dict[tuple[str, str], tuple[str, str]] = {}
 
@@ -839,6 +843,9 @@ class RuntimeToolOperationBridge:
         portable_args = _portable_arguments(args)
         arguments_digest = canonical_sha256(portable_args)
         fingerprint = (tool_def.name, arguments_digest)
+        if any(fingerprint == (record.tool_name, record.arguments_digest)
+               for record in self._reported_interruptions.values()):
+            raise ToolCallFailed(_INTERRUPTED_TOOL_MESSAGE)
         prior = self._decisions.get(key)
         if prior is not None:
             if self._decision_fingerprints.get(key) != fingerprint:
@@ -1139,15 +1146,51 @@ class RuntimeToolOperationBridge:
         self._operation_ids[pending.tool_call_id] = operation_id
         self._effect_receipts[pending.tool_call_id] = observed
 
+    def reported_interruption(self, record: ToolOperationRecord) -> bool:
+        """Whether this recovery already showed the model this unresolved receipt."""
+        return self._reported_interruptions.get(record.tool_operation_id) == record
+
+    @staticmethod
+    def _interruption_marker(record: ToolOperationRecord) -> list[JsonValue]:
+        return [record.tool_operation_id, record.producer_generation, record.fence]
+
+    def checkpoint_interruptions(self, messages: Sequence[ModelMessage]) -> Sequence[ModelMessage]:
+        """Tag the SDK's supplied failure in the already-owned checkpoint suffix."""
+        if not self._reported_interruptions:
+            return messages
+        records = {record.tool_call_id: record for record in self._reported_interruptions.values()}
+        result = []
+        for message in messages:
+            if isinstance(message, ModelRequest):
+                parts = []
+                for part in message.parts:
+                    record = records.get(part.tool_call_id) if isinstance(part, ToolReturnPart) else None
+                    if record is not None and part.tool_name == record.tool_name and part.outcome == "failed":
+                        metadata = dict(part.metadata) if isinstance(part.metadata, Mapping) else {}
+                        part = replace(part, metadata={**metadata, _INTERRUPTED_TOOL_RECEIPT: self._interruption_marker(record)})
+                    parts.append(part)
+                message = replace(message, parts=parts)
+            result.append(message)
+        return result
+
+    def has_checkpoint_interruption(self, part: ToolReturnPart) -> bool:
+        marker = part.metadata.get(_INTERRUPTED_TOOL_RECEIPT) if isinstance(part.metadata, Mapping) else None
+        identity = self._operation_ids.get(part.tool_call_id)
+        record = None if identity is None else self._reported_interruptions.get(identity)
+        return (record is not None and part.tool_name == record.tool_name and part.outcome == "failed"
+                and marker == self._interruption_marker(record))
+
     async def resume_canonical_effects(
         self,
         pending_calls: Mapping[str, str],
         *,
+        interrupted_generation: int | None = None,
+        retained_returns: Sequence[ToolReturnPart] = (),
         recover_delegate: Callable[
             [ToolOperationRecord, Mapping[str, JsonValue]], Awaitable[ToolOperationRecord],
         ] | None = None,
     ):
-        """Return only confirmed outcomes for exact tool calls from retained model input."""
+        """Project retained outcomes and explicitly reported interruptions; never replay a leaf."""
         from pydantic_ai.tools import DeferredToolResults
 
         if self._canonical_event_writer is None:
@@ -1155,6 +1198,11 @@ class RuntimeToolOperationBridge:
         values = await self._repository.list_by_agent_run(
             self._agent_run_id, tenant_id=self._tenant_id, execution_id=self._execution_id,
         )
+        retained = {
+            part.tool_call_id: part for part in retained_returns
+            if part.outcome == "failed" and isinstance(part.metadata, Mapping)
+            and _INTERRUPTED_TOOL_RECEIPT in part.metadata
+        }
         receipts = {}
         pending_recovery = []
         for value in values:
@@ -1162,12 +1210,29 @@ class RuntimeToolOperationBridge:
                     or value.tool_call_id in receipts):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if value.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}:
-                if (recover_delegate is None or value.tool_name != "delegate_task" or value.replay_safe
-                        or value.binding_digest != self._binding_digest
-                        or pending_calls.get(value.tool_call_id) != value.tool_name
+                if (value.binding_digest != self._binding_digest
                         or value.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}):
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                pending_recovery.append(value)
+                if value.tool_name == "delegate_task":
+                    if (recover_delegate is None or value.replay_safe
+                            or pending_calls.get(value.tool_call_id) != value.tool_name):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    pending_recovery.append(value)
+                else:
+                    if (interrupted_generation is None or self._producer_generation != interrupted_generation + 1
+                            or value.tool_operation_id != self._operation_id(self._agent_run_id, value.tool_call_id)):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    part = retained.get(value.tool_call_id)
+                    if (part is not None and part.tool_name == value.tool_name
+                            and part.metadata[_INTERRUPTED_TOOL_RECEIPT] == self._interruption_marker(value)
+                            and value.producer_generation is not None
+                            and value.producer_generation < interrupted_generation
+                            and value.tool_call_id not in pending_calls):
+                        self._operation_ids[value.tool_call_id] = value.tool_operation_id
+                        self._reported_interruptions[value.tool_operation_id] = value
+                    elif (value.producer_generation != interrupted_generation
+                          or pending_calls.get(value.tool_call_id) != value.tool_name):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             receipts[value.tool_call_id] = value
         results = DeferredToolResults()
         if any(call_id not in receipts or receipts[call_id].tool_name != tool_name
@@ -1195,7 +1260,11 @@ class RuntimeToolOperationBridge:
         for call_id in pending_calls:
             value = receipts[call_id]
             self._operation_ids[call_id] = value.tool_operation_id
-            results.calls[call_id] = await self._canonical_effect_result(value)
+            if value.status in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}:
+                self._reported_interruptions[value.tool_operation_id] = value
+                results.calls[call_id] = PydanticToolControlCapability.build_tool_failed(_INTERRUPTED_TOOL_MESSAGE)
+            else:
+                results.calls[call_id] = await self._canonical_effect_result(value)
         return results if pending_calls else None
 
     async def native_delegate_payload(
