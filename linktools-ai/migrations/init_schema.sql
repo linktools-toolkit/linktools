@@ -41,7 +41,7 @@ CREATE TABLE ai_state_records (
 CREATE TABLE ai_execution_records (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	`key` VARBINARY(488) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
 	scope_key VARBINARY(428) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
 	parent_key VARBINARY(367) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',

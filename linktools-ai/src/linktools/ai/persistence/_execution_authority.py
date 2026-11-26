@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from ..core import validate_execution_id
 from ..errors import AIError, ErrorCode
 from ..storage import TurnScopeIdentity
 from ._record_owner import EXECUTION_SHELL_KIND
@@ -35,7 +36,8 @@ class ExecutionAuthority:
 
     @property
     def key(self) -> bytes:
-        return record_key(self.scope.namespace, self.scope.tenant_id, "execution", "execution", (self.execution_id,))
+        return record_key(self.scope.namespace, self.scope.tenant_id, "execution", "execution",
+                          (validate_execution_id(self.execution_id),))
 
     def authority_values(self) -> dict[str, str | int | bytes]:
         if self.scope.scope != RUNTIME_TURN_SCOPE or type(self.fence) is not int or self.fence <= 0:

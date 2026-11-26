@@ -24,14 +24,12 @@ including direct SQL insertion and portable restore.
 | Table | Key | Scope | Parent |
 | --- | --- | --- | --- |
 | `ai_task_graphs` | 352 bytes: six framed components, namespace and tenant at 128 bytes each and Graph ID at 64 | Removed; graph headers have no scope | Removed; graph headers have no parent |
-| `ai_execution_records` | Keep 768; bounded service form is up to 356 bytes for an execution or 488 for an idempotency record | 428 bytes: full session or execution-idempotency resource relation | 367 bytes: full parent-execution relation |
+| `ai_execution_records` | 488 bytes: up to 356 for Execution and 488 for its idempotency receipt | 428 bytes: full session or execution-idempotency resource relation | 367 bytes: full parent-execution relation |
 | `ai_step_run_admissions` | 359 bytes: reserved run address with a bounded 64-byte run ID; other key shapes stay in generic State | 436 bytes: full conversation relation | 367 bytes: full parent-run relation |
 | `ai_step_tool_operations` | 362 bytes: exact checkpoint address with a bounded 64-byte operation ID; other key shapes stay in generic State | 436 bytes: full agent-run relation | 437 bytes: full execution relation |
 
-The execution owner still accepts some non-domain-shaped record keys via
-the State protocol. Its service-form key maximum is not a storage
-invariant. For the three dedicated relation families, the full bounded
-address is retained, and the canonical reserved key determines which
+For the dedicated owners, the full bounded key and relation address are
+retained; the canonical reserved key determines which
 widths apply. Generic record keys retain the full opaque relation budget. Separate
 typed ownership and preserve opaque State records before tightening these
 columns. The Task Graph owner now takes only its dedicated address shape;

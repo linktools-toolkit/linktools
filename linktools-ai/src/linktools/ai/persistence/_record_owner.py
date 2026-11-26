@@ -5,7 +5,10 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from ..core import AGENT_RUN_ID_MAX_BYTES, EXECUTION_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner
+from ..core import (
+    AGENT_RUN_ID_MAX_BYTES, EXECUTION_ID_MAX_BYTES, EXECUTION_REQUEST_KEY_MAX_BYTES,
+    RESOURCE_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner,
+)
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
@@ -70,6 +73,11 @@ def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) ->
 
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
+# Framed execution and idempotency writer addresses share this physical owner.
+EXECUTION_RECORD_KEY_MAX_BYTES = 2 * 128 + max(
+    36 + EXECUTION_ID_MAX_BYTES,
+    40 + RESOURCE_ID_MAX_BYTES + EXECUTION_REQUEST_KEY_MAX_BYTES,
+)
 EXECUTION_SORT_KEY_MAX_BYTES = 8 + RECORD_KEY_MAX_BYTES
 # Six framed components: record, namespace, tenant, task, task_graph, graph ID.
 TASK_GRAPH_KEY_MAX_BYTES = 32 + 2 * 128 + TASK_GRAPH_ID_MAX_BYTES
@@ -94,7 +102,10 @@ RECORD_OWNER_RELATION_WIDTHS = {
 }
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
-_EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}
+_EXECUTION_ADDRESS_IDENTITIES = {
+    "execution": (EXECUTION_ID_MAX_BYTES,),
+    "idempotency": (RESOURCE_ID_MAX_BYTES, EXECUTION_REQUEST_KEY_MAX_BYTES),
+}
 _KIND_OWNERS = {"execution": "ai_execution_records", "idempotency": "ai_execution_records", "task_graph": "ai_task_graphs", "tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
 _CONSTANTS = {
     "ai_execution_records": {"payload_bytes": None},
@@ -138,8 +149,12 @@ def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
             return "ai_state_records"
         if parts[4] == "agent_run" and not is_run_admission_address(parts):
             return "ai_state_records"
-        if parts[4] in _EXECUTION_ADDRESS_LENGTHS and (
-                parts[3] != "execution" or len(parts) != _EXECUTION_ADDRESS_LENGTHS[parts[4]]):
+        execution_identity_widths = _EXECUTION_ADDRESS_IDENTITIES.get(parts[4])
+        if execution_identity_widths is not None and (
+                parts[3] != "execution" or len(parts) != 5 + len(execution_identity_widths)
+                or any(not 1 <= len(value.encode("utf-8")) <= width for value, width in
+                       zip((*parts[1:3], *parts[5:]), (128, 128, *execution_identity_widths)))
+        ):
             return "ai_state_records"
         return _KIND_OWNERS.get(parts[4], "ai_state_records")
     return "ai_state_records"

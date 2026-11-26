@@ -22,9 +22,11 @@ from linktools.ai.core import (
     ResourceKind,
     RunBudget,
     StopReason,
+    TenantAuthorizationPolicy,
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.history import History
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime
@@ -336,70 +338,37 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
 
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Use the host policy for canonical session operations."""
+
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    try:
-        async with Persistence.open('default', storage=state) as persistence_340, Runtime.open(persistence=persistence_340, features=model_features(_PersistenceTestModels(), features)) as runtime:
-            created = await runtime.agents.get("default").create_session("session")
-            loaded = await runtime.sessions.get(
-                created.session_id,
-                principal=runtime.default_principal,
-            )
-            assert loaded.session_id == created.session_id
-
-            result = (await runtime.agents.get("default").run(
-                "hello",
-                output=_PersistenceNestedOutput,
-                session_id=created.session_id,
-                timeout_seconds=10,
-            )).result
-            assert result.status is ExecutionStatus.SUCCEEDED
-
-            session_record = await runtime._state.conversation.sessions.get(
-                created.session_id,
-                tenant_id=runtime.tenant_id,
-            )
-            execution = await runtime._state.execution.executions.get(
-                result.execution_id,
-                tenant_id=runtime.tenant_id,
-            )
-            persisted_result = await runtime._state.execution.executions.get_result(
-                result.execution_id,
-                tenant_id=runtime.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            assert execution is not None
-            assert execution.status is ExecutionStatus.SUCCEEDED
-            assert execution.result is not None
-            assert persisted_result == execution.result
-            assert persisted_result.output is not None
-            assert persisted_result.output.value == {
-                "findings": [
-                    {
-                        "trace_id": "trace",
-                        "labels": [
-                            {"name": "priority", "value": "high"},
-                        ],
-                    }
-                ]
-            }
-
-            assert execution.completed_at is not None
-            next_execution = replace(execution, result=persisted_result)
-            _encode_persisted_domain(persisted_result)
-            _encode_persisted_domain(next_execution)
-
-            inspected = await runtime.executions.inspect(
-                result.execution_id,
-                principal=runtime.default_principal,
-            )
-            waited = (await runtime.executions.wait(
-                result.execution_id,
-                principal=runtime.default_principal,
-            )).result
-            assert inspected.status is ExecutionStatus.SUCCEEDED
-            assert waited.status is ExecutionStatus.SUCCEEDED
-            assert waited.output == persisted_result.output.value
-    finally:
-        await runtime._state.close()
+    authorization = HostAuthorization()
+    expected = {
+        "findings": [{"trace_id": "trace", "labels": [{"name": "priority", "value": "high"}]}],
+    }
+    async with (
+        Persistence.open("default", storage=state) as persistence,
+        Runtime.open(persistence=persistence, authorization=authorization,
+                     features=model_features(_PersistenceTestModels(), features)) as runtime,
+    ):
+        agent = runtime.agents.get("default")
+        created = await agent.create_session("session")
+        loaded = await runtime.sessions.get(created.session_id, principal=runtime.default_principal)
+        assert loaded.session_id == created.session_id
+        result = (await agent.run(
+            "hello", output=_PersistenceNestedOutput, session_id=created.session_id, timeout_seconds=10,
+        )).result
+        assert result.status is ExecutionStatus.SUCCEEDED and result.view["output"] == expected
+        assert (await loaded.inspect())["active_turn_id"] is None
+        assert await persistence.conversation.sessions.get(created.session_id, tenant_id=runtime.tenant_id) is None
+        assert await persistence.execution.executions.get(result.key.turn_id, tenant_id=runtime.tenant_id) is None
+        principal = runtime.default_principal
+    async with (
+        Persistence.open("default", storage=state, read_only=True) as reopened,
+        History.open(persistence=reopened, authorization=authorization) as history,
+    ):
+        stored = await history.turn_result(created.session_id, result.key.turn_id, principal=principal)
+        assert stored["status"] == ExecutionStatus.SUCCEEDED.value
+        assert stored["conversation_committed"]
+        assert stored["output"] == expected
