@@ -9,9 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from contextvars import ContextVar
-from datetime import datetime, timedelta, timezone
-from enum import Enum
-from functools import wraps
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from linktools.core import environ
@@ -23,16 +21,11 @@ from ..persistence.coordination import read_admission_request
 from ..persistence.commands import StoredExecutionManagementAdapter
 
 
-from ..execution import (ExecutionManager, ExecutionDriver, CancelEffectOutcome,
-    terminal_error as _terminal_error,
+from ..execution import (ExecutionDriver, CancelEffectOutcome,
     execution_recovery_error as _execution_recovery_error,
-    operation_result as _operation_result,
-    operation_failure as _operation_failure,
-    operation_status as _operation_status,
     next_execution as _next_execution,
     terminal_idempotency_matches as _terminal_idempotency_matches,
     stable_idempotency_error as _stable_idempotency_error,
-    stable_operation_error as _stable_operation_error,
 )
 
 from ..model import validate_model_inputs
@@ -43,13 +36,11 @@ from ..agent import (
     AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
-    restore_output,
 )
 from ..core import (
     BudgetUsage,
     AuthorizationAction,
     AuthorizationPolicy,
-    CorrelationData,
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionMode,
@@ -62,17 +53,13 @@ from ..core import (
     OperationStatus,
     Page,
     Principal,
-    RUNTIME_OBJECT_STORE_ID,
     ResourceKind,
     ResourceRef,
     StopReason,
     UsageMetrics,
     WorkspaceFileInput,
-    canonical_json_bytes,
     canonical_sha256,
     deterministic_id,
-    normalize_json_value,
-    overlay_correlation,
     principal_identity_payload,
     validate_idempotency_key,
     validate_execution_id,
@@ -84,7 +71,6 @@ from ..session import SessionAdmission
 from ..spec import RepositoryInstructions
 from ..inputs import RepositoryInstructionPayload
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import sql_observation_phase
 from ..storage import (
     ObjectRef,
@@ -98,7 +84,6 @@ from ..inputs import ExecutionContextArchive, PreparedExecutionContext
 from ..capability import ToolResponseFixture
 from ._tool_response_fixture import _load_tool_response_fixture
 from ._feature_policy import _runtime_feature_policy
-from ..core import HandoffGate, HandoffState
 from ..inputs import (
     ExecutionInputMaterializer,
     decode_user_content_payload,
@@ -106,7 +91,7 @@ from ..inputs import (
     input_intent,
     validate_user_input,
 )
-from ..persistence.objects import ObjectKeyFactory, read_runtime_object
+from ..persistence.objects import ObjectKeyFactory
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ..execution import (
     CancelExecutionRequest,
@@ -133,11 +118,9 @@ from ..persistence import PersistenceDomain
 from ._pending_turn import _PendingExecutionTurns
 from ..persistence.coordination import PendingTurnCoordination
 from ..persistence.repositories import ExecutionRepositoryImpl
-from ..persistence.objects import runtime_object_source_reads
 from ..execution import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
-    ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartReservationResult,
     ExecutionStartUnknownCommit,
@@ -145,7 +128,6 @@ from ..execution import (
     ExecutionTerminalCommitResult,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
-    OperationTerminalUpdate,
     ResultRecord,
     StoredUserInput,
 )
@@ -154,7 +136,6 @@ from ..persistence.contracts import ExecutionRepositories, SessionRepository, Ta
 if TYPE_CHECKING:
     from ..persistence.contracts import ToolOperationRecord
     from ..persistence.turns import ExecutionAuthority, SessionTurnKey
-    from ..persistence.state import StateTransaction
     from ._native_subagent import NativeSubagentAdmission
     from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
     from ..session import SessionRecord

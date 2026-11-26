@@ -20,16 +20,12 @@ from ..asset import AssetStoreReader
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler, CompiledAgent
 from ..steps import NativeStepSource
 from ..capability import (
-    ToolResponsesCapability,
-    SessionCapability,
-    MemoryCapability,
     StepPersistenceCapability,
     AgentContext,
     AssetCapability,
     AssetSkillSource,
     CapabilityContribution,
     SkillSourceRegistry,
-    SkillDefinition,
     tool_class_from_metadata,
 )
 from ._lifecycle import _RuntimeCloseCoordinator
@@ -56,7 +52,6 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..session import SessionPendingExecutionLookup
 from ..observe import MetricRecorderProvider
-from ..model import ModelBinding
 from ..spec import (
     AgentSpec,
     CapabilityRef,
@@ -64,7 +59,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import CacheBackend, ObjectStore
+from ..storage import ObjectStore
 from ..workspace import (
     WorkspaceInstructionResolver,
     LocalWorkspaceBackend,
@@ -94,10 +89,8 @@ from pydantic_ai_harness.memory import MemoryStore
 from ..memory import PersistentMemoryStore
 from ..persistence.objects import ObjectKeyFactory
 from ._capabilities import runtime_feature_leaves
-from ..persistence.capabilities import CapabilityPersistence
 from ..persistence.capabilities import RuntimeCapabilityWrites
 from ..observe.service import MetricsService
-from ._persistence_configuration import validate_persistence_capabilities, capability_persistence_ids
 from ..capability import TraceCapability
 from ..history import History
 from ..core import token_seed
@@ -106,7 +99,7 @@ from ._session import RuntimeSessionService
 from ._subagent import SubagentDispatcher
 from ..history import TransientExecutionHistoryStore
 from ..capability import ToolResponseFixture
-from ..execution import CancelExecutionRequest, ExecutionHistoryReader
+from ..execution import ExecutionHistoryReader
 from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
 from ..persistence.commands import graph_task_repository
