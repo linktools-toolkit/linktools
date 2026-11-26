@@ -96,7 +96,10 @@ async def test_session_trace_sink_cannot_hold_or_fail_authoritative_turn(
                     await blocker.exec_driver_sql("BEGIN IMMEDIATE")
                 event.listen(trace_engine.sync_engine, "before_cursor_execute", observe_trace_write)
                 try:
-                    turn = await session.start("question", idempotency_key="request")
+                    turn = await runtime.sessions.start(
+                        session.session_id, "question", agent=runtime.agents.get(), principal=principal,
+                        idempotency_key="request",
+                    )
                     if expected is ExecutionStatus.CANCELLED:
                         await asyncio.wait_for(model_entered.wait(), 5)
                         assert await asyncio.wait_for(turn.cancel(), 5)
@@ -196,7 +199,10 @@ async def test_session_starts_with_unreachable_separate_trace(tmp_path: Path) ->
             ):
                 assert not attempts.is_set()
                 session = await runtime.agents.get().create_session("chat")
-                turn = await session.start("question", idempotency_key="request")
+                turn = await runtime.sessions.start(
+                    session.session_id, "question", agent=runtime.agents.get(), principal=runtime.default_principal,
+                    idempotency_key="request",
+                )
                 terminal = await turn.wait_final(timeout_seconds=5)
                 assert terminal.status is ExecutionStatus.SUCCEEDED
                 assert terminal.view["output"] == {"text": "available"}

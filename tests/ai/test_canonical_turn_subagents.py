@@ -24,7 +24,7 @@ from linktools.ai.persistence.runs import ModelInteractionStateStepArchive
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
 
 
 _SESSION = "delegation"
@@ -90,7 +90,7 @@ def _model(role, fn):
      (True, False, False, True, False, False), (False, True, False, False, False, False),
      (False, True, True, False, False, False), (True, False, False, True, True, False),
      (True, False, False, True, True, True), (True, False, False, True, False, True)),
-    ids=("success", "cancel", "cancel-wrapped", "cli-default-trace", "recover-completed-trace",
+    ids=("success", "cancel", "cancel-wrapped", "cli-default-trace", "recover-without-trace",
          "ordinary-unknown", "ordinary-unknown-bare-stop", "delegate-unknown-bare-stop"),
 )
 async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
@@ -239,8 +239,8 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                 assert generation == 1 and state == "succeeded"
                 return False
 
-            # The worker completed native Step and both model/tool Trace
-            # boundaries, but its terminal SQL publication was never committed.
+            # The worker completed native Step, but terminal Session publication
+            # was never committed, so optional parent Trace never enqueues.
             monkeypatch.setattr(state.session_turns, "finish", lose_terminal_commit)
         created = await http.post("/api/sessions", headers=_HEADERS,
                                   json={"session_id": _SESSION, "request_id": "create"})
@@ -316,38 +316,41 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
         assert await state.execution.executions.get(turn_id, tenant_id=runtime.tenant_id) is None
         assert state.conversation.sessions is None
 
+        if trace and not recover:
+            principal = runtime.default_principal
+            parent_trace = await _wait_for_committed(
+                lambda: runtime.history.turn_trace(_SESSION, turn_id, principal=principal),
+                lambda page: bool(page.items),
+            )
+            assert all(item.turn_id == turn_id for item in parent_trace.items)
+            parent_tools = {item.payload.get("tool_call_id") for item in parent_trace.items
+                            if item.payload["kind"] == "TOOL_RESULT"}
+            assert parent_tools == {_DELEGATE_CALL}
+
     async with open_host() as (state, runtime, _, http):
         if recover:
             key = SessionTurnKey(_SESSION, turn_id)
             turns = state.session_turns
             assert (await turns.get_turn(key))["state"] == "accepted"
-            before = await runtime.history.turn_trace(_SESSION, turn_id, principal=runtime.default_principal)
-            assert before.items[-1].payload["kind"] == "MODEL_RESPONSE"
             # Simulate expiration rather than sleep for the full lease period.
             async with turns._context.engine.begin() as connection:
                 changed = await connection.execute(
-                    turns._turns.update().filter_by(**turns._turn_values(key)).values(lease_until=0),
+                    turns._turns.update().filter_by(**turns._turn_values(key), generation=1).values(lease_until=0),
                 )
                 assert changed.rowcount == 1
-            async def missing_latest_trace(_archive, **_kwargs):
-                return ()
+
+            async def trace_forbidden(_archive, **_kwargs):
+                pytest.fail("Recover does not read optional parent Trace")
 
             with monkeypatch.context() as unavailable:
-                unavailable.setattr(ModelInteractionStateStepArchive, "list_model_interactions", missing_latest_trace)
-                with pytest.raises(AIError) as failure:
-                    await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
-                assert failure.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-                assert failure.value.safe_details["reason"] == "native_subagent_trace_incomplete"
+                unavailable.setattr(ModelInteractionStateStepArchive, "list_model_interactions", trace_forbidden)
+                unavailable.setattr(ModelInteractionStateStepArchive, "list_trace_events", trace_forbidden)
+                unavailable.setattr(ModelInteractionStateStepArchive, "list_turn_trace_events", trace_forbidden)
+                assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
 
-            # The failed pre-dispatch proof expires exactly its own successor.
-            rejected = await turns.get_turn(key)
-            assert rejected["state"] == "accepted" and rejected["generation"] == 2
-            assert not await turns.renew(key, generation=2, lease_seconds=60)
-            assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
             row = await turns.get_turn(key)
-            assert row["state"] == "succeeded" and row["generation"] == 3
-            after = await runtime.history.turn_trace(_SESSION, turn_id, principal=runtime.default_principal)
-            assert after == before
+            assert row["state"] == "succeeded" and row["generation"] == 2
+            assert not (await runtime.history.turn_trace(_SESSION, turn_id, principal=runtime.default_principal)).items
         assert await request(http) == turn_id
         stored = await http.get("/api/session", params={**params, "turn_id": turn_id})
         assert stored.status_code == 200, stored.text
@@ -358,16 +361,10 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
         assert calls == expected_calls and child_ids == [child_id]
         assert returned_ids == ([] if cancel else [child_id])
         if trace:
-            principal = runtime.default_principal
-            parent_trace = await runtime.history.turn_trace(_SESSION, turn_id, principal=principal)
-            child_trace = await runtime.history.trace(child_id, principal=principal)
-            assert parent_trace.items and all(item.turn_id == turn_id for item in parent_trace.items)
+            child_trace = await runtime.history.trace(child_id, principal=runtime.default_principal)
             assert child_trace.items and all(item.execution_id == child_id for item in child_trace.items)
-            parent_tools = {item.payload.get("tool_call_id") for item in parent_trace.items
-                            if item.payload["kind"] == "TOOL_RESULT"}
             child_tools = {item.payload.get("tool_call_id") for item in child_trace.items
                            if item.payload["kind"] == "TOOL_RESULT"}
-            assert parent_tools == {_DELEGATE_CALL}
             assert child_tools == {"lookup-A"}
 
 

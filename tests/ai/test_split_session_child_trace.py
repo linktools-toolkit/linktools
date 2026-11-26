@@ -69,8 +69,10 @@ async def test_split_session_trace_preserves_native_leaf_without_enabling_execut
         assert calls == []
 
         principal = runtime.default_principal
-        session = await agent.create_session("chat", principal=principal)
-        turn = await session.start("Review the entry", idempotency_key="review")
+        await agent.create_session("chat", principal=principal)
+        turn = await runtime.sessions.start(
+            "chat", "Review the entry", agent=agent, principal=principal, idempotency_key="review",
+        )
         result = await turn.wait_final(timeout_seconds=10)
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.view["output"] == {"text": "review complete"}

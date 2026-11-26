@@ -82,7 +82,6 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     original_sql_mutation = SqlStorageContext.run_mutation
     try:
         async with Persistence.open('terminal-trace', storage=storage) as persistence_77, Runtime.open(persistence=persistence_77, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features)) as runtime:
-            session = await runtime.agents.get().create_session("session")
             during["sql_mutations"] = []
 
             async def observe_sql(context, fn, **kwargs):
@@ -131,7 +130,7 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
             monkeypatch.setattr(archive, "_sync_projection_in_transaction", observe_projection)
             monkeypatch.setattr(repository, "commit_terminal_in_transaction", observe_terminal)
             recording = True
-            execution = await session.start("question")
+            execution = await runtime.agents.get().start("question")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 run_id, = runtime._run_store.trace_persistence.offsets
@@ -207,8 +206,8 @@ async def test_terminal_trace_does_not_delay_checkpoint_safety_boundary(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_terminal_trace_on_another_database_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_standalone_terminal_trace_rejects_a_separate_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(AIError) as rejected:
         await _run_observed(tmp_path, "sqlite", CommitPolicy.terminal(), monkeypatch, split=True)
-    assert rejected.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    assert "trace and execution must share a StateStorageGroup" in str(rejected.value)
+    assert rejected.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+    assert "Execution Trace requires Trace and Execution in one SQL transaction" in str(rejected.value)

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
-from linktools import environ
+from linktools.core import environ
 
 from ..persistence.contracts import TranscriptSpanRef
 from ..persistence.runs import ModelInteractionStateStepArchive, StagingAgentRunStore, StepEvent

@@ -253,7 +253,9 @@ async def compose_platform_capabilities(
             if isinstance(capability, feature):
                 if stage_session_trace:
                     bound_types.add(feature)
-                    return capability.bind(
+                    # Transport capture would buffer full HTTP bodies before the observer limit.
+                    trace = TraceCapability(commit=capability.commit) if capability.record_http_bodies else capability
+                    return trace.bind(
                         service(persistence, canonical_lifecycle=True),
                         model_request_seq=run_recorder.model_request_seq_for_tool_call,
                     )
