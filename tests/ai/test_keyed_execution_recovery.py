@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """Native keyed recovery preserves one producer through uncertain outcomes."""
 from ._runtime_test_helpers import model_features
 
@@ -20,11 +19,11 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.persistence import Persistence
 from linktools.ai.core import (
     ExecutionStatus, OperationKind, OperationLedgerInput, OperationStatus,
-    ResourceKind, SessionStatus, agent_conversation_id,
+    ResourceKind, TenantAuthorizationPolicy, agent_conversation_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionRecoveryState
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
 
 from .test_live_history_readback_integration import _Models
@@ -43,7 +42,7 @@ def interrupted_active_template(
             return frozen
         root = tmp_path_factory.mktemp("keyed-active-owner")
         owner = _RuntimeProcess(
-            root / "runtime.db", phase="active", native_database=root / "native.db",
+            root / "runtime.db", phase="active", mode="standalone", native_database=root / "native.db",
         )
         try:
             initial = owner.initial
@@ -70,7 +69,7 @@ async def _recoverable(
     native_database = None
     if crash_template is None:
         database = tmp_path / "runtime.db"
-        owner = _RuntimeProcess(database, phase=phase)
+        owner = _RuntimeProcess(database, phase=phase, mode="standalone")
         execution_id = owner.initial["execution_id"]
         owner.crash()
         owner.close()
@@ -108,8 +107,7 @@ async def _recoverable(
                 assert original.producer_generation == initial["generation"]
                 assert original.producer_claim_id == initial["claim_id"]
                 assert original.producer_claim_id is not None
-                session = await persistence_54.conversation.sessions.get("session", tenant_id="default")
-                assert session is not None and session.active_execution_id == execution_id
+                assert original.session_id is None
                 assert await persistence_54.execution.operations.get("recovery", tenant_id="default") is None
             async with Runtime.open(persistence=persistence_54, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(native_database=native_database))) as runtime, Persistence.open(_NAMESPACE, storage=other_state) as persistence_57, Runtime.open(persistence=persistence_57, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(native_database=native_database))) as other:
                 try:
@@ -376,36 +374,27 @@ async def test_runtime_close_drains_recovery_control_without_starting_a_new_work
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("admitted", "active"))
-@pytest.mark.parametrize("cancel_source", ("between_scans", "closing_session"))
 async def test_keyed_recovery_retains_receipt_when_cancellation_prevents_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, cancel_source: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
 ) -> None:
     async with _recoverable(tmp_path, phase=phase) as (runtime, other, state, execution_id, calls, _release):
         backend = runtime._execution_service.runtime_backend()
-        if cancel_source == "between_scans":
-            pending = backend._pending_cancel_operations
-            scans = 0
+        pending = backend._pending_cancel_operations
+        scans = 0
 
-            async def cancel_on_second_scan(*args, **kwargs):
-                nonlocal scans
-                scans += 1
-                if scans == 2:
-                    now = datetime.now(timezone.utc)
-                    await state.execution.operations.append(OperationLedgerInput(
-                        "racing-cancel", "default", ResourceKind.EXECUTION, execution_id, execution_id,
-                        OperationKind.EXECUTION_CANCEL, OperationStatus.PENDING,
-                        "b" * 64, None, None, None, False, now, now,
-                    ))
-                return await pending(*args, **kwargs)
+        async def cancel_on_second_scan(*args, **kwargs):
+            nonlocal scans
+            scans += 1
+            if scans == 2:
+                now = datetime.now(timezone.utc)
+                await state.execution.operations.append(OperationLedgerInput(
+                    "racing-cancel", "default", ResourceKind.EXECUTION, execution_id, execution_id,
+                    OperationKind.EXECUTION_CANCEL, OperationStatus.PENDING,
+                    "b" * 64, None, None, None, False, now, now,
+                ))
+            return await pending(*args, **kwargs)
 
-            monkeypatch.setattr(backend, "_pending_cancel_operations", cancel_on_second_scan)
-        else:
-            session = await state.conversation.sessions.get("session", tenant_id="default")
-            assert session is not None
-            await state.conversation.sessions.compare_and_swap(
-                session.session_id, tenant_id="default", expected_revision=session.revision,
-                next_record=replace(session, revision=session.revision + 1, status=SessionStatus.CLOSING),
-            )
+        monkeypatch.setattr(backend, "_pending_cancel_operations", cancel_on_second_scan)
         original = await _producer(state, execution_id)
         await _recover(runtime, execution_id, "recovery")
         receipt = await _receipt(state, "recovery")
@@ -462,41 +451,59 @@ async def test_competing_cancel_recovery_replays_the_no_producer_winner(
             await asyncio.gather(stale, return_exceptions=True)
 
 
+class _SessionAuthorization(TenantAuthorizationPolicy):
+    """Explicit native Session host authorization for this isolated test."""
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ("admitted", "active"))
-async def test_keyed_recovery_replays_session_conflict_terminal_outcome(tmp_path: Path, phase: str) -> None:
-    async with _recoverable(tmp_path, phase=phase) as (runtime, other, state, execution_id, calls, _release):
-        execution = await state.execution.executions.get(execution_id, tenant_id="default")
-        session = await state.conversation.sessions.get("session", tenant_id="default")
-        assert execution is not None and session is not None
-        sibling = replace(execution, execution_id="other-session-owner", root_execution_id="other-session-owner")
-        await state.execution.executions.create_execution(sibling)
-        await state.conversation.sessions.release_execution(
-            session.session_id, tenant_id="default", execution_id=execution_id,
-        )
-        reassigned = await state.conversation.sessions.admit_execution(
-            session.session_id, tenant_id="default", execution_id=sibling.execution_id,
-            expected=session.continuation,
-        )
-        assert reassigned.active_execution_id == sibling.execution_id
-        with pytest.raises(AIError) as failed_control:
-            await _recover(runtime, execution_id, "recovery")
-        assert failed_control.value.code is ErrorCode.SESSION_BUSY
-        receipt = await _receipt(state, "recovery")
-        assert receipt.status is OperationStatus.FAILED
-        if phase == "admitted":
-            assert receipt.result_ref is None
-        else:
-            assert receipt.result_ref == (await _producer(state, execution_id)).producer_claim_id
-        assert receipt.error_code == ErrorCode.SESSION_BUSY.value
-        failed = await state.execution.executions.get(execution_id, tenant_id="default")
-        assert failed.status is ExecutionStatus.FAILED and failed.error_code == ErrorCode.SESSION_BUSY.value
-        with pytest.raises(AIError) as replay:
-            await _recover(other, execution_id, "recovery")
-        assert replay.value.code is ErrorCode.SESSION_BUSY
-        assert await _receipt(state, "recovery") == receipt
-        assert await state.execution.executions.get(sibling.execution_id, tenant_id="default") == sibling
-        assert calls == []
+async def test_native_session_stale_recovery_and_close_cannot_displace_current_owner(tmp_path: Path) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def model(_messages, _info):
+        calls.append(1)
+        if len(calls) == 2:
+            started.set()
+            await release.wait()
+        yield "answer"
+
+    features = RuntimeFeatures(_NAMESPACE)
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(FunctionModel(stream_function=model)), features)
+    storage = PersistenceStorage.sqlite(tmp_path / "native.db")
+    async with (
+        Runtime.open(_NAMESPACE, storage=storage, features=features, authorization=_SessionAuthorization()) as runtime,
+        Runtime.open(_NAMESPACE, storage=storage, features=features, authorization=_SessionAuthorization()) as other,
+    ):
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+
+        async def start(host, key):
+            return await host.sessions.start(
+                "session", key, principal=principal, agent=host.agents.get(), idempotency_key=key,
+            )
+
+        original = await start(runtime, "original")
+        assert (await original.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        replacement = await start(runtime, "replacement")
+        try:
+            await asyncio.wait_for(started.wait(), 10)
+            turns = runtime._state.session_turns
+            before = await turns.get_session("session")
+            assert before["active_turn_id"] == replacement.key.turn_id.encode()
+            assert not await other.sessions.close_turn_session(
+                "session", principal=principal, expected_revision=before["revision"],
+            )
+            for _ in range(2):
+                assert not await other.sessions.recover_turn("session", original.key.turn_id, principal=principal)
+                with pytest.raises(AIError) as conflict:
+                    await start(other, "contender")
+                assert conflict.value.code is ErrorCode.SESSION_BUSY
+            assert await turns.get_session("session") == before
+            assert calls == [1, 1]
+        finally:
+            release.set()
+        assert (await replacement.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
