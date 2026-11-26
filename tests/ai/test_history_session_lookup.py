@@ -7,13 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
 
 from linktools.ai.core import AuthorizationAction, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 
-from .test_incremental_projection_boundaries import _storage
 from .test_session_timeline import _session
 
 pytestmark = pytest.mark.asyncio
@@ -28,12 +28,11 @@ def _reader(state, *, authorization=None):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("scope", ("owned", "missing", "other_owner"))
 async def test_session_lookup_uses_point_reads_within_the_list_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, scope: str,
+    monkeypatch: pytest.MonkeyPatch, scope: str,
 ) -> None:
-    state = Persistence(_storage(backend, tmp_path))
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="session-lookup", tenant_id="tenant")
     actions = []
 
@@ -66,6 +65,51 @@ async def test_session_lookup_uses_point_reads_within_the_list_scope(
         assert actions == expected
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("scope", ("owned", "missing", "other_owner"))
+async def test_native_session_state_is_an_authorized_point_read(tmp_path: Path, scope: str) -> None:
+    class Authorization(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            await super().authorize(principal, action, resource)
+            assert action is AuthorizationAction.SESSION_READ
+            assert resource.id == "session"
+            assert resource.owner_principal_id is None
+            if scope == "other_owner":
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    async with Persistence.open(
+        "session-lookup", tenant_id="tenant", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+    ) as state:
+        if scope != "missing":
+            await state.session_turns.create("session", config={})
+        async with History.open(persistence=state, authorization=Authorization()) as history:
+            engine = state._stores[PersistenceDomain.CONVERSATION].context.engine.sync_engine
+            statements = []
+
+            def capture(_connection, _cursor, sql, _parameters, _context, _many):
+                if sql.split(None, 1)[0].upper() not in {"BEGIN", "PRAGMA"}:
+                    statements.append(sql)
+
+            event.listen(engine, "before_cursor_execute", capture)
+            try:
+                if scope == "owned":
+                    view = await history.turn_session_state("session", principal=_OWNER)
+                    assert view["session_id"] == "session"
+                    assert view["active_turn_id"] is None
+                else:
+                    with pytest.raises(AIError) as denied:
+                        await history.turn_session_state("session", principal=_OWNER)
+                    assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            finally:
+                event.remove(engine, "before_cursor_execute", capture)
+            if scope == "other_owner":
+                assert not statements
+            else:
+                sql, = statements
+                assert sql.startswith("SELECT")
+                assert "ai_sessions.session_key = " in sql
+                assert "ORDER BY" not in sql
 
 
 @pytest.mark.parametrize("resource_id", ("list", "session"))

@@ -26,7 +26,12 @@ async def test_sqlite_route_request_survives_plan_rebuild_and_cache_selection(tm
         assert state.object_store(PersistenceDomain.EXECUTION) is objects
         assert state.plan.execution.exclusive_writer
         assert state.plan.execution.cache is cache
-        assert state.execution.executions.state_store.storage_group is not state.conversation.sessions.state_store.storage_group
+        await state.session_turns.create("conversation-only", config={})
+        assert await state.session_turn_reader.get_session("conversation-only") is not None
+        async with state.execution.executions.state_store.context.engine.connect() as connection:
+            assert (await connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM ai_sessions WHERE session_key = ?", (b"conversation-only",),
+            )).scalar_one() == 0
         contender = Persistence(PersistenceStorage(plan, object_store=objects))
         try:
             with pytest.raises(AIError) as rejected:
