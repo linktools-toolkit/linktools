@@ -22,7 +22,7 @@ from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
-from ..model import MaterializedUserContent, StoredUserInput, normalize_input_files, validate_model_inputs
+from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.turns import SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
 from ..session import SessionContext, ToolProcessItem, project_tool_process_event
@@ -120,6 +120,7 @@ class _AttachedGraphTurn:
     session_context: SessionContext
     attachments: Sequence[Mapping[str, JsonValue]] = ()
     stored_input: JsonValue = None
+    model_prompt: tuple[UserContent, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1227,7 +1228,7 @@ class _RegenerableTurnRunner:
 
     async def _reserve_attached_graph_turn(
         self, commands: StateCommands, reservation: ExecutionStartReservation, *,
-        session_id: str, session: Mapping[str, object], request_key: str, prompt: str, principal: Principal, tenant_id: str,
+        session_id: str, session: Mapping[str, object], request_key: str, prompt: CanonicalUserInput, principal: Principal, tenant_id: str,
         authorization: AuthorizationPolicy, task_repository: TaskRepositoryImpl,
         task_admission: TaskGraphAdmission, task_invocation: TaskNodeInvocation,
     ) -> tuple[ExecutionStartReservationResult, _AttachedGraphTurn | None]:
@@ -1262,9 +1263,16 @@ class _RegenerableTurnRunner:
         if cwd is not None:
             # Attaching a different workspace needs the original Graph instruction policy.
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        captured = execution.stored_user_input
+        native_input = None if captured is None else native_graph_input_content(captured)
+        if (native_input is None or (native_input != prompt if isinstance(prompt, str)
+                                    else isinstance(native_input, str) or tuple(native_input) != tuple(prompt))):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        text = native_input if isinstance(native_input, str) else ""
+        stored_input = None if isinstance(native_input, str) else encode_domain(captured)
         metadata = ImmutableJsonMapping(config.get("metadata", {}))
         request: dict[str, JsonValue] = {
-            "prompt": prompt, "principal": asdict(principal), "thinking": execution.thinking,
+            "prompt": text, "principal": asdict(principal), "thinking": execution.thinking,
             "session_metadata": dict(metadata), "cwd": cwd,
             "repository_instructions": None,
         }
@@ -1279,13 +1287,14 @@ class _RegenerableTurnRunner:
         through = session["last_turn_no"]
         revision = session["revision"]
         terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({
-            **request, "binding": execution.binding.to_payload(),
+            **request, **({} if stored_input is None else {"input": stored_input}),
+            "binding": execution.binding.to_payload(),
         }))
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
         context_from, history = await self._admission_history(
             key, through=through, lineage=lineage, session_context=execution.session_context,
-            remaining=_CONTEXT_BYTES - len(prompt.encode("utf-8")),
+            remaining=_CONTEXT_BYTES - self._input_bytes(text, captured if stored_input is not None else None),
         )
         result = await commands._reserve_canonical_graph_start(
             reservation, turns=self._store, key=key, expected_revision=revision,
@@ -1296,8 +1305,10 @@ class _RegenerableTurnRunner:
         if not result.created:
             return result, None
         return result, _AttachedGraphTurn(
-            key, 1, through + 1, prompt, tuple(history), terminal_bytes, revision + 1,
+            key, 1, through + 1, text, tuple(history), terminal_bytes, revision + 1,
             cwd, context_from, through, metadata, execution.session_context,
+            stored_input=stored_input, model_prompt=None if isinstance(native_input, str) else tuple(native_input),
+            attachments=stored_input_attachment_views(captured),
         )
 
     async def admit(

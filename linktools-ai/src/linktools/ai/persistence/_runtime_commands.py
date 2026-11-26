@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from linktools.core import environ
 from ..agent import AgentBindingContract
-from ..model import StoredUserInput
 
 from ..core import (
     ApprovalStatus,
@@ -1766,10 +1765,11 @@ class StateCommands:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if execution.input_context is not None or execution.context_imported or "input" in request:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
-        prompt = request.get("prompt")
+        from ..model import native_graph_input_content, native_graph_input_metadata
+
+        prompt = native_graph_input_content(execution.stored_user_input)
         if (
-            not isinstance(prompt, str)
-            or execution.stored_user_input != StoredUserInput("text", StoredPayload.inline_text(prompt))
+            prompt is None or request.get("prompt") != (prompt if isinstance(prompt, str) else "")
             or request.get("principal") != {
                 "principal_id": execution.principal_id, "tenant_id": self._tenant_id,
                 "kind": execution.principal_kind,
@@ -1786,9 +1786,15 @@ class StateCommands:
         archive = await archive_provider(create=True)
         if not _same_group((store, archive.store)):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        metadata = native_graph_input_metadata(execution.stored_user_input)
+        if metadata is not None and not archive.supports_attachment_objects:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         prepared = PreparedArchive()
         source = NativeUserInputReference(await native.prepare_archived_messages(
-            (ModelRequest(parts=[UserPromptPart(content=prompt, timestamp=execution.created_at)]),), prepared,
+            (ModelRequest(
+                parts=[UserPromptPart(content=prompt, timestamp=execution.created_at)],
+                metadata=metadata,
+            ),), prepared,
         ), 0)
         admission = await turns._prepare_accept(
             key, expected_revision=expected_revision, context_from=context_from, context_through=context_through,

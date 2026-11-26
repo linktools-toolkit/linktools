@@ -420,6 +420,11 @@ class ContentArchive:
         self.content_scope = archive_scope_token(self._scope_key)
         self._object_prefix = "v1/archive/" + scope_id + "/" + self.content_scope + "/"
 
+    @property
+    def supports_attachment_objects(self) -> bool:
+        """Whether canonical attachment bytes can be written outside SQL."""
+        return self._objects is not None
+
     def _bind(self, prepared: PreparedArchive) -> None:
         owner = self.scope_id, self._namespace, self._tenant_id
         if prepared.owner is None:

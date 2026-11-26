@@ -236,3 +236,75 @@ def plain_text_input_content(value: StoredUserInput) -> str | list[str] | None:
         return canonical_json_bytes(normalize_json_value(
             {"codec": item.codec, "payload": item.payload.to_json(), "view": None if item.view is None else dict(item.view)}))
     return content if wire(value) == wire(expected) else None
+
+
+_GRAPH_FILE = "linktools.graph_file"
+
+
+def native_graph_input_metadata(value: StoredUserInput) -> dict[str, JsonValue] | None:
+    """Carry only accepted file provenance that the native message cannot derive."""
+    view = value.view
+    if view is None:
+        return None
+    files, prompt = view.get("files"), view.get("prompt")
+    if (not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], Mapping)
+            or not isinstance(files[0].get("path"), str) or not isinstance(prompt, Mapping)
+            or prompt.get("kind") not in {"text", "items"}):
+        return None
+    return {_GRAPH_FILE: {"path": files[0]["path"], "scalar_prompt": prompt["kind"] == "text"}}
+
+
+def capture_native_graph_input(
+    content: str | Sequence[UserContent], metadata: Mapping[str, JsonValue] | None = None,
+) -> StoredUserInput:
+    """Reconstruct the one materializer-owned independent file without opening it."""
+    if metadata is None:
+        return capture_plain_text_input(content)
+    import hashlib
+
+    from ..workspace import normalize_workspace_input_path
+    from ._attachment import input_attachment_views, is_binary_attachment_text
+    from ._user_content_codec import encode_user_content_item
+
+    file = metadata.get(_GRAPH_FILE)
+    if (set(metadata) != {_GRAPH_FILE} or not isinstance(file, Mapping)
+            or set(file) != {"path", "scalar_prompt"} or type(file["scalar_prompt"]) is not bool
+            or not isinstance(file["path"], str) or normalize_workspace_input_path(file["path"]) != file["path"]
+            or isinstance(content, str) or len(content) < 3 or not isinstance(content[1], BinaryContent)
+            or any(not isinstance(item, str) for item in content[2:])
+            or file["scalar_prompt"] and len(content) != 3):
+        raise ValueError("invalid admitted Graph file")
+    path = file["path"]
+    binary = content[1]
+    if not is_binary_attachment_text(content[0], binary, path=path):
+        raise ValueError("admitted Graph file label differs from its original path")
+    descriptor = {"path": path, "media_type": binary.media_type, "size": len(binary.data),
+                  "digest": hashlib.sha256(binary.data).hexdigest()}
+    original = content[2] if file["scalar_prompt"] else tuple(content[2:])
+    items = [{"kind": "text", "text": item} for item in content[2:]]
+    prompt = items[0] if file["scalar_prompt"] else {"kind": "items", "items": items}
+    return StoredUserInput(
+        "user-content-v1", StoredPayload.inline_json({"items": [encode_user_content_item(item) for item in content]}),
+        {"version": 1, "prompt": prompt, "files": [descriptor],
+         "attachments": list(input_attachment_views(original, (descriptor,)))},
+    )
+
+
+def native_graph_input_content(value: StoredUserInput) -> str | list[UserContent] | None:
+    """Select only a byte-exact, already frozen turn prompt."""
+    from ._user_content_codec import decode_user_content_item
+
+    plain = plain_text_input_content(value)
+    if plain is not None:
+        return plain
+    metadata = native_graph_input_metadata(value)
+    if metadata is None or value.codec != "user-content-v1" or value.payload.kind != "inline" or value.payload.encoding != "json":
+        return None
+    try:
+        decoded = value.payload.decode()
+        if not isinstance(decoded, Mapping) or set(decoded) != {"items"} or not isinstance(decoded["items"], list):
+            return None
+        content = [decode_user_content_item(item) for item in decoded["items"]]
+        return content if capture_native_graph_input(content, metadata) == value else None
+    except (TypeError, ValueError, AIError):
+        return None

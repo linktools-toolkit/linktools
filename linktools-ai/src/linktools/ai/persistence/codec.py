@@ -2115,17 +2115,17 @@ def native_user_input_reference(value: Mapping) -> NativeUserInputReference | No
 
 
 def validate_native_user_input(reference: NativeUserInputReference, value: object) -> StoredUserInput:
-    from ..model import plain_text_input_content
+    from ..model import native_graph_input_content
 
     if (not isinstance(reference, NativeUserInputReference) or not isinstance(value, StoredUserInput)
-            or plain_text_input_content(value) is None):
+            or native_graph_input_content(value) is None):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
 
 
 def restore_native_user_input(reference: NativeUserInputReference, raw: bytes) -> StoredUserInput:
-    """Authenticate a canonical text or ordered-text capture from a fixed prompt."""
-    from ..model import capture_plain_text_input
+    """Authenticate a canonical accepted-input capture from its original native prompt."""
+    from ..model import capture_native_graph_input
 
     try:
         messages = decode_model_messages(raw)
@@ -2134,8 +2134,8 @@ def restore_native_user_input(reference: NativeUserInputReference, raw: bytes) -
             raise ValueError("native input source is not a request part")
         part = messages[0].parts[reference.part_index]
         if not isinstance(part, UserPromptPart):
-            raise ValueError("native input source is not ordinary prompt text")
-        return validate_native_user_input(reference, capture_plain_text_input(part.content))
+            raise ValueError("native input source is not a user prompt")
+        return validate_native_user_input(reference, capture_native_graph_input(part.content, messages[0].metadata))
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 

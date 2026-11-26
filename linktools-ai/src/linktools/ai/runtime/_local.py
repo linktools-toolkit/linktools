@@ -2121,10 +2121,16 @@ class LocalExecutionBackend:
         # This read resolves the admitted immutable native prompt, not the
         # request supplied by the current caller or its workspace.
         projection = await turns.get_history_turn(key, lineage=())
-        prompt = None if projection is None else projection["prompt"]
-        if (not isinstance(prompt, str) or prompt != await self.restore_user_input(execution)
-                or projection["graph_execution"] != key.turn_id
+        if (projection is None or projection["graph_execution"] != key.turn_id
                 or projection["generation"] != generation):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prompt = projection["prompt"]
+        stored_input = projection["stored_input"]
+        stored = runner._stored_input({"input": stored_input}) if stored_input is not None else None
+        if stored is not None and stored != execution.stored_user_input:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        restored = await runner._restore_prompt(prompt, stored)
+        if stored is None and prompt != await self.restore_user_input(execution):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         context_from, through = row["context_from"], row["context_through"]
         session_context = request.get("session_context", "all")
@@ -2135,16 +2141,20 @@ class LocalExecutionBackend:
         # not a second logical request body and was not charged at admission.
         accepted_request = {name: value for name, value in request.items() if name not in {"input", "graph_execution"}}
         accepted_request["prompt"] = prompt
+        if stored_input is not None:
+            accepted_request["input"] = stored_input
         terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({**accepted_request, "binding": row["binding_json"]}))
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         history = await runner._read_admitted_history(
             key, context_from=context_from, context_through=through, lineage=lineage,
-            session_context=execution.session_context, remaining=_CONTEXT_BYTES - len(prompt.encode("utf-8")),
+            session_context=execution.session_context, remaining=_CONTEXT_BYTES - runner._input_bytes(prompt, stored),
         )
         return _AttachedGraphTurn(
             key, generation, row["turn_no"], prompt, tuple(history), terminal_bytes, session["revision"], None,
             context_from, through, ImmutableJsonMapping(request["session_metadata"]), execution.session_context,
+            stored_input=stored_input, model_prompt=None if isinstance(restored, str) else tuple(restored),
+            attachments=() if stored is None else stored_input_attachment_views(stored),
         )
 
     async def _recover_undispatched_attached_graph(
@@ -2185,7 +2195,7 @@ class LocalExecutionBackend:
         step_store = (self._require_attached_graph_step_launch(execution, runner, binding)
                       if execution.restart_checkpoints else None)
         request = ExecutionRequest(
-            turn.prompt, principal, identity.idempotency_key, execution.memory_scope, execution.mode,
+            turn.model_prompt or turn.prompt, principal, identity.idempotency_key, execution.memory_scope, execution.mode,
             execution.planning, execution.thinking, correlation=execution.correlation,
             tool_effects=execution.tool_effects, tool_response_ref=execution.tool_response_ref,
             session_context=execution.session_context, resolved_binding=binding,
@@ -2269,7 +2279,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         binding = await self.validate_recovery_inputs(execution)
         request = ExecutionRequest(
-            turn.prompt, principal, identity.idempotency_key, execution.memory_scope, execution.mode,
+            turn.model_prompt or turn.prompt, principal, identity.idempotency_key, execution.memory_scope, execution.mode,
             execution.planning, execution.thinking, correlation=execution.correlation,
             tool_effects=execution.tool_effects, tool_response_ref=execution.tool_response_ref,
             session_context=execution.session_context, resolved_binding=binding,
@@ -2337,7 +2347,7 @@ class LocalExecutionBackend:
     ) -> ExecutionHandle:
         """Claim a real Graph-bound canonical turn before entering local lifecycle."""
         execution = reservation.execution
-        if (not isinstance(request.user_prompt, str) or request.files
+        if (request.files
                 or not (execution.durable_trace or execution.restart_checkpoints)
                 or self._execution_buffer is not None):
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
@@ -2450,7 +2460,7 @@ class LocalExecutionBackend:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         binding = await self._execution_binding(execution, request.resolved_binding)
-        request = replace(request, user_prompt=turn.prompt, files=(), resolved_binding=binding)
+        request = replace(request, user_prompt=turn.model_prompt or turn.prompt, files=(), resolved_binding=binding)
         await self._validate_start(request, execution)
 
         async def admit(_coordination: TurnCoordination | None) -> ExecutionHandle:
@@ -6415,7 +6425,7 @@ class LocalExecutionBackend:
         spec = binding.binding_contract.agent_spec
         structured = binding.output_binding.mode == "structured"
         context_messages, transcript, binding_refs = prepare_native_turn_transcript(
-            turn.prompt, turn.history, messages, output,
+            turn.model_prompt or turn.prompt, turn.history, messages, output,
             instructions=spec.instructions, system_prompt=spec.system_prompt, structured=structured,
         )
         shared_source = current.durable_trace or current.restart_checkpoints

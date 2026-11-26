@@ -33,7 +33,7 @@ from ..storage import (
     sql_unique,
 )
 from ._archive import ArchiveContentInput, PreparedArchive
-from .codec import decode_agent_binding_content, encode_agent_binding_content, restore_native_user_input
+from .codec import decode_agent_binding_content, encode_agent_binding_content, encode_domain, restore_native_user_input
 from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage, fork_segments, lineage_predicate
 from ._turn_sql_schema import (
     TURN_EXECUTION_MAX_BYTES,
@@ -368,17 +368,20 @@ class SqlSessionTurnReader:
         )
         projected = []
         for position, row in enumerate(rows):
+            admitted_prompt = None
             if position in prompts:
-                from ..model import plain_text_input_content
+                from ..model import native_graph_input_content
 
                 reference = prompts[position]
                 parts = bodies[reference.root]
                 if len(parts) != 1:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                prompt = plain_text_input_content(restore_native_user_input(reference, parts[0]))
-                if not isinstance(prompt, str):
+                stored = restore_native_user_input(reference, parts[0])
+                admitted_prompt = native_graph_input_content(stored)
+                if admitted_prompt is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                row = {**row, "prompt": prompt, "stored_input": None}
+                row = ({**row, "prompt": admitted_prompt, "stored_input": None} if isinstance(admitted_prompt, str)
+                       else {**row, "prompt": "", "stored_input": encode_domain(stored)})
             if row["state"] != "succeeded" or (body_limit is not None and position >= body_limit):
                 projected.append(row)
                 continue
@@ -401,7 +404,10 @@ class SqlSessionTurnReader:
                 if not isinstance(first, ModelRequest):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript has no request")
                 parts = [part for part in first.parts if isinstance(part, UserPromptPart)]
-                if len(parts) != 1 or parts[0].content != row["prompt"]:
+                raw_prompt = parts[0].content if len(parts) == 1 else None
+                if isinstance(raw_prompt, tuple):
+                    raw_prompt = list(raw_prompt)
+                if admitted_prompt is None or raw_prompt != admitted_prompt:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript differs from its admitted input")
                 messages[0] = replace(first, parts=[
                     replace(part, content="") if part is parts[0] else part for part in first.parts
