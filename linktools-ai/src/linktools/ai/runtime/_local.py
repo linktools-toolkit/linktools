@@ -3072,7 +3072,9 @@ class LocalExecutionBackend:
             ExecutionStatus.FINALIZING,
         }:
             return CancelEffectOutcome.CONFIRMED
-        revoke = (force and not execution.restart_checkpoints
+        # Native parked Stop already holds the exact WAITING predecessor
+        # receipt; its parent need not be a standalone Execution row.
+        revoke = (force and not parked_cancel_committed and not execution.restart_checkpoints
                   and execution.binding_kind == "agent"
                   and not execution.requires_task_invocation_capture)
         if revoke and execution.root_execution_id != execution.execution_id:

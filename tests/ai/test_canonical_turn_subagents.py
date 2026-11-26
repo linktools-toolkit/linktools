@@ -145,7 +145,7 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
             raise
         return _CHILD_OUTPUT
 
-    async def ordinary_effect() -> str:
+    async def ordinary_effect(_context: AgentContext[None]) -> str:
         calls.append("ordinary effect")
         entered.set()
         try:
@@ -241,21 +241,27 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                                   json={"session_id": _SESSION, "request_id": "create"})
         assert created.status_code == 201, created.text
         async with _events(app) as frames:
+            stage = "subscribe"
             try:
                 async with asyncio.timeout(10):
                     snapshot = await frames.get()
                     assert snapshot["type"] == "snapshot" and snapshot["session"]["active_turn_id"] is None
+                    stage = "admit turn"
                     turn_id = await request(http)
+                    stage = "enter tool"
                     await entered.wait()
                     assert await request(http) == turn_id
                     if cancel:
+                        stage = "Stop request"
                         stopped = await http.post("/api/session/cancel", params=params, headers=_HEADERS,
                                                   json={"request_id": "stop", "turn_id": turn_id})
                         assert stopped.status_code == 200 and stopped.json()["accepted"], stopped.text
+                        stage = "cancel tool"
                         await tool_cancelled.wait()
                         assert not release.is_set()
                     else:
                         release.set()
+                    stage = "terminal event"
                     tool_statuses = []
                     while True:
                         frame = await frames.get()
@@ -267,6 +273,7 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                             break
                         if frame["type"] == "gap" and recover:
                             break
+                        assert frame.get("phase") != "producer_stopped", frame
                         if frame["type"] == "terminal":
                             assert not recover and not ordinary, frame
                             assert frame["state"] == ("cancelled" if cancel else "succeeded"), frame
@@ -277,6 +284,8 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                         assert tool_statuses and tool_statuses[0] == "RUNNING" and "SUCCEEDED" not in tool_statuses
                     elif not ordinary:
                         assert tool_statuses == ["RUNNING", "SUCCEEDED"]
+            except TimeoutError:
+                pytest.fail(f"native delegation timed out at {stage}", pytrace=False)
             finally:
                 release.set()
         if ordinary:

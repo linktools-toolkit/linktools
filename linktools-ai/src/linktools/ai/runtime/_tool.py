@@ -805,6 +805,7 @@ class RuntimeToolOperationBridge:
             call, _portable_arguments(args), replay_safe=replay_safe, capability_ref=capability_ref,
         ))
         self._operation_ids[call_id] = operation_id
+        self._admission_attempts.add(operation_id)
         if self._operation_observer is not None:
             self._operation_observer(call_id, operation_id)
 

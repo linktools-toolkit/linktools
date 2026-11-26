@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
-from ..capability._subagent import SUBAGENT_CAPABILITY_ID
+from ..capability import SUBAGENT_CAPABILITY_ID
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views

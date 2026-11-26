@@ -60,12 +60,18 @@ single-file text preview; it does not enable bulk reads, file attachments
 returned by a tool, dynamically loaded skills, or shell commands. The console
 shows the tool status and public preview, not raw parameters or results.
 
-Explicit recovery of an ordinary turn regenerates from the accepted prompt,
-frozen Agent binding and input attachments. It does not replay an unfinished
-workspace tool result: a new authorized listing or text read sees the current
-workspace, subject to the same policy and limits. Published turns and admitted
-attachment bytes do not change. Use strict execution when identical prior tool
-results must be continued rather than regenerated.
+**Recover** continues an interrupted ordinary turn from its retained Step
+checkpoint when the turn and tool receipts share a store. An unfinished ordinary
+tool's outcome is reported to the model as unknown. The original tool call is not
+run again, and its receipt is kept unchanged. Already confirmed tool results keep
+their original meaning. The browser does not have to start a new turn for this
+recovery.
+
+A turn without a retained Step checkpoint can instead regenerate from the
+accepted prompt, frozen Agent binding, and admitted attachment bytes where its
+configured recovery mode supports that. This does not certify an interrupted
+tool's effects. Graph turns, split-store turns, and interrupted delegated work
+have separate recovery constraints.
 
 If recovery reports that a stopped ordinary turn cannot resume, the same
 **Recover** control stays visible. Choosing it again asks whether to end the

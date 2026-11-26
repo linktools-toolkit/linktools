@@ -33,7 +33,7 @@ from ._skill_source import (
     SkillSourceRef,
     SkillSourceRegistry,
 )
-from ._subagent import SubagentCapability, SubagentDelegate
+from ._subagent import SUBAGENT_CAPABILITY_ID, SubagentCapability, SubagentDelegate
 from ._tool_signal import ToolCallFailed, ToolCallRetry
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._tool_metadata import (
@@ -100,6 +100,7 @@ __all__ = [
     "CapabilityLoader",
     "AssetSkillSource",
     "SkillCapability",
+    "SUBAGENT_CAPABILITY_ID",
     "SubagentCapability",
     "TOOL_CLASS_METADATA_KEY",
     "TOOL_MCP_SELECTOR_METADATA_KEY",
