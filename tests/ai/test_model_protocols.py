@@ -337,8 +337,9 @@ def test_model_declaration_inspection_does_not_open_connections(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("factory,api,name", PROTOCOLS)
-async def test_strict_session_and_durable_web_model_content(monkeypatch, tmp_path, factory, api, name):
-    from linktools.ai.capability import TraceCapability, ExecutionCapability
+async def test_web_protocol_diagnostics_and_native_history_after_agent_removal(monkeypatch, tmp_path, factory, api, name):
+    from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability, TraceCapability
+    from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.web import create_app
@@ -354,17 +355,27 @@ async def test_strict_session_and_durable_web_model_content(monkeypatch, tmp_pat
     features.agent("old", model="default", allow_tools=())
     features.capability(TraceCapability(), scope="runtime")
     features.capability(ExecutionCapability(), scope="runtime")
+    features.capability(StepPersistenceCapability(), scope="runtime")
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
+    authorization = HostAuthorization()
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    async with Persistence.open('default', storage=storage) as persistence_341, Runtime.open(persistence=persistence_341, features=features) as runtime:
-        session = await runtime.agents.get("old").create_session("session")
-        # This is the explicit SDK Execution-backed session, not the Web
-        # Conversation store. The model wire still uses its public HTTP API.
-        meta = await runtime.history.inspect_session("session", principal=runtime.default_principal)
-        assert meta.session_id == "session"
+    async with (
+        Persistence.open("default", storage=storage) as persistence,
+        Runtime.open(persistence=persistence, features=features, authorization=authorization) as runtime,
+    ):
+        agent = runtime.agents.get("old")
+        actor = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=actor)
+        turn = await runtime.sessions.start("session", "Hello", principal=actor, agent=agent,
+                                            idempotency_key="hello", thinking=False)
+        assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        # Raw client request diagnostics belong to independent Execution, not Session Trace.
         async with _client(create_app(runtime=runtime)) as http:
-            execution = await session.start("Hello", thinking=False)
+            execution = await agent.start("Hello", thinking=False)
             result = await execution.wait()
-            assert result.result.status.value == "SUCCEEDED", result
+            assert result.result.status is ExecutionStatus.SUCCEEDED, result
             content = await http.get(f"/api/executions/{execution.execution_id}/models", params={"include_content":"true","include_client_requests":"true"})
             assert content.status_code == 200, content.text
             items = content.json()["items"]
@@ -378,9 +389,15 @@ async def test_strict_session_and_durable_web_model_content(monkeypatch, tmp_pat
     replacement.agent("replacement", model="default", allow_tools=())
     replacement.capability(TraceCapability(), scope="runtime")
     replacement.capability(ExecutionCapability(), scope="runtime")
-    async with Persistence.open('default', storage=storage) as persistence_362, Runtime.open(persistence=persistence_362, features=replacement) as runtime:
-        meta = await runtime.history.inspect_session("session", principal=runtime.default_principal)
-        assert meta.session_id == "session"
+    async with (
+        Persistence.open("default", storage=storage) as persistence,
+        Runtime.open(persistence=persistence, features=replacement, authorization=authorization) as runtime,
+    ):
+        page = await runtime.history.turn_session("session", principal=actor)
+        assert page["session"]["session_id"] == "session"
+        item, = page["timeline"]["items"]
+        assert item["turn_id"] == turn.key.turn_id
+        assert item["user_input"]["prompt"] == "Hello"
 
 
 @pytest.mark.parametrize('kind,api,model_name', PROTOCOLS)
