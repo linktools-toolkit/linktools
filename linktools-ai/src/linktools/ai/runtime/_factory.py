@@ -1036,14 +1036,13 @@ async def _build_local_components(
                     or tools.state_store.storage_group is not turn_state.storage_group
                     or executions.state_store.storage_group is not turn_state.storage_group):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            async def stop_children(invocation_id: str | None) -> bool:
+            async def stop_children() -> frozenset[str] | None:
                 row = await turns.get_turn(turn.key)
                 if row is None or row["generation"] != turn.generation or row["state"] != "cancelling":
-                    return False
+                    return None
                 # Handoff also cancels the coroutine, but only a committed
                 # Stop authorizes durable child cancellation.
-                children = await dispatcher.cancel_native_children(executions, turn.key, principal, principal)
-                return invocation_id is None or invocation_id in children
+                return await dispatcher.cancel_native_children(executions, turn.key, principal, principal)
 
             async with backend.canonical_subagent_parent(
                 turn.key, turn.generation, principal, stop_children=stop_children,
@@ -1091,6 +1090,7 @@ async def _build_local_components(
                 prepare_step=prepare_canonical_step, prepare_plan=prepare_canonical_plan,
                 abandon_child_repository=(state.execution.executions if native_subagent_topology else None),
                 cancel_subagents=cancel_native_subagents,
+                begin_child_stop=backend.begin_native_child_stop if native_subagent_topology else None,
                 prepare_subagents=prepare_native_subagents if native_subagent_topology else None,
                 recover_subagent=recover_native_subagent,
                 prepare_budget=(prepare_canonical_budget

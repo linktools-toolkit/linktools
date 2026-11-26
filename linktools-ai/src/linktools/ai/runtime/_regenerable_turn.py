@@ -152,6 +152,7 @@ class _RegenerableTurnRunner:
             tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None]] | None = None,
         abandon_child_repository: ExecutionRepositoryImpl | None = None,
         cancel_subagents: Callable[[SessionTurnKey, Principal, Principal], Awaitable[frozenset[str]]] | None = None,
+        begin_child_stop: Callable[[SessionTurnKey, int], None] | None = None,
         prepare_subagents: Callable[
             [_AdmittedTurn, AgentBinding, Principal, Callable[[], RepositoryInstructions | None]],
             AbstractAsyncContextManager[_NativeSubagentLeaf],
@@ -173,6 +174,7 @@ class _RegenerableTurnRunner:
         self._prepare_step = prepare_step
         self._abandon_child_repository = abandon_child_repository
         self._cancel_subagents = cancel_subagents
+        self._begin_child_stop = begin_child_stop
         self._prepare_subagents = prepare_subagents
         self._recover_subagent = recover_subagent
         self._prepare_plan = prepare_plan
@@ -257,6 +259,8 @@ class _RegenerableTurnRunner:
             try:
                 row = await self._store.get_turn(key)
                 if row is not None and row["state"] == "cancelling" and self._producers.get(key) is producer:
+                    if self._begin_child_stop is not None:
+                        self._begin_child_stop(key, row["generation"])
                     producer.cancel()
             except Exception as error:
                 _logger.warning("Remote cancellation confirmation failed: %s", type(error).__name__)
@@ -783,6 +787,8 @@ class _RegenerableTurnRunner:
             return False
         producer = self._producers.get(key)
         if producer is not None:
+            if changed and not split and self._begin_child_stop is not None:
+                self._begin_child_stop(key, turn["generation"])
             producer.cancel()
         elif changed:
             self._gap(key, cancelling=True)

@@ -303,6 +303,8 @@ class _OwnedNativeParent(_ChildWorkerScope):
     key: "SessionTurnKey"
     generation: int
     principal: Principal
+    stop_children: Callable[[], Awaitable[frozenset[str] | None]]
+    child_stop: asyncio.Task[frozenset[str] | None] | None = None
     child_approvals: dict[str, "NativeSubagentAdmission"] = field(default_factory=dict)
     parked_cancels: dict[str, tuple[int, int]] = field(default_factory=dict)
 
@@ -1299,10 +1301,21 @@ class LocalExecutionBackend:
                                     or turn.execution.status is ExecutionStatus.CANCELLING):
             raise asyncio.CancelledError
 
+    def begin_native_child_stop(self, key: "SessionTurnKey", generation: int) -> None:
+        """Start draining children independently of the parent provider's cancellation."""
+        parent = self._native_parents.get(key.turn_id)
+        if parent is None or parent.key != key or parent.generation != generation:
+            return
+        parent.stopping = True
+        if parent.child_stop is None:
+            parent.child_stop = asyncio.create_task(
+                parent.stop_children(), name=f"ai-native-child-stop-{key.turn_id}",
+            )
+
     @asynccontextmanager
     async def canonical_subagent_parent(
         self, key: "SessionTurnKey", generation: int, principal: Principal,
-        *, stop_children: Callable[[str | None], Awaitable[bool]],
+        *, stop_children: Callable[[], Awaitable[frozenset[str] | None]],
     ) -> AsyncIterator[None]:
         """Stop durable children before abandoning their local owners on explicit cancellation."""
         identity = key.turn_id
@@ -1310,28 +1323,32 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if identity in self._native_parents or identity in self._turn_owners:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        parent = _OwnedNativeParent(key, generation, principal)
+        parent = _OwnedNativeParent(key, generation, principal, stop_children)
         self._native_parents[identity] = parent
+        waiting_for_stop = False
         try:
             yield
         except (_NativeDelegateInterruption, asyncio.CancelledError) as error:
-            parent.stopping = True
-            invocation_id = error.call_id if isinstance(error, _NativeDelegateInterruption) else None
-            stopping = asyncio.create_task(stop_children(invocation_id), name=f"ai-native-child-stop-{identity}")
-            stopped, _ = await self._await_checkpoint_task(stopping, label="native child stop")
-            if stopped and invocation_id is not None:
-                # The exact delegated child is durably terminal. Leave its
-                # original tool receipt intact while propagating the user's Stop.
+            self.begin_native_child_stop(key, generation)
+            assert parent.child_stop is not None
+            waiting_for_stop = True
+            children, _ = await self._await_checkpoint_task(parent.child_stop, label="native child stop")
+            if (isinstance(error, _NativeDelegateInterruption)
+                    and children is not None and error.call_id in children):
                 raise asyncio.CancelledError from error
             raise
         finally:
             parent.stopping = True
-            self._stop_child_workers(parent)
-            drain = asyncio.create_task(self._drain_child_workers(parent), name=f"ai-native-child-drain-{identity}")
             try:
-                _, interrupted = await self._await_checkpoint_task(drain, label="native child drain")
+                if parent.child_stop is not None and not waiting_for_stop:
+                    await self._await_checkpoint_task(parent.child_stop, label="native child stop")
             finally:
-                self._native_parents.pop(identity)
+                self._stop_child_workers(parent)
+                drain = asyncio.create_task(self._drain_child_workers(parent), name=f"ai-native-child-drain-{identity}")
+                try:
+                    _, interrupted = await self._await_checkpoint_task(drain, label="native child drain")
+                finally:
+                    self._native_parents.pop(identity)
             if interrupted is not None:
                 raise interrupted
 

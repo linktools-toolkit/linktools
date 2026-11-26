@@ -121,10 +121,14 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
             # changing the already-retained receipt of the business tool.
             try:
                 return await invoke(executor, **kwargs)
-            except AIError as error:
-                if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
-                    raise asyncio.CancelledError from None
-                raise
+            except (AIError, asyncio.CancelledError) as error:
+                if isinstance(error, AIError) and error.code is not ErrorCode.TOOL_EFFECT_UNKNOWN:
+                    raise
+                if not ordinary:
+                    # The parent must not be the only task responsible for
+                    # stopping its child while the provider is still draining.
+                    await tool_cancelled.wait()
+                raise asyncio.CancelledError from None
 
         monkeypatch.setattr(AgentExecutor, "execute_regenerable", drain_without_wrapped_error)
 
