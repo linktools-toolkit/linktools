@@ -14,7 +14,7 @@ from linktools.core import environ
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 from threading import BoundedSemaphore
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy.exc import IntegrityError
 
@@ -22,7 +22,6 @@ from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..execution import TOOL_OPERATION_ID_METADATA_KEY
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
@@ -110,9 +109,6 @@ class _AdmittedTurn:
     budget: RunBudgetContext | None = None
     trace_enabled: bool = False
     split_source: _CanonicalSplitStep | None = None
-    trace_event_base: int = 0
-    trace_interaction_base: int = 0
-    traced_tool_starts: tuple[str, ...] = ()
     preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = ()
     native_stopped_delegates: set[tuple[str, str, int, str]] = field(default_factory=set)
 
@@ -186,7 +182,10 @@ class _RegenerableTurnRunner:
         self._split_recovery_source: Callable[[], Awaitable[_CanonicalSplitStep]] | None = None
         self._cancel_graph_turn: Callable[[SessionTurnKey, Principal], Awaitable[bool]] | None = None
         self._prepare_split_wait_resume = None
+        from ._lossy_session_trace import LossySessionTrace
+
         self._trace_archive: StateStepArchive | None = None
+        self._lossy_trace = LossySessionTrace()
         self._tasks: set[asyncio.Task[None] | asyncio.Task[bool]] = set()
         self._producers: dict[SessionTurnKey, asyncio.Task[bool]] = {}
         self._closed = False
@@ -203,19 +202,9 @@ class _RegenerableTurnRunner:
         native_step[1].configure_canonical_budget(budget.scope_id, budget.repository)
         return budget
 
-    def _require_turn_trace(self, binding: AgentBinding, *, canonical_step: bool) -> bool:
+    def _observes_turn_trace(self, binding: AgentBinding) -> bool:
         policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
-        if not policy.durable_trace:
-            return False
-        from ..capability import TraceCapability
-        trace = next((value for value in policy.capabilities if type(value) is TraceCapability), None)
-        if (self._trace_archive is None or not canonical_step or trace is None
-                or trace.record_http_bodies or trace.commit.buffer is not None):
-            raise AIError(
-                ErrorCode.STORAGE_CAPABILITY_MISSING,
-                "Canonical Trace requires same-transaction Step and an unbuffered Trace policy without HTTP bodies",
-            )
-        return True
+        return policy.durable_trace and self._trace_archive is not None
 
     def bind_deferred_publication(self, publish, stop=None) -> None:
         self._publish_deferred = publish
@@ -720,31 +709,16 @@ class _RegenerableTurnRunner:
         session = await self._store.get_session(key.session_id)
         if session is None or session["active_turn_id"] != key.turn_id.encode():
             return False
-        trace_enabled = request.get("trace", False)
-        event_base, agent_id = 0, None
-        if trace_enabled:
-            archive = self._trace_archive
-            if archive is None or contract is None:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            agent_id = contract.agent_spec.id
-            event_base, _ = await archive.state_store.read(
-                lambda transaction: archive._canonical_trace_frontier(transaction, key.turn_id),
-            )
-        turn = _AdmittedTurn(
-            key, row["turn_no"], request["prompt"], [], 0, session["revision"], None, row["generation"],
-            trace_enabled=trace_enabled, trace_event_base=event_base,
-        )
         code = ErrorCode.STORAGE_RECOVERY_REQUIRED.value
-        trace = await self._terminal_trace(turn, agent_id, "failed", code)
         if not await self._store.finish(
-            key, generation=turn.generation, turn_no=turn.number, state="failed",
+            key, generation=row["generation"], turn_no=row["turn_no"], state="failed",
             result={"error_code": code, "abandoned": True}, _abandon_expired=True,
-            _guard_abandon=child_guard, **trace,
+            _guard_abandon=child_guard,
         ):
             return False
         # Re-read the committed view rather than constructing it from incomplete input or effects.
         self._gap(key)
-        self._notice_lifecycle(key, "terminal", turn.revision + 1)
+        self._notice_lifecycle(key, "terminal", session["revision"] + 1)
         return True
 
     async def cancel_session_turn(
@@ -843,23 +817,8 @@ class _RegenerableTurnRunner:
             )
             if await self._stop_deferred(frontier) != "ready":
                 return False
-        trace_enabled = request.get("trace", False)
-        trace_archive = self._trace_archive
-        trace_recovery = {}
-        trace_event_base = 0
-        trace_agent_id = None
-        if trace_enabled:
-            if trace_archive is None or contract is None:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            trace_agent_id = contract.agent_spec.id
-
-            async def capture_trace_frontier(transaction):
-                nonlocal trace_event_base
-                trace_event_base, _ = await trace_archive._canonical_trace_frontier(transaction, key.turn_id)
-
-            trace_recovery["_trace_frontier"] = trace_archive.state_store, capture_trace_frontier
         if not await self._store.take_over(
-            key, generation=generation, lease_seconds=_LEASE_SECONDS, cancelling=True, **trace_recovery,
+            key, generation=generation, lease_seconds=_LEASE_SECONDS, cancelling=True,
         ):
             return False
         if has_subagents:
@@ -870,13 +829,11 @@ class _RegenerableTurnRunner:
         turn = _AdmittedTurn(
             key, row["turn_no"], request["prompt"], [], 0, revision, None, generation + 1,
             attachments=() if stored is None else stored_input_attachment_views(stored),
-            stored_input=request.get("input"), trace_enabled=trace_enabled, trace_event_base=trace_event_base,
+            stored_input=request.get("input"),
         )
         code = ErrorCode.EXECUTION_CANCELLED.value
-        trace = await self._terminal_trace(turn, trace_agent_id, "cancelled", code)
         finished = await self._store.finish(
             key, generation=generation + 1, turn_no=row["turn_no"], state="cancelled", result={"error_code": code},
-            **trace,
         )
         if finished:
             self._terminal(turn, "cancelled", error_code=code)
@@ -1047,17 +1004,13 @@ class _RegenerableTurnRunner:
                      if native_step is not None and isinstance(native_step[0].store, RuntimeStepStore) else None)
             if (split_recovery is None) != (split is None):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            if split is not None and (mode != "run" or planning or request.get("budgeted", False)
-                                      or request.get("trace", False)):
+            if split is not None and (mode != "run" or planning or request.get("budgeted", False)):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             budget = (self._prepare_turn_budget(key, generation + 1, native_step)
                       if request.get("budgeted", False) else None)
             if planning and self._prepare_plan is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             plan_store = self._prepare_plan(key, generation + 1) if planning else None
-            canonical_trace = self._require_turn_trace(binding, canonical_step=native_step is not None)
-            if canonical_trace != request.get("trace", False):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             subagent_topology = self._allows_native_subagents(
                 binding, native_step, mode=mode, planning=planning, budgeted=budget is not None,
                 split=split is not None,
@@ -1066,9 +1019,9 @@ class _RegenerableTurnRunner:
             # frontier grants a live subagent toolset to a resumed producer.
             native_subagents = ready is not None and subagent_topology
             settle_subagents = (ready is None and subagent_topology
-                                and (canonical_trace or self._recover_subagent is not None))
+                                and self._recover_subagent is not None)
             self._executor.require_regenerable(
-                binding, canonical_step=native_step is not None, canonical_trace=canonical_trace,
+                binding, canonical_step=native_step is not None,
                 split_step=split is not None, native_subagents=native_subagents or settle_subagents,
             )
             if "repository_instructions" not in request or "cwd" not in request:
@@ -1095,21 +1048,6 @@ class _RegenerableTurnRunner:
             completed_checkpoint = False
             output_retries_used = 0
             instruction_frontier = None
-            trace_event_base = trace_interaction_base = 0
-            traced_tool_starts = ()
-            trace_recovery = {}
-            trace_archive = self._trace_archive
-            trace_enabled = request.get("trace", False)
-            if trace_enabled and (trace_archive is None or native_step is None):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            if trace_enabled:
-                async def capture_trace_frontier(transaction):
-                    nonlocal trace_event_base, trace_interaction_base
-                    trace_event_base, trace_interaction_base = await trace_archive._canonical_trace_frontier(
-                        transaction, key.turn_id,
-                    )
-
-                trace_recovery["_trace_frontier"] = trace_archive.state_store, capture_trace_frontier
             if native_step is None:
                 if ready is not None:
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -1157,11 +1095,11 @@ class _RegenerableTurnRunner:
                 else:
                     if ready is None:
                         acquired, checkpoint, instruction_frontier = await self._store.take_over_with_checkpoint(
-                            key, generation=generation, lease_seconds=_LEASE_SECONDS, step_store=steps._store, **trace_recovery,
+                            key, generation=generation, lease_seconds=_LEASE_SECONDS, step_store=steps._store,
                         )
                     else:
                         acquired, checkpoint, instruction_frontier = await self._store.take_over_ready_checkpoint(
-                            ready, lease_seconds=_LEASE_SECONDS, step_store=steps._store, **trace_recovery,
+                            ready, lease_seconds=_LEASE_SECONDS, step_store=steps._store,
                         )
                     if not acquired:
                         return False
@@ -1193,9 +1131,6 @@ class _RegenerableTurnRunner:
                             events = await steps.list_events(run_id=key.turn_id)
                             completed_checkpoint = any(event.kind == "run_completed" for event in events)
                         delegate_pending = "delegate_task" in pending.values()
-                        traced_subagent_parent = settle_subagents and canonical_trace
-                        if traced_subagent_parent and delegate_pending:
-                            await self._reject_incomplete_subagent_trace(key, generation + 1)
                         if settle_subagents and not completed_checkpoint and delegate_pending:
                             recover_subagent = self._recover_subagent
                             assert recover_subagent is not None
@@ -1211,48 +1146,25 @@ class _RegenerableTurnRunner:
                         if recover_native_results is None:
                             retained_returns = tuple(part for message in continuation if isinstance(message, ModelRequest)
                                                      for part in message.parts if isinstance(part, ToolReturnPart))
-                            completed_frontier = None
-                            if (traced_subagent_parent and not pending and not completed_checkpoint
-                                    and latest_response == len(continuation) - 2 and latest_response >= 0
+                            checkpoint_completed_calls = None
+                            if (not pending and not completed_checkpoint and latest_response >= 0
+                                    and latest_response == len(continuation) - 2
                                     and isinstance(continuation[-1], ModelRequest)):
-                                calls = tuple(part for part in continuation[latest_response].parts
-                                              if isinstance(part, ToolCallPart))
+                                call_keys = [(part.tool_call_id, part.tool_name)
+                                             for part in continuation[latest_response].parts if isinstance(part, ToolCallPart)]
                                 returns = tuple(part for part in continuation[-1].parts if isinstance(part, ToolReturnPart))
-                                call_keys = [(part.tool_call_id, part.tool_name) for part in calls]
-                                return_keys = [(part.tool_call_id, part.tool_name) for part in returns]
-                                if (calls and len({call_id for call_id, _ in call_keys}) == len(calls)
-                                        and call_keys == return_keys and all(part.outcome == "success" for part in returns)):
-                                    # The Step checkpoint and Trace cutoff were
-                                    # captured by the same fenced takeover.
-                                    # Trace links each already-published return to
-                                    # the original operation, without flattening
-                                    # the SDK's persisted request projection.
-                                    events = await trace_archive.read_history_associations(
-                                        agent_run_id=key.turn_id, message_seqs=(),
-                                        tool_call_ids=tuple(call_id for call_id, _ in call_keys),
-                                        event_high_water=trace_event_base,
-                                    )
-                                    expected = dict(call_keys)
-                                    confirmed = {}
-                                    for event in events:
-                                        if event.event_type != "TOOL_CALL_SUCCEEDED":
-                                            continue
-                                        call_id = event.tool_call_id
-                                        operation_id = event.metadata.get(TOOL_OPERATION_ID_METADATA_KEY)
-                                        if (event.agent_run_id != key.turn_id or event.agent_conversation_id != key.session_id
-                                                or call_id not in expected or event.tool_name != expected[call_id]
-                                                or not operation_id or call_id in confirmed):
-                                            await self._reject_incomplete_subagent_trace(key, generation + 1)
-                                        confirmed[call_id] = expected[call_id], operation_id
-                                    if set(confirmed) != set(expected):
-                                        await self._reject_incomplete_subagent_trace(key, generation + 1)
-                                    completed_frontier = confirmed
+                                if (call_keys and len({call_id for call_id, _ in call_keys}) == len(call_keys)
+                                        and call_keys == [(part.tool_call_id, part.tool_name) for part in returns]
+                                        and all(part.outcome == "success" for part in returns)):
+                                    checkpoint_completed_calls = dict(call_keys)
                             deferred_results = await tools.resume_canonical_effects(
                                 pending, interrupted_generation=generation, retained_returns=retained_returns,
-                                completed_frontier=completed_frontier,
+                                checkpoint_completed_calls=checkpoint_completed_calls,
                             )
-                            if completed_frontier is not None and deferred_results is None:
-                                await self._reject_incomplete_subagent_trace(key, generation + 1)
+                            if checkpoint_completed_calls is not None and deferred_results is None:
+                                await self._store.expire_stopped_lease(key, generation=generation + 1)
+                                self._gap(key)
+                                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                             if not pending and not completed_checkpoint:
                                 latest_ids = (frozenset(part.tool_call_id for part in continuation[latest_response].parts
                                                        if isinstance(part, ToolCallPart)) if latest_response >= 0 else frozenset())
@@ -1263,40 +1175,9 @@ class _RegenerableTurnRunner:
                                     # The SDK skips original tool returns already
                                     # present in the retained last request.
                                     deferred_results = DeferredToolResults()
-                                elif checkpoint.state != "complete" and not traced_subagent_parent:
+                                elif checkpoint.state != "complete" and deferred_results is None:
                                     self._gap(key)
                                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                        if traced_subagent_parent:
-                            response = continuation[latest_response] if latest_response >= 0 else None
-                            if (not isinstance(response, ModelResponse)
-                                    or (completed_checkpoint and response is not continuation[-1])
-                                    or (not completed_checkpoint and (deferred_results is None
-                                        or any(isinstance(part, ToolCallPart) and part.tool_name == "delegate_task"
-                                               for part in response.parts)))):
-                                await self._reject_incomplete_subagent_trace(key, generation + 1)
-                            # Cold continuation starts after the exact retained
-                            # response, without dispatching any delegate.
-                            try:
-                                await self._require_retained_trace_response(
-                                    key, response, event_head=trace_event_base, request_head=trace_interaction_base,
-                                )
-                            except AIError as error:
-                                if error.code in {ErrorCode.STORAGE_RECOVERY_REQUIRED, ErrorCode.STORAGE_OWNER_MISMATCH}:
-                                    await self._reject_incomplete_subagent_trace(key, generation + 1)
-                                raise
-                        if trace_enabled and trace_event_base and deferred_results is not None and pending:
-                            # Tool-return replay emits SDK start notifications even
-                            # when no leaf is entered. Seed only the exact prior
-                            # starts within the captured Trace cutoff.
-                            starts = await trace_archive.read_history_associations(
-                                agent_run_id=key.turn_id, message_seqs=(),
-                                tool_call_ids=tuple(deferred_results.calls), event_high_water=trace_event_base,
-                            )
-                            traced_tool_starts = tuple(
-                                event.tool_call_id for event in starts
-                                if event.event_type == "TOOL_CALL_STARTED" and event.tool_call_id in pending
-                                and event.tool_name == pending[event.tool_call_id]
-                            )
                     else:
                         if (checkpoint.state != "interrupted"
                                 or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
@@ -1325,8 +1206,7 @@ class _RegenerableTurnRunner:
                 instruction_frontier=instruction_frontier,
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
                 mode=mode, planning=planning, plan_store=plan_store, budget=budget,
-                trace_enabled=trace_enabled, trace_event_base=trace_event_base,
-                trace_interaction_base=trace_interaction_base, traced_tool_starts=traced_tool_starts, split_source=split,
+                split_source=split,
                 preload_skill_inputs=tuple(request.get("preload_skills", ())),
                 previous_turn_interrupted=request.get("previous_turn_interrupted") is True,
             )
@@ -1456,6 +1336,7 @@ class _RegenerableTurnRunner:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._lifecycle_observers.clear()
+        await self._lossy_trace.close()
 
     async def _settle_with_lease(
         self, turn: _AdmittedTurn, *, binding: AgentBinding, context: AgentContext[object],
@@ -1602,7 +1483,7 @@ class _RegenerableTurnRunner:
                 code = ErrorCode.EXECUTION_CANCELLED.value
                 if await self._finish_retained_turn(
                     turn, state="cancelled",
-                    result={"error_code": code}, **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "cancelled", code)),
+                    result={"error_code": code},
                 ):
                     self._terminal(turn, "cancelled", error_code=code)
                     return
@@ -1781,13 +1662,13 @@ class _RegenerableTurnRunner:
         if planning and self._prepare_plan is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         plan_store = self._prepare_plan(key, 1) if planning else None
-        trace_enabled = self._require_turn_trace(binding, canonical_step=native_step is not None)
+        trace_enabled = self._observes_turn_trace(binding)
         native_subagents = self._allows_native_subagents(
             binding, native_step, mode=mode, planning=planning, budgeted=budget is not None,
             split=split is not None,
         )
         self._executor.require_regenerable(
-            binding, canonical_step=native_step is not None, canonical_trace=trace_enabled,
+            binding, canonical_step=native_step is not None,
             split_step=split is not None, native_subagents=native_subagents,
         )
         if await self.canonicalize_cwd(cwd) != cwd:
@@ -1812,10 +1693,6 @@ class _RegenerableTurnRunner:
         preload_skill_inputs = await self._executor.capture_preload_skills(binding)
         if preload_skill_inputs:
             request["preload_skills"] = [dict(value) for value in preload_skill_inputs]
-        if trace_enabled:
-            if split is not None:
-                raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
-            request["trace"] = True
         if split is not None:
             request["split_step"] = True
         if _runtime_feature_policy(binding.compiled_agent.runtime_contributions).session.checkpoints:
@@ -2036,102 +1913,17 @@ class _RegenerableTurnRunner:
 
         return _RepositoryInstructionBoundary(check, initial, overlay, approved_frontiers=approved)
 
-    async def _reject_incomplete_subagent_trace(self, key: SessionTurnKey, generation: int) -> NoReturn:
-        # The successor acquired the generation but did not start a producer.
-        await self._store.expire_stopped_lease(key, generation=generation)
-        self._gap(key)
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, safe_details={
-            "reason": "native_subagent_trace_incomplete", "generation": generation,
-        })
-
-    async def _require_retained_trace_response(
-        self, key: SessionTurnKey, response: ModelResponse, *, event_head: int, request_head: int,
-    ) -> None:
-        """Verify the exact latest provider response under the fenced Trace frontier."""
-        from ..persistence.contracts import ModelInteractionRecord
-
-        archive = self._trace_archive
-        if archive is None or event_head < 1 or request_head < 1:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        # The takeover fenced the previous producer before capturing these
-        # immutable frontiers; no provider or tool can append as this owner yet.
-        records = await archive.list_model_interactions(
-            agent_run_id=key.turn_id, after_model_request_seq=request_head - 1, limit=1,
-        )
-        if len(records) != 1:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        [record] = records
-        if (not isinstance(record, ModelInteractionRecord) or record.agent_run_id != key.turn_id
-                or record.model_request_seq != request_head or record.purpose != "agent"
-                or record.status != "SUCCEEDED" or record.finished_at is None or record.response_context is None):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        events = await archive.list_trace_events(
-            agent_run_id=key.turn_id, event_high_water=event_head, after_timestamp=None,
-            after_sequence=0, limit=3, model_request_seq=request_head, model_requests_only=True,
-        )
-        if tuple(event.event_type for _, event in events) != ("MODEL_REQUEST_STARTED", "MODEL_REQUEST_SUCCEEDED"):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        if any(event.agent_run_id != key.turn_id or event.agent_conversation_id != key.session_id
-               or event.step_index != record.step_index for _, event in events):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        _, retained, *_ = await archive.resolve_model_interaction(record)
-        if (retained is None or len(retained) != 1 or not isinstance(retained[0], ModelResponse)
-                or retained[0].parts != response.parts):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-
-    async def _terminal_trace(
-        self, turn: _AdmittedTurn, agent_id: str | None, state: str, error_code: str | None = None,
-        *, captured: _CapturedTurnInteractions | None = None,
-    ):
-        archive = self._trace_archive
-        if not turn.trace_enabled:
-            return {}
-        if archive is None or agent_id is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        from ..persistence.runs import AgentRunRecord, StepEvent
-
-        run = AgentRunRecord(turn.key.turn_id, turn.key.session_id, agent_id=agent_id)
-        event = StepEvent(
-            turn.key.turn_id,
-            {"succeeded": "AGENT_RUN_SUCCEEDED", "waiting": "AGENT_RUN_INTERRUPTED"}.get(state, "AGENT_RUN_FAILED"),
-            0, event_index=turn.trace_event_base,
-            agent_conversation_id=turn.key.session_id, agent_id=run.agent_id,
-            metadata={"turn_generation": str(turn.generation), "outcome": state,
-                      **({} if error_code is None else {"error_code": error_code})},
-        )
-
-        stores = archive.transaction_stores
-        append = None
-        if captured is not None:
-            from ..persistence.runs import ModelInteractionStateStepArchive
-            if not isinstance(archive, ModelInteractionStateStepArchive):
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            content_store, append = await captured.prepare_terminal_append(archive)
-            stores = tuple(dict.fromkeys((*stores, content_store)))
-
-        async def publish(transaction):
-            events = () if captured is None else captured.events
-            registered = await archive._append_canonical_turn_trace_terminal(
-                transaction.transaction(archive.state_store), run, (*events, event), key=turn.key,
-            )
-            if append is not None:
-                await append(transaction, registered)
-
-        return {'_publish_trace': (stores, publish)}
-
     async def _finish_retained_turn(
         self, turn: _AdmittedTurn, *, state, result=None, transcript=None,
-        binding_refs=(), output_ref=None, usage: UsageMetrics | None = None, **trace,
+        binding_refs=(), output_ref=None, usage: UsageMetrics | None = None,
     ) -> bool:
         split = turn.split_source
         if split is None:
             options = ({"transcript": transcript, "binding_refs": binding_refs, "output_ref": output_ref, "usage": usage}
                        if state == "succeeded" else {"result": result})
             return await self._store.finish(
-                turn.key, generation=turn.generation, turn_no=turn.number, state=state, **options, **trace,
+                turn.key, generation=turn.generation, turn_no=turn.number, state=state, **options,
             )
-        if trace:
-            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
         return await split.finish(
             turn.key, generation=turn.generation, turn_no=turn.number, state=state,
             result=result, transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
@@ -2145,81 +1937,23 @@ class _RegenerableTurnRunner:
         from ..model.messages import canonical_structured_output_reference, encode_model_messages
 
         captured: _CapturedTurnInteractions | None = None
-        trace_opts = {}
-        if turn.trace_enabled:
+        capture_trace = None
+        if turn.trace_enabled and turn.generation == 1:
             from ._canonical_trace_interactions import _CapturedTurnInteractions
 
-            observation_frontier = turn.trace_interaction_base
-            event_frontier = 0
-            trace_lock = asyncio.Lock()
-            trace_archive = self._trace_archive
-
-            def capture(staging):
+            def capture_trace(staging):
                 nonlocal captured
-                captured = _CapturedTurnInteractions.capture(
-                    staging, turn.key.turn_id, turn.key.session_id, after=observation_frontier, after_events=event_frontier, settled_only=True,
-                )
-
-            async def flush_locked(staging):
-                nonlocal observation_frontier, event_frontier
-                batch = _CapturedTurnInteractions.capture(
-                    staging, turn.key.turn_id, turn.key.session_id, after=observation_frontier, after_events=event_frontier, settled_only=True,
-                )
-                if batch is None:
-                    return
-                from ..persistence.runs import ModelInteractionStateStepArchive
-                if not isinstance(trace_archive, ModelInteractionStateStepArchive):
-                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                content_store, append = await batch.prepare_terminal_append(trace_archive)
-                group = trace_archive.state_store.storage_group
-                stores = tuple(dict.fromkeys((*trace_archive.transaction_stores, content_store)))
-
-                async def publish(transaction):
-                    run = await trace_archive._append_canonical_turn_trace_in_transaction(
-                        transaction.transaction(trace_archive.state_store), batch.run, batch.events,
-                        turns=self._store, key=turn.key, generation=turn.generation,
-                    )
-                    if run is None:
-                        return False
-                    await append(transaction, run)
-                    return True
-
                 try:
-                    if not await group.mutate(stores, publish):
-                        return
-                except Exception as error:
-                    # Record implementation location only: provider/tool errors
-                    # may carry prompts, credentials or raw arguments.
-                    frame = error.__traceback__
-                    while frame is not None and frame.tb_next is not None:
-                        frame = frame.tb_next
-                    location = None if frame is None else (
-                        frame.tb_frame.f_globals.get("__name__"),
-                        frame.tb_frame.f_code.co_name, frame.tb_lineno,
+                    captured = _CapturedTurnInteractions.capture(
+                        staging, turn.key.turn_id, turn.key.session_id, settled_only=True,
                     )
-                    _logger.error("Canonical Trace prefix rejected: turn=%s generation=%s code=%s exception=%s at=%s",
-                                  turn.key.turn_id, turn.generation,
-                                  error.code.value if isinstance(error, AIError) else None,
-                                  type(error).__name__, location)
-                    # Do not blindly reissue a batch whose commit was unseen.
-                    # Exact canonical lease takeover observes the durable prefix.
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-                if batch.interactions:
-                    observation_frontier = batch.interactions[-1].model_request_seq
-                event_frontier += len(batch.events)
+                except Exception as error:
+                    _logger.warning("Optional Session Trace capture discarded: %s", type(error).__name__)
 
-            async def flush(staging):
-                async with trace_lock:
-                    await flush_locked(staging)
-
-            from ..capability import TraceCapability
-            trace = next(value for value in _runtime_feature_policy(binding.compiled_agent.runtime_contributions).capabilities
-                         if type(value) is TraceCapability)
-            trace_opts.update(
-                capture_trace=capture, trace_interaction_base=turn.trace_interaction_base,
-                traced_tool_starts=turn.traced_tool_starts,
-                trace_boundary=flush, trace_auto_flush=trace.commit.mode != "terminal",
-            )
+        def offer_trace(state: str, error_code: str | None = None) -> None:
+            if captured is not None:
+                from ._lossy_session_trace import SessionTraceBatch
+                self._lossy_trace.offer(self._trace_archive, SessionTraceBatch(captured, state, error_code))
 
         structured = binding.output_binding.mode == "structured"
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
@@ -2274,7 +2008,7 @@ class _RegenerableTurnRunner:
                         preload_skill_inputs=turn.preload_skill_inputs, split_step=turn.split_source is not None,
                         previous_turn_interrupted=turn.previous_turn_interrupted,
                         native_subagent_leaf=native_subagent_leaf,
-                        settled_native_subagents=turn.settled_native_subagents, **trace_opts,
+                        settled_native_subagents=turn.settled_native_subagents, capture_trace=capture_trace,
                     )
                 if isinstance(outcome, DeferredToolRequests):
                     if turn.native_step is None or self._publish_deferred is None:
@@ -2303,12 +2037,12 @@ class _RegenerableTurnRunner:
                                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
                             item["linktools"] = evidence
                         outcome = replace(outcome, metadata=metadata)
-                    trace_wait = await self._terminal_trace(turn, binding.compiled_agent.spec.id, "waiting", captured=captured)
                     committed = await self._publish_deferred(
                         turn, checkpoint_id, tools, outcome,
-                        split_source=capability.store._canonical_split_source, **trace_wait,
+                        split_source=capability.store._canonical_split_source,
                     )
                     if committed:
+                        offer_trace("waiting")
                         self._publish(turn.key.session_id, {
                             "type": "waiting", "turn_id": turn.key.turn_id, "turn_no": turn.number,
                             "generation": turn.generation, "revision": turn.revision,
@@ -2360,17 +2094,17 @@ class _RegenerableTurnRunner:
                 )
             committed = await self._finish_retained_turn(
                 turn, state="failed", result={"error_code": code},
-                **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "failed", code, captured=captured)),
             )
             if committed:
+                offer_trace("failed", code)
                 self._terminal(turn, "failed", error_code=code)
             return committed
         committed = await self._finish_retained_turn(
             turn, state="succeeded",
             transcript=transcript, binding_refs=binding_refs, output_ref=output_ref, usage=usage,
-            **(await self._terminal_trace(turn, binding.compiled_agent.spec.id, "succeeded", captured=captured)),
         )
         if committed:
+            offer_trace("succeeded")
             self._terminal(
                 turn, "succeeded", output=output, messages=context_messages, output_ref=output_ref,
             )

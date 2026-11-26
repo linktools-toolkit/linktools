@@ -722,10 +722,16 @@ async def _build_local_components(
             await prepare_runtime_capabilities(binding.compiled_agent)
             return run_store.native_step_source
 
+        trace_archive = run_store.trace_persistence.archive
+        execution_trace_atomic = (
+            not isinstance(trace_archive, StateStepArchive)
+            or trace_archive.state_store.storage_group is state.execution.executions.state_store.storage_group
+        )
         execution = DefaultExecutionService(
             state.execution,
             state.object_store(PersistenceDomain.EXECUTION),
             authorization,
+            execution_trace_atomic=execution_trace_atomic,
             sessions=state.conversation.sessions,
             resolve_task_admissions=lambda: state.task.admissions,
             catalog=catalog,
@@ -810,6 +816,7 @@ async def _build_local_components(
             asset_sources=asset_sources,
             restore_binding=binding_resolver.restore,
             native_step_source=native_step_source,
+            execution_trace_atomic=execution_trace_atomic,
             tenant_id=tenant_id,
             workspace=workspace,
             limits=limits,
@@ -1128,10 +1135,8 @@ async def _build_local_components(
             from ..persistence.runs import ModelInteractionStateStepArchive
             from ._canonical_deferred_publication import bind_deferred_publication
 
-            trace_archive = run_store.trace_persistence.archive
             if (isinstance(trace_archive, ModelInteractionStateStepArchive)
-                    and state.plan.route(PersistenceDomain.TRACE).retention is StorageRetentionMode.DURABLE
-                    and all(member.storage_group is conversation_group for member in trace_archive.transaction_stores)):
+                    and state.plan.route(PersistenceDomain.TRACE).retention is StorageRetentionMode.DURABLE):
                 turn_runner._trace_archive = trace_archive
 
             bind_deferred_publication(turn_runner, state.session_turns, state.checkpoint)
@@ -1472,7 +1477,7 @@ async def _build_local_components(
             metric_buffer=metric_buffer, run_store=run_store, session=session, turn_runner=turn_runner, handoff=True,
         )
         lifecycle.configure(close_actions, handoff_actions)
-        await run_store.prepare_archives()
+        await run_store.prepare_archives(defer_trace=turn_runner is not None and not execution_trace_atomic)
         if auto_recover and PersistenceDomain.EXECUTION in state.plan.durable_domains:
             await backend.reconcile(
                 allow_active_recovery=exclusive_execution_writer,

@@ -227,10 +227,7 @@ class _AgentRunScope:
     history_id: str | None = None
     memory_store: MemoryStore | None = None
     memory_tool_names: tuple[str, ...] = ()
-    trace_interaction_base: int = 0
-    traced_tool_starts: tuple[str, ...] = ()
-    trace_boundary: Callable[[], Awaitable[None]] | None = None
-    trace_auto_flush: bool = False
+    stage_session_trace: bool = False
     plan_store_resolver: (
         Callable[[PydanticRunContext[object]], PlanningStore] | None
     ) = None
@@ -408,7 +405,7 @@ class AgentExecutor:
         return None
 
     def require_regenerable(
-        self, binding: AgentBinding, *, canonical_step: bool = False, canonical_trace: bool = False,
+        self, binding: AgentBinding, *, canonical_step: bool = False,
         split_step: bool = False, native_subagents: bool = False,
     ) -> None:
         compiled = binding.compiled_agent
@@ -423,7 +420,6 @@ class AgentExecutor:
                 not native_subagents or not canonical_step or split_step
             )),
             ("checkpoints", (policy.session.checkpoints or policy.restart_checkpoints) != canonical_step),
-            ("trace", policy.durable_trace != canonical_trace),
             ("tool_response_fixture", policy.tool_responses is not None),
         ) if selected]
         if unsupported:
@@ -474,10 +470,6 @@ class AgentExecutor:
         output_retries_used: int = 0,
         budget: RunBudgetContext | None = None,
         capture_trace: Callable[[StagingAgentRunStore], None] | None = None,
-        trace_interaction_base: int = 0,
-        traced_tool_starts: tuple[str, ...] = (),
-        trace_boundary: Callable[[StagingAgentRunStore], Awaitable[None]] | None = None,
-        trace_auto_flush: bool = False,
         mode: ExecutionMode = "run",
         planning: bool = False,
         plan_store: PlanningStore | None = None,
@@ -499,7 +491,7 @@ class AgentExecutor:
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         self.require_regenerable(
-            binding, canonical_step=canonical_step is not None, canonical_trace=trace_boundary is not None,
+            binding, canonical_step=canonical_step is not None,
             split_step=split_step, native_subagents=(
                 (native_subagent_leaf is not None or settled_native_subagents)
                 and mode == "run" and not planning and budget is None
@@ -507,7 +499,9 @@ class AgentExecutor:
         )
         if planning and plan_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        staging = StagingAgentRunStore()
+        from ._lossy_session_trace import BoundedTraceStaging
+
+        staging = StagingAgentRunStore() if capture_trace is None else BoundedTraceStaging()
         store = RuntimeAgentRunStore(
             staging,
             conversation_archive=(InMemoryStepArchive(PersistenceDomain.CONVERSATION)
@@ -532,10 +526,6 @@ class AgentExecutor:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             memory_store = self._canonical_memory_store(context.principal.tenant_id, context.execution_id, memory_scope)
             context = replace(context, memory_scope=memory_scope)
-        async def flush_trace() -> None:
-            assert trace_boundary is not None
-            await trace_boundary(staging)
-
         await store.initialize()
         try:
             outcome = await self.execute(_AgentRunScope(
@@ -550,8 +540,7 @@ class AgentExecutor:
                 canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
                 previous_turn_interrupted=previous_turn_interrupted,
                 output_retries_used=output_retries_used, deferred_approvals=deferred_approvals, budget=budget,
-                trace_interaction_base=trace_interaction_base, traced_tool_starts=traced_tool_starts,
-                trace_boundary=None if trace_boundary is None else flush_trace, trace_auto_flush=trace_auto_flush,
+                stage_session_trace=capture_trace is not None,
                 tool_effects="read_only" if canonical_step is None else "live",
                 mode=mode, planning=planning, preload_skill_inputs=preload_skill_inputs,
                 plan_store_resolver=None if plan_store is None else lambda _ctx: plan_store,
@@ -564,7 +553,7 @@ class AgentExecutor:
             return outcome
         finally:
             try:
-                if capture_trace is not None:
+                if capture_trace is not None and isinstance(staging, BoundedTraceStaging) and not staging.trace_discarded:
                     capture_trace(staging)
             finally:
                 await store.preflight_close()
@@ -913,18 +902,19 @@ class AgentExecutor:
                         tenant_id=scope.context.principal.tenant_id,
                         execution_id=scope.context.execution_id,
                         agent_run_id=scope.agent_run_id,
-                        next_model_request_seq=max(interaction_high_water, scope.trace_interaction_base) + 1,
+                        next_model_request_seq=interaction_high_water + 1,
                     )
                     if scope.canonical_step is not None:
                         runtime_capabilities = (*(
                             capability for capability in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
                             if (type(capability) in (ExecutionCapability, FileSystemCapability)
-                                or type(capability) is TraceCapability and scope.trace_boundary is not None)
+                                or type(capability) is TraceCapability and scope.stage_session_trace)
                         ), scope.canonical_step)
                     elif scope.regenerable:
                         runtime_capabilities = tuple(
                             capability for capability in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
-                            if type(capability) in (ExecutionCapability, FileSystemCapability, StepPersistenceCapability)
+                            if (type(capability) in (ExecutionCapability, FileSystemCapability, StepPersistenceCapability)
+                                or type(capability) is TraceCapability and scope.stage_session_trace)
                         )
                     else:
                         runtime_capabilities = (self._runtime_capabilities if self._prepare_runtime_capabilities is None
@@ -1329,8 +1319,6 @@ async def _materialize_agent(
         )
     )
     async def commit_history_boundary() -> None:
-        if scope.trace_auto_flush and scope.trace_boundary is not None:
-            await scope.trace_boundary()
         if isinstance(scope.run_store, RuntimeAgentRunStore):
             await scope.run_store.flush_execution_projection(
                 scope.agent_run_id,
@@ -1359,7 +1347,6 @@ async def _materialize_agent(
         initial_context=scope.initial_context,
         initial_attachments=scope.initial_attachments,
         history_boundary=commit_history_boundary,
-        traced_tool_starts=scope.traced_tool_starts,
         checkpoint_sink=save_checkpoint,
         checkpoint_sink_accepts_frozen=type(scope.run_store) is RuntimeAgentRunStore,
     )
@@ -1515,7 +1502,7 @@ async def _materialize_agent(
         model_journal=model_journal,
         model_request_recorder=model_observation.record_external_model_request,
         recorder=run_recorder,
-        canonical_trace_flush=scope.trace_boundary,
+        stage_session_trace=scope.stage_session_trace,
         budget=scope.budget,
     )
     existing_ids: set[str] = set()

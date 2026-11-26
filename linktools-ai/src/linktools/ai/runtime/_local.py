@@ -106,6 +106,7 @@ from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
 from ..execution.model_progress import encode_model_progress
 from ..history import project_committed_model_progress
 from ._execution import (
+    _require_atomic_execution_trace,
     CancelEffectOutcome, ExecutionStartIdentity, _GroupedTurnStart, _TerminalMetricDelivery, _execution_cancel_actor,
 )
 from ..observe.service import (
@@ -391,7 +392,9 @@ class LocalExecutionBackend:
         trace_commit: CommitPolicy | None = None,
         pending_turns: _PendingExecutionTurns | None = None,
         pending_cancel: Callable[[str, Principal], Awaitable[object]] | None = None,
+        execution_trace_atomic: bool = True,
     ) -> None:
+        self._execution_trace_atomic = execution_trace_atomic
         if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
             raise ValueError("Execution requires sync or terminal commit")
         self._turn_observers: set[Callable[[SessionTurnNotice], None]] = set()
@@ -523,6 +526,7 @@ class LocalExecutionBackend:
         return await self._execution_binding(execution, binding)
 
     async def validate_recovery_inputs(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:
+        _require_atomic_execution_trace(execution.durable_trace, self._execution_trace_atomic)
         binding = await self._execution_binding(execution, binding)
         await self._executor.validate_recovery_inputs(binding, execution.tool_response_ref)
         return binding
@@ -751,6 +755,7 @@ class LocalExecutionBackend:
                 self._tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        _require_atomic_execution_trace(execution.durable_trace, self._execution_trace_atomic)
         await self._execution_binding(execution, request.resolved_binding)
         if (
             request.mode != execution.mode
@@ -2230,6 +2235,7 @@ class LocalExecutionBackend:
                 or not isinstance(execution.binding, AgentBindingContract)
                 or row["binding_json"] != execution.binding.to_payload()):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_atomic_execution_trace(execution.durable_trace, self._execution_trace_atomic)
         cwd = request["cwd"]
         if cwd is not None:
             if self._workspace is None:
@@ -2451,11 +2457,12 @@ class LocalExecutionBackend:
     ) -> SqlStepStore:
         native = self._require_attached_graph_step_source(execution, runner._store)
         if (self._queue_deferred_graph is None
-                or execution.durable_trace and not runner._require_turn_trace(binding, canonical_step=True)):
+                or execution.durable_trace and not runner._observes_turn_trace(binding)):
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
-        if any(leaf.commit.mode == "terminal" for feature in policy.capabilities
-               for leaf in runtime_feature_leaves(feature) if isinstance(leaf, TraceCapability)):
+        if any(leaf.commit.mode == "terminal" or leaf.commit.buffer is not None or leaf.record_http_bodies
+               for feature in policy.capabilities for leaf in runtime_feature_leaves(feature)
+               if isinstance(leaf, TraceCapability)):
             # Native Step and Trace must publish through the shared synchronous
             # boundary, not an independently sealed buffer.
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
@@ -3801,6 +3808,7 @@ class LocalExecutionBackend:
     async def _reconcile_handoff(
         self, checkpoint: ExecutionRecord
     ) -> ExecutionRecord:
+        _require_atomic_execution_trace(checkpoint.durable_trace, self._execution_trace_atomic)
         handoff = checkpoint.recovery.terminal_handoff
         if handoff is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)

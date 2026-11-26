@@ -534,17 +534,19 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._preflight = False
         self._initialized = True
 
-    async def prepare_archives(self) -> None:
+    async def prepare_archives(self, *, defer_trace: bool = False) -> None:
         """Prepare writable execution resources before admitting any turns.
 
-        This reads and writes group metadata in an already provisioned store;
-        storage composition and read-only history do not call it.
+        A detached Trace observer can open its own group on first use. A
+        group owned by Conversation or Execution still opens here even when
+        it also contains Trace.
         """
         await self._ensure_business()
         groups = dict.fromkeys(
             archive.state_store.storage_group
-            for archive in self._archives.values()
+            for domain, archive in self._archives.items()
             if isinstance(archive, StateStepArchive)
+            and not (defer_trace and domain is PersistenceDomain.TRACE)
         )
         if isinstance(self._execution_repository, ExecutionRepositoryImpl):
             groups.setdefault(self._execution_repository.state_store.storage_group)

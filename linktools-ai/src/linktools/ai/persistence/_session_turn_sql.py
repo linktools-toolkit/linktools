@@ -1135,7 +1135,6 @@ class SqlSessionTurns(SqlSessionTurnReader):
         usage: UsageMetrics | None = None,
         _abandon_expired: bool = False,
         _guard_abandon: tuple[StateStore, Callable[[StateTransaction], Awaitable[None]]] | None = None,
-        _publish_trace: tuple[tuple[StateStore, ...], Callable[[StateGroupTransaction], Awaitable[None]]] | None = None,
     ) -> bool:
         """Finalize and release using the same lock order as acceptance."""
         if _abandon_expired and state != "failed":
@@ -1154,14 +1153,13 @@ class SqlSessionTurns(SqlSessionTurnReader):
             _expired=_abandon_expired,
         )
         try:
-            if prepared.transcript is None and _publish_trace is None and _guard_abandon is None:
+            if prepared.transcript is None and _guard_abandon is None:
                 return await self._context.run_mutation(prepared.write, domain="session.finish")
 
-            trace_stores, publish_trace = ((), None) if _publish_trace is None else _publish_trace
             guard_stores = () if _guard_abandon is None else (_guard_abandon[0],)
             stores = prepared.stores
             group = stores[0].storage_group
-            if any(member.storage_group is not group for member in (*trace_stores, *guard_stores)):
+            if any(member.storage_group is not group for member in guard_stores):
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
             async def publish(transaction: StateGroupTransaction) -> bool:
@@ -1170,12 +1168,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
                 if _guard_abandon is not None:
                     member, guard = _guard_abandon
                     await guard(transaction.transaction(member))
-                if publish_trace is not None:
-                    # A Trace write failure rolls back both terminal and release.
-                    await publish_trace(transaction)
                 return True
 
-            return await group.mutate(tuple(dict.fromkeys((*stores, *trace_stores, *guard_stores))), publish)
+            return await group.mutate(tuple(dict.fromkeys((*stores, *guard_stores))), publish)
         except _TerminalFenceLost:
             return False
 
@@ -1379,7 +1374,6 @@ class SqlSessionTurns(SqlSessionTurnReader):
         self, key: SessionTurnKey, *, generation: int, checkpoint_id: str,
         continuation: PendingToolContinuation, receipt_store: StateStore,
         publish_receipts: Callable[[], Awaitable[None]], max_bytes: int,
-        _publish_trace: tuple[tuple[StateStore, ...], Callable[[StateGroupTransaction], Awaitable[None]]] | None = None,
     ) -> bool:
         frontier = CanonicalDeferredFrontier.from_json(key, generation, {
             "checkpoint_id": checkpoint_id,
@@ -1400,10 +1394,6 @@ class SqlSessionTurns(SqlSessionTurnReader):
         if receipt_store.storage_group is not group:
             raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
 
-        trace_stores, publish_trace = ((), None) if _publish_trace is None else _publish_trace
-        if any(member.storage_group is not group for member in trace_stores):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
         async def mutate(group_transaction) -> bool:
             async def wait(connection: AsyncSession) -> bool:
                 changed = await connection.execute(self._turns.update().filter_by(
@@ -1416,11 +1406,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
             if not await group_transaction.transaction(turn_store).run_sql(self._context, wait):
                 return False
             await publish_receipts()
-            if publish_trace is not None:
-                await publish_trace(group_transaction)
             return True
 
-        members = tuple(dict.fromkeys((turn_store, receipt_store, *trace_stores)))
+        members = tuple(dict.fromkeys((turn_store, receipt_store)))
         return await group.mutate(members, mutate)
 
     async def publish_split_waiting(
@@ -1800,20 +1788,12 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
     async def take_over(
         self, key: SessionTurnKey, *, generation: int, lease_seconds: int, cancelling: bool = False,
-        _trace_frontier=None,
     ) -> bool:
         async def write(session: AsyncSession) -> bool:
             return await self._take_over(session, key, generation=generation,
                                          lease_seconds=lease_seconds, cancelling=cancelling)
 
-        if _trace_frontier is None:
-            return await self._context.run_mutation(write, domain="session.recover")
-
-        async def claim(session: AsyncSession) -> tuple[bool]:
-            return (await write(session),)
-
-        acquired, = await self._recover_with_trace_frontier(claim, _trace_frontier)
-        return acquired
+        return await self._context.run_mutation(write, domain="session.recover")
 
     async def split_target_lease(
         self, key: SessionTurnKey, *, generation: int, cancelling: bool, expired: bool,
@@ -2022,30 +2002,8 @@ class SqlSessionTurns(SqlSessionTurnReader):
         result = await session.execute(statement)
         return SessionInstructionFrontier.from_json(result.scalar_one())
 
-    async def _recover_with_trace_frontier(self, write, trace_frontier):
-        if trace_frontier is None:
-            return await self._context.run_mutation(write, domain="session.recover")
-        trace_store, capture = trace_frontier
-        if self._transcript_write_binding is None:
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        turn_store = self._transcript_write_binding[0]
-        group = turn_store.storage_group
-        if trace_store.storage_group is not group:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-        async def recover(transaction):
-            value = await transaction.transaction(turn_store).run_sql(self._context, write)
-            if value[0]:
-                # The exact canonical generation was just regranted, so prior
-                # trace phases cannot append after this already held lease CAS.
-                await capture(transaction.transaction(trace_store))
-            return value
-
-        return await group.mutate(tuple(dict.fromkeys((turn_store, trace_store))), recover)
-
     async def take_over_with_checkpoint(
         self, key: SessionTurnKey, *, generation: int, lease_seconds: int, step_store: SqlStepStore,
-        _trace_frontier=None,
     ) -> tuple[bool, ContinuableSnapshot | None, SessionInstructionFrontier | None]:
         """Regrant the canonical lease and freeze its stable native checkpoint frontier."""
         self._require_checkpoint_store(step_store)
@@ -2060,13 +2018,12 @@ class SqlSessionTurns(SqlSessionTurnReader):
             instructions = await self._capture_instruction_frontier(session, key)
             return True, checkpoint, instructions
 
-        acquired, checkpoint, instructions = await self._recover_with_trace_frontier(write, _trace_frontier)
+        acquired, checkpoint, instructions = await self._context.run_mutation(write, domain="session.recover")
         return acquired, None if checkpoint is None else await checkpoint(), instructions
 
 
     async def take_over_ready_checkpoint(
         self, frontier: CanonicalDeferredFrontier, *, lease_seconds: int, step_store: SqlStepStore,
-        _trace_frontier=None,
     ) -> tuple[bool, ContinuableSnapshot | None, SessionInstructionFrontier | None]:
         """Adopt a settled frontier exactly once, without another turn or owner."""
         if lease_seconds < 1:
@@ -2092,5 +2049,5 @@ class SqlSessionTurns(SqlSessionTurnReader):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return checkpoint, await self._capture_instruction_frontier(session, key)
 
-        checkpoint, instructions = await self._recover_with_trace_frontier(write, _trace_frontier)
+        checkpoint, instructions = await self._context.run_mutation(write, domain="session.recover")
         return (False, None, None) if checkpoint is None else (True, await checkpoint(), instructions)

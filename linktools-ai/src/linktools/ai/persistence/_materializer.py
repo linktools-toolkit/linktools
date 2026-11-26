@@ -204,14 +204,19 @@ async def materialize_runtime_storage(
     for store in (*stores.values(), *capability_stores.values()):
         await store.initialize()
 
-    execution_store = stores[PersistenceDomain.EXECUTION]
-    atomic_domains = {PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
-    for domain in atomic_domains:
-        if stores[domain].storage_group is not execution_store.storage_group:
-            raise AIError(
-                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                f"{domain.value} and execution must share a StateStorageGroup",
-            )
+    execution_group = stores[PersistenceDomain.EXECUTION].storage_group
+    if stores[PersistenceDomain.CHECKPOINT].storage_group is not execution_group:
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            "checkpoint and execution must share a StateStorageGroup",
+        )
+    trace_store = stores[PersistenceDomain.TRACE]
+    if (trace_store.storage_group is not execution_group
+            and (session_turn_reader is None or not isinstance(trace_store, SqlStateStore))):
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            "A separate Trace route requires SQL Conversation and Trace storage",
+        )
 
     bundles: dict[PersistenceDomain, dict[str, RepositoryBase]] = {
         domain: build_repository_bundle(

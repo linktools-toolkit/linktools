@@ -141,7 +141,6 @@ class _StepArchiveBatch(Protocol):
 
 if TYPE_CHECKING:
     from ._checkpoint_repositories import ToolRepositoryImpl
-    from ._session_turn_sql import SessionTurnKey, SqlSessionTurns
 
 
 @dataclass(slots=True)
@@ -2478,10 +2477,13 @@ class StateStepArchive(AgentRunStore):
 
         await self._mutate(mutate)
 
-    def _stored_agent_run(self, record: AgentRunRecord, *, source_receipt: StepWriteReceipt | None = None) -> StoredRecord:
+    def _stored_agent_run(
+        self, record: AgentRunRecord, *, source_receipt: StepWriteReceipt | None = None, trace_owned: bool = False,
+    ) -> StoredRecord:
         key = self._agent_run_key(record.agent_run_id)
         source = self._registration_sources.get(record.agent_run_id)
-        data = (self._native_runs.encode(record, source_receipt=source_receipt)
+        data = (_encode_step(record) if trace_owned else
+                self._native_runs.encode(record, source_receipt=source_receipt)
                 if source_receipt is not None and self._native_runs is not None else
                 RunRegistrationReference.capture(source, record).to_data() if source is not None else
                 None if self._native_runs is None else self._native_runs.encode(record))
@@ -2952,79 +2954,21 @@ class StateStepArchive(AgentRunStore):
                                                    observation=observation, archive=archive or PreparedArchive())
         await self._mutate(commit)
 
-    async def _append_canonical_turn_trace_in_transaction(
+    async def _append_lossy_session_trace_in_transaction(
         self,
         transaction: StateTransaction,
         run: AgentRunRecord,
         events: Sequence[StepEvent],
-        *,
-        turns: "SqlSessionTurns",
-        key: "SessionTurnKey",
-        generation: int,
-    ) -> AgentRunRecord | None:
-        """Append trace facts only under the canonical turn's source fence.
-
-        The caller owns the grouped transaction and immutable run source.
-        Checkpoints, interaction bodies and transcript publication are not
-        part of this operation. Do not blindly retry an uncertain append.
-        """
-        if (self._runtime_domain is not PersistenceDomain.TRACE or self._trace_events is None
-                or (self._run_registrations is not None and not self._run_registrations.joins(self._store))
-                or active_state_transaction(self._store, writable=True) is not transaction
-                or run.agent_run_id != key.turn_id or run.agent_conversation_id != key.session_id
-                or any(event.agent_run_id != key.turn_id or event.agent_conversation_id != key.session_id
-                       for event in events)):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        if self._run_registrations is None or self._run_registrations.native is None:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        source = await self._run_registrations.get_in_transaction(transaction, key.turn_id)
-        if source is None:
-            # Managed Step owns initial registration; Trace can get here first.
-            return None
-        if (source.conversation_id != key.session_id or source.parent_run_id is not None
-                or source.agent_name != run.agent_id):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        self.remember_run_registration(source)
-        from ._official_step_reader import OfficialStepReader
-        run = OfficialStepReader.project_run(source)
-        await StateStepArchive._sync_projection_in_transaction(
-            self, transaction, run, events=events, checkpoints=(),
-            canonical_turn=(turns, key, generation),
-        )
-        return run
-
-    async def _canonical_trace_frontier(self, transaction: StateTransaction, run_id: str) -> tuple[int, int]:
-        streams = self._stream(run_id, "event"), self._stream(run_id, "interaction")
-        values = await transaction.get_sequences(streams)
-        return values.get(streams[0], 0), values.get(streams[1], 0)
-
-    async def _append_canonical_turn_trace_terminal(
-        self,
-        transaction: StateTransaction,
-        run: AgentRunRecord,
-        events: Sequence[StepEvent],
-        *,
-        key: "SessionTurnKey",
     ) -> AgentRunRecord:
-        """Join the caller's already-CASed canonical terminal mutation."""
+        """Append observability data using only the Trace-owned run and stream."""
         if (self._runtime_domain is not PersistenceDomain.TRACE or self._trace_events is None
-                or self._run_registrations is None or self._run_registrations.native is None
-                or not self._run_registrations.joins(self._store)
                 or active_state_transaction(self._store, writable=True) is not transaction
-                or run.agent_run_id != key.turn_id or run.agent_conversation_id != key.session_id
-                or any(event.agent_run_id != key.turn_id or event.agent_conversation_id != key.session_id
-                       for event in events)):
+                or run.agent_conversation_id is None or run.parent_agent_run_id is not None
+                or any((event.agent_run_id, event.agent_conversation_id, event.parent_agent_run_id, event.agent_id)
+                       != (run.agent_run_id, run.agent_conversation_id, None, run.agent_id) for event in events)):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        source = await self._run_registrations.get_in_transaction(transaction, key.turn_id)
-        if source is not None:
-            if (source.conversation_id != key.session_id or source.parent_run_id is not None
-                    or source.agent_name != run.agent_id):
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            self.remember_run_registration(source)
-            from ._official_step_reader import OfficialStepReader
-            run = OfficialStepReader.project_run(source)
         await StateStepArchive._sync_projection_in_transaction(
-            self, transaction, run, events=events, checkpoints=(), canonical_terminal=True,
+            self, transaction, run, events=events, checkpoints=(), trace_owned=True,
         )
         return run
 
@@ -3042,8 +2986,7 @@ class StateStepArchive(AgentRunStore):
         execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
         prefetch_keys: Sequence[bytes] = (),
-        canonical_turn: tuple["SqlSessionTurns", "SessionTurnKey", int] | None = None,
-        canonical_terminal: bool = False,
+        trace_owned: bool = False,
     ) -> bool:
         """Commit projection metadata and report whether its AgentRun was admitted."""
         self._ensure_open()
@@ -3060,16 +3003,13 @@ class StateStepArchive(AgentRunStore):
             ("checkpoint", checkpoint.stored, checkpoint.stored.state)
             for checkpoint in checkpoints
         )
-        if canonical_turn is not None:
-            turns, key, generation = canonical_turn
-            await turns.guard_step_in_transaction(transaction, key, generation=generation)
-        elif not canonical_terminal:
+        if not trace_owned:
             await self._execution_history_guard_in_transaction(
                 transaction, execution_id, execution_guard, producer_generation,
                 inserted_terminal=inserted_terminal,
             )
         source_receipt = None
-        if canonical_turn is None and not canonical_terminal and self._native_events is not None:
+        if not trace_owned and self._native_events is not None:
             source_receipt = await self._native_events.publish(transaction, events)
             run = self._native_events.resolve_run(run)
         owner_record, created = await self._ensure_run_with_head_in_transaction(
@@ -3077,6 +3017,7 @@ class StateStepArchive(AgentRunStore):
             run,
             include_projection=True,
             source_receipt=source_receipt,
+            trace_owned=trace_owned,
             prefetch_keys=(
                 *prefetch_keys,
                 *(key for checkpoint in checkpoints for key in
@@ -3110,7 +3051,7 @@ class StateStepArchive(AgentRunStore):
         high_waters = await transaction.reserve_sequences({
             stream: len(grouped[family]) for family, stream in streams.items()
         })
-        if events and (canonical_turn is not None or canonical_terminal):
+        if events and trace_owned:
             first = high_waters[streams["event"]] - len(events)
             events = tuple(replace(event, event_index=first + index) for index, event in enumerate(events))
             grouped["event"] = list(events)
@@ -3134,7 +3075,7 @@ class StateStepArchive(AgentRunStore):
                         fact_kind,
                         None,
                         kind,
-                        ((self._native_events.encode(value) if canonical_turn is None and not canonical_terminal and self._native_events is not None and family == "event" else None)
+                        ((self._native_events.encode(value) if not trace_owned and self._native_events is not None and family == "event" else None)
                          or _encode_step(value)),
                     )
                 )
@@ -3342,6 +3283,7 @@ class StateStepArchive(AgentRunStore):
         include_projection: bool = False,
         prefetch_keys: Sequence[bytes] = (),
         source_receipt: StepWriteReceipt | None = None,
+        trace_owned: bool = False,
     ) -> tuple[StoredRecord, bool]:
         owner = self._agent_run_key(run.agent_run_id)
         history_owner = (
@@ -3353,13 +3295,13 @@ class StateStepArchive(AgentRunStore):
         keys = (owner, head_key)
         if include_projection:
             keys += (self._history.projection_key(history_owner),)
-        records = (await transaction.get_records((*keys, *prefetch_keys)) if self._native_runs is None else
+        records = (await transaction.get_records((*keys, *prefetch_keys)) if self._native_runs is None or trace_owned else
                    await self._native_runs.read_physical(transaction, (*keys, *prefetch_keys)))
         owner_record = records.get(owner)
         head_record = records.get(head_key)
         if owner_record is None:
             registrations = self._run_registrations
-            if registrations is not None and registrations.joins(self._store) and source_receipt is None:
+            if not trace_owned and registrations is not None and registrations.joins(self._store) and source_receipt is None:
                 source = self._registration_sources.get(run.agent_run_id)
                 if source is None:
                     source = await registrations.get_in_transaction(transaction, run.agent_run_id)
@@ -3369,8 +3311,8 @@ class StateStepArchive(AgentRunStore):
                                            metadata=dict(run.metadata), started_at=run.started_at)
                     self.remember_run_registration(source)
                 await registrations.publish_in_transaction(transaction, source)
-            stored_run = self._stored_agent_run(run, source_receipt=source_receipt)
-            if self._native_runs is not None:
+            stored_run = self._stored_agent_run(run, source_receipt=source_receipt, trace_owned=trace_owned)
+            if self._native_runs is not None and not trace_owned:
                 self._native_runs.remember_prepared(transaction, stored_run, run, source_receipt=source_receipt,
                                                    registration=self._registration_sources.get(run.agent_run_id))
             if head_record is None:
@@ -3393,7 +3335,10 @@ class StateStepArchive(AgentRunStore):
                 )
             return stored_run, True
         else:
-            if self._native_runs is not None and is_native_run_reference(owner_record.data):
+            if trace_owned:
+                # This lane never reads or rewrites a Step-backed registration.
+                matches = not is_native_run_reference(owner_record.data) and _decode_step(owner_record.data) == run
+            elif self._native_runs is not None and is_native_run_reference(owner_record.data):
                 matches = self._native_runs.matches(owner_record.data, run, transaction=transaction)
             else:
                 projected = (await self._project_run_records((owner_record,)))[0]
@@ -3403,7 +3348,7 @@ class StateStepArchive(AgentRunStore):
         if head_record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._history.decode_head(head_record)
-        if self._native_runs is not None and not is_native_run_reference(owner_record.data):
+        if not trace_owned and self._native_runs is not None and not is_native_run_reference(owner_record.data):
             reference = self._native_runs.encode(run, source_receipt=source_receipt)
             if reference is not None:
                 updated = replace(owner_record, data=reference, storage_revision=owner_record.storage_revision + 1)

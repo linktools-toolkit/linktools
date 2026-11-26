@@ -123,7 +123,7 @@ async def compose_platform_capabilities(
     transcript_start: int = 0,
     initial_output_retries_used: int = 0,
     tool_operations: ToolOperationBridge | None = None,
-    canonical_trace_flush: Callable[[], Awaitable[None]] | None = None,
+    stage_session_trace: bool = False,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     run_recorder = recorder or AgentRunRecorder(
@@ -251,10 +251,10 @@ async def compose_platform_capabilities(
             )
         for enabled, feature, service in ((guarantees[2], TraceCapability, TraceService),):
             if isinstance(capability, feature):
-                if canonical_trace_flush is not None:
+                if stage_session_trace:
                     bound_types.add(feature)
                     return capability.bind(
-                        service(persistence, canonical_lifecycle=True), flush=canonical_trace_flush,
+                        service(persistence, canonical_lifecycle=True),
                         model_request_seq=run_recorder.model_request_seq_for_tool_call,
                     )
                 if not enabled:

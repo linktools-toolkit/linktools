@@ -19,7 +19,6 @@ from linktools.ai.errors import AIError
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._step_store import RuntimeStepStore
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 
@@ -101,26 +100,6 @@ def _crash_native_process(root_path: str, phase: str) -> None:
     root = Path(root_path)
     original_complete = RuntimeToolOperationBridge.complete
     original_step = RuntimeStepStore.commit_step
-    original_boundary = AgentRunRecorder.commit_history_boundary
-    projected = phase == "projected_tool_checkpoint_trace"
-    committed_tool_turn = None
-    live_runtime = None
-
-    async def die_at_projection():
-        if live_runtime is None or committed_tool_turn is None:
-            return
-        trace = await live_runtime.history.turn_trace(
-            _SESSION, committed_tool_turn, principal=live_runtime.default_principal,
-        )
-        if any(item.payload.get("kind") == "TOOL_RESULT"
-               and item.payload.get("tool_call_id") == "stable-call" for item in trace.items):
-            os._exit(91)
-
-    async def history_boundary(recorder):
-        await original_boundary(recorder)
-        if projected:
-            await die_at_projection()
-
     async def complete(bridge, decision, result):
         completed = await original_complete(bridge, decision, result)
         if phase == "tool_completed":
@@ -130,30 +109,25 @@ def _crash_native_process(root_path: str, phase: str) -> None:
     async def commit_step(store, **kwargs):
         await original_step(store, **kwargs)
         snapshot = kwargs.get("snapshot")
-        if (phase in {"tool_checkpoint", "projected_tool_checkpoint_trace"}
+        if (phase in {"tool_checkpoint", "wrapped_tool_checkpoint_trace"}
                 and snapshot is not None and snapshot.messages
                 and any(isinstance(part, ToolReturnPart) for part in snapshot.messages[-1].parts)):
-            if not projected:
-                os._exit(91)
-            nonlocal committed_tool_turn
-            committed_tool_turn = snapshot.run_id
-            await die_at_projection()
+            # Step has durably retained the tool return. A hard exit here
+            # deliberately does not wait for optional Trace publication.
+            os._exit(91)
 
     RuntimeToolOperationBridge.complete = complete
     RuntimeStepStore.commit_step = commit_step
-    AgentRunRecorder.commit_history_boundary = history_boundary
 
     async def run() -> None:
-        nonlocal live_runtime
         async with (
             Persistence.open(_NAME, storage=PersistenceStorage.from_root(root / "runtime")) as state,
             Runtime.open(persistence=state, features=_features(
                 root, crash=phase.startswith("tool_interrupted"), traced=phase.endswith("_trace"),
-                session_checkpoints=phase.endswith("_session_capability"), wrapped_return=projected,
+                session_checkpoints=phase.endswith("_session_capability"), wrapped_return=phase == "wrapped_tool_checkpoint_trace",
             ),
                          authorization=_HostAuthorization()) as runtime,
         ):
-            live_runtime = runtime
             await runtime.agents.get().create_session(_SESSION)
             turn = await _send(runtime)
             await turn.wait_final(timeout_seconds=15)
@@ -257,7 +231,7 @@ async def _run_until_crash(target, *args):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", (
     "tool_completed", "tool_checkpoint", "tool_interrupted", "tool_interrupted_twice", "tool_interrupted_twice_trace",
-    "tool_interrupted_session_capability", "projected_tool_checkpoint_trace",
+    "tool_interrupted_session_capability", "wrapped_tool_checkpoint_trace",
 ))
 async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_replaying_effect(tmp_path: Path, phase: str):
     await _run_until_crash(_crash_native_process, str(tmp_path), phase)
@@ -277,7 +251,7 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         Runtime.open(persistence=state, features=_features(
             tmp_path, interrupted=interrupted, traced=traced,
             session_checkpoints=phase.endswith("_session_capability"),
-            wrapped_return=phase == "projected_tool_checkpoint_trace",
+            wrapped_return=phase == "wrapped_tool_checkpoint_trace",
         ),
                      authorization=_HostAuthorization()) as runtime,
     ):
@@ -289,11 +263,20 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         [receipt] = await tools.list_by_execution(turn_id, tenant_id=tenant)
         assert receipt.tool_call_id == "stable-call"
         assert receipt.status is (ToolOperationStatus.CLAIMED if interrupted else ToolOperationStatus.COMPLETED)
-        if phase == "projected_tool_checkpoint_trace":
-            with _recovery_diagnostic("pre-recovery durable Trace"):
-                captured = await runtime.history.turn_trace(_SESSION, turn_id, principal=principal)
-            [projected_result] = [item for item in captured.items if item.payload.get("kind") == "TOOL_RESULT"]
-            assert projected_result.payload["tool_call_id"] == "stable-call"
+        if phase == "wrapped_tool_checkpoint_trace":
+            steps = await state.create_step_store()
+            try:
+                checkpoint = await steps.latest_snapshot(run_id=turn_id)
+                assert checkpoint is not None and checkpoint.messages
+                parts = checkpoint.messages[-1].parts
+                [saved] = [part for part in parts if isinstance(part, ToolReturnPart)]
+                assert saved.tool_call_id == "stable-call" and saved.content == "confirmed effect"
+                assert saved.metadata == {"proof": "fixture"}
+                assert [part.content for part in parts if isinstance(part, UserPromptPart)] == [
+                    "private fixture supplement",
+                ]
+            finally:
+                await steps.close()
         repeated = await _send(runtime)
         assert repeated.key == key
         assert await turns.get_turn(key) == before
@@ -322,9 +305,6 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         assert await state.execution.executions.get(turn_id, tenant_id=tenant) is None
         if traced:
             assert not await state.execution.executions.list_children(turn_id, tenant_id=tenant)
-        if phase == "projected_tool_checkpoint_trace":
-            finished = await runtime.history.turn_trace(_SESSION, turn_id, principal=principal)
-            assert projected_result in finished.items
         assert (await _send(runtime)).key == key
     assert effect_log.read_text().splitlines() == [turn_id]
     assert provider_log.read_text().splitlines() == (

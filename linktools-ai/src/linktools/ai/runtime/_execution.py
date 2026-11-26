@@ -455,6 +455,14 @@ class _ExecutionManagementAdapter(StoredExecutionManagementAdapter):
         await self._service._runtime_bridge.pending_turns.cancel_remote(execution_id, tenant_id=tenant_id)
 
 
+def _require_atomic_execution_trace(durable_trace: bool, execution_trace_atomic: bool) -> None:
+    if durable_trace and not execution_trace_atomic:
+        raise AIError(
+            ErrorCode.STORAGE_CAPABILITY_MISSING,
+            "Execution Trace requires Trace and Execution in one SQL transaction",
+        )
+
+
 class DefaultExecutionService(TaskExecutionService):
     """Apply execution authorization and state transitions before launching work."""
 
@@ -484,7 +492,9 @@ class DefaultExecutionService(TaskExecutionService):
         context_archive: ExecutionContextArchive | None = None,
         retained_turn_confirmed: Callable[[ExecutionRecord], bool] | None = None,
         retained_publication: Callable[..., ExecutionTerminalPublication | None] | None = None,
+        execution_trace_atomic: bool = True,
     ) -> None:
+        self._execution_trace_atomic = execution_trace_atomic
         self._state = state
         self._canonical_graph_session: Callable[[str, Principal], Awaitable[Mapping[str, object] | None]] | None = None
         self._start_attached_graph: Callable[[
@@ -1675,6 +1685,10 @@ class DefaultExecutionService(TaskExecutionService):
         native_source = None
         if (policy.restart_checkpoints or parent is not None and parent.restart_checkpoints) and self._native_step_source is not None:
             native_source = await self._native_step_source(binding)
+        durable_trace = (policy.durable_trace
+                         or requires_task_invocation_capture and (graph_task is None or native_source is None)
+                         or parent is not None and parent.durable_trace)
+        _require_atomic_execution_trace(durable_trace, self._execution_trace_atomic)
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
@@ -1715,9 +1729,7 @@ class DefaultExecutionService(TaskExecutionService):
             native_step_source=native_source,
             restart_checkpoints=(policy.restart_checkpoints
                                  or parent is not None and parent.restart_checkpoints),
-            durable_trace=(policy.durable_trace
-                           or requires_task_invocation_capture and (graph_task is None or native_source is None)
-                           or parent is not None and parent.durable_trace),
+            durable_trace=durable_trace,
             conversation=policy.execution.retain_history,
         )
         proposed_reservation = ExecutionStartReservation(
