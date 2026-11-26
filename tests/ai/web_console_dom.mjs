@@ -133,13 +133,13 @@ function deferred(path){
   resolve.reject=error=>{delays.delete(path);reject(error);};resolve.requested=requested;
   return resolve;
 }
-let forkAttempts=0,cancelAttempts=0,endMode=null;
+let forkAttempts=0,cancelAttempts=0,endMode=null,turnSessions=false;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
   calls.push({key,method,body,signal:options.signal,query:{...Object.fromEntries(url.searchParams),identities:url.searchParams.getAll('identity')}});
   if(networkFailures.has(method+' '+key))throw new Error('Runtime read unavailable');
   if(delays.has(method+' '+key)){const pending=delays.get(method+' '+key);pending.started();return pending.promise;}
-  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',runtime:{namespace:'actual-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
+  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',runtime:{namespace:'actual-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,turn_sessions:turnSessions,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
   if(key==='/api/executions' && endMode?.listError)throw new Error('list unavailable');
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
@@ -326,6 +326,35 @@ if(process.argv[3]==='session-published-turn') {
   sessions.get('a').active_execution_id=null;sessions.get('a').revision++;source.snapshot();
   await settle();
   assert.equal(reads(),readerReads,'refreshing visible Original does not reread Chat History');
+
+  // From Original, open a native conversation and exercise its actual Chat
+  // click with the ordinary session watch installed. It has no legacy
+  // execution process map: native previews and history own the Chat DOM.
+  turnSessions=true;await node('settings').click();node('settings-dialog').close();
+  const ordinaryTurn='b-native-turn';
+  const ordinarySession=sessions.get('b');
+  Object.assign(ordinarySession,{active_turn_id:ordinaryTurn,last_turn_no:0,revision:1});
+  timelineOverrides.set('b',{items:[{
+    turn_id:ordinaryTurn,turn_no:1,status:'STARTED',conversation_committed:false,
+    user_input:{prompt:'Native question',attachments:[]},items:[],
+  }],next_cursor:null});
+  const beforeNative=calls.length;
+  await select('#session=b');
+  const ordinaryWatch=sessionSources.at(-1);
+  assert.notEqual(ordinaryWatch,source);
+  assert.equal(ordinaryWatch.id,'b');
+  const emitTurn=frame=>ordinaryWatch.listeners.get('turn')({data:JSON.stringify(frame)});
+  emitTurn({type:'snapshot',session:{...ordinarySession}});
+  emitTurn({type:'delta',turn_id:ordinaryTurn,generation:1,delta_kind:'text',text:'Native preview'});
+  await node('chat-mode').click();
+  assert.equal(node('composer').hidden,false);
+  assert.match(node('conversation').textContent,/Native question.*Native preview/);
+  assert.equal(node('send').disabled,true);
+  emitTurn({type:'terminal',turn_id:ordinaryTurn,turn_no:1,revision:2,generation:1,state:'succeeded',
+    prompt:'Native question',items:[{item_kind:'assistant',content:'Native finished'}]});
+  assert.match(node('conversation').textContent,/Native question.*Native finished/);
+  assert.doesNotMatch(node('conversation').textContent,/Native preview/);
+  assert.equal(calls.slice(beforeNative).filter(call=>call.key.startsWith('/api/executions/')).length,0);
   process.exit(0);
 }
 if(process.argv[3]==='session-open-active') {
