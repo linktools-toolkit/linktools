@@ -445,7 +445,7 @@ function ordinaryTurnNode(turn, previous=null) {
   }
   for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
   node.append(answers);
-  if(!turn.conversation_committed && turn.previewGap!=null)
+  if(!turn.conversation_committed && (turn.previewGap!=null || !turn.previewHasPrefix))
     node.append(element('p','muted','Live preview is incomplete. The final reply will appear here.'));
   if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
   const heading={RECOVERY_REQUIRED:'Recovery required',WAITING_DEFERRED:'Waiting for approval or tool results',CANCELLING:'Cancelling…'}[turn.status];
@@ -577,7 +577,7 @@ function watchOrdinarySession(id) {
     const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
     if(!turn || turn.liveGeneration>frame.generation || turn.previewGap===frame.generation)return;
     const reset=turn.liveGeneration!==frame.generation;
-    if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];turn.previewGap=null;}
+    if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];turn.previewGap=null;turn.previewHasPrefix=false;}
     if(frame.type==='preview_reset'){
       turn.liveParts=turn.liveParts.filter(part=>part.modelKey!==frame.model_key || part.attempt!==frame.attempt);
       patchOrdinaryTurn(turn);
@@ -734,7 +734,9 @@ function watchOrdinarySession(id) {
       const missingPreview=bufferedGeneration===frame.generation && watch.activeRead?.overflow;
       const preview=row?.liveGeneration===frame.generation && !missingPreview ? {}
         : {liveGeneration:frame.generation,liveParts:[],previewGap:missingPreview?frame.generation:null};
-      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',can_recover:false,user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,...preview});
+      // An authorized history read can reveal an active turn, not prove its preview prefix was observed.
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',can_recover:false,
+        user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,previewHasPrefix:true,...preview});
     } else if(frame.type==='waiting'){
       const row=state.turns.find(item=>item.turn_id===frame.turn_id);
       if(activeTurn()!==frame.turn_id || row?.conversation_committed
@@ -2572,7 +2574,7 @@ async function sendMessage(event) {
     if(ordinary){
       if(!state.turns.some(turn=>turn.turn_id===result.turn_id)){
         if(state.session && !state.session.active_turn_id)state.session.active_turn_id=result.turn_id;
-        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue,uploads.map(({file})=>({display_name:file.name,media_type:file.type,size:file.size}))),items:[],conversation_committed:false});
+        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue,uploads.map(({file})=>({display_name:file.name,media_type:file.type,size:file.size}))),items:[],conversation_committed:false,previewHasPrefix:true});
       }
       return;
     }

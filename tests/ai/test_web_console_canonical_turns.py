@@ -109,8 +109,7 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
                     assert frame.get("error_code") is None
                     assert thinking_timing is not None
                     assert set(thinking_timing) == {
-                        "type", "turn_id", "turn_no", "generation", "revision",
-                        "model_key", "attempt", "part_index", "elapsed_ms",
+                        "type", "turn_id", "generation", "model_key", "attempt", "part_index", "elapsed_ms",
                     }
                     assert thinking_timing["model_key"] == "model:1:1"
                     assert thinking_timing["attempt"] == 1 and thinking_timing["part_index"] == 0

@@ -1027,7 +1027,8 @@ class DefaultExecutionService(TaskExecutionService):
         """Read the original reservation identity without starting or joining a producer."""
         existing = await self._state.idempotency.get("execution.subagent", key, tenant_id=principal.tenant_id)
         if existing is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                          safe_details={"reason": "native_child_reservation_missing"})
         return await self.load_authorized(existing.resource_id, principal, AuthorizationAction.EXECUTION_READ)
 
     async def _wait_native_child_result(
@@ -1047,7 +1048,8 @@ class DefaultExecutionService(TaskExecutionService):
                 child = await self.load_authorized(child.execution_id, principal, AuthorizationAction.EXECUTION_READ)
             except Exception as error:
                 # An unconfirmed start or wait never authorizes retry or failure settlement.
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                              safe_details={"reason": "native_child_recovery_unconfirmed"}) from error
             if child.status not in terminal:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         if child.status not in terminal:

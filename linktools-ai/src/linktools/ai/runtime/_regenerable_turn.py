@@ -1099,7 +1099,8 @@ class _RegenerableTurnRunner:
                             # marker to an already complete, retained parent run.
                             if not completed_checkpoint or not continuation or not isinstance(continuation[-1], ModelResponse):
                                 self._gap(key)
-                                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                                              safe_details={"reason": "native_subagent_trace_incomplete"})
                             await self._require_completed_trace(
                                 key, continuation[-1], event_head=trace_event_base,
                                 request_head=trace_interaction_base,
@@ -2025,6 +2026,8 @@ class _RegenerableTurnRunner:
                         except Exception as error:
                             # The child may have crossed its first-start fence.
                             # Missing proof cannot be projected as parent failure.
+                            if isinstance(error, AIError) and error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED:
+                                raise
                             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
                         native_subagent_leaf = None
                     outcome = await self._executor.execute_regenerable(

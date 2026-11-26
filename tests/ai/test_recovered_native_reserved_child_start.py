@@ -5,6 +5,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from traceback import extract_tb
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
@@ -16,6 +17,7 @@ from linktools.ai.execution import ExecutionStartClaim
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._native_subagent import NativeSubagentAdmission
+from linktools.ai.runtime._subagent import SubagentDispatcher
 
 from ._runtime_test_helpers import _wait_for_committed
 from .test_canonical_turn_subagents import _HostAuthorization, _model
@@ -42,7 +44,18 @@ async def test_recovered_native_start_requires_retained_receipt_and_pristine_chi
         # first-start transaction is the precise failure point.
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
+    dispatched_errors: list[Exception] = []
+    dispatch = SubagentDispatcher.dispatch
+
+    async def observe_dispatch(dispatcher, *args, **kwargs):
+        try:
+            return await dispatch(dispatcher, *args, **kwargs)
+        except Exception as error:
+            dispatched_errors.append(error)
+            raise
+
     monkeypatch.setattr(NativeSubagentAdmission, "commit_start", stop_before_start)
+    monkeypatch.setattr(SubagentDispatcher, "dispatch", observe_dispatch)
     name = "native-reserved-child-start"
     features = RuntimeFeatures(name)
     features.model("parent", _model("parent", parent))
@@ -73,6 +86,15 @@ async def test_recovered_native_start_requires_retained_receipt_and_pristine_chi
             original_delegate, lambda row: row is not None and row.status is ToolOperationStatus.EFFECT_UNKNOWN,
         )
         children = await state.execution.executions.list_children(key.turn_id, tenant_id=runtime.tenant_id)
+        if not children and dispatched_errors:
+            error = dispatched_errors[0]
+            cause = error.__cause__ or error
+            frame = extract_tb(cause.__traceback__)[-1]
+            raise AssertionError(
+                f"native delegation stopped before reservation: {error!r}; "
+                f"{type(cause).__name__} at {Path(frame.filename).name}:{frame.lineno} ({frame.name})"
+            ) from error
+        assert len(children) == 1
         [reserved] = children
         assert reserved.status is ExecutionStatus.PENDING_START and reserved.started_at is None
         request_key = canonical_sha256({

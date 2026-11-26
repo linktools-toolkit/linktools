@@ -350,6 +350,7 @@ if(process.argv[3]==='session-published-turn') {
   emitTurn({type:'snapshot',session:{...ordinarySession,metadata:{title:'SSE title'},cwd:'fixture'}});
   assert.equal(node('conversation-title').textContent,'SSE title');
   assert.equal(node('conversation-meta').textContent,'fixture');
+  assert.match(node('conversation').textContent,/Native question.*Live preview is incomplete/s);
   const live={turn_id:ordinaryTurn,generation:1,model_key:'model:1:1',attempt:1};
   emitTurn({type:'delta',...live,delta_kind:'thinking',part_index:0,text:'Stale thought'});
   emitTurn({type:'preview_reset',...live});
@@ -387,6 +388,7 @@ if(process.argv[3]==='session-published-turn') {
   assert.equal(liveThought.open,true);
   assert.equal(node('composer').hidden,false);
   assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native preview/s);
+  assert.match(node('conversation').textContent,/Native preview.*Live preview is incomplete/s,'a resumed suffix is not a complete preview');
   assert.doesNotMatch(node('conversation').textContent,/Stale thought/);
   assert.equal(node('send').type,'button');
   assert.equal(node('send').textContent,'Stop');
@@ -438,6 +440,15 @@ if(process.argv[3]==='session-published-turn') {
   assert.match(sentNative.body.request_id,/^[A-Za-z0-9_-]{12}$/);
   assert.equal(sentNative.body.request_id,resetRequest.body.request_id,'retry preserves uncertain request identity');
   nextNative({turn_id:'b-next-turn'});await sendNative;
+  assert.match(node('conversation').textContent,/Next native question/);
+  assert.doesNotMatch(node('conversation').textContent,/Live preview is incomplete/,'local POST receipt is not an attached preview');
+  const beforeAdmission=calls.length;
+  emitTurn({type:'admitted',turn_id:'b-next-turn',turn_no:2,revision:3,generation:1,prompt:'Next native question'});
+  emitTurn({type:'delta',turn_id:'b-next-turn',generation:1,model_key:'model:1:1',attempt:1,
+    delta_kind:'text',part_index:0,text:'Fresh full stream'});
+  assert.match(node('conversation').textContent,/Fresh full stream/);
+  assert.doesNotMatch(node('conversation').textContent,/Live preview is incomplete/);
+  assert.equal(calls.length,beforeAdmission,'admission and preview frames add no request');
   assert.equal(node('recover-turn'),undefined);
   const stopped={type:'gap',phase:'producer_stopped',turn_id:'b-next-turn',generation:1};
   const recoverRead=deferred('GET /api/sessions/b');

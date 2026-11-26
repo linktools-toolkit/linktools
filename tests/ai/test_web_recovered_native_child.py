@@ -23,9 +23,9 @@ from .test_canonical_turn_subagents import _HEADERS, _SESSION, _HostAuthorizatio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unknown_start", (False, True), ids=("recovered", "unknown-start-no-dispatch"))
+@pytest.mark.parametrize("outcome", ("recovered", "unknown-start-no-dispatch", "reservation-missing"))
 async def test_web_recovery_first_starts_only_the_original_reserved_child(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unknown_start: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
@@ -105,8 +105,15 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
 
     params = {"session_id": _SESSION}
     payload = {"prompt": "Delegate once", "request_id": "original-turn"}
+    async def stop_before_reservation(_proof, _repository, _request, *, authority):
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+    missing = outcome == "reservation-missing"
     with monkeypatch.context() as fault:
-        fault.setattr(NativeSubagentAdmission, "commit_start", stop_before_start)
+        if missing:
+            fault.setattr(NativeSubagentAdmission, "reserve", stop_before_reservation)
+        else:
+            fault.setattr(NativeSubagentAdmission, "commit_start", stop_before_start)
         async with open_host() as (state, runtime, http):
             create = await http.post("/api/sessions", headers=_HEADERS,
                                      json={"session_id": _SESSION, "request_id": "create"})
@@ -123,8 +130,13 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             original = await _wait_for_committed(
                 original_tool, lambda value: value is not None and value.status is ToolOperationStatus.EFFECT_UNKNOWN,
             )
-            [reserved] = await state.execution.executions.list_children(turn_id, tenant_id=runtime.tenant_id)
-            assert reserved.status is ExecutionStatus.PENDING_START and reserved.started_at is None
+            children = await state.execution.executions.list_children(turn_id, tenant_id=runtime.tenant_id)
+            if missing:
+                assert not children
+                reserved = None
+            else:
+                [reserved] = children
+                assert reserved.status is ExecutionStatus.PENDING_START and reserved.started_at is None
             assert calls == ["parent dispatch"]
             await runtime.handoff()
 
@@ -135,7 +147,10 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
         turns = state.session_turns
         tenant_id = runtime.tenant_id
         initial = await state.execution.idempotency.get("execution.subagent", request_key, tenant_id=tenant_id)
-        assert (initial.resource_id, initial.status) == (reserved.execution_id, IdempotencyStatus.RESERVED)
+        if missing:
+            assert initial is None
+        else:
+            assert (initial.resource_id, initial.status) == (reserved.execution_id, IdempotencyStatus.RESERVED)
         async with turns._context.engine.begin() as connection:
             changed = await connection.execute(
                 turns._turns.update().filter_by(**turns._turn_values(key), generation=1, state="accepted")
@@ -147,6 +162,7 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             pytest.fail("recovery must not reserve another child")
 
         monkeypatch.setattr(state.execution.executions, "reserve_native_subagent", no_new_reservation)
+        unknown_start = outcome == "unknown-start-no-dispatch"
         if unknown_start:
             commands = runtime._execution_service.runtime_backend()._runtime_commands
             commit = commands.commit_recovered_native_subagent_start
@@ -160,17 +176,26 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
 
         recovered = await http.post("/api/session/recover", params=params, headers=_HEADERS,
                                     json={"turn_id": turn_id, "request_id": "recover"})
-        [same_child] = await state.execution.executions.list_children(turn_id, tenant_id=tenant_id)
+        children = await state.execution.executions.list_children(turn_id, tenant_id=tenant_id)
         receipt = await state.execution.idempotency.get("execution.subagent", request_key, tenant_id=tenant_id)
         row = await turns.get_turn(key)
+        settled = await state.checkpoint.tools.get_operation(original.tool_operation_id, tenant_id=tenant_id)
+        if missing:
+            assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
+            assert recovered.json()["safe_details"] == {"reason": "native_child_reservation_missing"}
+            assert row["state"] == "accepted" and row["generation"] == 2 and settled == original
+            assert not children and receipt is None
+            assert calls == ["parent dispatch"] and returned_children == []
+            return
+        [same_child] = children
         assert receipt.resource_id == same_child.execution_id == reserved.execution_id
         assert receipt.request_digest == initial.request_digest
         assert row["generation"] == 2
         assert await state.execution.executions.get(turn_id, tenant_id=tenant_id) is None
-        settled = await state.checkpoint.tools.get_operation(original.tool_operation_id, tenant_id=tenant_id)
 
         if unknown_start:
             assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
+            assert recovered.json()["safe_details"] == {"reason": "native_child_recovery_unconfirmed"}
             assert row["state"] == "accepted" and settled == original
             assert same_child.status is ExecutionStatus.STARTED and same_child.agent_run_seq == 0
             assert receipt.status is IdempotencyStatus.STARTED
