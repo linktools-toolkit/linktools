@@ -14,6 +14,7 @@ pytest.importorskip("starlette")
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.web import create_app
 
@@ -78,7 +79,7 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
                     snapshot = await frames.get()
                     assert snapshot["type"] == "snapshot" and snapshot["session"]["active_turn_id"] is None
                     accepted = await http.post("/api/session/messages?session_id=chat", headers=_HEADERS, json={
-                        "prompt": "question", "agent_id": "default", "request_id": "send",
+                        "prompt": "question", "request_id": "send", "planning": step_enabled,
                     })
                     assert accepted.status_code == 202, accepted.text
                     assert set(accepted.json()) == {"turn_id"}
@@ -100,6 +101,8 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
             assert result.status_code == 200
             assert result.json()["turn_id"] == turn_id
             assert result.json()["conversation_committed"] is True
+            stored = await state.session_turn_reader.get_turn(SessionTurnKey("chat", turn_id))
+            assert stored["request_json"].get("planning", False) is step_enabled
 
 
 @pytest.mark.asyncio
@@ -110,7 +113,6 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
 
     from linktools.ai.execution import StoredUserInput
     from linktools.ai.persistence.codec import decode_domain
-    from linktools.ai.persistence.turns import SessionTurnKey
     from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
     class WorkspacePolicy(TenantAuthorizationPolicy):

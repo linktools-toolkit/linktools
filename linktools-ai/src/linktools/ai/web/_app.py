@@ -581,14 +581,14 @@ class _Console:
             })
         if self.turn_sessions:
             if action == "messages":
-                if payload.get("planning"):
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
-                        "field": "planning", "reason": "use_standalone_plan",
-                    })
+                planning = payload.get("planning", False)
+                if type(planning) is not bool:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "planning"})
                 prompt = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []))
                 turn_id = await runtime.sessions.start_turn(
                     session_id, prompt, agent="default",
                     principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
+                    planning=planning,
                 )
                 return _json({"turn_id": turn_id}, 202)
             if action in {"cancel", "recover"}:

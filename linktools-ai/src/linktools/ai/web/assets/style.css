@@ -294,7 +294,8 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .thinking-panel{position:absolute;right:0;bottom:calc(100% + 8px);z-index:5;width:176px;padding:12px;border:1px solid var(--line);border-radius:10px;background:#fff;box-shadow:0 8px 22px #20252c18}
 .thinking-control{flex-flow:row nowrap;justify-content:space-between;gap:8px;white-space:nowrap}
 .thinking-control output{color:var(--muted)}
-.thinking-panel input{width:100%;height:24px;margin:6px 0 0;padding:0;accent-color:var(--accent)}
+.thinking-panel input[type=range]{width:100%;height:24px;margin:6px 0 0;padding:0;accent-color:var(--accent)}
+.thinking-panel .planning-control{margin-top:6px}
 .planning-control{display:flex;flex-direction:row;align-items:center;gap:6px;white-space:nowrap;font-size:12px}
 .live-tools{margin:10px 0}
 .live-tool{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}

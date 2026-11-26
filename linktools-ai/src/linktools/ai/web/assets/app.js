@@ -143,7 +143,6 @@ function setDisabled() {
     for(const [id,action] of [['rename-session','update'],['close-session','close']])
       $(id).disabled ||= busy || state.actionsPending.has(`session:${state.selectedSession}:${action}`);
   }
-  $('planning-control').hidden=ordinary;
   $('choose-attachments').hidden=!ordinary || readonly || !state.config?.attachment_upload;
   $('choose-attachments').disabled=$('turn-files').disabled=readonly || !ordinary || state.session?.status!=='OPEN';
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
@@ -2450,8 +2449,7 @@ async function sendMessage(event) {
   sessionSubmissions.add(sessionId);
   setThinkingPanel(false);$('send').disabled=true;notice('');
   try {
-    const options={prompt:promptValue,thinking:readThinking()};
-    if(!ordinary)options.planning=$('planning').checked;
+    const options={prompt:promptValue,thinking:readThinking(),planning:$('planning').checked};
     const intent=uploads.length?{...options,attachments:uploads.map(item=>item.id)}:options;
     if(ordinary && uploads.length)options.attachments=await Promise.all(uploads.map(item=>readAttachment(item.file)));
     const result=await mutate(sessionURL(sessionId,"messages"),options,{
@@ -2711,7 +2709,6 @@ function showSettings() {
 async function bootstrap() {
   state.config=await api('/api/config');renderComposerModel();$('workspace-label').textContent=state.config.workspace || 'Local Runtime';
   state.config.metric_names.forEach(name=>{const option=element('option','',name.replace('linktools.',''));option.value=name;$('metric-names').append(option);});
-  if(state.config.turn_sessions)$('planning').checked=false;
   if(state.config.read_only){connection('Read-only');notice('Read-only. Configure a model at startup to send messages.');}
   setDisabled();await loadList();await fromHash();
 }
