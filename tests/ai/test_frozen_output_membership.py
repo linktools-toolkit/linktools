@@ -22,7 +22,7 @@ from linktools.ai.execution import ApprovalDecisionRequest, ExecutionInputContex
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, native_checkpoint
 
 
 _SCHEMA = {
@@ -274,9 +274,13 @@ async def test_new_execution_does_not_charge_previous_session_output_retries(
         source = "foreign" if attempts[turn] == 1 else "source"
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"sources": [source]})])
 
-    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
+    # This hook requires an admitted custom agent capability. Native SQL turns
+    # intentionally do not accept such capability bindings.
+    storage = PersistenceStorage.in_memory()
     async with Persistence.open("frozen-output-membership", storage=storage) as persistence:
-        features = _features(model, [], checkpoints=checkpoints)
+        features = _features(model, [])
+        if checkpoints:
+            features.capability(native_checkpoint(database=tmp_path / "checkpoints.db"), scope="runtime")
         async with Runtime.open(persistence=persistence, features=features) as runtime:
             session = await runtime.agents.get().create_session("review", metadata={"accepted_sources": ["source"]})
             for turn in range(2):

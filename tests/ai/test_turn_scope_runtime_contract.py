@@ -169,8 +169,8 @@ async def test_authority_only_context_lives_in_one_task_beyond_handle_and_waiter
     async with Persistence.open("scope-contract", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("question", idempotency_key="request")
+        agent = runtime.agents.get()
+        execution = await agent.start("question", idempotency_key="request")
         await asyncio.wait_for(started.wait(), 5)
         assert len(authority.scopes) == len(authority.claimed) == 1
         scope = authority.scopes[0]
@@ -232,8 +232,8 @@ async def test_pending_publish_cannot_install_worker_after_captured_owner_is_los
             await publish(record, coordination, **kwargs)
 
         monkeypatch.setattr(coordinator, "publish", paused_publish)
-        session = await runtime.agents.get().create_session("session")
-        caller = asyncio.create_task(session.start("question", idempotency_key="request"))
+        agent = runtime.agents.get()
+        caller = asyncio.create_task(agent.start("question", idempotency_key="request"))
         try:
             await asyncio.wait_for(publishing.wait(), 5)
             scope = authority.scopes[0]
