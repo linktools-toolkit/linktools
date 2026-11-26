@@ -1522,34 +1522,6 @@ class _SqlTransaction:
             raise
         return proof.coordination(scope, token=token)
 
-    async def _clear_native_session_owner(
-        self, source: object, scope: "TurnScopeIdentity", *, session_key: str,
-        execution_id: str, fence: int, session_owner_id: int,
-    ) -> None:
-        from ._turn_sql import SqlTurnNotOwned
-        from .state import state_store_key
-
-        owner = self._table("ai_state_records")
-        store_key = state_store_key(scope.namespace, scope.tenant_id, "conversation")
-        changed = await self._execute(owner.update().where(
-            *source._strict_session_address(owner, store_key=store_key, session_key=session_key),
-            owner.c.id == session_owner_id, owner.c.strict_turn_fence == fence,
-            owner.c.strict_turn_execution_id == execution_id.encode("utf-8"),
-        ).values(strict_turn_execution_id=None))
-        if changed.rowcount != 1:
-            raise SqlTurnNotOwned()
-
-    async def _release_native_session_after_terminal(
-        self, scope: "TurnScopeIdentity", *, session_store: SqlStateStore, session_key: str,
-        execution_id: str, token: str, fence: int, request_key: str, receipt: str,
-    ) -> bool:
-        if session_store.context is not self._context:
-            raise StateTransactionNestingError("native session terminal release requires its same SQL boundary")
-        return (await self._change_native_execution_receipt(
-            scope, execution_id=execution_id, receipt=receipt, kind="release",
-            lease=(session_key, request_key, token, fence),
-        )) is True
-
     async def _regrant_native_execution_receipt(
         self, scope: "TurnScopeIdentity", *, session_key: str,
         execution_id: str, request_key: str, request_digest: str, owner_id: str, token: str, duration: float, split: bool = False,
@@ -1658,7 +1630,6 @@ class _SqlTransaction:
         from datetime import timedelta
         from sqlalchemy import update
         from ._turn_sql import SESSION, SqlTurnNotOwned, SqlTurnRows, turn_hex
-        from .state import state_store_key
 
         active = active_state_scope()
         if active is None or not active.writable or not is_active_state_transaction(self):
@@ -1686,18 +1657,15 @@ class _SqlTransaction:
         source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=True)
         dialect = self._context.dialect
         clock = dialect.read_snapshot_time_expression()
-        session_owner = row["turn_session_owner_id"] if row["turn_slot_kind"] == SESSION else None
-        session_store_key = (state_store_key(scope.namespace, scope.tenant_id, "conversation")
-                             if session_owner is not None else None)
         try:
             locked = await self._execute(source.control_guard(
                 session_key=proof.session_key, execution_id=execution_id, token=token, fence=proof.fence,
-                revision=observed.slot_revision, session_store_key=session_store_key,
+                revision=observed.slot_revision,
             ))
             if locked.rowcount != 1:
                 raise SqlTurnNotOwned()
             revision = observed.slot_revision + 1
-            if kind == "release" and session_owner is None:
+            if kind == "release":
                 written = await self._execute(source.park_standalone_control(
                     proof, token=token, revision=revision, receipt=receipt, kind="release",
                     clock=clock, sqlite=dialect.single_writer,
@@ -1711,10 +1679,6 @@ class _SqlTransaction:
                 "receipt_id": receipt, "receipt_kind": kind,
                 "cancel_requested": kind == "cancel" or proof.cancel_requested,
             }}
-            if session_owner is not None:
-                values["turn_receipt"]["request_key"] = proof.request_key
-                if kind == "release":
-                    values.update(turn_token=None, turn_request_route=unoccupied_turn_route(row["key_locator"]))
             if kind == "renew":
                 now = await self._context.run_statement(dialect.database_current_time(self._session))
                 values["turn_expiry"] = now + timedelta(seconds=duration)
@@ -1727,12 +1691,6 @@ class _SqlTransaction:
             ).values(**values))
             if written.rowcount != 1:
                 raise SqlTurnNotOwned()
-            if kind == "release":
-                await self._clear_native_session_owner(
-                    source, scope, session_key=proof.session_key, execution_id=execution_id,
-                    fence=proof.fence, session_owner_id=session_owner,
-                )
-                return True
         except BaseException as error:
             self._abort_mutation(error)
             raise

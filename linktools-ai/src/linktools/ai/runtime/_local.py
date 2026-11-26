@@ -293,7 +293,6 @@ class _OwnedExecutionTurn:
     coordination: TurnCoordination | None
     principal: Principal
     scope: TurnScope | None = None
-    strict_session_request_key: str | None = None
     admitting: bool = True
     notice_admitted: bool = False
     notice_recovery_terminal: bool = False
@@ -581,7 +580,6 @@ class LocalExecutionBackend:
             if execution.session_id is not None
             else None
         )
-        owner = self._turn_owners.get(execution.execution_id)
         return await self._runtime_commands.commit_start_checkpoint(
             ExecutionStartClaim(
                 execution.execution_id,
@@ -593,8 +591,6 @@ class LocalExecutionBackend:
                 datetime.now(timezone.utc),
             ),
             session_id=execution.session_id,
-            strict_turn_fence=(self._source_turn_fence(owner)
-                               if owner is not None and owner.strict_session_request_key is not None else None),
             expected_cursor=expected,
         )
 
@@ -870,14 +866,11 @@ class LocalExecutionBackend:
         expected_execution: ExecutionRecord | None = None,
     ) -> ExecutionTerminalCommitResult:
         execution_id = commit.execution.execution_id
-        owner = self._turn_owners.get(execution_id)
         async with self._audit_lock(execution_id):
             pending = await self._source_audit_prefix(execution_id)
             committed = await self._runtime_commands.commit_terminal_checkpoint(
                 commit,
                 session_id=session_id,
-                turn_fence=self._source_turn_fence(owner) if owner is not None and owner.strict_session_request_key is not None else None,
-                strict_session_request_key=None if owner is None else owner.strict_session_request_key,
                 expected_execution=expected_execution,
                 audit_events=pending,
                 background_tasks=self._execution_task_set(execution_id),
@@ -1482,12 +1475,8 @@ class LocalExecutionBackend:
                 scope.require_active()
             if execution.execution_id in self._turn_owners:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            owned_request_key = (None if coordinator is None else coordinator._native_session_request_key(
-                coordination, execution_id=execution.execution_id, session_id=execution.session_id,
-            ))
             owner = _OwnedExecutionTurn(reservation, coordination, principal, scope=scope,
-                                        lifetime=asyncio.current_task(), admission=admission,
-                                        strict_session_request_key=owned_request_key)
+                                        lifetime=asyncio.current_task(), admission=admission)
             if graph_claim is not None:
                 (owner.graph_turn, owner.graph_turns, owner.observed, owner.graph_terminal_notice,
                  owner.graph_producer_stopped, graph_task_repository, graph_task_lease) = graph_claim
@@ -1766,16 +1755,12 @@ class LocalExecutionBackend:
                 self._pending_turns.release(turn)
                 self._live_broker.confirm_events(execution_id, first_event_seq=1, count=1)
 
-            owner = self._turn_owners.get(execution_id)
-
             async def confirm() -> None:
                 value = confirmed
                 if value is None:
                     value = await self._runtime_commands.read_pending_turn_promotion(
                         reservation, expected_session=turn.session,
                         captured_input_context=context, producer_claim_id=claim, tool_operations=tool_operations,
-                        **({"strict_session_request_key": owner.strict_session_request_key}
-                           if owner is not None and owner.strict_session_request_key is not None else {}),
                     )
                 if value is None:
                     # Absence does not prove rollback of the original unknown attempt.
@@ -1802,8 +1787,6 @@ class LocalExecutionBackend:
                     captured_input_context=context, producer_claim_id=claim, context_write=context_write,
                     tool_operations=tool_operations,
                     authority=self._pending_turns.coordination.execution_authority(turn.coordination),
-                    **({"strict_session_request_key": owner.strict_session_request_key}
-                       if owner is not None and owner.strict_session_request_key is not None else {}),
                 )
                 await accept(execution)
 
@@ -1949,10 +1932,8 @@ class LocalExecutionBackend:
             if reservation.execution.session_id is not None else None
         )
         owner = self._turn_owners.get(reservation.execution.execution_id)
-        native_key = None if owner is None else owner.strict_session_request_key
         result = await self._runtime_commands.reserve_start_checkpoint(
             reservation, expected_cursor=expected, expected_session=session, authority=authority,
-            **({"strict_session_request_key": native_key} if native_key is not None else {}),
         )
         if owner is not None:
             self._capture_reserved_start(owner, result)
@@ -1974,7 +1955,6 @@ class LocalExecutionBackend:
             if execution.session_id is not None
             else None
         )
-        owner = self._turn_owners.get(execution.execution_id)
         started = await self._runtime_commands.commit_start_attempt_checkpoint(
             ExecutionStartClaim(
                 execution.execution_id,
@@ -1986,8 +1966,6 @@ class LocalExecutionBackend:
                 now,
             ),
             session_id=execution.session_id,
-            strict_turn_fence=(self._source_turn_fence(owner)
-                               if owner is not None and owner.strict_session_request_key is not None else None),
             expected_cursor=expected, expected_session=identity.expected_session,
         )
         _logger.info(
@@ -8593,8 +8571,6 @@ class LocalExecutionBackend:
         async def confirm() -> None:
             committed = await self._runtime_commands.read_pending_turn(
                 reservation, expected_session=turn.session, tool_operations=tool_operations,
-                **({"strict_terminal_authority": self._pending_turns.coordination.execution_authority(turn.coordination)}
-                   if owner is not None and owner.strict_session_request_key is not None else {}),
             )
             if committed is None:
                 # Absence does not prove rollback of the original unknown attempt.
@@ -8608,8 +8584,6 @@ class LocalExecutionBackend:
             await accept(committed)
 
         turn.reconcile = lambda: self._reconcile_pending_boundary(turn, confirm)
-
-        owner = self._turn_owners.get(current.execution_id)
 
         async def commit_owned() -> ExecutionTerminalCommitResult:
             committed = await self._runtime_commands.commit_pending_turn(
@@ -8626,8 +8600,6 @@ class LocalExecutionBackend:
                 include_publication=True,
                 authority=(None if self._pending_turns.coordination is None else
                            self._pending_turns.coordination.execution_authority(turn.coordination)),
-                **({"strict_session_request_key": owner.strict_session_request_key}
-                   if owner is not None and owner.strict_session_request_key is not None else {}),
             )
             if not await accept(committed):
                 assert turn.failure is not None
@@ -9155,7 +9127,6 @@ class LocalExecutionBackend:
             session_turn=None if owner is None else owner.session_turn,
             expected_execution=current,
             turn_fence=self._source_turn_fence(owner),
-            strict_session_request_key=None if owner is None else owner.strict_session_request_key,
             session_id=current.session_id,
             expected_cursor=expected_cursor,
             next_cursor=next_cursor,

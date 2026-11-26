@@ -1683,20 +1683,6 @@ class StateCommands:
             await asyncio.sleep(0)
         raise AssertionError("unreachable grouped admission attempt")
 
-    def _check_native_pending_session(
-        self, reservation: ExecutionStartReservation, session: SessionRecord | None,
-        authority: "ExecutionAuthority | None", request_key: str | None,
-    ) -> None:
-        if request_key is None:
-            return
-        execution, identity = reservation.execution, reservation.idempotency
-        if (authority is None or session is None or type(self._conversation) is not SessionRepositoryImpl
-                or session.session_id != execution.session_id
-                or authority.execution_id != execution.execution_id or authority.slot != f"session:{session.session_id}"
-                or (authority.scope.namespace, authority.scope.tenant_id) != (self._namespace, self._tenant_id)
-                or request_key != canonical_sha256([identity.scope, identity.idempotency_key])):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
     async def _reserve_canonical_graph_start(
         self, reservation: ExecutionStartReservation, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
         expected_revision: int, context_from: int, context_through: int,
@@ -2219,10 +2205,8 @@ class StateCommands:
         expected_cursor: ConversationCursor | None,
         expected_session: SessionRecord | None = None,
         authority: "ExecutionAuthority | None" = None,
-        strict_session_request_key: str | None = None,
     ) -> ExecutionStartReservationResult | None:
         """Reserve and admit a new local execution without publishing a worker."""
-        self._check_native_pending_session(reservation, expected_session, authority, strict_session_request_key)
         initial = reservation.execution
         if (type(self._execution) is not ExecutionRepositoryImpl
                 or initial.parent_execution_id is not None):
@@ -2242,19 +2226,9 @@ class StateCommands:
                                     identity.request_digest, initial.created_at)
 
         async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult | None:
-            strict_session = None
-            if strict_session_request_key is not None:
-                current = await self._conversation.get_in_transaction(
-                    group.transaction(self._conversation.state_store), initial.session_id, tenant_id=self._tenant_id,
-                )
-                _require_session_capture(current, expected_session)
-                if (current.status is not SessionStatus.OPEN or current.continuation != expected_cursor
-                        or current.history_quality == "unavailable" or current.active_execution_id is not None):
-                    raise AIError(ErrorCode.SESSION_CONFLICT)
-                strict_session = current
             return await self._reserve_start_in_transaction(
                 group, reservation, claim, expected_cursor=expected_cursor, expected_session=expected_session,
-                authority=authority, strict_session=strict_session,
+                authority=authority,
             )
 
         for attempt in range(2):
@@ -2285,18 +2259,8 @@ class StateCommands:
                 )
                 if started is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                if strict_session_request_key is not None:
-                    async def read_strict(transaction: StateTransaction) -> SessionRecord:
-                        _, value, _ = await self._conversation.read_strict_turn_session_in_transaction(
-                            transaction, initial.session_id, tenant_id=self._tenant_id,
-                            execution_store=self._execution.state_store,
-                        )
-                        return value
-
-                    session = await self._conversation.state_store.read(read_strict)
-                else:
-                    session = (None if initial.session_id is None else
-                           await self._load_session(initial.session_id, tenant_id=self._tenant_id))
+                session = (None if initial.session_id is None else
+                       await self._load_session(initial.session_id, tenant_id=self._tenant_id))
                 if initial.session_id is not None and (session is None or session.active_execution_id != initial.execution_id):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 return ExecutionStartReservationResult(started, observed_identity, True, session=session)
@@ -2306,10 +2270,9 @@ class StateCommands:
         self, group: StateGroupTransaction, reservation: ExecutionStartReservation, claim: ExecutionStartClaim, *,
         expected_cursor: ConversationCursor | None, expected_session: SessionRecord | None,
         authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
-        strict_session: SessionRecord | None = None,
     ) -> ExecutionStartReservationResult | None:
         initial, identity = reservation.execution, reservation.idempotency
-        if initial.session_id is not None and strict_session is None and isinstance(group, GroupRecordReader):
+        if initial.session_id is not None and isinstance(group, GroupRecordReader):
             keys = {self._execution.state_store: (
                 self._execution.execution_record_key(initial.execution_id),
                 self._execution.start_idempotency_record_key(identity),
@@ -2319,7 +2282,7 @@ class StateCommands:
             await group.get_records(keys)
         # Busy, stale-owner and changed-cursor admissions retain the existing
         # reservation/rejection path, including durable failed request keys.
-        if initial.session_id is not None and strict_session is None:
+        if initial.session_id is not None:
             session = await self._conversation.get_in_transaction(
                 group.transaction(self._conversation.state_store), initial.session_id,
                 tenant_id=self._tenant_id,
@@ -2336,30 +2299,21 @@ class StateCommands:
             return reserved
         turns: list[SessionTurnRef] = []
         started = reserved.execution
-        if strict_session is not None:
-            # Same transaction already checked the exact typed claim and
-            # published Execution. The public pointer comes from that local result.
-            admitted_session = await self._conversation.publish_strict_turn_in_transaction(
-                group.transaction(self._conversation.state_store), strict_session, claim.execution_id,
+        if initial.session_id is not None:
+            await self._conversation.admit_execution_in_transaction(
+                group.transaction(self._conversation.state_store), initial.session_id,
+                tenant_id=self._tenant_id, execution_id=claim.execution_id,
+                expected=expected_cursor, expected_session=expected_session,
                 admitted_turn=turns.append,
             )
-            started_identity = reserved.idempotency
-        else:
-            if initial.session_id is not None:
-                await self._conversation.admit_execution_in_transaction(
-                    group.transaction(self._conversation.state_store), initial.session_id,
-                    tenant_id=self._tenant_id, execution_id=claim.execution_id,
-                    expected=expected_cursor, expected_session=expected_session,
-                    admitted_turn=turns.append,
-                )
-            started_identity = await self._execution.get_start_idempotency(claim)
-            if started_identity is None or started_identity.status is not IdempotencyStatus.STARTED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            admitted_session = (None if initial.session_id is None else
-                await self._conversation.get_in_transaction(
-                    group.transaction(self._conversation.state_store), initial.session_id,
-                    tenant_id=self._tenant_id,
-                ))
+        started_identity = await self._execution.get_start_idempotency(claim)
+        if started_identity is None or started_identity.status is not IdempotencyStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        admitted_session = (None if initial.session_id is None else
+            await self._conversation.get_in_transaction(
+                group.transaction(self._conversation.state_store), initial.session_id,
+                tenant_id=self._tenant_id,
+            ))
         observed = await self._execution.get_observed_in_transaction(
             group.transaction(self._execution.state_store), initial.execution_id, tenant_id=self._tenant_id,
         )
@@ -2370,18 +2324,6 @@ class StateCommands:
             observed=observed, turn=turns[0] if turns else None,
         )
 
-    @staticmethod
-    async def _guard_strict_session_fact_owner(transaction: StateTransaction, session_record: StoredRecord) -> None:
-        from ._sql import _SqlTransaction
-
-        if not isinstance(transaction, _SqlTransaction):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        guarded = await transaction.guard_record_revision(
-            session_record.key, expected_storage_revision=session_record.storage_revision,
-        )
-        if guarded is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-
     async def commit_start_checkpoint(
         self,
         claim: ExecutionStartClaim,
@@ -2390,7 +2332,6 @@ class StateCommands:
         expected_cursor: ConversationCursor | None = None,
         expected_session: SessionRecord | None = None,
         admitted_turn: Callable[[SessionTurnRef], None] | None = None,
-        strict_turn_fence: SourceTurnWriteFence | None = None,
     ) -> ExecutionRecord:
         _logger.debug(
             "start checkpoint requested: execution=%s session=%s",
@@ -2401,41 +2342,11 @@ class StateCommands:
         if session_id is not None:
             self._require_conversation()
             stores.append(self._conversation.state_store)
-        if strict_turn_fence is not None:
-            proof = strict_turn_fence.authority
-            if (session_id is None or type(self._conversation) is not SessionRepositoryImpl
-                    or strict_turn_fence.store is not self._execution.state_store
-                    or proof.execution_id != claim.execution_id or proof.slot != f"session:{session_id}"
-                    or (proof.scope.namespace, proof.scope.tenant_id) != (self._namespace, self._tenant_id)
-                    or not _same_group(stores)):
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if _same_group(stores):
             async def callback(group: StateGroupTransaction) -> ExecutionRecord:
                 transaction = group.transaction(self._execution.state_store)
                 if session_id is not None:
                     session_transaction = group.transaction(self._conversation.state_store)
-                    if strict_turn_fence is not None:
-                        # Same read boundary as the legacy SessionRecord read.
-                        session_record, session, occupancy = await self._conversation.read_strict_turn_session_in_transaction(
-                            session_transaction, session_id, tenant_id=self._tenant_id,
-                            execution_store=self._execution.state_store,
-                        )
-                        if (occupancy.execution_id != claim.execution_id
-                                or occupancy.fence != strict_turn_fence.authority.fence):
-                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                        if expected_session is not None:
-                            _require_session_capture(session, expected_session)
-                        if (session.status is not SessionStatus.OPEN or session.continuation != expected_cursor
-                                or session.history_quality == "unavailable"):
-                            raise AIError(ErrorCode.SESSION_CONFLICT)
-                        await strict_turn_fence.guard(claim.execution_id)
-                        started = await self._execution.claim_start_in_transaction(transaction, claim)
-                        if session.active_execution_id is None:
-                            await self._guard_strict_session_fact_owner(session_transaction, session_record)
-                            await self._conversation.publish_strict_turn_in_transaction(
-                                session_transaction, session, claim.execution_id, admitted_turn=admitted_turn,
-                            )
-                        return started
                     session = await self._conversation.get_in_transaction(
                         session_transaction,
                         session_id,
@@ -2493,7 +2404,6 @@ class StateCommands:
                     claim,
                     session_id=session_id,
                     expected_cursor=expected_cursor, expected_session=expected_session,
-                    strict_session_owner=strict_turn_fence is not None,
                 )
                 if observed is not None:
                     return observed
@@ -2842,12 +2752,11 @@ class StateCommands:
         expected_cursor: ConversationCursor | None = None,
         expected_session: SessionRecord | None = None,
         admitted_turn: Callable[[SessionTurnRef], None] | None = None,
-        strict_turn_fence: SourceTurnWriteFence | None = None,
         _graph_launch: "_GraphLaunch | None" = None,
     ) -> ExecutionRecord:
         """Commit the initial execution start and optional recovery admission."""
         if _graph_launch is not None:
-            if session_id is not None or strict_turn_fence is not None:
+            if session_id is not None:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             repository = self._execution
             store = repository.state_store
@@ -2863,7 +2772,7 @@ class StateCommands:
             claim,
             session_id=session_id,
             expected_cursor=expected_cursor,
-            expected_session=expected_session, admitted_turn=admitted_turn, strict_turn_fence=strict_turn_fence,
+            expected_session=expected_session, admitted_turn=admitted_turn,
         )
 
     async def commit_tool_terminal(
@@ -3751,7 +3660,6 @@ class StateCommands:
     async def read_pending_turn(
         self, reservation: ExecutionStartReservation, *, expected_session: SessionRecord | None,
         tool_operations: Sequence[ToolOperationRecord] = (),
-        strict_terminal_authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionTerminalCommitResult | None:
         """Confirm a terminal turn from source without retrying its write."""
         if (not reservation.execution.conversation
@@ -3774,7 +3682,6 @@ class StateCommands:
         async def read(group: StateGroupTransaction) -> ExecutionTerminalCommitResult | None:
             return await self._read_pending_turn_in_group(
                 group, reservation, expected_session, tool_operations=tool_operations,
-                strict_terminal_authority=strict_terminal_authority,
             )
 
         return await stores[0].storage_group.read_many(stores, read)
@@ -3782,7 +3689,6 @@ class StateCommands:
     async def _read_pending_turn_in_group(
         self, group: StateGroupTransaction, reservation: ExecutionStartReservation,
         expected_session: SessionRecord | None, *, tool_operations: Sequence[ToolOperationRecord] = (),
-        strict_terminal_authority: "ExecutionAuthority | None" = None,
     ) -> ExecutionTerminalCommitResult | None:
         result = await self._execution.pending_turn_result_in_transaction(
             group.transaction(self._execution.state_store), reservation,
@@ -3849,17 +3755,6 @@ class StateCommands:
             elif committed.start_message_index != 0 or committed.end_message_index != 0:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.execution_id == reservation.execution.execution_id:
-            if strict_terminal_authority is not None:
-                from ._sql import SqlStateStore
-
-                store = self._execution.state_store
-                if not isinstance(store, SqlStateStore) or strict_terminal_authority.execution_id != execution.execution_id:
-                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                if await store._confirm_native_turn_receipt(
-                    strict_terminal_authority.scope, execution_id=execution.execution_id,
-                    receipt=strict_terminal_authority.token, kind="release",
-                ) is not True:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._materialize_pending_tools(execution, tool_operations, read_only=True, terminal=True)
         return result
 
@@ -3867,7 +3762,6 @@ class StateCommands:
         self, reservation: ExecutionStartReservation, *, expected_session: SessionRecord | None,
         captured_input_context: RuntimePayloadRef | None, producer_claim_id: str,
         tool_operations: Sequence[ToolOperationRecord] = (),
-        strict_session_request_key: str | None = None,
     ) -> ExecutionRecord | None:
         """Confirm only the caller's first durable promotion receipt."""
         if not isinstance(producer_claim_id, str) or not producer_claim_id.strip():
@@ -3913,15 +3807,9 @@ class StateCommands:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if expected_session is not None:
                 transaction = group.transaction(self._conversation.state_store)
-                if strict_session_request_key is not None:
-                    _, session, _ = await self._conversation.read_strict_turn_session_in_transaction(
-                        transaction, expected_session.session_id, tenant_id=self._tenant_id,
-                        execution_store=self._execution.state_store,
-                    )
-                else:
-                    session = await self._conversation.get_in_transaction(
-                        transaction, expected_session.session_id, tenant_id=self._tenant_id,
-                    )
+                session = await self._conversation.get_in_transaction(
+                    transaction, expected_session.session_id, tenant_id=self._tenant_id,
+                )
                 if (session.active_execution_id != initial.execution_id
                         or session.continuation != expected_session.continuation):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -3937,7 +3825,6 @@ class StateCommands:
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         tool_operations: Sequence[ToolOperationRecord] = (),
         authority: "ExecutionAuthority | None" = None,
-        strict_session_request_key: str | None = None,
     ) -> ExecutionRecord:
         """Confirm durable producer ownership before a local turn performs effects."""
         producer_claim_id = uuid4().hex if producer_claim_id is None else producer_claim_id
@@ -3945,7 +3832,6 @@ class StateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if expected_session is not None:
             self._require_conversation()
-        self._check_native_pending_session(reservation, expected_session, authority, strict_session_request_key)
         initial = reservation.execution
         if (type(self._execution) is not ExecutionRepositoryImpl
                 or (expected_session is not None and type(self._conversation) is not SessionRepositoryImpl)):
@@ -3981,17 +3867,9 @@ class StateCommands:
             nonlocal resolved, rejected
             if expected_session is not None:
                 session_transaction = group.transaction(self._conversation.state_store)
-                if strict_session_request_key is not None:
-                    session_record, session, occupancy = await self._conversation.read_strict_turn_session_in_transaction(
-                        session_transaction, expected_session.session_id, tenant_id=self._tenant_id,
-                        execution_store=self._execution.state_store,
-                    )
-                    if occupancy.execution_id != initial.execution_id or occupancy.fence != authority.fence:
-                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                else:
-                    session = await self._conversation.get_in_transaction(
-                        session_transaction, expected_session.session_id, tenant_id=self._tenant_id,
-                    )
+                session = await self._conversation.get_in_transaction(
+                    session_transaction, expected_session.session_id, tenant_id=self._tenant_id,
+                )
                 if session != expected_session:
                     rejected = True
                     raise AIError(ErrorCode.SESSION_BUSY)
@@ -4004,23 +3882,11 @@ class StateCommands:
             if not reserved.created:
                 rejected = True
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if strict_session_request_key is not None:
-                # reserve_start has promoted the exact, still-live shell in
-                # this transaction, so neither re-read nor mirror the SessionRecord.
-                started = await self._execution.claim_start_in_transaction(
-                    group.transaction(self._execution.state_store), claim,
-                )
-                await self._guard_strict_session_fact_owner(session_transaction, session_record)
-                await self._conversation.publish_strict_turn_in_transaction(
-                    session_transaction, session,
-                    initial.execution_id, admitted_turn=None,
-                )
-            else:
-                started = await self.commit_start_attempt_checkpoint(
-                    claim,
-                    session_id=None if expected_session is None else expected_session.session_id,
-                    expected_cursor=None if expected_session is None else expected_session.continuation,
-                )
+            started = await self.commit_start_attempt_checkpoint(
+                claim,
+                session_id=None if expected_session is None else expected_session.session_id,
+                expected_cursor=None if expected_session is None else expected_session.continuation,
+            )
             if captured_input_context is None:
                 resolved = started
             else:
@@ -4050,7 +3916,7 @@ class StateCommands:
                 observed = await self.read_pending_turn_promotion(
                     reservation, expected_session=expected_session,
                     captured_input_context=captured_input_context, producer_claim_id=producer_claim_id,
-                    tool_operations=tool_operations, strict_session_request_key=strict_session_request_key,
+                    tool_operations=tool_operations,
                 )
             except AIError as error:
                 if error.code is ErrorCode.IDEMPOTENCY_CONFLICT:
@@ -4084,7 +3950,6 @@ class StateCommands:
         tool_operations: Sequence[ToolOperationRecord] = (),
         include_publication: bool = False,
         authority: "ExecutionAuthority | None" = None,
-        strict_session_request_key: str | None = None,
     ) -> ExecutionTerminalCommitResult:
         """Materialize one volatile turn and its replay-safe outcomes atomically.
 
@@ -4206,13 +4071,10 @@ class StateCommands:
         stores = tuple(_dedupe_stores(stores))
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        self._check_native_pending_session(reservation, expected_session, authority, strict_session_request_key)
         repository = self._execution
-        strict_authority = authority if strict_session_request_key is not None else None
 
         existing = await self.read_pending_turn(
             reservation, expected_session=expected_session, tool_operations=tool_operations,
-            strict_terminal_authority=strict_authority,
         )
         if existing is not None:
             if self._capability_writes is not None:
@@ -4293,7 +4155,6 @@ class StateCommands:
             execution_transaction = group.transaction(repository.state_store)
             winner = await self._read_pending_turn_in_group(
                 group, reservation, expected_session, tool_operations=tool_operations,
-                strict_terminal_authority=strict_authority,
             )
             if winner is not None:
                 if capability_prefix is not None and not await capability_prefix.readback():
@@ -4368,17 +4229,6 @@ class StateCommands:
             )
             if capability_prefix is not None:
                 await capability_prefix.apply(group)
-            if strict_authority is not None:
-                from ._sql import SqlStateStore
-
-                store = self._execution.state_store
-                if not isinstance(store, SqlStateStore):
-                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                await self._release_published_strict_turn_in_transaction(
-                    group, SourceTurnWriteFence(store, strict_authority),
-                    session_id=expected_session.session_id, request_key=strict_session_request_key,
-                    receipt=strict_authority.token,
-                )
             candidate_published = True
             if not include_publication:
                 return final
@@ -4399,7 +4249,6 @@ class StateCommands:
             try:
                 resolved = await self.read_pending_turn(
                     reservation, expected_session=expected_session, tool_operations=tool_operations,
-                    strict_terminal_authority=strict_authority,
                 )
             except AIError as error:
                 if error.code is ErrorCode.IDEMPOTENCY_CONFLICT:
@@ -4945,27 +4794,6 @@ class StateCommands:
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         return confirmed
 
-    async def _release_published_strict_turn_in_transaction(
-        self, group: StateGroupTransaction, turn_fence: SourceTurnWriteFence, *,
-        session_id: str, request_key: str, receipt: str,
-    ) -> None:
-        """Retire the native Execution receipt and occupancy in this transaction."""
-        from ._sql import SqlStateStore, _SqlTransaction
-
-        session_store = self._conversation.state_store
-        transaction = group.transaction(turn_fence.store)
-        if not isinstance(session_store, SqlStateStore) or not isinstance(transaction, _SqlTransaction):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        proof = turn_fence.authority
-        if proof.slot != f"session:{session_id}":
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        if not await transaction._release_native_session_after_terminal(
-            proof.scope, session_store=session_store, session_key=proof.slot,
-            execution_id=proof.execution_id, token=proof.token, fence=proof.fence,
-            request_key=request_key, receipt=receipt,
-        ):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
     @sql_observation_phase("persistence.terminal.durable_commit")
     async def commit_terminal_checkpoint(
         self,
@@ -4988,7 +4816,6 @@ class StateCommands:
         audit_events: Sequence[ExecutionEventAppend] = (),
         background_tasks: "set[asyncio.Task[object]] | None" = None,
         turn_fence: SourceTurnWriteFence | None = None,
-        strict_session_request_key: str | None = None,
     ) -> ExecutionTerminalCommitResult:
         if expected_execution is not None and (
             expected_execution.execution_id != commit.execution.execution_id
@@ -5040,19 +4867,6 @@ class StateCommands:
             if not _same_group(stores):
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH,
                               "A source-owned terminal commit cannot publish across SQL groups")
-        strict_release_receipt = None
-        if strict_session_request_key is not None:
-            from ._turn_sql import turn_hex
-            from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES
-
-            turn_hex(strict_session_request_key, TURN_REQUEST_MAX_BYTES)
-            if (session_id is None or turn_fence is None or turn_fence.store is not self._execution.state_store
-                    or type(self._conversation) is not SessionRepositoryImpl or not _same_group(stores)
-                    or turn_fence.authority.slot != f"session:{session_id}"
-                    or (turn_fence.authority.scope.namespace, turn_fence.authority.scope.tenant_id)
-                    != (self._namespace, self._tenant_id)):
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            strict_release_receipt = uuid4().hex
         terminal_archives = tuple(
             archive for archive, participates in (
                 (self._execution_run_store, execution_run is not None and bool(execution_projections or execution_checkpoints)),
@@ -5279,17 +5093,7 @@ class StateCommands:
                     if session_id is not None:
                         conversation_transaction = group.transaction(self._conversation.state_store)
                         if conversation_agent_run is None or conversation_checkpoint is None:
-                            if strict_release_receipt is not None:
-                                if publish_turn:
-                                    turn_commit = await self._conversation.commit_timeline_turn_in_transaction(
-                                        conversation_transaction, session_id, tenant_id=self._tenant_id,
-                                        execution_id=commit.execution.execution_id,
-                                        start_message_index=0 if timeline_range is None else timeline_range[0],
-                                        end_message_index=0 if timeline_range is None else timeline_range[1],
-                                        allow_unadmitted=commit.execution.started_at is None,
-                                        admitted_turn=session_turn,
-                                    )
-                            elif publish_turn:
+                            if publish_turn:
                                 final_session, turn_commit = await self._conversation.publish_and_release_turn_in_transaction(
                                     conversation_transaction, session_id, tenant_id=self._tenant_id,
                                     execution_id=commit.execution.execution_id,
@@ -5327,16 +5131,15 @@ class StateCommands:
                                 session,
                                 prepared_conversation[0],
                             )
-                            if strict_release_receipt is None:
-                                final_session = await self._conversation.complete_execution_in_transaction(
-                                    conversation_transaction,
-                                    session_id,
-                                    tenant_id=self._tenant_id,
-                                    execution_id=commit.execution.execution_id,
-                                    expected=expected_cursor,
-                                    next_cursor=next_cursor,
-                                    history_quality="complete",
-                                )
+                            final_session = await self._conversation.complete_execution_in_transaction(
+                                conversation_transaction,
+                                session_id,
+                                tenant_id=self._tenant_id,
+                                execution_id=commit.execution.execution_id,
+                                expected=expected_cursor,
+                                next_cursor=next_cursor,
+                                history_quality="complete",
+                            )
                             if timeline_range is None:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                             turn_commit = await self._conversation.commit_timeline_turn_in_transaction(
@@ -5427,19 +5230,6 @@ class StateCommands:
                         ))
                     if observed is None or observed.value != closed_result.execution:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if strict_release_receipt is not None:
-                        # Release only after the terminal owner and its history edge
-                        # are confirmed in this still-open group transaction.
-                        final_session = await self._conversation.complete_strict_turn_in_transaction(
-                            group.transaction(self._conversation.state_store), session_id, tenant_id=self._tenant_id,
-                            expected=expected_cursor, next_cursor=next_cursor if conversation_agent_run is not None else None,
-                            history_unavailable=commit.execution.invalidates_session_history,
-                            published_turn=turn_commit is not None,
-                        )
-                        await self._release_published_strict_turn_in_transaction(
-                            group, turn_fence, session_id=session_id, request_key=strict_session_request_key,
-                            receipt=strict_release_receipt,
-                        )
                     after_image = None
                     if (isinstance(closed_result, ExecutionTerminalWriteReceipt)
                             and type(self._conversation) is SessionRepositoryImpl and final_session is not None
@@ -5478,16 +5268,6 @@ class StateCommands:
                         )
                         if not visible:
                             return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                        if strict_release_receipt is not None:
-                            released = await turn_fence.store._confirm_native_turn_receipt(
-                                turn_fence.authority.scope, execution_id=commit.execution.execution_id,
-                                receipt=strict_release_receipt, kind="release",
-                            )
-                            if released is not True:
-                                return CommitObservation(
-                                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                                )
                         if prepared is not None and not await prepared.readback():
                             return CommitObservation(
                                 DurableCommitState.PARTIAL_INTEGRITY_ERROR,
@@ -6267,8 +6047,6 @@ class StateCommands:
         session_id: str | None,
         expected_cursor: ConversationCursor | None,
         expected_session: SessionRecord | None = None,
-        strict_session_owner: bool = False,
-        observed_strict_session: SessionRecord | None = None,
     ) -> ExecutionRecord | None:
         execution = await self._load_execution(
             claim.execution_id,
@@ -6305,18 +6083,7 @@ class StateCommands:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session_id is not None:
-            if observed_strict_session is not None:
-                session = observed_strict_session
-            elif strict_session_owner:
-                async def read_strict(transaction: StateTransaction) -> SessionRecord:
-                    _, value, _ = await self._conversation.read_strict_turn_session_in_transaction(
-                        transaction, session_id, tenant_id=self._tenant_id, execution_store=self._execution.state_store,
-                    )
-                    return value
-
-                session = await self._conversation.state_store.read(read_strict)
-            else:
-                session = await self._load_session(session_id, tenant_id=self._tenant_id)
+            session = await self._load_session(session_id, tenant_id=self._tenant_id)
             if (session is None or session.session_id != session_id or session.active_execution_id != claim.execution_id
                     or session.continuation != expected_cursor):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

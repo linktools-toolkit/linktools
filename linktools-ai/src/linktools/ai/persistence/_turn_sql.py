@@ -138,34 +138,6 @@ class SqlTurnRows:
             raise ValueError("turn identity exceeds its byte limit")
         return raw
 
-    def _strict_session_address(self, session, *, store_key: bytes, session_key: str) -> tuple:
-        """Exact physical conversation row; do not infer scope from an admission."""
-        kind, logical = turn_session_address(session_key)
-        if not self.coowned or kind != SESSION or type(store_key) is not bytes or len(store_key) != 32:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        key = record_key(
-            self._scope.namespace, self._scope.tenant_id, "conversation", "session",
-            (logical.decode("utf-8"),),
-        )
-        return (
-            session.c.store_key == store_key, session.c.kind == "session",
-            session.c.key_locator == sha256(key).hexdigest(), session.c.key == key,
-        )
-
-    def _strict_session_fence(
-        self, *, session_store_key: bytes, session_key: str, execution_id: str, fence: int,
-    ) -> "ColumnElement[bool]":
-        """An exact converted Session row must still hold this execution/fence."""
-        from sqlalchemy import exists, select
-
-        session = self._metadata.tables["ai_state_records"]
-        predicates = self._strict_session_address(session, store_key=session_store_key, session_key=session_key)
-        return exists(select(1).where(
-            *predicates,
-            session.c.strict_turn_execution_id == self._key(execution_id, TURN_EXECUTION_MAX_BYTES),
-            session.c.strict_turn_fence == fence,
-        ))
-
     def select_standalone_execution_receipt(
         self, *, route: Literal["execution", "request"], identity: str, clock: "ColumnElement",
     ) -> "Select":
@@ -376,7 +348,6 @@ class SqlTurnRows:
     def control_guard(
         self, *, session_key: str, execution_id: str, token: str, fence: int,
         revision: int | None = None, published_only: bool = False, revoke: bool = False,
-        session_store_key: bytes | None = None,
     ) -> "Update":
         from sqlalchemy import update
         control = self._control
@@ -384,11 +355,6 @@ class SqlTurnRows:
         exact = [self._execution_address(control, execution_id),
                  control.c.turn_slot_kind == slot_kind, control.c.turn_slot_key == slot,
                  control.c.turn_token == turn_hex(token, 32), control.c.turn_fence == fence]
-        if session_store_key is not None:
-            exact.append(self._strict_session_fence(
-                session_store_key=session_store_key, session_key=session_key,
-                execution_id=execution_id, fence=fence,
-            ))
         if published_only:
             exact.append(control.c.kind == "execution")
         if revision is not None:
@@ -400,7 +366,6 @@ class SqlTurnRows:
     def control_set_expiry(
         self, *, execution_id: str, token: str, fence: int, expiry: datetime | None,
         clock: "ColumnElement | None" = None, sqlite: bool = False,
-        strict_session: tuple[bytes, str] | None = None,
     ) -> "Update":
         from sqlalchemy import func, update
         control = self._control
@@ -410,12 +375,6 @@ class SqlTurnRows:
         expires = control.c.turn_expiry
         live = None if clock is None else (func.julianday(expires) > func.julianday(clock) if sqlite else expires > clock)
         exact = [] if live is None else [live]
-        if strict_session is not None:
-            session_store_key, session_key = strict_session
-            exact.append(self._strict_session_fence(
-                session_store_key=session_store_key, session_key=session_key,
-                execution_id=execution_id, fence=fence,
-            ))
         return update(control).where(
             self._execution_address(control, execution_id),
             control.c.turn_token == turn_hex(token, 32), control.c.turn_fence == fence, *exact,

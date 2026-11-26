@@ -1008,9 +1008,8 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
             audit_events: tuple[ExecutionEventAppend, ...],
             background_tasks: set[asyncio.Task[object]] | None = None,
             turn_fence=None,
-            strict_session_request_key=None,
         ) -> ExecutionTerminalCommitResult:
-            del session_id, background_tasks, expected_execution, turn_fence, strict_session_request_key
+            del session_id, background_tasks, expected_execution, turn_fence
             assert actual is commit
             assert audit_events == (pending,)
             self.started.set()

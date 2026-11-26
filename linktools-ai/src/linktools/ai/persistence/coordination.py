@@ -134,19 +134,6 @@ class PendingTurnCoordination:
             return source._enter_existing(self._scope, **identity)
         return self.enter(**identity)
 
-    def _native_session_request_key(
-        self, coordinated: TurnCoordination | None, *, execution_id: str, session_id: str | None,
-    ) -> str | None:
-        """Read the already held native request identity, not an additional owner lookup."""
-        source = self._state_authority
-        if (session_id is None or source is None or not source._native_execution_receipts
-                or coordinated is None or coordinated.lease is None):
-            return None
-        identity = source._lease_identity(coordinated.lease)
-        if identity is None or identity[:3] != (self._scope.scope, execution_id, f"session:{session_id}"):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        return identity[3]
-
     def durable_write_fence(self, coordinated: TurnCoordination, target) -> SourceTurnWriteFence | None:
         authority = self.execution_authority(coordinated)
         if authority is None:
