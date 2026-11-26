@@ -44,7 +44,7 @@ CREATE TABLE ai_execution_records (
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
 	parent_key VARBINARY(367) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
 	kind VARCHAR(32) NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
-	sort_key VARBINARY(776) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
+	sort_key VARBINARY(488) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
 	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',

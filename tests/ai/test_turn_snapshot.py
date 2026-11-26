@@ -18,7 +18,6 @@ from linktools.ai.persistence._turn_snapshot import (
 )
 from linktools.ai.persistence._turn_sql import SqlTurnProof
 from linktools.ai.persistence._turn_sql_schema import unoccupied_turn_route
-from linktools.ai.persistence.contracts import SessionRecord, SessionStatus
 from linktools.ai.persistence.snapshots import restore_snapshot
 from linktools.ai.snapshot import SnapshotLimits
 from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, StorageRoute, TurnScopeIdentity
@@ -53,13 +52,6 @@ def _receipt(proof, *, session):
     return {**result, "request_key": proof.request_key} if session else result
 
 
-async def _session(state, identity):
-    now = datetime.now(timezone.utc)
-    await state.conversation.sessions.create(
-        SessionRecord(identity, "owner", SessionStatus.OPEN, 0, None, {}, now, now, None, None, "agent")
-    )
-
-
 async def _add_receipt(state, proof, *, parked=False, split=False):
     store = state.snapshot_resources().stores[PersistenceDomain.EXECUTION]
     control = store.storage_group.metadata.tables["ai_execution_records"]
@@ -84,8 +76,9 @@ async def test_native_turn_snapshot_restores_expired_authority_and_preserves_fen
     source = _storage(tmp_path / "source", split=split)
     async with Persistence.open(_SCOPE.namespace, storage=source, tenant_id=_SCOPE.tenant_id) as state:
         if split:
-            await _session(state, "active")
-            await _session(state, "idle")
+            assert state.session_turns is not None
+            for identity in ("active", "idle"):
+                await state.session_turns.create(identity, config={"metadata": {"fixture": identity}})
             first = _proof("older-session", "session:active", "a" * 64, 1, active=False)
             live = _proof("session-live", "session:active", "a" * 64, 3, active=True)
             parked = _proof("session-parked", "session:idle", "b" * 64, 2, active=False)
@@ -108,6 +101,13 @@ async def test_native_turn_snapshot_restores_expired_authority_and_preserves_fen
     target = tmp_path / "restored"
     await restore_snapshot(reference, object_store=archive, root=target, limits=_LIMITS, open_target=open_target)
     async with Persistence.open(_SCOPE.namespace, storage=_storage(target, split=split), tenant_id=_SCOPE.tenant_id) as state:
+        if split:
+            assert state.session_turns is not None
+            for identity in ("active", "idle"):
+                session = await state.session_turns.get_session(identity)
+                assert session is not None
+                assert session["config_json"]["metadata"] == {"fixture": identity}
+                assert session["active_turn_id"] is None
         resources = state.snapshot_resources()
         store = resources.stores[PersistenceDomain.EXECUTION]
         control = store.storage_group.metadata.tables["ai_execution_records"]

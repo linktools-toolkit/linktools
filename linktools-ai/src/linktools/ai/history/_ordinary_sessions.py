@@ -143,7 +143,7 @@ def project_ordinary_turn_activity(
 
 
 async def _turn_view(
-    row: RowMapping, read_scalar_input: Callable[[StoredUserInput], Awaitable[str]], *, local_tool_feedback: bool,
+    row: RowMapping, read_scalar_input: Callable[[StoredUserInput], Awaitable[str]], *, local_tool_feedback: bool = False,
 ) -> dict[str, JsonValue]:
     state = row["state"]
     result = row["result_json"]

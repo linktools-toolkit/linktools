@@ -5,6 +5,7 @@
 import asyncio
 import multiprocessing
 import os
+import traceback
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -123,16 +124,22 @@ def _crash_interruption_recovery(root_path: str, turn_id: str, traced: bool) -> 
     commit = RuntimeStepStore.commit_step
 
     async def die_after_feedback(store, **kwargs):
-        await commit(store, **kwargs)
-        snapshot = kwargs.get("snapshot")
-        if snapshot is not None:
-            retained = await store.latest_snapshot(run_id=turn_id)
-            if retained is not None and any(
-                isinstance(part, ToolReturnPart) and isinstance(part.metadata, Mapping)
-                and _INTERRUPT_MARKER in part.metadata
-                for message in retained.messages for part in message.parts
-            ):
-                os._exit(91)
+        try:
+            await commit(store, **kwargs)
+            snapshot = kwargs.get("snapshot")
+            if snapshot is not None:
+                retained = await store.latest_snapshot(run_id=turn_id)
+                if retained is not None and any(
+                    isinstance(part, ToolReturnPart) and isinstance(part.metadata, Mapping)
+                    and _INTERRUPT_MARKER in part.metadata
+                    for message in retained.messages for part in message.parts
+                ):
+                    os._exit(91)
+        except Exception:
+            # The background producer can report a failure before the child
+            # process reaches the crash marker. Retain the original traceback.
+            _append(root / "interruption-recovery-error.log", traceback.format_exc())
+            raise
 
     RuntimeStepStore.commit_step = die_after_feedback
 
@@ -144,10 +151,15 @@ def _crash_interruption_recovery(root_path: str, turn_id: str, traced: bool) -> 
         ):
             key = SessionTurnKey(_SESSION, turn_id)
             await _expire(state.session_turns, key, generation=1)
-            await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
+            recovered = await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
+            assert recovered, "interrupted turn was not recovered"
         raise AssertionError("recovery feedback checkpoint was not reached")
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except Exception:
+        _append(root / "interruption-recovery-error.log", traceback.format_exc())
+        raise
 
 
 async def _expire(turns, key: SessionTurnKey, *, generation: int) -> None:
@@ -163,6 +175,10 @@ async def _run_until_crash(target, *args):
     process.start()
     try:
         await asyncio.to_thread(process.join, 25)
+        if process.exitcode != 91 and target is _crash_interruption_recovery:
+            diagnostic = Path(args[0]) / "interruption-recovery-error.log"
+            pytest.fail(diagnostic.read_text() if diagnostic.exists() else
+                        f"feedback checkpoint process exited without a diagnostic: {process.exitcode}")
         assert process.exitcode == 91, (target, args, process.exitcode)
     finally:
         if process.is_alive():

@@ -77,7 +77,9 @@ EXECUTION_RECORD_KEY_MAX_BYTES = 2 * 128 + max(
     36 + EXECUTION_ID_MAX_BYTES,
     40 + RESOURCE_ID_MAX_BYTES + EXECUTION_REQUEST_KEY_MAX_BYTES,
 )
-EXECUTION_SORT_KEY_MAX_BYTES = 8 + RECORD_KEY_MAX_BYTES
+# Execution, idempotency and authority-shell rows order by their framed key.
+# Timestamp-prefixed sort addresses belong to other State owners.
+EXECUTION_SORT_KEY_MAX_BYTES = EXECUTION_RECORD_KEY_MAX_BYTES
 # Six framed components: record, namespace, tenant, task, task_graph, graph ID.
 TASK_GRAPH_KEY_MAX_BYTES = 32 + 2 * 128 + TASK_GRAPH_ID_MAX_BYTES
 # Six framed components: record, namespace, tenant, checkpoint, tool_operation, ID.

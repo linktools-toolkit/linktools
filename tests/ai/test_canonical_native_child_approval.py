@@ -131,13 +131,22 @@ async def test_native_parent_approves_exact_child_without_shadow_execution(
 
             monkeypatch.setattr(LocalExecutionBackend, "_run_owned_action", pause_native_resume)
             approval_task = asyncio.create_task(runtime.approvals.decide(child_id, request))
+            phase = "wait for approved child resume"
             try:
                 await asyncio.wait_for(before_resume.wait(), timeout=10)
+                phase = "request parent Stop"
                 assert await turn.cancel()
+                phase = "wait for cancelled parent"
                 assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.CANCELLED
+            except (AIError, TimeoutError) as error:
+                detail = error.code.value if isinstance(error, AIError) else type(error).__name__
+                raise AssertionError(f"{phase}: {detail}") from error
             finally:
                 continue_resume.set()
-                decided = await approval_task
+                [decided] = await asyncio.gather(approval_task, return_exceptions=True)
+            if isinstance(decided, BaseException):
+                detail = decided.code.value if isinstance(decided, AIError) else type(decided).__name__
+                raise AssertionError(f"finish competing child approval: {detail}") from decided
             assert decided.approval_id == pending.approval_id and decided.decision is ApprovalDecision.APPROVE
             assert len(parent_models) == len(child_models) == 1
             assert child_entries == [child_id] and not child_effects and not returned_ids

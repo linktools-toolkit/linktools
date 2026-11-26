@@ -14,6 +14,7 @@ from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._step_archive import PreparedExecutionProjection
 
 
+from .test_pending_turn_source_confirmation import _SOURCE_CASES, _source_state
 from .test_pending_turn_commit import _NAMESPACE, _pending_turn, _snapshot, _turn_state
 from .test_pending_turn_outcomes import _outcome
 from .test_pending_turn_sessionless import _standalone
@@ -60,11 +61,10 @@ async def _publish(state, turn, projections):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
+@pytest.mark.parametrize(("backend", "sessionless"), _SOURCE_CASES)
 @pytest.mark.parametrize("status", (ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED))
-@pytest.mark.parametrize("sessionless", (False, True))
 async def test_pending_trace_seals_the_atomic_terminal(tmp_path: Path, backend, status, sessionless) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _source_state(backend, tmp_path, standalone=sessionless) as state:
         turn, projections = await _trace_turn(state, status, sessionless=sessionless)
         archive = state.storage.run_store.read_store(PersistenceDomain.TRACE)
         assert await archive.get_agent_run(agent_run_id=turn.run.agent_run_id) is None
@@ -220,8 +220,8 @@ async def test_pending_trace_requires_same_group_before_source_writes(tmp_path: 
 
 
 async def test_pending_trace_without_checkpoints_cannot_adopt_a_prior_projection(tmp_path: Path) -> None:
-    async with _turn_state("sqlite", tmp_path) as state:
-        turn, projections = await _trace_turn(state, ExecutionStatus.FAILED)
+    async with _source_state("sqlite", tmp_path, standalone=True) as state:
+        turn, projections = await _trace_turn(state, ExecutionStatus.FAILED, sessionless=True)
         inherited = replace(projections[0], checkpoints=(), durable_projection_digest="a" * 64)
         with pytest.raises(AIError) as error:
             await _publish(state, turn, (inherited,))
@@ -229,12 +229,12 @@ async def test_pending_trace_without_checkpoints_cannot_adopt_a_prior_projection
         assert await state.storage.execution.executions.get("execution", tenant_id="tenant") is None
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize(("backend", "sessionless"), _SOURCE_CASES)
 async def test_terminal_insertion_receipt_cannot_be_reused_in_a_later_transaction(
-    tmp_path: Path, monkeypatch, backend: str,
+    tmp_path: Path, monkeypatch, backend: str, sessionless: bool,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
-        turn, projections = await _trace_turn(state, ExecutionStatus.FAILED)
+    async with _source_state(backend, tmp_path, standalone=sessionless) as state:
+        turn, projections = await _trace_turn(state, ExecutionStatus.FAILED, sessionless=sessionless)
         repository = state.storage.execution.executions
         archive = state.storage.run_store.read_store(PersistenceDomain.TRACE)
         original = type(repository).insert_pending_turn_in_transaction

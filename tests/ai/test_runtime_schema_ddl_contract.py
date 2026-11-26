@@ -373,6 +373,23 @@ def test_operation_address_column_is_bounded_binary_with_scoped_unique_key(diale
     assert all(len(index.columns) <= 3 for index in table.indexes)
 
 
+def test_execution_owner_sort_width_fits_maximum_exact_address() -> None:
+    from linktools.ai.persistence._record_owner import record_owner_table, record_owner_values
+    from linktools.ai.persistence.state import record_key, validate_sort_key
+
+    key = record_key("n" * 128, "t" * 128, "execution", "idempotency", ("s" * 128, "r" * 64))
+    table = build_sql_schema_metadata().tables["ai_execution_records"]
+    assert len(key) == 488
+    assert record_owner_table(key) == table.name
+    assert table.c.sort_key.type.compile(dialect=mysql.dialect()) == "VARBINARY(488)"
+    assert record_owner_values(table.name, {"key": key, "kind": "idempotency", "sort_key": key})["sort_key"] == key
+    with pytest.raises(ValueError, match="execution sort key"):
+        record_owner_values(table.name, {"key": key, "kind": "idempotency", "sort_key": key + b"x"})
+    opaque = b"x" * 1024
+    assert validate_sort_key(opaque) == opaque
+    assert record_owner_values("ai_state_records", {"sort_key": opaque})["sort_key"] == opaque
+
+
 def test_runtime_schema_has_no_tool_alias_sidecar() -> None:
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CHECKPOINT}))
     assert "ai_tool_operation_aliases" not in metadata.tables
