@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
-from ._record_owner import EXECUTION_SORT_KEY_MAX_BYTES, SCAN_KIND_OWNERS
+from ._record_owner import EXECUTION_SORT_KEY_MAX_BYTES, SCAN_KIND_OWNERS, TASK_GRAPH_KEY_MAX_BYTES
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 
 
@@ -36,6 +36,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
 
     if name in metadata.tables:
         return
+    record_key_width = TASK_GRAPH_KEY_MAX_BYTES if name == "ai_task_graphs" else RECORD_KEY_MAX_BYTES
     columns = [
         sql_id_column(),
         Column(
@@ -46,7 +47,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         ),
         Column(
             "key",
-            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
+            LargeBinary(record_key_width).with_variant(mysql.VARBINARY(record_key_width), "mysql"),
             nullable=False,
             comment="Exact bounded binary identity of the persisted runtime record.",
         ),
@@ -173,7 +174,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
     omitted = {
         "ai_execution_records": {"payload_bytes"},
         "ai_step_tool_operations": {"kind", "payload_bytes"},
-        "ai_task_graphs": {"kind"},
+        "ai_task_graphs": {"kind", "scope_key", "parent_key", "scope_locator", "parent_locator"},
     }.get(name, set())
     records = Table(name, metadata, *(column for column in columns if column.name not in omitted),
                     comment=comment, **sql_table_options())

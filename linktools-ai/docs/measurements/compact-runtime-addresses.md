@@ -1,9 +1,40 @@
 # Compact state addresses without losing identity
 
 The 64-byte budget applies at a field's owner, not by truncating an encoded
-address. Existing `store_key` is already bounded independently. The three
-remaining `VARBINARY(768)` fields contain original identity, not simply a
-lookup projection. Narrowing their columns alone rejects valid data.
+address. Existing `store_key` is already bounded independently. Common State
+columns and dedicated runtime owners must be budgeted separately.
+
+### Generic State columns that still require 768 bytes
+
+| Table | Columns | Public writer that can use the full width |
+| --- | --- | --- |
+| `ai_state_records` | `key`, `scope_key`, `parent_key` | `StoredRecord` accepts opaque bytes; `RecordQuery` compares the complete scope or parent. |
+| `ai_state_facts` | `stream_key`, `owner_key` | `StoredFact` can refer to any such stream and record; owner-based deletion matches the original key exactly. |
+| `ai_state_counters` | `stream_key` | `StateTransaction.next_sequence` and batch counter operations accept a raw stream address. |
+| `ai_state_operations` | `operation_key`, `stream_key` | Generic `StoredOperation` accepts opaque keys independent of the built-in codecs. |
+
+Shorter built-in addresses do not justify shrinking a column shared with
+those callers. The SQL regressions in `test_state_stream_addresses.py` and
+`test_state_store_keys.py` cover maximum-width raw identities, lookups and
+ownership. The remaining dedicated columns must match their domain writers,
+including direct SQL insertion and portable restore.
+
+### Dedicated record columns
+
+| Table | Key | Scope | Parent |
+| --- | --- | --- | --- |
+| `ai_task_graphs` | 416 bytes: six framed components with up to 128 bytes each for namespace, tenant and graph ID | Removed; graph headers have no scope | Removed; graph headers have no parent |
+| `ai_execution_records` | Keep 768; bounded service form is up to 420 bytes for an execution or 552 for an idempotency record | Keep 768; session and idempotency-resource lookups, service forms up to 442 bytes | Keep 768; subagent parent, service form up to 431 bytes |
+| `ai_step_run_admissions` | Keep 768; typed run key up to 423 bytes | Keep 768; conversation lookup, typed form up to 436 bytes | Keep 768; parent-run lookup, typed form up to 431 bytes |
+| `ai_step_tool_operations` | Keep 768; built-in 64-byte operation ID yields a 362-byte key, but repository callers are not restricted to built-in IDs | Keep 768; agent-run lookup, typed form up to 436 bytes | Keep 768; execution lookup, typed form up to 437 bytes |
+
+The three wide dedicated owners still route some non-domain-shaped records
+through the generic State protocol and do not enforce each typed address
+bound. Their service-form maximum is not a storage invariant. Separate
+typed ownership and preserve opaque State records before tightening these
+columns. The Task Graph owner now takes only its dedicated address shape;
+other shapes stay in the generic table. For existing pre-release data using
+a superseded Task Graph owner layout, rebuild before switching schemas.
 
 | Field | What must survive | Where to change first |
 | --- | --- | --- |
@@ -11,14 +42,13 @@ lookup projection. Narrowing their columns alone rejects valid data.
 | `owner_key` | Exact record owner for fact selection and deletion, portable snapshot verification and restore. An SQL row ID is not portable across backup/restore or necessarily across stores/tables. | Keep it until fact ownership can use a bounded, typed logical owner ID in every affected owner. Do not reuse a surrogate across stores or infer ownership from an index locator. |
 | `operation_key` | Ordinary ledger actions and capability write receipts are distinct, exact identities. Some ordinary actions use the caller's idempotency key as the operation ID; capability keys include capability/revision/run/write identity. | Separate operation identity and caller request identity at their command entries first. Generated IDs may use existing bounded identities; an operation retry must still find the original decision under the original scope and key. Do not turn a long caller key into a new random operation on each retry. |
 
-At the current boundary, ordinary operation IDs still accept a 128-byte
-caller-supplied idempotency key. The namespace and tenant are each also
-allowed to reach 128 bytes; an ordinary Execution operation with all three
-at their maxima occupies 402 bytes before any change to the codec. A 128-byte
-valid graph or run ID alone already exceeds the target. Dropping the
-namespace/tenant/domain string only because SQL has a `store_key` is unsafe
-for the public key generators: their contract is globally scoped and
-backups can stage multiple owners without the original SQL key.
+Built-in ordinary operation addresses are at most 163 bytes and capability
+write receipt addresses are at most 301 bytes. The original caller key
+remains exact. A valid 128-byte graph or run ID alone already exceeds the
+64-byte target. Dropping the namespace/tenant/domain string merely because SQL
+has a `store_key` is unsafe for public record and stream key generators:
+their contract is globally scoped and backups can stage multiple owners
+without the original SQL partition.
 
 ## Proposed cutover order
 

@@ -71,13 +71,16 @@ def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) ->
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
 EXECUTION_SORT_KEY_MAX_BYTES = 8 + RECORD_KEY_MAX_BYTES
+# Six framed components: record, namespace, tenant, task, task_graph, graph ID.
+TASK_GRAPH_KEY_MAX_BYTES = 416
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
 _EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}
 _KIND_OWNERS = {"execution": "ai_execution_records", "idempotency": "ai_execution_records", "task_graph": "ai_task_graphs", "tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
 _CONSTANTS = {
     "ai_execution_records": {"payload_bytes": None},
-    "ai_task_graphs": {"kind": "task_graph"},
+    "ai_task_graphs": {"kind": "task_graph", "scope_key": None, "parent_key": None,
+                       "scope_locator": None, "parent_locator": None},
     "ai_step_tool_operations": {"kind": "tool_operation", "payload_bytes": None},
     "ai_step_run_admissions": {"kind": "agent_run", "subject_id": None, "state": None,
         "lease_owner": None, "lease_fence": 0, "lease_expires_at": None, "payload_bytes": None},
@@ -97,6 +100,8 @@ def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
             return ("ai_messages" if store_key == encode_key_components(("state-group-archive",), 128)
                     else "ai_state_records")
     if len(parts) >= 6 and parts[0] == "record":
+        if parts[4] == "task_graph" and (len(parts) != 6 or parts[3] != "task" or len(key) > TASK_GRAPH_KEY_MAX_BYTES):
+            return "ai_state_records"
         if parts[4] in _EXECUTION_ADDRESS_LENGTHS and (
                 parts[3] != "execution" or len(parts) != _EXECUTION_ADDRESS_LENGTHS[parts[4]]):
             return "ai_state_records"
@@ -195,5 +200,5 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
 
 
 
-__all__ = ["EXECUTION_SHELL_KIND", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["EXECUTION_SHELL_KIND", "TASK_GRAPH_KEY_MAX_BYTES", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
 

@@ -13,8 +13,9 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.codec import decode_fact, decode_operation, encode_fact, encode_operation
 from linktools.ai.persistence.snapshots import _decode_snapshot_sequences
 from linktools.ai.persistence.state import (
-    STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, FactQuery, FactScanCursor,
-    OperationQuery, OperationScanCursor, StateTransaction, StoredFact, StoredOperation,
+    STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES,
+    PARENT_KEY_MAX_BYTES, FactQuery, FactScanCursor, OperationQuery, OperationScanCursor,
+    RecordQuery, StateTransaction, StoredFact, StoredOperation,
     capability_receipt_key, capability_store_key, record_key, stream_key, validate_stream_key,
 )
 
@@ -130,6 +131,25 @@ async def test_bare_store_stream_scope_family_counters_and_pagination(backend: s
             with pytest.raises(ValueError):
                 await transaction.next_sequence(b"x" * (STREAM_KEY_MAX_BYTES + 1))
         await store.mutate(reject_overflow)
+
+
+@pytest.mark.asyncio
+async def test_sql_raw_record_relations_and_fact_owner_keep_the_full_address(tmp_path: Path) -> None:
+    owner = replace(_record(1), key=b"r" * RECORD_KEY_MAX_BYTES,
+                    scope_key=b"s" * RELATION_KEY_MAX_BYTES, parent_key=b"p" * PARENT_KEY_MAX_BYTES)
+    fact = StoredFact(b"stream", 1, owner.key, "probe", None, None, {})
+    async with _open_store("sql", tmp_path) as store:
+        async def seed(transaction: StateTransaction) -> None:
+            await transaction.insert_record(owner)
+            await transaction.insert_fact(fact)
+
+        await store.mutate(seed)
+        assert await store.read_record(owner.key) == owner
+        assert await store.read(lambda tx: tx.list_records(RecordQuery(scope_key=owner.scope_key))) == (owner,)
+        assert await store.read(lambda tx: tx.list_records(RecordQuery(parent_key=owner.parent_key))) == (owner,)
+        assert await store.read(lambda tx: tx.list_facts(FactQuery(fact.stream_key))) == (fact,)
+        await store.mutate(lambda tx: tx.delete_fact_streams(owner.key))
+        assert await store.read(lambda tx: tx.list_facts(FactQuery(fact.stream_key))) == ()
 
 
 @pytest.mark.asyncio

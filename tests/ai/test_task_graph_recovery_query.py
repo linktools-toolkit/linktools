@@ -21,11 +21,13 @@ def _row(index: int, *, state: str, opaque: bool = False, store: bytes = b"parti
     scope = b"scope" if index % 2 else b"other-scope"
     parent = b"parent" if index % 3 else b"other-parent"
     order = b"x" * 128 + f"{index // 2:05}".encode()
-    return dict(store_key=store, key=key, key_locator=sha256(key).hexdigest(),
-                scope_key=scope, scope_locator=sha256(scope).hexdigest(),
-                parent_key=parent, parent_locator=sha256(parent).hexdigest(),
-                sort_key=order, sort_prefix=order[:128], state=state,
-                storage_revision=0, payload_json={"index": index}, lease_fence=0)
+    values = dict(store_key=store, key=key, key_locator=sha256(key).hexdigest(),
+                  sort_key=order, sort_prefix=order[:128], state=state,
+                  storage_revision=0, payload_json={"index": index}, lease_fence=0)
+    if opaque:
+        values.update(scope_key=scope, scope_locator=sha256(scope).hexdigest(),
+                      parent_key=parent, parent_locator=sha256(parent).hexdigest())
+    return values
 
 
 @pytest.mark.parametrize("states", [None, frozenset(), frozenset({"PENDING"}),
@@ -51,8 +53,8 @@ def test_graph_pages_preserve_scopes_and_raw_tie_cursors(
         connection.execute(insert(generic), dict(_row(200, state="PENDING", opaque=True), kind="other", scan_kind="k:other"))
         expected = sorted((row for row in rows if row["store_key"] == b"partition"
             and (states is None or row["state"] in states)
-            and (scope is None or row["scope_key"] == scope)
-            and (parent is None or row["parent_key"] == parent)
+            and (scope is None or row.get("scope_key") == scope)
+            and (parent is None or row.get("parent_key") == parent)
             and (prefix is None or row["sort_key"].startswith(prefix))),
             key=lambda row: (row["sort_prefix"], row["sort_key"], row["key"]))
         query = RecordQuery(kind="task_graph", states=states, scope_key=scope,
