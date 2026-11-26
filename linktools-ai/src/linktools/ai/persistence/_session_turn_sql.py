@@ -14,6 +14,7 @@ from weakref import finalize
 
 from ..agent import AgentBindingContract
 from ..core import (
+    AuthorizationAction, ResourceKind, ResourceRef, TenantAuthorizationPolicy,
     RUNTIME_OBJECT_STORE_ID, SESSION_REQUEST_KEY_MAX_BYTES, ImmutableJsonMapping, canonical_json_bytes, canonical_sha256,
     deterministic_id, validate_session_request_key,
 )
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
     from ..storage import ObjectRef
     from .contracts import BudgetRepository
     from ._checkpoint_repositories import ToolRepositoryImpl
-    from ..core import Principal
+    from ..core import AuthorizationPolicy, Principal
     from ._archive import ContentArchive
     from ..execution import PendingToolContinuation
     from .state import StateGroupTransaction, StateStore, StateTransaction
@@ -610,6 +611,55 @@ class SqlSessionTurnReader:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return SessionTurnKey(session_key.decode("utf-8"), execution_id), generation
 
+    async def read_linked_graph_context(
+        self, execution_id: str, *, admitted: Principal, principal: Principal,
+        authorization: AuthorizationPolicy,
+    ) -> tuple[tuple[SessionContextTurn, ...], Mapping[str, JsonValue], Mapping[str, JsonValue] | None] | None:
+        """Read the original Graph admission range, not the session's current context."""
+        from sqlalchemy import select
+
+        if principal.tenant_id != self._tenant_id or admitted.tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        rows, sessions = self._turns.c, self._sessions.c
+        statement = select(
+            rows.session_key, rows.turn_no, rows.context_from, rows.context_through, rows.request_json,
+            sessions.lineage_json, sessions.session_key.label("owner_key"),
+        ).select_from(self._turns.outerjoin(self._sessions, (
+            (rows.scope_key == sessions.scope_key) & (rows.session_key == sessions.session_key)
+        ))).where(
+            rows.scope_key == self._scope, rows.turn_id == self._key(execution_id, NATIVE_TURN_ID_MAX_BYTES),
+            rows.request_json["graph_execution"].as_string().is_not(None),
+        )
+        async with self._context.engine.connect() as connection:
+            row = (await connection.execute(statement)).mappings().one_or_none()
+        if row is None:
+            return None
+        if type(authorization) is TenantAuthorizationPolicy:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        session_id = row["session_key"].decode("utf-8")
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_READ,
+            ResourceRef(ResourceKind.SESSION, session_id, self._tenant_id),
+        )
+        request = row["request_json"]
+        if request.get("graph_execution") != execution_id or request.get("principal") != asdict(admitted):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if row["owner_key"] is None:
+            raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE)
+        if row["context_through"] != row["turn_no"] - 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        lineage = decode_session_lineage(row["lineage_json"])
+        for segment in lineage:
+            await authorization.authorize(
+                principal, AuthorizationAction.SESSION_READ,
+                ResourceRef(ResourceKind.SESSION, segment.session_id, self._tenant_id),
+            )
+        context = await self.read_context_range(
+            session_id, after=row["context_from"] - 1, through=row["context_through"], lineage=lineage,
+            missing=ErrorCode.INPUT_CONTEXT_UNAVAILABLE,
+        )
+        return context, request["session_metadata"], request.get("repository_instructions")
+
     @staticmethod
     async def _read_binding_payloads(archive, keys: tuple[bytes, ...]) -> dict[bytes, dict]:
         if not keys:
@@ -1095,9 +1145,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
         await self._context.run_mutation(write, domain="session.create")
 
     async def fork_session(
-        self, source_id: str, target_id: str, *, expected_revision: int | None, config: JsonValue, request_id: str,
+        self, source_id: str, target_id: str, *, expected_revision: int, authorized_revision: int, request_id: str,
     ) -> bool:
-        """Freeze a matching source head; without a matching revision only replay is allowed."""
+        """Freeze the authorized source head or replay the exact fork request."""
         validate_session_request_key(request_id)
         if source_id == target_id:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1109,10 +1159,10 @@ class SqlSessionTurns(SqlSessionTurnReader):
             if existing is not None:
                 lineage = existing["lineage_json"]
                 if (lineage is not None and lineage["source"] == source_id and lineage["request_id"] == request_id
-                        and lineage["config_fingerprint"] == canonical_sha256(config)):
+                        and lineage["source_revision"] == expected_revision):
                     return True
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if expected_revision is None:
+            if authorized_revision != expected_revision:
                 return False
             row = (await connection.execute(self._sessions.select().filter_by(
                 **source, revision=expected_revision,
@@ -1126,9 +1176,11 @@ class SqlSessionTurns(SqlSessionTurnReader):
             ).values(revision=expected_revision + 1))
             if result.rowcount != 1:
                 return False
+            source_config = row["config_json"]
+            config = {"metadata": source_config.get("metadata", {}), "cwd": source_config.get("cwd")}
             await connection.execute(self._sessions.insert().values(
                 **target, status="open", revision=0, last_turn_no=through, config_json=config,
-                lineage_json={"source": source_id, "request_id": request_id, "config_fingerprint": canonical_sha256(config),
+                lineage_json={"source": source_id, "request_id": request_id, "source_revision": expected_revision,
                               "segments": [[part.session_id, part.after, part.through] for part in segments]},
             ))
             return True

@@ -52,7 +52,7 @@ async def test_session_list_reads_each_keyset_page_without_generation_probe(stor
 async def test_session_fork_reads_two_headers_and_writes_once_atomically(store):
     engine, _metadata, turns = store
     with _session_statements(engine) as queries:
-        assert await turns.fork_session("chat", "target", expected_revision=0, config={}, request_id="fork")
+        assert await turns.fork_session("chat", "target", expected_revision=0, authorized_revision=0, request_id="fork")
 
     assert [sql.split()[0] for sql, _ in queries] == ["SELECT", "SELECT", "UPDATE", "INSERT"]
     assert all("AI_SESSIONS" in sql for sql, _ in queries)
@@ -65,19 +65,20 @@ async def test_session_fork_reads_two_headers_and_writes_once_atomically(store):
 
 async def test_session_fork_replay_only_reads_existing_target(store):
     engine, _metadata, turns = store
-    assert await turns.fork_session("chat", "target", expected_revision=0, config={}, request_id="fork")
+    assert await turns.fork_session("chat", "target", expected_revision=0, authorized_revision=0, request_id="fork")
     target = await turns.get_session("target")
     before = await turns.get_session("chat")
 
     with _session_statements(engine) as queries:
-        assert await turns.fork_session("chat", "target", expected_revision=0, config={}, request_id="fork")
+        assert await turns.fork_session("chat", "target", expected_revision=0,
+                                        authorized_revision=before["revision"], request_id="fork")
     [(statement, _)] = queries
     assert statement.startswith("SELECT") and "AI_SESSIONS" in statement
     assert await turns.get_session("target") == target
     assert await turns.get_session("chat") == before
 
     with pytest.raises(AIError) as conflict:
-        await turns.fork_session("chat", "target", expected_revision=0, config={"changed": True}, request_id="fork")
+        await turns.fork_session("chat", "target", expected_revision=1, authorized_revision=1, request_id="fork")
     assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
 
 
@@ -89,14 +90,16 @@ async def test_session_fork_replay_uses_frozen_source_prefix_without_copying_tur
     source = await turns.get_session("chat")
     with _session_statements(engine) as queries:
         assert await turns.fork_session("chat", "target", expected_revision=source["revision"],
-                                        config={}, request_id="fork")
+                                        authorized_revision=source["revision"], request_id="fork")
     assert all("AI_SESSIONS" in sql for sql, _ in queries)
 
     after_fork = await turns.get_session("chat")
     assert await accept(turns, "later", revision=after_fork["revision"], through=1, request="later")
     assert await turns.finish(SessionTurnKey("chat", "later"), generation=1, turn_no=2,
                               state="succeeded", transcript=_TRANSCRIPT)
-    assert await turns.fork_session("chat", "target", expected_revision=source["revision"], config={}, request_id="fork")
+    current = await turns.get_session("chat")
+    assert await turns.fork_session("chat", "target", expected_revision=source["revision"],
+                                    authorized_revision=current["revision"], request_id="fork")
     target = await turns.get_session("target")
     assert target["last_turn_no"] == 1
     inherited, = await turns.turn_page("target", through=target["last_turn_no"], limit=10,

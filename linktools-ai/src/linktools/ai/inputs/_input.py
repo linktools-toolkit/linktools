@@ -6,7 +6,7 @@ import binascii
 import hashlib
 import json
 import mimetypes
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 
@@ -505,6 +505,22 @@ class ExecutionInputMaterializer:
             canonical_json_bytes(payload.value), format="user-content", write_object=write,
         )
         return value if placed is None else replace(value, payload=placed)
+
+    async def restore_session_input(
+        self, prompt: str, stored: "StoredUserInput | None", *,
+        read_scalar: Callable[["StoredUserInput"], Awaitable[str]],
+    ) -> str | Sequence[UserContent]:
+        """Restore a canonical turn prompt without reopening its workspace source."""
+        if stored is None:
+            return prompt
+        if stored.codec == "text":
+            if prompt:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Turn input has two text owners")
+            return await read_scalar(stored)
+        detached = await self.restore(stored)
+        if isinstance(detached, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Detached turn input is not multipart")
+        return (*detached, prompt) if prompt else tuple(detached)
 
     async def restore(self, value: "StoredUserInput") -> CanonicalUserInput:
         from ..execution import StoredUserInput

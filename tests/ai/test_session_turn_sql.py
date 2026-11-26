@@ -533,3 +533,62 @@ async def test_ordinary_snapshot_remaps_native_root_without_needing_step_checkpo
         assert restored_root.store_key == source_root.store_key and restored_root.slices == source_root.slices
         assert [part.content for message in restored["messages"] for part in message.parts] == ["two"]
         assert (await turns.get_turn_for_recovery(key))["binding_json"] == _BINDING
+
+
+@pytest.mark.asyncio
+async def test_ordinary_snapshot_preserves_exact_fork_receipt(tmp_path):
+    import hashlib
+    import json
+
+    from linktools.ai.core import Principal, TenantAuthorizationPolicy
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.snapshot import SnapshotLimits
+    from linktools.ai.storage import InMemoryObjectStore, ObjectRef, read_object
+
+    archive = InMemoryObjectStore()
+    limits = SnapshotLimits(max_entries=1000, max_bytes=1_000_000)
+    principal = Principal("owner", "a")
+    options = {"principal": principal, "expected_revision": 0, "idempotency_key": "fork"}
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
+    def open_runtime(state):
+        return Runtime.open(persistence=state, features=RuntimeFeatures("test"),
+                            authorization=HostAuthorization())
+
+    source = PersistenceStorage.from_root(tmp_path / "source")
+    async with Persistence.open("test", storage=source, tenant_id="a") as state:
+        async with open_runtime(state) as runtime:
+            await runtime.sessions.create_turn_session("source", principal=principal)
+            assert await runtime.sessions.fork_turn_session("source", "child", **options)
+    async with Persistence.open("test", storage=source, tenant_id="a", read_only=True) as state:
+        reference = await state.export_snapshot(object_store=archive, limits=limits)
+
+    restored = tmp_path / "restored"
+    await Persistence.restore_snapshot(reference, object_store=archive, root=restored, limits=limits)
+    async with Persistence.open("test", storage=PersistenceStorage.from_root(restored), tenant_id="a") as state:
+        async with open_runtime(state) as runtime:
+            assert await runtime.sessions.fork_turn_session("source", "child", **options)
+            with pytest.raises(AIError) as conflict:
+                await runtime.sessions.fork_turn_session("source", "child", **(options | {"expected_revision": 1}))
+            assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+
+    manifest = json.loads(await read_object(
+        archive, reference.key, expected_digest=reference.digest, expected_size=reference.size,
+    ))
+    child, = (row for row in manifest["ordinary_sessions"]["sessions"] if row["lineage_json"] is not None)
+    child["lineage_json"]["source_revision"] = 1
+    payload = json.dumps(manifest).encode()
+
+    async def chunks():
+        yield payload
+
+    digest = hashlib.sha256(payload).hexdigest()
+    key = f"v{manifest['format_version']}/runtime-storage-snapshot/{digest}"
+    await archive.put(key, chunks(), expected_size=len(payload), expected_digest=digest)
+    invalid = ObjectRef(archive.store_id, key, digest, len(payload))
+    with pytest.raises(AIError) as corrupt:
+        await Persistence.restore_snapshot(invalid, object_store=archive, root=tmp_path / "invalid", limits=limits)
+    assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

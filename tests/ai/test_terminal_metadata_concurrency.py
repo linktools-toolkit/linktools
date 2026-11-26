@@ -44,6 +44,8 @@ from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
 
 def _storage(tmp_path: Path, backend: str, split_session: bool) -> PersistenceStorage:
     if split_session:
+        # These cases exercise the Execution-owned retention ledger against a
+        # separate conversation store. Native SQL turns own a different ledger.
         route = (
             StorageRoute.memory()
             if backend == "memory"
@@ -54,7 +56,7 @@ def _storage(tmp_path: Path, backend: str, split_session: bool) -> PersistenceSt
         return PersistenceStorage(
             PersistencePlan(
                 execution=route,
-                conversation=StorageRoute.sqlite(tmp_path / "conversation" / "runtime.db", exclusive_writer=True),
+                conversation=StorageRoute.memory(),
             )
         )
     if backend == "memory":
@@ -149,6 +151,9 @@ async def test_terminal_preserves_concurrent_hold_metadata(
     async with Persistence.open('terminal-metadata', storage=state, tenant_id='evaluation-consumers') as persistence_146, Runtime.open(persistence=persistence_146, context=CONTEXT, features=model_features(FixtureModels(), group)) as runtime:
         agent = runtime.agents.get()
         if split_session:
+            assert persistence_146.conversation.sessions.state_store.storage_group is not (
+                persistence_146.execution.executions.state_store.storage_group
+            )
             await agent.create_session("session", principal=PRINCIPAL)
             handle = await agent.session("session").start("hello", principal=PRINCIPAL)
         else:
@@ -194,6 +199,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
     repository = state.execution.executions
     current = _record(ExecutionStatus.STARTED, 0)
     if split_session:
+        assert state.conversation.sessions.state_store.storage_group is not repository.state_store.storage_group
         current = replace(current, session_id="session")
         await state.conversation.sessions.create(
             replace(_session(), active_execution_id="execution")

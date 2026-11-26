@@ -117,7 +117,7 @@ async def inspect_call(ctx: AgentContext[None]) -> str:
         assert execution is not None
         assert identity.root_execution_id == execution.root_execution_id
         assert identity.parent_execution_id == execution.parent_execution_id
-        assert identity.session_id == execution.session_id == 'session'
+        assert identity.session_id is execution.session_id is None
     with (root/'identities').open('a') as stream:
         stream.write(json.dumps(asdict(identity))+'\n')
         stream.flush()
@@ -144,8 +144,7 @@ async def main():
     features.agent('default',allow_tools=('inspect_call',))
     async with Persistence.open('crash-identity',storage=PersistenceStorage.sqlite(root/'state.sqlite'),tenant_id='tenant') as state, Runtime.open(persistence=state,features=model_features(_Models(_UsageFunctionModel(model)),features),metrics=None,auto_recover=False) as runtime:
         if stage=='create':
-            session=await runtime.agents.get().create_session('session',principal=principal)
-            execution=await session.start('inspect',idempotency_key='start')
+            execution=await runtime.agents.get().start('inspect',principal=principal,idempotency_key='start')
             (root/'execution').write_text(execution.execution_id)
             await execution.wait(timeout_seconds=15)
             raise AssertionError('crash not reached')

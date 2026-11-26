@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
+"""Opt-in Memory display snapshots and authoritative SQL session reads."""
 
-from linktools.ai.core import ExecutionContext
-"""Opt-in whole display snapshots retain fresh authority and bounded staleness."""
-from ._runtime_test_helpers import model_features
-
-from linktools.ai.persistence import Persistence
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import event
+from pydantic_ai.messages import ModelResponse, TextPart
 
 import linktools.ai.runtime._session as session_module
-from linktools.ai.core import ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
+from linktools.ai.core import ExecutionContext, ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, PersistencePlan
-from linktools.ai.runtime import RuntimeSessions
+from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, PersistencePlan
+from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeSessions
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.persistence.contracts import ConversationCursor
 from linktools.ai.persistence.state import active_state_scope
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 
-from .test_incremental_projection_boundaries import _storage
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_session_refresh import _admit
 from .test_session_timeline import _commit_empty_turn, _execution, _materialize_conversation, _session
 from .test_runtime_content_cache_integration import WriteOnlyCache
@@ -148,11 +144,9 @@ async def _change_execution_display(state, value, execution_id="active"):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_display_cache_returns_whole_old_page_until_fixed_expiry(tmp_path, monkeypatch, backend):
+async def test_display_cache_returns_whole_old_page_until_fixed_expiry(monkeypatch):
     clock = _clock(monkeypatch)
-    state, cache = _storage(backend, tmp_path), _Cache()
-    state = Persistence(state)
+    state, cache = Persistence(PersistenceStorage.in_memory()), _Cache()
     await _prepare(state)
     try:
         service = _service(state, cache)
@@ -176,35 +170,63 @@ async def test_display_cache_returns_whole_old_page_until_fixed_expiry(tmp_path,
         await state.close()
 
 
+class _HostAuthorization(TenantAuthorizationPolicy):
+    """Explicit host policy for canonical SQL session reads."""
+
+
+def _native_features():
+    async def answer(_messages, _info):
+        return ModelResponse(parts=[TextPart("answer")])
+
+    group = RuntimeFeatures("display")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group.agent("default", model="default", allow_tools=())
+    return model_features(_Models(_UsageFunctionModel(answer)), group)
+
+
 @pytest.mark.parametrize("body", (False, True))
-async def test_display_cache_saves_body_sql_and_keeps_fresh_dependency_reads(tmp_path, body):
-    state, cache = _storage("sqlite", tmp_path), _Cache()
-    state = Persistence(state)
-    await _prepare(state, body=body)
-    engine = state.conversation.sessions.state_store.storage_group.context.engine
-    statements = []
-
-    def capture(_connection, _cursor, statement, *_args):
-        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
-            statements.append(statement)
-
-    event.listen(engine.sync_engine, "before_cursor_execute", capture)
-    try:
-        service = _service(state, cache)
-        cold = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
-        cold_count = len(statements)
+async def test_native_session_inspect_skips_body_sql_and_refresh_is_authoritative(tmp_path, body):
+    cache = _Cache()
+    storage = PersistenceStorage.sqlite(tmp_path / "native.db", cache=cache)
+    async with Persistence.open("display", storage=storage, tenant_id="tenant") as state, Runtime.open(
+        persistence=state, features=_native_features(), authorization=_HostAuthorization(),
+    ) as runtime:
+        await runtime.sessions.create_turn_session("session", principal=_PRINCIPAL)
         if body:
-            assert any("ai_messages" in statement for statement in statements)
-        statements.clear()
-        assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == cold
-        # Warm reads retain authorization, execution and committed-turn checks,
-        # but never hydrate transcript message bytes.
-        assert len(statements) <= (5 if body else 3)
-        assert not any("ai_messages" in statement for statement in statements)
-        assert cold_count > len(statements)
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", capture)
-        await state.close()
+            turn = await runtime.sessions.start(
+                "session", "first", principal=_PRINCIPAL, agent="default", idempotency_key="turn-1",
+            )
+            assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+
+        engine = state.session_turns._context.engine.sync_engine
+        statements = []
+
+        def capture(_connection, _cursor, statement, *_args):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            first = await runtime.sessions.inspect("session", principal=_PRINCIPAL)
+            assert len(statements) == 1 and "ai_messages" not in statements[0]
+            statements.clear()
+            page = await runtime.sessions.refresh("session", principal=_PRINCIPAL)
+            assert len(page["timeline"]["items"]) == int(body)
+            assert any("ai_messages" in statement for statement in statements) is body
+            if body:
+                assert page["timeline"]["items"][0]["output"] == {"text": "answer"}
+            with pytest.raises(AIError) as denied:
+                await runtime.sessions.inspect("session", principal=Principal("foreign", "other-tenant"))
+            assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            with pytest.raises(ValueError, match="max_age=0"):
+                await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
+            assert await runtime.sessions.update_turn_session(
+                "session", principal=_PRINCIPAL, expected_revision=first["revision"], metadata={"value": "fresh"},
+            )
+            assert (await runtime.sessions.refresh("session", principal=_PRINCIPAL))["session"]["metadata"] == {"value": "fresh"}
+            assert not any(key.startswith("session-display:") for key in cache.keys)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
 
 
 async def test_display_cache_rechecks_policy_and_deletion_after_authorization(monkeypatch):
@@ -406,7 +428,7 @@ async def test_display_cache_facade_passes_max_age_to_custom_service():
 async def test_display_cache_split_routes_keep_strong_fallback(tmp_path):
     state = PersistenceStorage.from_plan(PersistencePlan(
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
+        conversation=StorageRoute.memory(),
     ))
     cache = _Cache()
     state = Persistence(state)
@@ -835,7 +857,7 @@ async def test_storage_exposes_borrowed_cache_without_closing_it():
 
 
 @pytest.mark.parametrize("retention", ("durable", "volatile", "transient"))
-async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tmp_path, retention):
+async def test_runtime_factory_does_not_stale_native_or_nondurable_display(tmp_path, retention):
     from pydantic_ai.models.test import TestModel
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import Runtime
@@ -851,18 +873,23 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
     group = RuntimeFeatures[None]("display")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
-    async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_824, Runtime.open(persistence=persistence_824, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None)) as runtime:
-        await runtime._state.conversation.sessions.create(_session())
-        await _admit(runtime._state, status=ExecutionStatus.PENDING_START)
-        first = await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
-        await _change_execution_display(runtime._state, "changed")
-        second = await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
+    async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_824, Runtime.open(persistence=persistence_824, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None), authorization=_HostAuthorization()) as runtime:
         if retention == "durable":
-            assert second == first
-            assert len([key for key in cache.keys if key.startswith("session-display:")]) == 1
+            assert runtime._state.conversation.sessions is None
+            await runtime.sessions.create_turn_session("session", principal=_PRINCIPAL)
+            first = await runtime.sessions.inspect("session", principal=_PRINCIPAL)
+            assert await runtime.sessions.update_turn_session(
+                "session", principal=_PRINCIPAL, expected_revision=first["revision"], metadata={"fresh": True},
+            )
+            assert (await runtime.sessions.refresh("session", principal=_PRINCIPAL))["session"]["metadata"] == {"fresh": True}
         else:
+            await runtime._state.conversation.sessions.create(_session())
+            await _admit(runtime._state, status=ExecutionStatus.PENDING_START)
+            await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
+            await _change_execution_display(runtime._state, "changed")
+            second = await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
             assert second.timeline.items[0].safe_error_details == {"value": "changed"}
-            assert not any(key.startswith("session-display:") for key in cache.keys)
+        assert not any(key.startswith("session-display:") for key in cache.keys)
     await cache.put("after-close", b"host-owned")
     assert await cache.get("after-close") == b"host-owned"
     with pytest.raises(AIError):
@@ -935,14 +962,14 @@ async def test_display_cache_rejects_execution_dependencies_outside_authorized_t
 
 @pytest.mark.parametrize("phase", ("get", "put"))
 @pytest.mark.parametrize("cancel_read", (False, True))
-async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(tmp_path, monkeypatch, phase, cancel_read):
+async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(monkeypatch, phase, cancel_read):
     from pydantic_ai.models.test import TestModel
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import Runtime
     from ._runtime_test_helpers import _Models
 
     cache = _Cache()
-    storage = PersistenceStorage.sqlite(tmp_path / "close.db", cache=cache)
+    storage = PersistenceStorage.in_memory(cache=cache)
     group = RuntimeFeatures[None]("display")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
@@ -960,6 +987,9 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
             exited.set()
     async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_932, Runtime.open(persistence=persistence_932, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None)) as runtime:
         await runtime._state.conversation.sessions.create(_session())
+        # Exercise the owned legacy display drain with the same cache as direct legacy callers.
+        monkeypatch.setattr(runtime._session_service._display_cache, "_cache", cache)
+        monkeypatch.setattr(runtime._session_service, "_cache", cache)
         monkeypatch.setattr(cache, phase, blocked)
         read = asyncio.create_task(runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3))
         await asyncio.wait_for(entered.wait(), 5)
@@ -1039,23 +1069,17 @@ async def test_display_refresh_without_key_value_cache_keeps_fresh_source(cache:
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("sqlite",))
 async def test_display_cache_is_shared_across_readers_without_renewing_capture(
-    tmp_path, monkeypatch, backend,
+    monkeypatch,
 ):
     clock = _clock(monkeypatch)
     cache = _Cache()
-    first_state = _storage(backend, tmp_path)
-    first_state = Persistence(first_state)
+    first_state = Persistence(PersistenceStorage.in_memory())
     await _prepare(first_state, body=True)
     first = _service(first_state, cache)
     detail = await first.refresh("session", principal=_PRINCIPAL, max_age=3)
-    await first_state.close()
-    second_state = _storage(backend, tmp_path)
-    second_state = Persistence(second_state)
-    await second_state.initialize(namespace="display", tenant_id="tenant")
     try:
-        second = _service(second_state, cache)
+        second = _service(first_state, cache)
         writes = cache.writes
         captures = 0
         capture = session_module.capture_session_refresh
@@ -1073,12 +1097,11 @@ async def test_display_cache_is_shared_across_readers_without_renewing_capture(
         assert await second.refresh("session", principal=_PRINCIPAL, max_age=3) == detail
         assert captures == 1 and cache.writes == writes + 1
     finally:
-        await second_state.close()
         await first_state.close()
 
 
 @pytest.mark.parametrize("warm_page", (False, True))
-async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkeypatch, warm_page):
+async def test_display_rebuild_does_not_stack_body_cache_expiry(monkeypatch, warm_page):
     from linktools.ai.persistence import PersistenceDomain
     from linktools.ai.persistence.state import FactQuery
     from linktools.ai.storage import _write_cache
@@ -1087,7 +1110,7 @@ async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkey
     clock = _clock(monkeypatch)
     monkeypatch.setattr(_write_cache, "time", lambda: clock.now)
     cache = _Cache()
-    state = PersistenceStorage.sqlite(tmp_path / "display.db", cache=cache)
+    state = PersistenceStorage.in_memory(cache=cache)
     state = Persistence(state)
     session = await _prepare(state, body=True, attachment=True)
     try:
@@ -1146,7 +1169,10 @@ async def test_persistence_owns_record_cache_publication_beyond_runtime_close(tm
     async with Persistence.open("display", storage=PersistenceStorage.sqlite(tmp_path / "record.db", cache=cache),
                                 tenant_id="tenant") as persistence:
         async with Runtime.open(features=RuntimeFeatures(), persistence=persistence, auto_recover=False):
-            await persistence.conversation.sessions.create(_session())
+            await persistence.execution.executions.create_execution(replace(
+                _execution("independent", status=ExecutionStatus.PENDING_START, prompt="record cache owner"),
+                session_id=None, lineage_kind=ExecutionLineageKind.RUN,
+            ))
             await asyncio.wait_for(entered.wait(), 5)
         assert persistence.ready
         assert not exited.is_set()

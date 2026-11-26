@@ -28,11 +28,11 @@ class SessionTurnSegment:
 def decode_session_lineage(raw: object) -> tuple[SessionTurnSegment, ...]:
     if raw is None:
         return ()
-    if not isinstance(raw, dict) or set(raw) != {"source", "request_id", "config_fingerprint", "segments"}:
+    if not isinstance(raw, dict) or set(raw) != {"source", "request_id", "source_revision", "segments"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     segments = raw["segments"]
-    digest = raw["config_fingerprint"]
-    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+    revision = raw["source_revision"]
+    if type(revision) is not int or revision < 0:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not isinstance(segments, list) or len(segments) > _MAX_SEGMENTS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

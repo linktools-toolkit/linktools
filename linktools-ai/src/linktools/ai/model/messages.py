@@ -7,7 +7,7 @@ import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import cast
 
@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
     BinaryContent, CompactionPart, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
     ModelRequestAttempt, ModelResponse, NativeToolReturnPart,
-    SpeechPart, SystemPromptPart, TextContent, ToolCallPart, ToolReturn, ToolReturnPart, UserContent, UserPromptPart,
+    SpeechPart, SystemPromptPart, TextContent, TextPart, ToolCallPart, ToolReturn, ToolReturnPart, UserContent, UserPromptPart,
 )
 
 try:
@@ -930,7 +930,48 @@ def tool_error_message(part: ToolReturnPart) -> str | None:
     return None
 
 
-__all__ = ['CANONICAL_OUTPUT_TOOL_NAME', 'canonical_structured_output', 'canonical_structured_output_reference', 'THINKING_ELAPSED_MS_METADATA_KEY', 'TOOL_ARGUMENT_PREVIEWS_METADATA_KEY', 'TOOL_ELAPSED_MS_METADATA_KEY', 'bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'session_compaction_summaries', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_error_message', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
+def restore_turn_context(
+    prompt: str | Sequence[UserContent], messages: Sequence[ModelMessage], *, interrupted: bool,
+) -> tuple[ModelMessage, ...]:
+    if interrupted:
+        # Keep an explicit historical boundary: the SDK can merge adjacent
+        # requests when reloading an already completed exchange.
+        content = prompt if isinstance(prompt, str) else list(prompt)
+        timestamp = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return (
+            ModelRequest(parts=[UserPromptPart(content, timestamp=timestamp)]),
+            ModelResponse(parts=[TextPart("[Runtime: This turn was interrupted before a final answer.]")],
+                          timestamp=timestamp),
+        )
+    if not messages:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn messages are missing")
+    restored = prompt if isinstance(prompt, str) else list(prompt)
+    return (substitute_turn_input(messages[0], "", restored), *messages[1:])
+
+
+def substitute_turn_input(
+    message: ModelMessage, expected: str | Sequence[UserContent], value: str | Sequence[UserContent],
+) -> ModelRequest:
+    if not isinstance(message, ModelRequest):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
+    prompts = [part for part in message.parts if isinstance(part, UserPromptPart)]
+    if len(prompts) != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
+    [prompt] = prompts
+    content = prompt.content
+    same_input = (
+        content == expected
+        if isinstance(content, str) or isinstance(expected, str)
+        else tuple(content) == tuple(expected)
+    )
+    if not same_input:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
+    return replace(message, parts=[
+        replace(part, content=value) if part is prompt else part for part in message.parts
+    ])
+
+
+__all__ = ['restore_turn_context', 'substitute_turn_input', 'CANONICAL_OUTPUT_TOOL_NAME', 'canonical_structured_output', 'canonical_structured_output_reference', 'THINKING_ELAPSED_MS_METADATA_KEY', 'TOOL_ARGUMENT_PREVIEWS_METADATA_KEY', 'TOOL_ELAPSED_MS_METADATA_KEY', 'bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'session_compaction_summaries', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_error_message', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 

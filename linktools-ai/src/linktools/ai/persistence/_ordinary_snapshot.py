@@ -311,7 +311,8 @@ def decode_ordinary_snapshot(value: object, *, tenant_id: str, paired_split: boo
             parent_id = row["lineage_json"]["source"]
             parent_key = parent_id.encode("utf-8")
             parent = session_ids.get(parent_key)
-            if parent is None or parent_key == key or inherited > parent["last_turn_no"]:
+            if (parent is None or parent_key == key or inherited > parent["last_turn_no"]
+                    or row["lineage_json"]["source_revision"] >= parent["revision"]):
                 raise _invalid()
             try:
                 if fork_segments(parent_id, lineages[parent_key], inherited) != lineage:

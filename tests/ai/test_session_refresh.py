@@ -2,28 +2,27 @@
 # -*- coding: utf-8 -*-
 """Coordinated session refresh captures fresh authority, admission, and timeline."""
 
-from linktools.ai.persistence import Persistence
 import asyncio
 from contextlib import aclosing
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
 
 from linktools.ai.core import (
     ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeSessions
+from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeSessions
 from linktools.ai.session import SessionDetail
-from linktools.ai.persistence import PersistenceStorage, PersistencePlan
-from linktools.ai.storage import StorageRoute
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.persistence.contracts import ConversationCursor
 from linktools.ai.persistence.state import active_state_scope
 
-from .test_incremental_projection_boundaries import _storage
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_session_timeline import _commit_empty_turn, _execution, _materialize_conversation, _session
 
 pytestmark = pytest.mark.asyncio
@@ -58,13 +57,11 @@ async def _release(state, execution_id):
     )
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("status", (ExecutionStatus.PENDING_START, ExecutionStatus.FAILED))
 async def test_refresh_reconciles_once_outside_metadata_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, status: ExecutionStatus,
+    monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus,
 ) -> None:
-    state = _storage(backend, tmp_path)
-    state = Persistence(state)
+    state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -279,56 +276,6 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
         await state.close()
 
 
-async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: Path) -> None:
-    state = PersistenceStorage.from_plan(PersistencePlan(
-        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
-    ))
-    state = Persistence(state)
-    await state.initialize(namespace="session-refresh", tenant_id="tenant")
-    try:
-        await state.conversation.sessions.create(_session())
-        await _admit(state, status=ExecutionStatus.PENDING_START)
-        checked = []
-        facade = RuntimeSessions(_service(state), object(), start_session=None, bind_session=None, ensure_open=lambda: checked.append(True))
-        detail = await facade.refresh("session", principal=_PRINCIPAL)
-        assert detail.session.active_execution_id == "active"
-        assert detail.timeline.items[0].execution_id == "active"
-        assert checked == [True]
-        assert active_state_scope() is None
-    finally:
-        await state.close()
-
-
-async def test_refresh_idle_has_one_authority_read_and_one_metadata_snapshot(tmp_path: Path) -> None:
-    state = PersistenceStorage.sqlite(tmp_path / "refresh.db")
-    state = Persistence(state)
-    await state.initialize(namespace="session-refresh", tenant_id="tenant")
-    try:
-        await state.conversation.sessions.create(_session())
-        await _admit(state)
-        await _release(state, "active")
-        engine = state.conversation.sessions.state_store.storage_group.context.engine
-        statements, begins = [], []
-        def capture(_connection, _cursor, statement, _parameters, _context, _many):
-            statements.append(statement)
-        def begin(connection):
-            begins.append(connection)
-        event.listen(engine.sync_engine, "before_cursor_execute", capture)
-        event.listen(engine.sync_engine, "begin", begin)
-        try:
-            detail = await _service(state).refresh("session", principal=_PRINCIPAL)
-        finally:
-            event.remove(engine.sync_engine, "before_cursor_execute", capture)
-            event.remove(engine.sync_engine, "begin", begin)
-        assert detail.timeline.items[0].execution_id == "active"
-        assert len(begins) == 2
-        # The metadata snapshot reads the timeline counter and window together.
-        assert sum(statement.lstrip().upper().startswith("SELECT") for statement in statements) == 4
-    finally:
-        await state.close()
-
-
 @pytest.mark.parametrize("cancel", (False, True))
 async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
     monkeypatch: pytest.MonkeyPatch, cancel: bool,
@@ -463,35 +410,55 @@ async def test_refresh_cancellation_during_metadata_releases_scope_and_consumer(
         await state.close()
 
 
-async def test_refresh_live_admission_reuses_the_metadata_snapshot(tmp_path: Path) -> None:
-    state = PersistenceStorage.sqlite(tmp_path / "live-refresh.db")
-    state = Persistence(state)
-    await state.initialize(namespace="session-refresh", tenant_id="tenant")
-    try:
-        await state.conversation.sessions.create(_session())
-        await _admit(state, status=ExecutionStatus.PENDING_START)
-        engine = state.conversation.sessions.state_store.storage_group.context.engine
-        statements, begins = [], []
+@pytest.mark.parametrize("active", (False, True))
+async def test_sql_refresh_reads_session_and_history_without_writing(
+    tmp_path: Path, active: bool,
+) -> None:
+    class HostPolicy(TenantAuthorizationPolicy):
+        pass
 
-        def capture(_connection, _cursor, statement, _parameters, _context, _many):
-            statements.append(statement)
+    entered, release = asyncio.Event(), asyncio.Event()
 
-        def begin(connection):
-            begins.append(connection)
+    async def model(messages, info):
+        if active:
+            entered.set()
+            await release.wait()
+        return ModelResponse(parts=[TextPart("answer")])
 
-        event.listen(engine.sync_engine, "before_cursor_execute", capture)
-        event.listen(engine.sync_engine, "begin", begin)
+    namespace = "session-refresh"
+    features = model_features(_Models(_UsageFunctionModel(model)), RuntimeFeatures(namespace))
+    storage = PersistenceStorage.sqlite(tmp_path / "refresh.db")
+    async with Runtime.open(namespace, storage=storage, features=features, authorization=HostPolicy()) as runtime:
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turn = await runtime.sessions.start("session", "question", agent="default", principal=principal,
+                                            idempotency_key="question")
         try:
-            detail = await _service(state).refresh("session", principal=_PRINCIPAL)
+            if active:
+                await asyncio.wait_for(entered.wait(), 5)
+                expected = []
+            else:
+                expected = [(await turn.wait_final(timeout_seconds=5)).view]
+            engine = runtime._state.session_turns._context.engine.sync_engine
+            statements = []
+
+            def capture(_connection, _cursor, statement, _parameters, _context, _many):
+                if statement != "BEGIN":
+                    statements.append(_context.compiled.statement if _context.compiled else None)
+
+            event.listen(engine, "before_cursor_execute", capture)
+            try:
+                detail = await runtime.sessions.refresh("session", principal=principal)
+            finally:
+                event.remove(engine, "before_cursor_execute", capture)
+            assert detail["session"]["active_turn_id"] == (turn.key.turn_id if active else None)
+            assert detail["timeline"]["items"] == expected
+            assert 0 < len(statements) <= 4
+            assert all(statement is not None and statement.is_select for statement in statements)
         finally:
-            event.remove(engine.sync_engine, "before_cursor_execute", capture)
-            event.remove(engine.sync_engine, "begin", begin)
-        assert detail.session.active_execution_id == "active"
-        assert detail.timeline.items[0].execution_id == "active"
-        assert len(begins) == 2
-        assert sum(sql.lstrip().upper().startswith("SELECT") for sql in statements) <= 6
-    finally:
-        await state.close()
+            release.set()
+        if active:
+            await turn.wait_final(timeout_seconds=5)
 
 
 @pytest.mark.parametrize("status", (ExecutionStatus.PENDING_START, ExecutionStatus.FAILED))

@@ -510,7 +510,13 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
                 key_bytes = sum(column.type.length * (1 if isinstance(column.type, LargeBinary) else 4)
                                 if getattr(column.type, "length", None) else 1
                                 for column in (table.c[name] for name in columns))
-                assert key_bytes == (896 if "idempotency_key" in columns else 769 if "pruned" in columns else 768)
+                assert key_bytes == {
+                    ("store_locator", "run_id"): 512,
+                    ("store_locator", "conversation_id"): 768,
+                    ("store_locator", "parent_run_id"): 512,
+                    ("store_locator", "run_id", "idempotency_key"): 640,
+                    ("store_locator", "run_id", "pruned"): 513,
+                }[columns]
                 assert key_bytes <= 3072
 
 

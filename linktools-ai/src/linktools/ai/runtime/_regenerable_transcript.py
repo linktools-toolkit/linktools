@@ -11,10 +11,9 @@ from pydantic_ai.messages import (
     ModelResponse,
     SystemPromptPart,
     UserContent,
-    UserPromptPart,
 )
 
-from ..model.messages import canonical_structured_output, canonical_structured_output_reference
+from ..model.messages import canonical_structured_output, canonical_structured_output_reference, restore_turn_context, substitute_turn_input
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..model.ordinary_transcript import decode_ordinary_transcript, encode_ordinary_transcript
@@ -73,7 +72,7 @@ def _canonical_delta(
     suffix = tuple(messages[prefix:])
     if not suffix or reply_from_turn(suffix, structured=structured) != output:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Terminal output cannot be projected from the transcript")
-    return (_substitute_input(suffix[0], prompt, ""), *suffix[1:])
+    return (substitute_turn_input(suffix[0], prompt, ""), *suffix[1:])
 
 
 def decode_regenerable_turn(
@@ -81,16 +80,7 @@ def decode_regenerable_turn(
     instructions: list[str] | None = None, system_prompt: str | None = None,
 ) -> tuple[ModelMessage, ...]:
     messages = decode_ordinary_transcript(payload, instructions=instructions, system_prompt=system_prompt)
-    return restore_turn_prompt(prompt, messages)
-
-
-def restore_turn_prompt(
-    prompt: str | Sequence[UserContent], messages: Sequence[ModelMessage],
-) -> tuple[ModelMessage, ...]:
-    if not messages:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn messages are missing")
-    restored = prompt if isinstance(prompt, str) else list(prompt)
-    return (_substitute_input(messages[0], "", restored), *messages[1:])
+    return restore_turn_context(prompt, messages, interrupted=False)
 
 
 def reply_from_turn(messages: Sequence[ModelMessage], *, structured: bool = False) -> JsonValue:
@@ -100,25 +90,3 @@ def reply_from_turn(messages: Sequence[ModelMessage], *, structured: bool = Fals
     if not isinstance(response, ModelResponse) or response.text is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no final text")
     return {"text": response.text}
-
-
-def _substitute_input(
-    message: ModelMessage, expected: str | Sequence[UserContent], value: str | Sequence[UserContent],
-) -> ModelRequest:
-    if not isinstance(message, ModelRequest):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
-    prompts = [part for part in message.parts if isinstance(part, UserPromptPart)]
-    if len(prompts) != 1:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
-    [prompt] = prompts
-    content = prompt.content
-    same_input = (
-        content == expected
-        if isinstance(content, str) or isinstance(expected, str)
-        else tuple(content) == tuple(expected)
-    )
-    if not same_input:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
-    return replace(message, parts=[
-        replace(part, content=value) if part is prompt else part for part in message.parts
-    ])

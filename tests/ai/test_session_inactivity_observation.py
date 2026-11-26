@@ -14,13 +14,15 @@ from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.coordination import PendingTurnCoordination
 from linktools.ai.persistence.contracts import ExecutionRecoveryDetail, PendingDeferredCall, PendingToolContinuation
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._session import RuntimeSessionService
 import linktools.ai.runtime._session as session_module
 from linktools.ai.storage import InMemoryCacheBackend, StoredPayload
 
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_incremental_projection_boundaries import _storage
 from .test_session_timeline import _commit_empty_turn, _execution, _session
 
@@ -89,12 +91,11 @@ async def _cancel_observer(task):
         await task
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("terminal", (False, True))
 async def test_inactive_observation_does_not_write_or_release_retained_turn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, terminal: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: bool,
 ) -> None:
-    async with _state(tmp_path, backend) as state:
+    async with _state(tmp_path) as state:
         if terminal:
             await _admit(state, status=ExecutionStatus.SUCCEEDED)
         sessions = state.conversation.sessions
@@ -202,7 +203,7 @@ async def test_observer_deadline_is_distinct_from_dependency_timeout(
             await asyncio.Event().wait()
 
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, sleep=asyncio.sleep))
+            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
             task = asyncio.create_task(_service(state, owner=blocked_owner).wait_inactive(
                 "session", principal=_OWNER, timeout_seconds=None,
             ))
@@ -259,11 +260,11 @@ async def test_current_execution_permission_is_required(tmp_path: Path) -> None:
         assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
-@pytest.mark.parametrize("change", ("sql_admit_release", "local_membership"))
+@pytest.mark.parametrize("change", ("admit_release", "local_membership"))
 async def test_absent_admission_aba_retries_before_reporting_inactive(
     tmp_path: Path, change: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _state(tmp_path, "sqlite") as state:
+    async with _state(tmp_path) as state:
         epoch = 0
         observed_change = False
         retry_reached = AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -277,7 +278,7 @@ async def test_absent_admission_aba_retries_before_reporting_inactive(
             if observed_change:
                 raise retry_reached
             observed_change = True
-            if change == "sql_admit_release":
+            if change == "admit_release":
                 await _admit(state, status=ExecutionStatus.SUCCEEDED)
                 await state.conversation.sessions.release_execution(
                     "session", tenant_id="tenant", execution_id="execution",
@@ -290,12 +291,11 @@ async def test_absent_admission_aba_retries_before_reporting_inactive(
                 epoch += 2
             return None
 
-        async def yield_retry(delay):
-            # Keep a scheduling boundary without waiting for the production backoff.
-            await asyncio.sleep(0)
+        def timeout(delay):
+            return asyncio.timeout(0 if delay == 1.0 else delay)
 
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=asyncio.timeout, sleep=yield_retry))
+            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
             with pytest.raises(AIError) as error:
                 await _service(state, observe=observe, owner=owner).wait_inactive(
                     "session", principal=_OWNER, timeout_seconds=5,
@@ -424,7 +424,7 @@ async def test_observation_budget_covers_complete_authoritative_pass(
             return await read(callback)
 
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, sleep=asyncio.sleep))
+            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
             patch.setattr(state.conversation.sessions.state_store, "read", source)
             if phase == "projection":
                 async def project(*args, **kwargs):
@@ -468,7 +468,7 @@ async def test_observation_budget_is_shared_across_source_and_owner_reads(
             await asyncio.Event().wait()
 
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, sleep=asyncio.sleep))
+            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
             patch.setattr(state.conversation.sessions.state_store, "read", source)
             task = asyncio.create_task(_service(state, owner=owner).wait_inactive(
                 "session", principal=_OWNER, timeout_seconds=60, observation_timeout_seconds=7,
@@ -503,11 +503,9 @@ async def test_observation_budget_excludes_passive_waits(
             deadline = asyncio.timeout(delay)
             if delay in (7, 60):
                 deadlines[delay] = deadline
+            elif delay == (1.0 if passive == "retry" else 30):
+                waiting.set()
             return deadline
-
-        async def sleep(delay):
-            waiting.set()
-            await asyncio.Event().wait()
 
         def observe(session_id, *, tenant_id):
             return None, epoch
@@ -520,7 +518,7 @@ async def test_observation_budget_excludes_passive_waits(
 
         waiter = _BlockingWaiter() if passive == "local" else None
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, sleep=sleep))
+            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
             task = asyncio.create_task(_service(state, observe=observe, owner=owner, waiter=waiter).wait_inactive(
                 "session", principal=_OWNER, timeout_seconds=60, observation_timeout_seconds=7,
             ))
@@ -574,7 +572,7 @@ async def test_overall_deadline_keeps_wait_timeout_during_observation(
             await asyncio.Event().wait()
 
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, sleep=asyncio.sleep))
+            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
             task = asyncio.create_task(_service(state, owner=owner).wait_inactive(
                 "session", principal=_OWNER, timeout_seconds=60, observation_timeout_seconds=7,
             ))
@@ -630,7 +628,7 @@ async def test_budget_does_not_hide_backend_timeout_or_cancellation_settlement(
                 raise
 
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, sleep=asyncio.sleep))
+            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
             task = asyncio.create_task(_service(state, owner=slow_cancel).wait_inactive(
                 "session", principal=_OWNER, timeout_seconds=60, observation_timeout_seconds=7,
             ))
@@ -675,7 +673,7 @@ async def test_dependency_suppressing_cancellation_cannot_return_idle_after_dead
                 return None
 
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, sleep=asyncio.sleep))
+            patch.setattr(session_module, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
             task = asyncio.create_task(_service(state, owner=suppress_cancel).wait_inactive(
                 "session", principal=_OWNER, timeout_seconds=60, observation_timeout_seconds=7,
             ))
@@ -689,6 +687,135 @@ async def test_dependency_suppressing_cancellation_cannot_return_idle_after_dead
                     with pytest.raises(AIError) as caught:
                         await asyncio.wait_for(task, 5)
                     assert caught.value.code is ErrorCode.WAIT_TIMEOUT
+            finally:
+                if not task.done():
+                    await _cancel_observer(task)
+
+
+@pytest.mark.parametrize("revoked", (False, True))
+async def test_native_wait_rechecks_authorization_after_active_turn_and_does_not_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revoked: bool,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart
+
+    entered, release, observing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    principal = Principal("observer", "tenant", "service")
+    producer = Principal("producer", "tenant", "service")
+    denied = False
+
+    class Authorization(TenantAuthorizationPolicy):
+        async def authorize(self, actor, action, resource):
+            await super().authorize(actor, action, resource)
+            if actor == principal and action is AuthorizationAction.SESSION_READ:
+                if denied:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                observing.set()
+
+    async def model(_messages, _info):
+        entered.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = RuntimeFeatures("native-inactivity")
+    features.agent("default", model="default", allow_tools=())
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    async with Persistence.open("native-inactivity", tenant_id="tenant",
+                                storage=PersistenceStorage.sqlite(tmp_path / "native.db")) as state:
+        async with Runtime.open(persistence=state, features=features, authorization=Authorization()) as runtime:
+            await runtime.sessions.create_turn_session("session", principal=producer)
+            turn = await runtime.sessions.start(
+                "session", "question", principal=producer, agent="default", idempotency_key="first",
+            )
+            await asyncio.wait_for(entered.wait(), 5)
+            observer = asyncio.create_task(runtime.sessions.wait_inactive(
+                "session", principal=principal, timeout_seconds=5, observation_timeout_seconds=5,
+            ))
+            try:
+                await asyncio.wait_for(observing.wait(), 5)
+                assert not observer.done()
+                denied = revoked
+                release.set()
+                if revoked:
+                    with pytest.raises(AIError) as error:
+                        await asyncio.wait_for(observer, 5)
+                    assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+                else:
+                    assert (await asyncio.wait_for(observer, 5))["active_turn_id"] is None
+                assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+
+                async def forbidden_mutation(*args, **kwargs):
+                    pytest.fail("observing inactivity must not mutate authoritative state")
+
+                denied = False
+                with monkeypatch.context() as patch:
+                    patch.setattr(type(state.session_turns._context), "run_mutation", forbidden_mutation)
+                    assert (await runtime.sessions.wait_inactive(
+                        "session", principal=principal, timeout_seconds=5, observation_timeout_seconds=5,
+                    ))["active_turn_id"] is None
+            finally:
+                release.set()
+                if not observer.done():
+                    await _cancel_observer(observer)
+
+
+@pytest.mark.parametrize("timeout_kind", ("overall", "observation", "backend"))
+async def test_native_wait_distinguishes_deadlines_and_backend_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout_kind: str,
+) -> None:
+    from linktools.ai.runtime import _domains
+    from pydantic_ai.models.test import TestModel
+
+    entered = asyncio.Event()
+    observer_principal = Principal("observer", "tenant", "service")
+    producer = Principal("producer", "tenant", "service")
+    backend_failure = TimeoutError("authorization backend read failed")
+    deadlines = {}
+
+    def timeout(delay):
+        deadline = asyncio.timeout(delay)
+        deadlines[delay] = deadline
+        return deadline
+
+    class Authorization(TenantAuthorizationPolicy):
+        async def authorize(self, actor, action, resource):
+            await super().authorize(actor, action, resource)
+            if actor == observer_principal and action is AuthorizationAction.SESSION_READ:
+                if timeout_kind == "backend":
+                    raise backend_failure
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # A dependency that consumes cancellation cannot return an
+                    # apparently successful idle observation after its deadline.
+                    return None
+
+    async with Runtime.open(
+        "native-deadline", tenant_id="tenant", storage=PersistenceStorage.sqlite(tmp_path / "deadline.db"),
+        features=model_features(_Models(TestModel())), authorization=Authorization(),
+    ) as runtime:
+        await runtime.sessions.create_turn_session("session", principal=producer)
+        with monkeypatch.context() as patch:
+            patch.setattr(_domains, "asyncio", SimpleNamespace(timeout=timeout, Event=asyncio.Event))
+            wait = runtime.sessions.wait_inactive(
+                "session", principal=observer_principal, timeout_seconds=60, observation_timeout_seconds=7,
+            )
+            if timeout_kind == "backend":
+                with pytest.raises(TimeoutError) as error:
+                    await wait
+                assert error.value is backend_failure
+                return
+            task = asyncio.create_task(wait)
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                deadlines[60 if timeout_kind == "overall" else 7].reschedule(asyncio.get_running_loop().time())
+                if timeout_kind == "overall":
+                    with pytest.raises(AIError) as error:
+                        await asyncio.wait_for(task, 5)
+                    assert error.value.code is ErrorCode.WAIT_TIMEOUT
+                else:
+                    with pytest.raises(TimeoutError, match="session inactivity observation timed out"):
+                        await asyncio.wait_for(task, 5)
             finally:
                 if not task.done():
                     await _cancel_observer(task)

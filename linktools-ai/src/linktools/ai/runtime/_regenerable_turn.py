@@ -9,10 +9,9 @@ import secrets
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
 
 from linktools.core import environ
-from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -25,7 +24,7 @@ from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, 
 from ..errors import AIError, ErrorCode
 from ..execution import ExecutionInputContext
 from ..inputs import stored_input_attachment_views, stored_user_input_view
-from ..model.messages import binary_content_usage, encode_model_messages
+from ..model.messages import binary_content_usage, encode_model_messages, restore_turn_context
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.contracts import ToolOperationRecord
@@ -38,7 +37,7 @@ from ..session import SessionContext, SessionTurnAdmission, project_tool_process
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta, _NativeSubagentLeaf
 from .agent_execution import resolve_execution_policy
-from ._regenerable_transcript import prepare_native_turn_transcript, reply_from_turn, restore_turn_prompt
+from ._regenerable_transcript import prepare_native_turn_transcript, reply_from_turn
 from ._step_store import RuntimeStepStore
 from ._repository_instructions import (
     _RepositoryInstructionBoundary,
@@ -513,11 +512,9 @@ class _RegenerableTurnRunner:
             decode_session_lineage(source["lineage_json"]), principal=principal,
             tenant_id=tenant_id, authorization=authorization,
         )
-        config = source["config_json"]
         return await self._store.fork_session(
             source_id, target_id, request_id=request_id,
-            expected_revision=expected_revision if source["revision"] == expected_revision else None,
-            config={"metadata": config.get("metadata", {}), "cwd": config.get("cwd")},
+            expected_revision=expected_revision, authorized_revision=source["revision"],
         )
 
     async def lookup_admission(
@@ -1640,7 +1637,7 @@ class _RegenerableTurnRunner:
             if remaining < 0 or remaining_media < 0:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
             restored = await self._restore_prompt(prior["prompt"], prior_input)
-            history.extend(self._context_messages(restored, position.messages, interrupted=position.interrupted))
+            history.extend(restore_turn_context(restored, position.messages, interrupted=position.interrupted))
         return tuple(history)
 
     async def _reserve_attached_graph_turn(
@@ -1961,27 +1958,11 @@ class _RegenerableTurnRunner:
             restored = await self._restore_prompt(candidate_prompt, stored)
             if not history and not candidate.interrupted:
                 baseline = candidate.turn_id, candidate.seed_checkpoint_prefix
-            history.append(self._context_messages(restored, candidate.messages, interrupted=candidate.interrupted))
+            history.append(restore_turn_context(restored, candidate.messages, interrupted=candidate.interrupted))
             remaining -= size
             remaining_media -= media_bytes
             context_from = candidate.turn_no
         return context_from, [message for messages in reversed(history) for message in messages], interrupted, baseline, projection
-
-    @staticmethod
-    def _context_messages(
-        prompt: str | Sequence[UserContent], messages: Sequence[ModelMessage], *, interrupted: bool,
-    ) -> tuple[ModelMessage, ...]:
-        if interrupted:
-            # Keep an explicit historical boundary: the SDK can merge adjacent
-            # requests when reloading an already completed exchange.
-            content = prompt if isinstance(prompt, str) else list(prompt)
-            timestamp = datetime(1970, 1, 1, tzinfo=timezone.utc)
-            return (
-                ModelRequest(parts=[UserPromptPart(content, timestamp=timestamp)]),
-                ModelResponse(parts=[TextPart("[Runtime: This turn was interrupted before a final answer.]")],
-                              timestamp=timestamp),
-            )
-        return restore_turn_prompt(prompt, messages)
 
     @staticmethod
     def _stored_input(request: Mapping[str, JsonValue]) -> StoredUserInput | None:
@@ -2006,16 +1987,7 @@ class _RegenerableTurnRunner:
     async def _restore_prompt(
         self, prompt: str, stored: StoredUserInput | None,
     ) -> str | Sequence[UserContent]:
-        if stored is None:
-            return prompt
-        if stored.codec == "text":
-            if prompt:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Turn input has two text owners")
-            return await self._store.read_scalar_input(stored)
-        detached = await self._input_materializer.restore(stored)
-        if isinstance(detached, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Detached turn input is not multipart")
-        return (*detached, prompt) if prompt else tuple(detached)
+        return await self._input_materializer.restore_session_input(prompt, stored, read_scalar=self._store.read_scalar_input)
 
     def _instruction_boundary(
         self, turn: _AdmittedTurn, binding: AgentBinding,

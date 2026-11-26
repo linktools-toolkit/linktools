@@ -143,6 +143,8 @@ def _backend() -> LocalExecutionBackend:
     backend._pending_turns = _PendingExecutionTurns()
     backend._turn_monitors = {}
     backend._turn_owners = {}
+    backend._native_parents = {}
+    backend._execution_trace_atomic = True
 
     async def no_resolution_operations(
         *_args: object, **_kwargs: object

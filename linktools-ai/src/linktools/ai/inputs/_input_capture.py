@@ -35,9 +35,10 @@ from ..execution import ExecutionInputContext, RuntimePayloadRef
 from ._context_archive import ExecutionContextArchive
 from ..model import MaterializedUserContent
 from ..model.attachments import read_attachment_payload
+from ..model.messages import restore_turn_context
 from ..persistence.objects import read_runtime_object, put_runtime_object
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
-from ..execution import ExecutionResult, ExecutionView
+from ..execution import ExecutionRecord, ExecutionResult, ExecutionView
 from ..persistence import Persistence
 from ..persistence.objects import ObjectKeyFactory
 from ..core import PromptLimits
@@ -598,6 +599,38 @@ class InputCaptures:
         )
         return instructions.to_payload()
 
+    async def _linked_graph_input_context(
+        self, record: ExecutionRecord, principal: Principal,
+    ) -> ExecutionInputContext | None:
+        turns = None if self._persistence is None else self._persistence.session_turns
+        if turns is None or not record.requires_task_invocation_capture or record.session_id is not None:
+            return None
+        admitted = Principal(record.principal_id, principal.tenant_id, record.principal_kind)
+        captured = await turns.read_linked_graph_context(
+            record.execution_id, admitted=admitted, principal=principal, authorization=self._authorization,
+        )
+        if captured is None:
+            return None
+        positions, metadata, instructions = captured
+        history = []
+        materializer = None
+        for position in positions:
+            prior = position.request
+            prompt = prior["prompt"]
+            if "input" in prior:
+                if materializer is None:
+                    materializer = ExecutionInputMaterializer(
+                        None, PromptLimits(), object_store=self._objects(PersistenceDomain.EXECUTION),
+                    )
+                prompt = await materializer.restore_session_input(
+                    prompt, decode_domain(prior["input"], StoredUserInput), read_scalar=turns.read_scalar_input,
+                )
+            history.extend(restore_turn_context(prompt, position.messages, interrupted=position.interrupted))
+        return ExecutionInputContext.from_messages(
+            history, session_metadata=metadata, repository_instructions=instructions,
+            replace_history_system_prompt=True,
+        )
+
     async def _capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
         principal = request.principal
         repository = self._execution_repositories.executions
@@ -608,25 +641,30 @@ class InputCaptures:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         await self._authorize(principal, ResourceKind.EXECUTION, execution_id, AuthorizationAction.EXECUTION_READ, record.principal_id)
         await self._authorize(principal, ResourceKind.EXECUTION, execution_id, AuthorizationAction.EXECUTION_CAPTURE_INPUT, record.principal_id)
+        invocation = await self._get(self._key(principal.tenant_id, "invocation", execution_id))
+        if invocation is None and record.requires_task_invocation_capture:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE,
+                          safe_details={"reason": "task_invocation_not_retained"})
+        node = decode_domain(invocation["node"], TaskNode) if isinstance(invocation, Mapping) else None
         is_agent = isinstance(record.binding, AgentBindingContract)
         context = None
-        if is_agent and request.context_policy == "captured":
+        if (is_agent and request.context_policy == "captured"
+                and record.input_context is None and record.memory_scope is None):
+            context = await self._linked_graph_input_context(record, principal)
+        if context is None and is_agent and request.context_policy == "captured":
             if record.input_context is not None:
                 context = await self._context_archive.load(record.input_context)
                 if context.unavailable_reason is not None:
                     raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": context.unavailable_reason})
             elif any(value is not None for value in (record.session_id, record.memory_scope, record.previous_execution_id, record.fork_base_execution_id)):
                 raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "pre_input_context_not_retained"})
+            elif node is not None and node.input.get("session_id") is not None:
+                raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "pre_input_context_not_retained"})
             else:
                 instructions = await self._admitted_repository_instructions(record.repository_instructions)
                 context = ExecutionInputContext.from_messages((), repository_instructions=instructions)
-        invocation = await self._get(self._key(principal.tenant_id, "invocation", execution_id))
-        if invocation is None and record.requires_task_invocation_capture:
-            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE,
-                          safe_details={"reason": "task_invocation_not_retained"})
         task_input = None
-        if isinstance(invocation, Mapping):
-            node = decode_domain(invocation["node"], TaskNode)
+        if node is not None:
             states = decode_domain(invocation["dependency_states"], dict[str, TaskDependencyState])
             dependencies = await self._capture_dependencies(node, invocation["graph_id"], states, principal)
             admission = await self._tasks.admissions.get(invocation["graph_id"], tenant_id=principal.tenant_id)

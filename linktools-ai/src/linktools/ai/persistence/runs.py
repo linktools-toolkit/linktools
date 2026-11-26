@@ -1369,15 +1369,23 @@ class RuntimeAgentRunStore(AgentRunStore):
                 or messages[:start] != tuple(approved_prefix)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         observation = projection.observation
-        retained_end = end if observation is None else observation.base_message_count
-        if observation is not None and (
-            observation.owner_id != agent_run_id or observation.target_message_count != end
-            or not 0 <= retained_end <= end
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
+        traced_count = (projection.target_transcript_message_count if observation is None
+                        else observation.target_message_count)
         if native_alias is not None and native_alias.count != end:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if traced_count == end - start and start:
+            # Trace can start at the first request made by this run, whereas
+            # the Step checkpoint also includes its accepted conversation prefix.
+            if native_alias is not None:
+                native_alias = native_alias.slice(start, end)
+            messages = messages[start:]
+            start, end = 0, len(messages)
+        retained_end = end if observation is None else observation.base_message_count
+        if (traced_count != end or observation is not None and (
+            observation.owner_id != agent_run_id or not 0 <= retained_end <= end
+        )):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
         retained = await archive.transcript_repository.capture_raw_native_range(
             agent_run_id, start=0, end=retained_end,
         )

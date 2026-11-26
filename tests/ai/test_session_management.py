@@ -269,6 +269,39 @@ async def test_native_fork_cannot_copy_metadata_from_a_different_revision(tmp_pa
         assert child["metadata"] == {"value": "current"}
 
 
+async def test_native_fork_replay_keeps_original_revision_and_configuration(tmp_path) -> None:
+    class Policy(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            await super().authorize(principal, action, resource)
+            if principal.principal_id == "denied" and action is AuthorizationAction.SESSION_CREATE:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    async with (
+        Persistence.open("session-owner", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+                         tenant_id="tenant") as state,
+        Runtime.open(persistence=state, features=RuntimeFeatures("session-owner"), authorization=Policy()) as runtime,
+    ):
+        sessions = runtime.sessions
+        source = await sessions.create_turn_session("source", principal=_PRINCIPAL, metadata={"value": "original"})
+        request = {"expected_revision": source["revision"], "idempotency_key": "fork"}
+        assert await sessions.fork_turn_session("source", "child", principal=_PRINCIPAL, **request)
+        source = await runtime.history.turn_session_state("source", principal=_PRINCIPAL)
+        assert await sessions.update_turn_session(
+            "source", principal=_PRINCIPAL, expected_revision=source["revision"], metadata={"value": "updated"},
+        )
+        updated = await runtime.history.turn_session_state("source", principal=_PRINCIPAL)
+        with pytest.raises(AIError) as denied:
+            await sessions.fork_turn_session("source", "child", principal=Principal("denied", "tenant"), **request)
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert await sessions.fork_turn_session("source", "child", principal=_PRINCIPAL, **request)
+        assert await runtime.history.turn_session_state("source", principal=_PRINCIPAL) == updated
+        assert (await runtime.history.turn_session_state("child", principal=_PRINCIPAL))["metadata"] == {"value": "original"}
+        for conflict in (dict(request, expected_revision=updated["revision"]), dict(request, idempotency_key="other")):
+            with pytest.raises(AIError) as mismatched:
+                await sessions.fork_turn_session("source", "child", principal=_PRINCIPAL, **conflict)
+            assert mismatched.value.code is ErrorCode.STORAGE_CONFLICT
+
+
 @pytest.mark.parametrize("resource", ("session", "execution"))
 async def test_management_authorization_uses_one_sql_select(tmp_path, resource) -> None:
     from sqlalchemy import event
