@@ -6,7 +6,7 @@ import asyncio
 import os
 from argparse import Namespace
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from linktools.ai.model import ModelBinding
     from linktools.ai.core import JsonValue
     from linktools.ai.runtime import Runtime
-    from linktools.ai.session import SessionTurnNotice, ToolProcessItem
     from linktools.ai.persistence import PersistenceStorage
 
 MODEL_APIS = ("openai", "openai-responses", "anthropic")
@@ -216,83 +215,38 @@ class LocalRuntime:
     workspace: Workspace
 
 
-class _LocalSessionFeed:
-    def __init__(self, runtime: "Runtime") -> None:
-        self.runtime = runtime
-        self._callbacks: dict[str, set["Callable[[str, ToolProcessItem], None]"]] = {}
-
-    def subscribe(
-        self, session_id: str, on_process: "Callable[[str, ToolProcessItem], None]",
-    ) -> "Callable[[], None]":
-        callbacks = self._callbacks.setdefault(session_id, set())
-        callbacks.add(on_process)
-
-        def unsubscribe() -> None:
-            callbacks.discard(on_process)
-            if not callbacks:
-                self._callbacks.pop(session_id, None)
-
-        return unsubscribe
-
-    def receive(self, value: dict[str, object]) -> None:
-        # This authenticated local carrier is advisory: never install its
-        # revision, occupancy, or terminal state as authoritative.
-        if value.get("kind") == "ordinary_turn":
-            session_id, turn_id, revision = value.get("session_id"), value.get("turn_id"), value.get("revision")
-            phase = value.get("phase")
-            if (
-                self.runtime.sessions.supports_turn_sessions
-                and value.get("namespace") == self.runtime.namespace
-                and value.get("tenant_id") == self.runtime.tenant_id
-                and phase in ("admitted", "cancelling", "terminal", "waiting")
-                and isinstance(session_id, str) and isinstance(turn_id, str)
-                and type(revision) is int and revision >= 1
-            ):
-                self.runtime.sessions.invalidate_turn_session(session_id, turn_id, revision=revision, phase=phase)
-            return
-        if self.runtime.sessions.supports_turn_sessions:
-            return
-        kind, session_id, execution_id = value.get("kind"), value.get("session_id"), value.get("execution_id")
-        if not isinstance(session_id, str) or not session_id or not isinstance(execution_id, str) or not execution_id:
-            return
-        if kind in ("admitted", "terminal"):
-            self.runtime.sessions.invalidate(session_id)
-        elif kind == "tool" and self._callbacks.get(session_id):
-            row = value.get("process")
-            if not isinstance(row, dict):
-                return
-            from linktools.ai.session import ToolProcessItem
-
-            item = ToolProcessItem.from_notice(row)
-            if item is None:
-                return
-            for callback in tuple(self._callbacks[session_id]):
-                callback(execution_id, item)
+def _receive_local_turn(runtime: "Runtime", value: dict[str, object]) -> None:
+    # Authenticated notices are advisory; never install their revision or state as authoritative.
+    if (value.get("kind") != "ordinary_turn" or value.get("namespace") != runtime.namespace
+            or value.get("tenant_id") != runtime.tenant_id):
+        return
+    session_id, turn_id, revision = value.get("session_id"), value.get("turn_id"), value.get("revision")
+    phase = value.get("phase")
+    if (phase in ("admitted", "cancelling", "terminal", "waiting")
+            and isinstance(session_id, str) and isinstance(turn_id, str)
+            and type(revision) is int and revision >= 1):
+        runtime.sessions.invalidate_turn_session(session_id, turn_id, revision=revision, phase=phase)
 
 
 @asynccontextmanager
-async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "AsyncIterator[_LocalSessionFeed | None]":
+async def local_turn_notices(local: LocalRuntime, *, receive: bool = False) -> "AsyncIterator[None]":
     from ._session_notices import session_notice_publisher, session_notice_receiver
 
-    feed = _LocalSessionFeed(local.runtime) if receive else None
+    runtime = local.runtime
     runtime_root = _local_runtime_root(local.workspace)
     async with AsyncExitStack() as stack:
-        receiver = None if feed is None else await stack.enter_async_context(session_notice_receiver(runtime_root, feed.receive))
+        receiver = None
+        if receive:
+            receiver = await stack.enter_async_context(
+                session_notice_receiver(runtime_root, lambda notice: _receive_local_turn(runtime, notice))
+            )
         offer = await stack.enter_async_context(session_notice_publisher(runtime_root, exclude=receiver))
 
-        if local.runtime.sessions.supports_turn_sessions:
-            def publish_lifecycle(notice: "dict[str, JsonValue]") -> None:
-                offer({
-                    **notice, "namespace": local.runtime.namespace, "tenant_id": local.runtime.tenant_id,
-                })
+        def publish_lifecycle(notice: "dict[str, JsonValue]") -> None:
+            offer({**notice, "namespace": runtime.namespace, "tenant_id": runtime.tenant_id})
 
-            stack.callback(local.runtime.sessions.observe_turn_lifecycle(publish_lifecycle))
-        else:
-            def publish(notice: "SessionTurnNotice") -> None:
-                offer(asdict(notice), discover=notice.kind != "tool")
-
-            stack.callback(local.runtime.sessions.observe_turns(publish))
-        yield feed
+        stack.callback(runtime.sessions.observe_turn_lifecycle(publish_lifecycle))
+        yield
 
 
 @asynccontextmanager

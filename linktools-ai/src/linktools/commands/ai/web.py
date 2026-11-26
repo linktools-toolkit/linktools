@@ -50,11 +50,11 @@ class Command(BaseCommand):
                     shutdown_event.set()
                     await super().shutdown(sockets=sockets)
 
-            async with local_turn_notices(local, receive=True) as notices:
+            async with local_turn_notices(local, receive=True):
                 app = create_app(
                     runtime=local.runtime, metrics=local.metrics,
                     status=local.status, capabilities=local.capabilities, shutdown_event=shutdown_event,
-                    session_notices=notices, local_workspace=True,
+                    local_workspace=True,
                 )
                 url = f"http://127.0.0.1:{args.port}"
                 self.logger.info("AI Web console: %s", url)

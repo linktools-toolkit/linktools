@@ -95,9 +95,8 @@ async def test_other_process_turns_use_committed_notices_and_targeted_readback_w
     async with _open_local_runtime(workspace, model=_Models(_UsageFunctionModel(forbidden_model))) as local:
         runtime = local.runtime
         await runtime.sessions.create_turn_session("session", principal=runtime.default_principal, idempotency_key="create")
-        async with local_turn_notices(local, receive=True) as feed:
-            assert feed is not None
-            app = create_app(runtime=runtime, session_notices=feed, local_workspace=True)
+        async with local_turn_notices(local, receive=True):
+            app = create_app(runtime=runtime, local_workspace=True)
             path = "/api/session/events"
             scope = {
                 "type": "http", "asgi": {"version": "3.0", "spec_version": "2.0"}, "method": "GET",

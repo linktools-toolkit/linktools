@@ -404,22 +404,27 @@ class SqlSessionTurnReader:
                 if not isinstance(first, ModelRequest):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript has no request")
                 parts = [part for part in first.parts if isinstance(part, UserPromptPart)]
-                expected_prompt = admitted_prompt
-                if (row["result_json"].get("graph_step_source") is True
-                        and admitted_prompt is not None and len(parts) == 1):
+                raw_prompt = parts[0].content if len(parts) == 1 else None
+                if isinstance(raw_prompt, tuple):
+                    raw_prompt = list(raw_prompt)
+                matches = admitted_prompt is not None and raw_prompt == admitted_prompt
+                if (not matches and len(parts) == 1 and admitted_prompt is not None
+                        and row["result_json"].get("graph_step_source") is True):
+                    # The native Step writer can retain the original terminal
+                    # snapshot; the context recorder can instead retire consumed
+                    # media. Prove either representation against the same input.
                     supplied = replace(first, parts=[
                         replace(part, content=admitted_prompt) if part is parts[0] else part
                         for part in first.parts
                     ])
                     projected_first = project_transient_binary_content((supplied, messages[-1]))[0]
                     expected_parts = [part for part in projected_first.parts if isinstance(part, UserPromptPart)]
-                    expected_prompt = expected_parts[0].content if len(expected_parts) == 1 else None
-                raw_prompt = parts[0].content if len(parts) == 1 else None
-                if isinstance(raw_prompt, tuple):
-                    raw_prompt = list(raw_prompt)
-                if isinstance(expected_prompt, tuple):
-                    expected_prompt = list(expected_prompt)
-                if expected_prompt is None or raw_prompt != expected_prompt:
+                    if len(expected_parts) == 1:
+                        expected_prompt = expected_parts[0].content
+                        if isinstance(expected_prompt, tuple):
+                            expected_prompt = list(expected_prompt)
+                        matches = raw_prompt == expected_prompt
+                if not matches:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript differs from its admitted input")
                 messages[0] = replace(first, parts=[
                     replace(part, content="") if part is parts[0] else part for part in first.parts
