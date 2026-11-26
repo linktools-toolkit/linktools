@@ -50,7 +50,7 @@ class _CapturedTurnInteractions:
     async def prepare_append(self, archive: ModelInteractionStateStepArchive):
         """Prepare this observation batch for the independent Trace transaction."""
         prepared = PreparedArchive()
-        content = await archive.transcript_repository.content_archive(create=True)
+        content = await archive.transcript_repository.content_archive(create=True, best_effort=True)
         if content.store.storage_group is not archive.state_store.storage_group:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         values = await archive.prepare_interactions(

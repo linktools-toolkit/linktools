@@ -22,7 +22,9 @@ from ._step_archive import (
     _encode_step,
     _validate_interaction_page,
 )
+from ._sql import SqlStateStorageGroup
 from .state import (
+    StateGroupCallback,
     RecordQuery,
     RecordReplacement,
     StateStore,
@@ -37,6 +39,14 @@ from .state import (
 
 class ModelInteractionStateStepArchive(StateStepArchive):
     """Durable archive with one CAS-protected record per admitted model request."""
+
+    async def write_lossy_trace(self, stores: Sequence[StateStore], write: StateGroupCallback[None]) -> None:
+        """Publish optional evidence without waiting for SQLite's writer lock."""
+        group = self.state_store.storage_group
+        if isinstance(group, SqlStateStorageGroup):
+            await group.mutate(stores, write, sqlite_nowait=True)
+        else:
+            await group.mutate(stores, write)
 
     async def capture_model_interactions(
         self,

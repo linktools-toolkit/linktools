@@ -1181,7 +1181,7 @@ class StateStorageGroup(Protocol):
     ) -> "StateStore | None":
         """Borrow an isolated logical store owned by this existing group.
 
-        Keys are opaque binary storage identities bounded by STREAM_KEY_MAX_BYTES. Open outside
+        Keys are opaque binary storage identities bounded by STORE_KEY_MAX_BYTES. Open outside
         transaction callbacks; opening never changes record keys or transaction boundaries.
         Read-only opens do not create partitions. The group owns their lifetime.
         """

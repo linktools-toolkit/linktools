@@ -177,13 +177,19 @@ class TranscriptRepository:
         self._native_messages: SqlStepStore | None = None
 
 
-    async def content_archive(self, *, create: bool = False) -> ContentArchive:
+    async def content_archive(self, *, create: bool = False, best_effort: bool = False) -> ContentArchive:
         if self._content_archive is None:
-            if not isinstance(self._store.storage_group, StateStorageGroup):
+            group = self._store.storage_group
+            if not isinstance(group, StateStorageGroup):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            opened = self._store.storage_group.opened_archive
+            opened = group.opened_archive
             if opened is None and active_state_scope() is None:
-                opened = await self._store.storage_group.open_archive(create=create)
+                from ._sql import SqlStateStorageGroup
+
+                if best_effort and isinstance(group, SqlStateStorageGroup):
+                    opened = await group.open_archive(create=create, sqlite_nowait=True)
+                else:
+                    opened = await group.open_archive(create=create)
             if opened is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             scope, store = opened

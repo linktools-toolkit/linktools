@@ -638,7 +638,7 @@ class SqlStateStorageGroup:
         return None if record is None else _archive_scope_id(record)
 
     async def open_archive(
-        self, *, create: bool = False,
+        self, *, create: bool = False, sqlite_nowait: bool = False,
     ) -> tuple[str, "SqlStateStore"] | None:
         if active_state_scope() is not None:
             raise StateTransactionNestingError("open_archive must run outside a state callback")
@@ -652,7 +652,10 @@ class SqlStateStorageGroup:
             # Do not repeat its absence/content checks in separate read snapshots.
             async def prepare(_group: StateGroupTransaction) -> None:
                 pass
-            await self.mutate((metadata_store,), prepare)
+            if sqlite_nowait:
+                await self.mutate((metadata_store,), prepare, sqlite_nowait=True)
+            else:
+                await self.mutate((metadata_store,), prepare)
             if self._opened_archive is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return self._opened_archive
@@ -679,7 +682,14 @@ class SqlStateStorageGroup:
                 await tx.insert_record(value)
                 return value
             try:
-                record = await metadata_store.mutate(initialize_scope)
+                if sqlite_nowait:
+                    record = await self.mutate(
+                        (metadata_store,),
+                        lambda group: initialize_scope(group.transaction(metadata_store)),
+                        sqlite_nowait=True,
+                    )
+                else:
+                    record = await metadata_store.mutate(initialize_scope)
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
@@ -878,6 +888,8 @@ class SqlStateStorageGroup:
         self,
         stores: Sequence["SqlStateStore"],
         fn: StateGroupCallback[ValueT],
+        *,
+        sqlite_nowait: bool = False,
     ) -> ValueT:
         if self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
@@ -944,10 +956,15 @@ class SqlStateStorageGroup:
 
         lock = self._mutation_lock
         if lock is not None:
-            await lock.acquire()
+            if sqlite_nowait:
+                async with asyncio.timeout(0):
+                    await lock.acquire()
+            else:
+                await lock.acquire()
         try:
             from ._native_content_index import run_native_mutation
-            result = await run_native_mutation(self._context, execute, domain="runtime.state.group")
+            result = await run_native_mutation(self._context, execute, domain="runtime.state.group",
+                                               sqlite_nowait=sqlite_nowait and lock is not None)
             confirmed = True
             if pending_archive_scope is not None:
                 self._opened_archive = pending_archive_scope, self._archive_member

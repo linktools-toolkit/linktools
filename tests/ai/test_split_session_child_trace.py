@@ -2,21 +2,72 @@
 # -*- coding: utf-8 -*-
 """Canonical Session delegation can keep optional Trace on a separate SQL route."""
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.capability import SessionCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, PersistenceDomain, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.runtime._canonical_trace_interactions import _CapturedTurnInteractions
 from linktools.ai.storage import StorageRoute
 
 from ._runtime_test_helpers import _wait_for_committed
 from .test_canonical_turn_subagents import _HostAuthorization, _model
+
+
+@pytest.mark.asyncio
+async def test_cold_split_trace_drops_locked_archive_initialization(tmp_path: Path, monkeypatch) -> None:
+    async def model(_messages, _info):
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = RuntimeFeatures("locked-session-trace")
+    features.model("default", _model("default", model))
+    features.agent("default", model="default", allow_tools=())
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    features.capability(TraceCapability(), scope="runtime")
+    trace_path = tmp_path / "trace.db"
+    storage = PersistenceStorage.from_plan(replace(
+        PersistencePlan.from_default(StorageRoute.sqlite(tmp_path / "session.db")),
+        trace=StorageRoute.sqlite(trace_path),
+    ))
+    dropped = asyncio.Event()
+    prepare = _CapturedTurnInteractions.prepare_append
+
+    async def observe_prepare(capture, archive):
+        try:
+            return await prepare(capture, archive)
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_UNAVAILABLE:
+                dropped.set()
+            raise
+
+    monkeypatch.setattr(_CapturedTurnInteractions, "prepare_append", observe_prepare)
+    blocker = create_async_engine(f"sqlite+aiosqlite:///{trace_path}")
+    try:
+        async with Persistence.open("locked-session-trace", storage=storage) as state:
+            async with blocker.begin() as writer:
+                await writer.exec_driver_sql("BEGIN IMMEDIATE")
+                async with Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime:
+                    store = state.snapshot_resources().stores[PersistenceDomain.TRACE]
+                    assert store.storage_group.opened_archive is None
+                    agent = runtime.agents.get()
+                    principal = runtime.default_principal
+                    await agent.create_session("chat", principal=principal)
+                    turn = await runtime.sessions.start(
+                        "chat", "Reply", agent=agent, principal=principal, idempotency_key="reply",
+                    )
+                    assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+                    await asyncio.wait_for(dropped.wait(), timeout=1)
+                assert store.storage_group.opened_archive is None
+    finally:
+        await blocker.dispose()
 
 
 @pytest.mark.asyncio

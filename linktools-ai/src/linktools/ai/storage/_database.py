@@ -6,7 +6,8 @@ import asyncio
 import sqlite3
 import sys
 import traceback
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from operator import index
 from pathlib import Path
@@ -175,14 +176,19 @@ class SqlStorageContext:
         *,
         retry_limit: int | None = None,
         domain: str = "sql",
+        sqlite_nowait: bool = False,
     ) -> ValueT:
         """Retry known aborts; explicit limits cap attempts on every dialect.
 
         Default SQLite BUSY retries admit new attempts within its busy window.
         In-flight I/O is still settled, not cancelled when that window expires.
+        A best-effort SQLite mutation can opt out of lock waits and retries.
         """
         from sqlalchemy.exc import DBAPIError
 
+        sqlite_nowait = sqlite_nowait and self.dialect.single_writer
+        if sqlite_nowait:
+            retry_limit = 1
         if retry_limit is not None:
             retry_limit = index(retry_limit)
             if retry_limit < 1:
@@ -223,91 +229,118 @@ class SqlStorageContext:
                 raise AIError(ErrorCode.STORAGE_CLOSED)
             if self._sqlite_owner is not None:
                 self._sqlite_owner.require_open()
-            session = self.sessions()
-            transaction = session.begin()
-            if self._sqlite_owner is not None:
-                self._local_mutations[session] = True
-            entered = False
-            try:
-                await transaction.__aenter__()
-                entered = True
+            async with AsyncExitStack() as resources:
+                if sqlite_nowait:
+                    connection = await resources.enter_async_context(self._sqlite_nowait_connection())
+                    session = self.sessions(bind=connection)
+                else:
+                    session = self.sessions()
+                transaction = session.begin()
+                if self._sqlite_owner is not None:
+                    self._local_mutations[session] = True
+                entered = False
                 try:
-                    if self.engine.dialect.name == "sqlite" or self._sqlite_owner is not None:
-                        await require_sqlite_write(await session.connection(), self._sqlite_owner)
-                    if self.dialect.single_writer:
-                        # SQLite's legacy driver otherwise defers BEGIN until the
-                        # first write, allowing prerequisite reads to disagree.
-                        await self.dialect.begin_consistent_read(session)
-                    result = await callback(session)
-                except BaseException as error:
-                    _release_sqlite_error_frames(error)
-                    disposition = (SqlTransactionDisposition.RETRYABLE_ABORTED
-                                   if isinstance(error, SqlSnapshotConflict) else
-                                   self.dialect.classify_transaction_error(
-                                       error, phase=SqlTransactionPhase.BODY,
-                                       connection_invalidated=_connection_invalidated(error),
-                                   ))
-                    await transaction.__aexit__(*sys.exc_info())
-                    if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and can_retry(error):
-                        _logger.warning(
-                            "retrying SQL mutation after aborted body: domain=%s dialect=%s attempt=%s",
-                            domain,
-                            self.dialect.name,
-                            attempt + 1,
-                        )
-                        continue
-                    raise
-                try:
-                    await transaction.__aexit__(None, None, None)
-                except BaseException as error:
-                    _release_sqlite_error_frames(error)
-                    disposition = self.dialect.classify_transaction_error(
-                        error,
-                        phase=SqlTransactionPhase.COMMIT,
-                        connection_invalidated=_connection_invalidated(error),
-                    )
-                    if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and can_retry(error):
-                        _logger.warning(
-                            "retrying SQL mutation after aborted commit: domain=%s dialect=%s attempt=%s",
-                            domain,
-                            self.dialect.name,
-                            attempt + 1,
-                        )
-                        continue
-                    if disposition is SqlTransactionDisposition.COMMIT_UNKNOWN:
-                        _logger.error(
-                            "SQL mutation commit outcome unknown: domain=%s dialect=%s "
-                            "attempt=%s duration_ms=%.3f outcome=unknown",
-                            domain,
-                            self.dialect.name,
-                            attempt + 1,
-                            (monotonic() - started) * 1000,
-                        )
-                        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
-                    raise
-                _logger.debug(
-                    "SQL mutation committed: domain=%s dialect=%s attempt=%s duration_ms=%.3f outcome=committed",
-                    domain,
-                    self.dialect.name,
-                    attempt + 1,
-                    (monotonic() - started) * 1000,
-                )
-                return result
-            finally:
-                try:
-                    if not entered:
+                    await transaction.__aenter__()
+                    entered = True
+                    try:
+                        if self.engine.dialect.name == "sqlite" or self._sqlite_owner is not None:
+                            await require_sqlite_write(await session.connection(), self._sqlite_owner)
+                        if self.dialect.single_writer:
+                            # SQLite's legacy driver otherwise defers BEGIN until the
+                            # first write, allowing prerequisite reads to disagree.
+                            await self.dialect.begin_consistent_read(session)
+                        result = await callback(session)
+                    except BaseException as error:
+                        _release_sqlite_error_frames(error)
+                        disposition = (SqlTransactionDisposition.RETRYABLE_ABORTED
+                                       if isinstance(error, SqlSnapshotConflict) else
+                                       self.dialect.classify_transaction_error(
+                                           error, phase=SqlTransactionPhase.BODY,
+                                           connection_invalidated=_connection_invalidated(error),
+                                       ))
                         await transaction.__aexit__(*sys.exc_info())
+                        if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and can_retry(error):
+                            _logger.warning(
+                                "retrying SQL mutation after aborted body: domain=%s dialect=%s attempt=%s",
+                                domain,
+                                self.dialect.name,
+                                attempt + 1,
+                            )
+                            continue
+                        raise
+                    try:
+                        await transaction.__aexit__(None, None, None)
+                    except BaseException as error:
+                        _release_sqlite_error_frames(error)
+                        disposition = self.dialect.classify_transaction_error(
+                            error,
+                            phase=SqlTransactionPhase.COMMIT,
+                            connection_invalidated=_connection_invalidated(error),
+                        )
+                        if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and can_retry(error):
+                            _logger.warning(
+                                "retrying SQL mutation after aborted commit: domain=%s dialect=%s attempt=%s",
+                                domain,
+                                self.dialect.name,
+                                attempt + 1,
+                            )
+                            continue
+                        if disposition is SqlTransactionDisposition.COMMIT_UNKNOWN:
+                            _logger.error(
+                                "SQL mutation commit outcome unknown: domain=%s dialect=%s "
+                                "attempt=%s duration_ms=%.3f outcome=unknown",
+                                domain,
+                                self.dialect.name,
+                                attempt + 1,
+                                (monotonic() - started) * 1000,
+                            )
+                            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+                        raise
+                    _logger.debug(
+                        "SQL mutation committed: domain=%s dialect=%s attempt=%s duration_ms=%.3f outcome=committed",
+                        domain,
+                        self.dialect.name,
+                        attempt + 1,
+                        (monotonic() - started) * 1000,
+                    )
+                    return result
                 finally:
-                    if self._sqlite_owner is None:
-                        await session.close()
-                    else:
-                        try:
-                            await _finish_owned_io(asyncio.create_task(session.close()))
-                        except BaseException:
-                            self._local_mutations[session] = False
-                            raise
+                    try:
+                        if not entered:
+                            await transaction.__aexit__(*sys.exc_info())
+                    finally:
+                        if self._sqlite_owner is None:
+                            await session.close()
                         else:
-                            self._local_mutations.pop(session)
+                            try:
+                                await _finish_owned_io(asyncio.create_task(session.close()))
+                            except BaseException:
+                                self._local_mutations[session] = False
+                                raise
+                            else:
+                                self._local_mutations.pop(session)
+
+    @asynccontextmanager
+    async def _sqlite_nowait_connection(self) -> "AsyncIterator[AsyncConnection]":
+        # Keep the connection checked out until its original busy handler is restored.
+        async with self.engine.connect() as connection:
+            original = (await self.run_statement(connection.exec_driver_sql("PRAGMA busy_timeout"))).scalar_one()
+            try:
+                await self.run_statement(connection.exec_driver_sql("PRAGMA busy_timeout=0"))
+                await connection.commit()
+                yield connection
+            finally:
+                async def restore() -> None:
+                    try:
+                        await connection.rollback()
+                        if not connection.invalidated:
+                            await connection.exec_driver_sql(f"PRAGMA busy_timeout={int(original)}")
+                            await connection.commit()
+                    except BaseException:
+                        await connection.invalidate()
+                        raise
+
+                await _finish_owned_io(asyncio.create_task(restore()))
 
     @property
     def closed(self) -> bool:

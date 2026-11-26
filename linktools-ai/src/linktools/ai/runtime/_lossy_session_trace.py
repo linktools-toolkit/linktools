@@ -99,12 +99,12 @@ class LossySessionTrace:
 
     async def close(self) -> None:
         self._closed = True
+        while not self._queue.empty():
+            self._queue.get_nowait()
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        while not self._queue.empty():
-            self._queue.get_nowait()
 
     async def _write(self) -> None:
         while True:
@@ -146,4 +146,4 @@ class LossySessionTrace:
             if run is not None:
                 await append(transaction, run)
 
-        await archive.state_store.storage_group.mutate(stores, write)
+        await archive.write_lossy_trace(stores, write)
