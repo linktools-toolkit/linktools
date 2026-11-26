@@ -210,6 +210,7 @@ await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64
 const settle=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,10));};
 // Observe each handler without serializing later events behind it.
 const select=async hash=>{location.hash=hash;await hashChanged;};
+const canSend=()=>node('send').type==='submit' && !node('send').disabled;
 async function until(description,ready){
   const deadline=performance.now()+5000;
   while(!ready()){
@@ -220,7 +221,7 @@ async function until(description,ready){
 const node=id=>nodes.get(id),tab=name=>({async click(){if(node('inspector').hidden){const opening=node('inspector-toggle').click();if(node('detail-view').value===name)return opening;}node('detail-view').value=name;return node('detail-view').onchange();}}),view=name=>all.find(element=>element.dataset.view===name);
 const descendants=node=>[node,...node.children.flatMap(descendants)];
 async function openOriginal(diagnostic=true){
-  const draft=node('prompt').value;await node('native-mode').click();assert.equal(node('composer').hidden,true);assert.equal(node('cancel').parentElement,node('reader-actions'));assert.equal(node('prompt').value,draft);assert.equal(node('inspector').hidden,true);assert.equal(node('run-actions').open,false);assert.ok(node('native-mode').className.includes('active'));
+  const draft=node('prompt').value;await node('native-mode').click();assert.equal(node('composer').hidden,true);assert.equal(node('reader-stop').parentElement,node('reader-actions'));assert.equal(node('prompt').value,draft);assert.equal(node('inspector').hidden,true);assert.equal(node('run-actions').open,false);assert.ok(node('native-mode').className.includes('active'));
   const diagnostics=descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Original HTTP diagnostics');if(diagnostic && diagnostics)await diagnostics.click();
 }
 async function refresh(){await node('refresh').click();}
@@ -249,7 +250,7 @@ if(process.argv[3]==='snapshot-tail') {
   assert.equal(sessionReads(),beforeSession+1,'committed session timeline still refreshes');
   assert.equal(node('prompt').value,'Keep local draft');assert.equal(document.activeElement,node('prompt'));
   assert.equal(node('detail-turn').value,'a-run','tail does not select the observed execution');
-  assert.equal(node('send').disabled,true,'execution completion cannot release the session owner');
+  assert.equal(canSend(),false,'execution completion cannot release the session owner');
 
   const failed='a-broken';executions.set(failed,{...info(failed,'a'),status:'STARTED',terminal_at:null});
   streamBlocks.set(failed,{});sessions.get('a').active_execution_id=failed;
@@ -427,7 +428,7 @@ if(process.argv[3]==='session-published-turn') {
   await activate('a-first');
   const before=reads();
   complete('a-first',2);
-  assert.equal(node('send').disabled,true,'a published turn cannot release the session');
+  assert.equal(node('send').type,'button','a published turn cannot release the session');
   source.execution('a-first','snapshot',info('a-first','a'));
   sessions.get('a').active_execution_id=null;sessions.get('a').revision++;source.snapshot();
   await until('session released',()=>!node('send').disabled);
@@ -439,9 +440,9 @@ if(process.argv[3]==='session-published-turn') {
   complete('a-first',2);
   await settle();
   assert.equal(reads(),nextReads,'late duplicate cannot refresh the newer execution');
-  assert.equal(node('send').disabled,true);
+  assert.equal(node('send').type,'button');
   assert.equal(node('conversation').textContent.split('Canonical a-first').length,2);
-  await node('cancel').click();
+  await node('send').click();
   assert.ok(calls.some(call=>call.method==='POST' && call.key==='/api/executions/a-next/cancel'));
 
   const reader='a-reader', modelPath=`/api/executions/${reader}/models`;
@@ -527,7 +528,7 @@ if(process.argv[3]==='session-published-turn') {
   assert.equal(node('send').disabled,false);
   const stopResponse=deferred('POST /api/sessions/b/cancel'),stop=node('send').click();
   await stopResponse.requested;
-  assert.equal(node('send').disabled,true);
+  assert.equal(canSend(),false);
   stopResponse({accepted:false});await stop;
   assert.equal(node('send').textContent,'Stop');
   assert.equal(node('send').disabled,false);
@@ -623,7 +624,7 @@ if(process.argv[3]==='session-published-turn') {
   assert.equal(calls.filter(call=>call.key==='/api/sessions/b/abandon').length,1,'older recovery failure cannot arm a newer producer');
   const recoverResponse=deferred('POST /api/sessions/b/recover'),recover=node('send').click();
   await recoverResponse.requested;
-  assert.equal(node('send').disabled,true);
+  assert.equal(canSend(),false);
   recoverResponse({accepted:true});await recover;
   emitTurn({type:'admitted',turn_id:'b-next-turn',turn_no:2,revision:3,generation:4,prompt:'Next native question'});
   assert.equal(node('send').textContent,'Stop');
@@ -708,14 +709,14 @@ if(process.argv[3]==='session-open-active') {
 }
 if(process.argv[3]==='session-sync') {
   await select('#session=a&execution=a-run');
-  await until('session initial snapshot',()=>!node('send').disabled);
+  await until('session initial snapshot',()=>canSend());
   let first=sessionSources.at(-1);
   node('prompt').value='My private draft';node('planning').checked=true;node('thinking').value='3';
   node('prompt').focus();
   executions.set('a-live',{...info('a-live','a'),status:'STARTED',terminal_at:null});
   streamBlocks.set('a-live',{});
   sessions.get('a').active_execution_id='a-live';
-  await until('other client admission',()=>node('send').disabled && node('current-status').textContent.includes('occupied'));
+  await until('other client admission',()=>!canSend() && node('current-status').textContent.includes('occupied'));
   assert.equal(node('prompt').disabled,false);assert.equal(node('planning').disabled,false);assert.equal(node('thinking').disabled,false);
   assert.equal(node('prompt').value,'My private draft');assert.equal(node('planning').checked,true);assert.equal(node('thinking').value,'3');
   assert.equal(document.activeElement,node('prompt'));
@@ -729,14 +730,14 @@ if(process.argv[3]==='session-sync') {
   assert.equal(calls.filter(call=>call.method==='POST').length,posts,'keyboard/programmatic submit obeys authoritative occupancy');
   detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),active_execution_id:null},timeline:timeline('a')});
   await refresh();
-  assert.equal(node('send').disabled,true,'HTTP metadata cannot release the SSE owner');
+  assert.equal(canSend(),false,'HTTP metadata cannot release the SSE owner');
   detailResponses.delete('/api/sessions/a');
   first=sessionSources.at(-1);
   executions.set('a-live',{...info('a-live','a')});
   const releasedPage=timeline('a');
   timelineOverrides.set('a',{...releasedPage,items:[...releasedPage.items,{...releasedPage.items[0],execution_id:'a-live',user_input:'Released turn'}]});
   sessions.get('a').active_execution_id=null;
-  await until('authoritative release',()=>!node('send').disabled);
+  await until('authoritative release',()=>canSend());
   await until('exact released turn hydrates',()=>node('conversation').textContent.includes('Released turn'));
   assert.equal(node('prompt').value,'My private draft');
   first.onerror();assert.equal(node('send').disabled,true);
@@ -765,11 +766,11 @@ if(process.argv[3]==='session-sync') {
     const beforeReleaseReads=historyReads(),answer=`Committed before observation ${stale}`;
     sessions.get('a').active_execution_id=quick;
     await late.requested;
-    assert.equal(node('send').disabled,true);
+    assert.equal(canSend(),false);
     const quickTimeline=timeline('a');
     timelineOverrides.set('a',{...quickTimeline,items:[...quickTimeline.items,{...quickTimeline.items[0],execution_id:quick,user_input:answer}]});
     sessions.get('a').active_execution_id=null;sessions.get('a').revision++;
-    await until('remote release enables sending',()=>!node('send').disabled);
+    await until('remote release enables sending',()=>canSend());
     late(stale?{...info(quick,'a'),status:'STARTED',terminal_at:null}:info(quick,'a'));
     await until('released turn without execution stream appears',()=>node('conversation').textContent.includes(answer));
     await settle();
@@ -788,7 +789,7 @@ if(process.argv[3]==='session-sync') {
   const beforeLostTail=calls.length;
   executions.set(streamed,info(streamed,'a'));
   sessions.get('a').active_execution_id=null;sessions.get('a').revision++;
-  await until('release with no execution tail enables sending',()=>!node('send').disabled);
+  await until('release with no execution tail enables sending',()=>canSend());
   await until('release without snapshot loads committed turn',()=>node('conversation').textContent.includes('Committed with execution stream'));
   assert.equal(historyReads(),beforeStreamReads+1,'lost execution tail has one exact History read');
   const releaseReads=calls.slice(beforeLostTail);
@@ -846,7 +847,7 @@ if(process.argv[3]==='session-sync') {
   await refresh();
   const refreshedSource=sessionSources.at(-1);
   assert.notEqual(refreshedSource,staleSource);assert.equal(staleSource.closed,true);
-  assert.equal(node('send').disabled,true);
+  assert.equal(canSend(),false);
   assert.match(node('session-details').textContent,/CLOSING/);
   assert.match(node('session-details').textContent,/a-live/);
   assert.equal(node('prompt').value,'My private draft');
@@ -858,7 +859,7 @@ if(process.argv[3]==='session-sync') {
   await refresh();assert.equal(node('send').disabled,true,'newer HTTP idle alone cannot authorize sending');
   detailResponses.delete('/api/sessions/a');
   sessions.get('a').revision=httpRevision+1;
-  await until('fresh SSE confirms HTTP idle',()=>!node('send').disabled);
+  await until('fresh SSE confirms HTTP idle',()=>canSend());
 
   const beforeExternal=sessionSources.at(-1),sameRevision=sessions.get('a').revision;
   const realSnapshot=EventSource.prototype.snapshot;
@@ -869,7 +870,7 @@ if(process.argv[3]==='session-sync') {
   detailResponses.set('/api/sessions/a',{session:{...sessions.get('a'),active_execution_id:'a-live'},timeline:timeline('a')});
   await refresh();
   assert.notEqual(sessionSources.at(-1),beforeExternal,'explicit Refresh resubscribes even at unchanged admission revision');
-  assert.equal(beforeExternal.closed,true);assert.equal(node('send').disabled,true);
+  assert.equal(beforeExternal.closed,true);assert.equal(canSend(),false);
   assert.equal(node('prompt').value,'My private draft');
   EventSource.prototype.snapshot=realSnapshot;detailResponses.delete('/api/sessions/a');
   sessionSources.at(-1).snapshot();await settle();assert.equal(node('send').disabled,false);
@@ -883,7 +884,7 @@ if(process.argv[3]==='session-sync') {
   node('prompt').value='Edited while another client won';
   sessions.get('a').active_execution_id='a-live';
   rejected({code:'SESSION_BUSY'},409);await sending;
-  assert.equal(node('send').disabled,true);assert.equal(node('prompt').value,'Edited while another client won');
+  assert.equal(canSend(),false);assert.equal(node('prompt').value,'Edited while another client won');
   const replacement=sessionSources.at(-1);
   assert.equal(replacement,admissionSource,'observed busy owner avoids an unnecessary reconnect');
   await select('#session=b');
@@ -892,14 +893,14 @@ if(process.argv[3]==='session-sync') {
   assert.equal(node('conversation-title').textContent,'Beta');assert.equal(node('send').disabled,false);
   node('prompt').value='Other tab/session draft';
   await select('#session=a');
-  assert.equal(node('prompt').value,'Edited while another client won');assert.equal(node('send').disabled,true);
+  assert.equal(node('prompt').value,'Edited while another client won');assert.equal(canSend(),false);
   const current=sessionSources.at(-1);
   current.listeners.get('session_error')({data:'{"error_code":"AUTHORIZATION_DENIED"}'});
   assert.equal(current.closed,true);assert.equal(node('send').disabled,true);
   current.onmessage({data:JSON.stringify({status:'OPEN',active_execution_id:null})});
   assert.equal(node('send').disabled,true,'late frames after a terminal error cannot reopen sending');
   sessions.get('a').active_execution_id=null;
-  await refresh();await until('explicit refresh resubscribes',()=>!node('send').disabled);
+  await refresh();await until('explicit refresh resubscribes',()=>canSend());
   assert.equal(node('prompt').value,'Edited while another client won');
   const synchronized=sessionSources.at(-1);
   const accepted=deferred('POST /api/sessions/a/messages');
@@ -921,7 +922,7 @@ if(process.argv[3]==='session-sync') {
   // Admission reuses only its current observation, whether SSE wins or loses
   // the POST race. Ordinary navigation must retain fresh execution reads.
   for(const order of ['observed','pending','post-first','terminal']) {
-    await select('#session=b');await select('#session=a');await until('admission ready',()=>!node('send').disabled);
+    await select('#session=b');await select('#session=a');await until('admission ready',()=>canSend());
     const id=`a-admission-${order}`,before=calls.length;
     executions.set(id,{...info(id,'a'),status:order==='terminal'?'SUCCEEDED':'STARTED',terminal_at:null});
     streamBlocks.set(id,{});
@@ -1013,7 +1014,7 @@ if(process.argv[3]==='unavailable') {
   await select('#session=a');
   assert.equal(stream.closed,true,'same-session reopen denial stops its existing observation');
   assert.equal(node('current-status').textContent,'Conversation unavailable');
-  assert.equal(node('send').disabled,true);assert.equal(node('cancel').hidden,true);
+  assert.equal(node('send').disabled,true);assert.equal(node('send').type,'submit');
   assert.doesNotMatch(node('conversation').textContent,/a answer/);assert.equal(node('session-details').textContent,'');
   assert.equal(node('prompt').value,'Retained draft');
   const readCount=calls.length;await settle();assert.equal(calls.length,readCount,'unavailable resources do not restart observation');
@@ -1429,14 +1430,14 @@ if(process.argv[3]==='tools') {
   await until('replacement process isolated',()=>node('conversation').textContent.includes('New lookupIn progress'));
   assert.match(remoteArticle(remote).textContent,/External lookup240 msCompleted/,'keep known old tool state until canonical readback');
   assert.doesNotMatch(node('conversation').textContent,/Before occupancy|Must not render|Stale terminal frame/);
-  assert.equal(node('send').disabled,true);
+  assert.equal(canSend(),false);
   const finishedRemote={...remoteTurn,status:'SUCCEEDED',conversation_committed:true,process:[remoteResult],items:[{item_kind:'assistant',content:'External answer'}]};
   const replacementTimeline={items:[saved,finishedRemote,replacementTurn],next_cursor:null};
   timelineOverrides.set('a',replacementTimeline);
   replacementRead({session:{...session},timeline:replacementTimeline});
   await until('same-revision replacement reads the previous committed turn',()=>remoteArticle(remote)?.textContent.includes('External answer'));
   assert.match(remoteArticle(remote).textContent,/External lookup240 msCompleted/,'remote notice and committed history share the elapsed field');
-  assert.equal(node('send').disabled,true,'older completion must not unlock a replacement owner');
+  assert.equal(canSend(),false,'older completion must not unlock a replacement owner');
   assert.match(remoteArticle(replacement).textContent,/New lookupIn progress/);
   source.process(replacement,{...remoteTool,tool_name:'New lookup',status:'FAILED'});
   await until('failure without a code is explicit',()=>remoteArticle(replacement).textContent.includes('No reason provided.'));
@@ -1490,7 +1491,7 @@ if(process.argv[3]==='tools') {
   assert.doesNotMatch(node('notice').textContent,/SESSION_TURN_PENDING|Runtime read unavailable/);
   successorRead({session:{...session},timeline:{items:[successorTurn],next_cursor:null}});
   await until('new owner readback remains active',()=>remoteArticle(successor)?.textContent.includes('New owner input'));
-  assert.equal(node('send').disabled,true);
+  assert.equal(canSend(),false);
   console.log('Public process survives reconnect, commit and external-owner transitions without polling the execution');process.exit(0);
 }
 if(process.argv[3]==='thinking') {
@@ -1776,7 +1777,7 @@ if(process.argv[3]==='details') {
   executions.get('orphan').status='STARTED';recoveryReply({execution_id:'orphan'},202);await recovering;await hashChanged;
   assert.equal(node('inspector').hidden,true,'Completing same-execution Resume must not reopen closed details');
   streamBlocks.get('orphan').controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'orphan',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'resumed after close'}}}})+'\n\n'));
-  await until('resumed output with details closed',()=>node('live').textContent.includes('resumed after close'));assert.equal(node('cancel').hidden,false);
+  await until('resumed output with details closed',()=>node('live').textContent.includes('resumed after close'));assert.equal(node('send').type,'button');
   await tab('recovery').click();const lateRecovery=deferred('POST /api/executions/orphan/recover'),lateRecovering=node('resume-run').click();await lateRecovery.requested;
   await select('#session=b');const beforeLate=calls.length;lateRecovery({execution_id:'orphan'},202);await lateRecovering;
   assert.equal(node('conversation-title').textContent,'Beta');assert.ok(!calls.slice(beforeLate).some(call=>call.key.includes('/orphan')),'Late Resume does not refresh a newer conversation selection');
@@ -1816,7 +1817,7 @@ if(process.argv[3]==='guided') {
   await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Refresh requests').click();
   assert.equal(descendants(node('conversation')).find(item=>item.dataset.requestFocus==='reader:selection').value,'a-run:1:1:0','Refreshing source preserves selected request');
   assert.equal(document.activeElement?.dataset.requestFocus,'reader:selection','Source refresh preserves keyboard focus on the request selector');
-  await detail('models',/actual system first/);assert.equal(node('composer').hidden,false,'Opening diagnostics from reader restores coherent conversation layout');assert.equal(node('cancel').parentElement,node('composer-actions'));assert.equal(node('conversation-column').className.includes('reading'),false);await openOriginal();
+  await detail('models',/actual system first/);assert.equal(node('composer').hidden,false,'Opening diagnostics from reader restores coherent conversation layout');assert.equal(node('send').hidden,false);assert.equal(node('conversation-column').className.includes('reading'),false);await openOriginal();
   assert.ok(descendants(node('conversation')).some(item=>item.tagName==='PRE' && item.textContent===source),'Changing the reading surface retains the same authoritative body and selection');
   timelineOverrides.set('a',{items:[...timeline('a').items,{...timeline('a').items[0],execution_id:'a-two',user_input:'Second question'}],next_cursor:null});
   await select('#session=a&execution=a-run');await openOriginal();
@@ -1825,10 +1826,10 @@ if(process.argv[3]==='guided') {
   assert.doesNotMatch(node('conversation').textContent,/actual system first/,'Failed turn selection cannot retain another turn original bytes');
   assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && item.textContent==='Download original bytes'));
   networkFailures.clear();await select('#session=a&execution=a-run');
-  node('chat-mode').click();assert.equal(node('composer').hidden,false);assert.equal(node('cancel').parentElement,node('composer-actions'));assert.match(node('conversation').textContent,/a answer/);assert.equal(node('request-context')?.hidden ?? true,true);
+  node('chat-mode').click();assert.equal(node('composer').hidden,false);assert.equal(node('send').hidden,false);assert.match(node('conversation').textContent,/a answer/);assert.equal(node('request-context')?.hidden ?? true,true);
   await detail('transcript',/SDK text excerpts only/);assert.match(node('inspector-content').textContent,/System, instructions, tools/);
-  node('new-session').click();assert.equal(document.activeElement,node('new-agent'));assert.equal(node('new-options').open,false);
-  node('new-dialog').close();await openOriginal();node('new-session').click();node('new-title').value='Fresh chat';node('new-agent').value='default';
+  node('new-session').click();assert.equal(document.activeElement,node('create-session'));assert.equal(node('new-options').open,false);
+  node('new-dialog').close();await openOriginal();node('new-session').click();node('new-title').value='Fresh chat';
   const creation=deferred('POST /api/sessions'),creating=node('new-form').requestSubmit();await creation.requested;
   const createdId=calls.findLast(call=>call.method==='POST' && call.key==='/api/sessions').body.session_id;
   sessions.set(createdId,{session_id:createdId,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:'Fresh chat'}});timelineOverrides.set(createdId,{items:[],next_cursor:null});
@@ -1902,7 +1903,7 @@ if(process.argv[3]==='native') {
   await pick('a-run:1:2:unavailable');detailResponses.set('/api/executions/a-run/models',{items:[{...item,model_request_seq:2}],next_cursor:null});await clickText('Refresh requests');assert.equal(picker().value,'a-run:1:2:0','A selected unavailable request becomes its own captured attempt, never another request');
   const stale=deferred('GET /api/executions/a-run/models'),staleRefresh=clickText('Refresh requests');await stale.requested;
   await select('#session=b');
-  stale({items:[item],next_cursor:null});await staleRefresh;assert.equal(node('composer').hidden,true,'Switching conversations in reader mode keeps the composer hidden');assert.equal(node('cancel').parentElement,node('reader-actions'));
+  stale({items:[item],next_cursor:null});await staleRefresh;assert.equal(node('composer').hidden,true,'Switching conversations in reader mode keeps the composer hidden');assert.equal(node('reader-stop').parentElement,node('reader-actions'));
   assert.doesNotMatch(node('conversation').textContent,/native only/);
   assert.ok(calls.filter(call=>call.key.endsWith('/models')).every(call=>call.query.include_client_requests==='true' && !call.query.include_content || call.query.include_content==='true' && !call.query.include_client_requests));
   const id='native-live',path=`/api/executions/${id}/models`;
@@ -2046,11 +2047,11 @@ if(process.argv[3]==='navigation'){
   delays.delete('GET /api/sessions/a');executions.get('page-old').status='SUCCEEDED';sessions.get('a').active_execution_id='page-new';
   executions.set('page-new',{...info('page-new','a'),status:'STARTED'});streamBlocks.set('page-new',{});
   const oldController=streamBlocks.get('page-old').controller;
-  oldController.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('page-old'))+'\n\n'));oldController.close();await until('current owner after older page request',()=>node('cancel').getAttribute('aria-label')?.includes('page-new'));
-  assert.match(node('cancel').getAttribute('aria-label'),/page-new/);
+  oldController.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('page-old'))+'\n\n'));oldController.close();await until('current owner after older page request',()=>Boolean(streamBlocks.get('page-new').controller) && node('send').type==='button');
+  assert.equal(node('send').getAttribute('aria-label'),'Stop current turn');
   olderPage({session:oldSession,timeline:{items:[{...timeline('a').items[0],execution_id:'earlier-run',user_input:'Earlier question'}],next_cursor:null}});await paging;
-  assert.match(node('conversation').textContent,/Earlier question/);assert.match(node('cancel').getAttribute('aria-label'),/page-new/);
-  const newCancel=deferred('POST /api/executions/page-new/cancel'),cancelling=node('cancel').click();await newCancel.requested;
+  assert.match(node('conversation').textContent,/Earlier question/);assert.equal(node('send').getAttribute('aria-label'),'Stop current turn');
+  const newCancel=deferred('POST /api/executions/page-new/cancel'),cancelling=node('send').click();await newCancel.requested;
   assert.equal(calls.filter(item=>item.method==='POST').at(-1).key,'/api/executions/page-new/cancel');
   executions.get('page-new').status='CANCELLING';newCancel({execution_id:'page-new',cancelled:false});await cancelling;
   const currentNotice=node('notice').textContent;assert.match(currentNotice,/Cancellation requested/);
@@ -2065,10 +2066,10 @@ if(process.argv[3]==='navigation'){
   executions.get('reopen-old').status='SUCCEEDED';sessions.get('a').active_execution_id='reopen-new';
   executions.set('reopen-new',{...info('reopen-new','a'),status:'STARTED'});streamBlocks.set('reopen-new',{});
   const reopeningController=streamBlocks.get('reopen-old').controller;
-  reopeningController.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('reopen-old'))+'\n\n'));reopeningController.close();await until('new current owner during session reopen',()=>node('cancel').getAttribute('aria-label')?.includes('reopen-new'));
-  assert.match(node('cancel').getAttribute('aria-label'),/reopen-new/);
+  reopeningController.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('reopen-old'))+'\n\n'));reopeningController.close();await until('new current owner during session reopen',()=>Boolean(streamBlocks.get('reopen-new').controller) && node('send').type==='button');
+  assert.equal(node('send').getAttribute('aria-label'),'Stop current turn');
   reopen({session:previousSession,timeline:timeline('a')});await reopening;
-  assert.match(node('cancel').getAttribute('aria-label'),/reopen-new/);assert.equal(node('cancel').hidden,false);
+  assert.equal(node('send').getAttribute('aria-label'),'Stop current turn');assert.equal(node('send').type,'button');
   assert.match(node('execution-meta').textContent,/a-run/);assert.doesNotMatch(node('execution-meta').textContent,/Loading/);
 
   await select('#execution=a-run');const recent=deferred('GET /api/executions');
@@ -2133,19 +2134,19 @@ if(process.argv[3]==='races'){
   newOwnerList({items:[{...sessions.get('a'),active_execution_id:'external-run'},sessions.get('b')],next_cursor:null});await until('newer same-revision list owner visible',()=>node('list').textContent.includes('Running'));
   const renamedList=deferred('GET /api/sessions');node('filter-form').requestSubmit();await renamedList.requested;
   renamedList({items:[{...sessions.get('a'),revision:1,metadata:{title:'Renamed elsewhere'},active_execution_id:'external-run'},sessions.get('b')],next_cursor:null});await until('newer revision list title visible',()=>node('list').textContent.includes('Renamed elsewhere'));
-  late(staleInfo);await settle();assert.equal(node('cancel').hidden,true);assert.equal(node('end-active').hidden,true);assert.equal(node('current-status').textContent,'Session available');
+  late(staleInfo);await settle();assert.equal(node('send').type,'submit');assert.equal(node('end-active').hidden,true);assert.equal(node('current-status').textContent,'Session available');
 
   // Snapshot delivery and response EOF are distinct; an older Refresh cannot undo terminal truth.
   controller=await activate('owner-held');node('show-active').click();await until('selected active owner details',()=>node('execution-meta').textContent.includes('owner-held') && !node('execution-meta').textContent.includes('Loading'));
   const started={...executions.get('owner-held')},refresh=deferred('GET /api/executions/owner-held');node('refresh').click();await refresh.requested;
   executions.get('owner-held').status='CANCELLED';controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('owner-held'))+'\n\n'));await until('terminal snapshot before EOF',()=>node('execution-meta').textContent.includes('CANCELLED'));
-  refresh(started);await settle();assert.equal(node('cancel').hidden,true);assert.match(node('execution-meta').textContent,/CANCELLED/);assert.doesNotMatch(node('current-status').textContent,/STARTED/);
+  refresh(started);await settle();assert.equal(node('send').type,'submit');assert.match(node('execution-meta').textContent,/CANCELLED/);assert.doesNotMatch(node('current-status').textContent,/STARTED/);
   sessions.get('a').active_execution_id=null;controller.close();await until('completed terminal readback',()=>node('connection').textContent==='Observation: Complete');
 
   controller=await activate('owner-two');
   executions.set('owner-three',{...info('owner-three','a'),status:'STARTED'});streamBlocks.set('owner-three',{});
   executions.get('owner-two').status='SUCCEEDED';sessions.get('a').active_execution_id='owner-three';controller.error(new Error('closed without snapshot'));await until('next owner observation',()=>Boolean(streamBlocks.get('owner-three').controller));
-  controller=streamBlocks.get('owner-three').controller;assert.ok(controller);assert.equal(node('cancel').hidden,false);assert.match(node('cancel').getAttribute('aria-label'),/owner-three/);
+  controller=streamBlocks.get('owner-three').controller;assert.ok(controller);assert.equal(node('send').type,'button');assert.equal(node('send').getAttribute('aria-label'),'Stop current turn');
   assert.equal(node('end-active').hidden,false);assert.equal(calls.filter(item=>item.method==='POST').length,0);
   for(const success of [false,true]){
     const end=deferred('POST /api/executions/owner-three/cancel'),ending=node('end-active').click();await end.requested;
@@ -2161,7 +2162,7 @@ if(process.argv[3]==='races'){
   executions.get('owner-four').status='CANCELLED';networkFailures.add('GET /api/sessions/a');snapshot(controller,'owner-four');await until('failed terminal session readback',()=>node('connection').textContent.includes('read unavailable'));
   assert.match(node('connection').textContent,/read unavailable/);assert.equal(node('connection').hidden,false);
   networkFailures.clear();streamBlocks.delete('owner-four');executions.set('owner-five',{...info('owner-five','a'),status:'STARTED'});streamBlocks.set('owner-five',{});sessions.get('a').active_execution_id='owner-five';
-  await until('observation after Runtime read recovery',()=>Boolean(streamBlocks.get('owner-five').controller));controller=streamBlocks.get('owner-five').controller;assert.ok(controller);assert.match(node('cancel').getAttribute('aria-label'),/owner-five/);
+  await until('observation after Runtime read recovery',()=>Boolean(streamBlocks.get('owner-five').controller));controller=streamBlocks.get('owner-five').controller;assert.ok(controller);assert.equal(node('send').getAttribute('aria-label'),'Stop current turn');
   // A finite nonterminal execution tail pauses within the same session stream.
   snapshot(controller,'owner-five');await until('explicit paused boundary',()=>node('connection').textContent.includes('Paused'));
   assert.equal(streamBlocks.get('owner-five').controller,controller);
@@ -2185,7 +2186,7 @@ if(process.argv[3]==='races'){
   await until('partial live text and thinking',()=>node('live').textContent.includes(partialText) && partialTurn().textContent.includes('Partial thinking'));assert.match(node('live').textContent,/Received partial content stays incomplete/);
   const beforeStop=calls.length;
   const stop=deferred(`POST /api/executions/${partialId}/cancel`);
-  const stopping=node('cancel').click();await stop.requested;
+  const stopping=node('send').click();await stop.requested;
   executions.get(partialId).status='CANCELLED';sessions.get('a').active_execution_id=null;
   timelineOverrides.get('a').items[1].status='CANCELLED';
   const finishFinalRead=deferred('GET /api/sessions/a');
@@ -2210,7 +2211,7 @@ if(process.argv[3]==='races'){
   const lateId='stop-response-after-terminal';
   controller=await activate(lateId);
   const lateStop=deferred(`POST /api/executions/${lateId}/cancel`);
-  const lateStopping=node('cancel').click();await lateStop.requested;
+  const lateStopping=node('send').click();await lateStop.requested;
   executions.get(lateId).status='CANCELLED';sessions.get('a').active_execution_id=null;
   snapshot(controller,lateId);
   await until('Stop reconciles before its mutation response',()=>node('notice').textContent.includes('Session released'));
@@ -2224,7 +2225,7 @@ if(process.argv[3]==='races'){
   timelineOverrides.set('a',{items:[previousTurn,noTailTurn],next_cursor:null});
   await activate(noTailId);
   const beforeNoTailStop=calls.length,noTailStop=deferred(`POST /api/executions/${noTailId}/cancel`);
-  const noTailStopping=node('cancel').click();await noTailStop.requested;
+  const noTailStopping=node('send').click();await noTailStop.requested;
   const cancelled={...noTailTurn,status:'CANCELLED',conversation_committed:true,error_code:'EXECUTION_CANCELLED'};
   timelineOverrides.set('a',{items:[previousTurn,cancelled],next_cursor:null});
   executions.get(noTailId).status='CANCELLED';sessions.get('a').active_execution_id=null;
@@ -2249,10 +2250,10 @@ if(process.argv[3]==='races'){
   timelineOverrides.set('a',{items:[previousTurn,oldDone,{...oldTurn,execution_id:newId,user_input:'Follow-up'}],next_cursor:'older-page'});
   executions.set(newId,{...info(newId,'a'),status:'STARTED'});streamBlocks.set(newId,{});sessions.get('a').active_execution_id=newId;
   nextAdmission({execution_id:newId});await nextSending;
-  assert.equal(node('send').disabled,true,'newly admitted turn holds the composer');
+  assert.equal(canSend(),false,'newly admitted turn holds the composer');
   oldHistory({session:{...sessions.get('a'),active_execution_id:null},timeline:{items:[oldDone],next_cursor:null}});
   await until('previous committed turn updates in place after the successor',()=>node('conversation').textContent.includes('Execution cancelled.'));
-  assert.equal(node('send').disabled,true,'older exact History cannot clear the new owner');
+  assert.equal(canSend(),false,'older exact History cannot clear the new owner');
   assert.equal(node('turns-more').hidden,false,'incremental exact History preserves the earlier page cursor');
   const thirdId='directly-observed-successor',beforeDirect=calls.length;
   const nextDone={...oldTurn,execution_id:newId,status:'SUCCEEDED',user_input:'Follow-up',conversation_committed:true,
@@ -2265,7 +2266,7 @@ if(process.argv[3]==='races'){
     && node('conversation').textContent.includes('Another tab'));
   const directHistory=calls.slice(beforeDirect).filter(call=>call.method==='GET' && call.key==='/api/sessions/a');
   assert.deepEqual(directHistory.map(call=>[call.query.execution_id,call.query.turn_state]),[[newId,undefined],[thirdId,'active']]);
-  assert.equal(node('send').disabled,true);
+  assert.equal(canSend(),false);
   assert.equal(node('turns-more').hidden,false);
   console.log('Observation and End notice race contracts passed');process.exit(0);
 }
@@ -2296,7 +2297,7 @@ if(process.argv[3]==='workspace'){
   streamBlocks.set('a-live',{});await select('#session=a');
   const observations=()=>calls.filter(item=>item.key==='/api/executions/a-live/events');
   if(node('inspector').hidden)node('inspector-toggle').click();node('detail-turn').value='a-run';await node('detail-turn').onchange();
-  assert.match(node('execution-meta').textContent,/a-run/);assert.equal(node('cancel').hidden,false);assert.equal(node('end-active').hidden,false);
+  assert.match(node('execution-meta').textContent,/a-run/);assert.equal(node('send').type,'button');assert.equal(node('end-active').hidden,false);
   let controller=streamBlocks.get('a-live').controller;
   const delta=(value,cursor='cursor-one')=>controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',cursor,item:{execution_id:'a-live',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:value}}}})+'\n\n'));
   delta('**Live');await until('initial live response',()=>node('live').textContent.includes('Live'));assert.match(node('live').textContent,/Live/);
@@ -2318,7 +2319,7 @@ if(process.argv[3]==='workspace'){
   delta('Reattached **response**');await until('reattached live response',()=>node('live').textContent.includes('Reattached response'));assert.match(node('live').textContent,/Reattached response/);assert.match(node('live').textContent,/Live response/);
   assert.equal(calls.filter(item=>item.method==='POST' && item.key.endsWith('/recover')).length,0);
   // Owner actions stay on the current turn while the inspector shows an old one.
-  const stop=deferred('POST /api/executions/a-live/cancel'),stopping=node('cancel').click();node('cancel').click();await stop.requested;
+  const stop=deferred('POST /api/executions/a-live/cancel'),stopping=node('send').click();node('send').click();await stop.requested;
   assert.equal(calls.filter(item=>item.key==='/api/executions/a-live/cancel').length,1);
   executions.get('a-live').status='CANCELLING';stop({execution_id:'a-live',cancelled:false});await stopping;
   assert.match(node('execution-meta').textContent,/a-run/);assert.match(node('notice').textContent,/terminal outcome is not yet confirmed/);
@@ -2344,8 +2345,8 @@ await select('#session=a&execution=a-run');
 assert.match(node('current-status').textContent,/Session occupied/);assert.equal(node('show-active').hidden,false);
 assert.doesNotMatch(node('current-status').textContent,/SUCCEEDED/);
 node('show-active').click();await until('active execution details',()=>node('execution-meta').textContent.includes('active-other') && !node('execution-meta').textContent.includes('Loading'));assert.match(node('current-status').textContent,/Session occupied · STARTED/);
-assert.equal(node('inspector').hidden,false);assert.equal(node('cancel').hidden,false);
-node('inspector-close').click();assert.equal(node('cancel').hidden,false);
+assert.equal(node('inspector').hidden,false);assert.equal(node('send').type,'button');
+node('inspector-close').click();assert.equal(node('send').type,'button');
 sessions.get('a').active_execution_id=null;await select('#session=a');
 
 // A session response cannot overwrite a newer navigation.
@@ -2420,7 +2421,7 @@ assert.equal(forks[0].body.request_id,forks[1].body.request_id);
 // Dismissing an in-flight creation cannot close or navigate a newer dialog.
 const releaseCreate=deferred('POST /api/sessions');
 node('new-session').click();node('new-title').value='<img src=x onerror=alert(1)>';
-node('new-agent').value='default';const create=node('new-form').requestSubmit();await releaseCreate.requested;
+const create=node('new-form').requestSubmit();await releaseCreate.requested;
 const oldSession=node('new-dialog').dataset.sessionId;
 node('new-dialog').close();node('new-session').click();const newerSession=node('new-dialog').dataset.sessionId;
 const priorHash=location.hash;releaseCreate({session_id:oldSession});await create;
