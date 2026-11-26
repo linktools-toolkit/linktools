@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import ConversationCursor, SessionRecord
-from sqlalchemy.ext.asyncio import create_async_engine
+from linktools.ai.persistence.turns import SessionTurnKey
+
+from .test_session_turn_sql import _TRANSCRIPT, accept, store
 
 
 def _session() -> SessionRecord:
@@ -161,11 +162,29 @@ async def test_memory_session_admission_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sql_session_admission_contract(tmp_path) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
-    await provision_database(engine)
-    state = PersistenceStorage.sql(engine)
-    try:
-        await _assert_admission_contract(state)
-    finally:
-        await engine.dispose()
+async def test_sql_session_admission_contract(store) -> None:
+    _engine, _metadata, turns = store
+    assert (await turns.get_session("chat"))["revision"] == 0
+    first = SessionTurnKey("chat", "first")
+    assert await accept(turns, first.turn_id, request="first-request")
+    acquired = await turns.get_session("chat")
+    assert acquired["active_turn_id"] == b"first" and acquired["revision"] == 1
+    assert not await accept(turns, "competing", revision=1, request="competing-request")
+    assert not await turns.close_session("chat", expected_revision=1)
+    assert not await turns.update_session("chat", expected_revision=1, config={"metadata": {"replacement": True}})
+    assert await turns.get_session("chat") == acquired
+
+    assert await turns.finish(first, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT)
+    released = await turns.get_session("chat")
+    assert released["active_turn_id"] is None and released["last_turn_no"] == 1
+    assert released["revision"] == 2
+    assert not await turns.finish(first, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT)
+    assert await turns.update_session("chat", expected_revision=2, config={"metadata": {"updated": True}})
+    assert not await turns.close_session("chat", expected_revision=2)
+    assert await turns.close_session("chat", expected_revision=3)
+    closed = await turns.get_session("chat")
+    assert closed["active_turn_id"] is None and closed["status"] == "closed"
+    assert not await accept(turns, "after-close", revision=closed["revision"], through=1, request="later")
+    assert await turns.get_session("chat") == closed
+    committed, = await turns.turn_page("chat", through=1, limit=10)
+    assert committed["turn_id"] == b"first" and committed["messages"][0].text == "two"

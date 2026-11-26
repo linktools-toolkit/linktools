@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """Consumption and next-turn admission bypass unexpired observation records."""
-from ._runtime_test_helpers import model_features
 
 import asyncio
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.capability import ExecutionCapability
-from pydantic_ai_harness.step_persistence import StepPersistence
-from tests.ai._runtime_test_helpers import native_checkpoint
-from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.execution import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
 
-from .test_live_history_readback_integration import _Models
+from ._runtime_test_helpers import _Models, model_features, native_checkpoint
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", (False, True))
-async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
+async def test_committed_execution_results_ignore_remote_observation_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool,
 ) -> None:
     now = [1000.0]
@@ -53,11 +50,9 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
     reader_storage = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
     async with Persistence.open('committed-read', storage=owner_storage) as persistence_49, Runtime.open(persistence=persistence_49, features=model_features(models, group)) as owner, Persistence.open('committed-read', storage=reader_storage) as persistence_49, Runtime.open(persistence=persistence_49, features=model_features(models, group)) as reader:
         principal = owner.default_principal
-        await owner.agents.get().create_session("session")
-        first = await owner.agents.get().session("session").start("first", idempotency_key="first")
+        first = await owner.agents.get().start("first", idempotency_key="first")
         try:
             await asyncio.wait_for(entered.wait(), 10)
-            await reader.sessions.get("session", principal=principal)
             assert (await reader.executions.inspect(first.execution_id, principal=principal)).status is ExecutionStatus.STARTED
             if cancel:
                 outcome = await owner.executions.cancel(
@@ -79,10 +74,71 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
             assert (await asyncio.wait_for(remote.wait(), 10)).result.status is terminal.status
             if not cancel:
                 assert await reader._execution_service.result_payload_size(first.execution_id, principal=principal) > 0
-            # The captured session continuation also remains hot; admission must read its source.
-            second = await reader.agents.get().session("session").start("second", idempotency_key="second")
-            assert (await asyncio.wait_for(second.wait(), 10)).result.status is ExecutionStatus.SUCCEEDED
-            assert calls == 2
+            assert calls == 1
+        finally:
+            release.set()
+
+
+class _SessionAuthorization(TenantAuthorizationPolicy):
+    """Explicit host policy for authorized native SQL sessions."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", (False, True))
+async def test_native_next_turn_uses_canonical_continuation_across_runtimes(tmp_path: Path, cancel: bool) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    model_histories = []
+
+    async def model(messages, _info):
+        model_histories.append([message.text for message in messages if isinstance(message, ModelResponse)])
+        if len(model_histories) == 1:
+            entered.set()
+            await release.wait()
+            yield "first output"
+        else:
+            yield "second output"
+
+    group = RuntimeFeatures("committed-session")
+    group.agent("default", model="default", allow_tools=())
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = model_features(_Models(FunctionModel(stream_function=model)), group)
+    database = tmp_path / "session.db"
+    async with AsyncExitStack() as stack:
+        runtimes = []
+        for _ in range(2):
+            persistence = await stack.enter_async_context(Persistence.open(
+                "committed-session", storage=PersistenceStorage.sqlite(
+                    database, cache=InMemoryCacheBackend(max_bytes=1000000),
+                ),
+            ))
+            runtimes.append(await stack.enter_async_context(Runtime.open(
+                persistence=persistence, features=features, authorization=_SessionAuthorization(persistence.tenant_id),
+            )))
+        owner, reader = runtimes
+        principal = owner.default_principal
+        await owner.sessions.create_turn_session("session", principal=principal)
+        first = await owner.sessions.start(
+            "session", "first", principal=principal, agent="default", idempotency_key="first",
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            occupied = await reader.history.turn_session_state("session", principal=principal)
+            assert occupied["active_turn_id"] == first.key.turn_id
+            if cancel:
+                assert await first.cancel()
+            release.set()
+            expected = ExecutionStatus.CANCELLED if cancel else ExecutionStatus.SUCCEEDED
+            assert (await asyncio.wait_for(first.wait_final(), 10)).status is expected
+            second = await reader.sessions.start(
+                "session", "second", principal=principal, agent="default", idempotency_key="second",
+            )
+            assert (await asyncio.wait_for(second.wait_final(), 10)).status is ExecutionStatus.SUCCEEDED
+            page = await reader.history.turn_session("session", principal=principal)
+            turns = page["timeline"]["items"]
+            assert [(item["turn_id"], item["status"]) for item in turns] == [
+                (first.key.turn_id, expected.value), (second.key.turn_id, "SUCCEEDED"),
+            ]
+            assert model_histories == [[], [] if cancel else ["first output"]]
         finally:
             release.set()
 
@@ -99,10 +155,7 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Persistence.open('terminal-consumption', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_96, Runtime.open(persistence=persistence_96, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime:
-        await runtime.agents.get().create_session("session")
-        execution = await runtime.agents.get().session("session").start(
-            "first", idempotency_key="first",
-        )
+        execution = await runtime.agents.get().start("first", idempotency_key="first")
         await execution.wait()
         service = runtime._execution_service
         repository = runtime._state.execution.executions

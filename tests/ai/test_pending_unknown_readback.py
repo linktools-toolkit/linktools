@@ -5,7 +5,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
@@ -114,9 +114,16 @@ async def test_native_tool_unknown_ack_does_not_dispatch_before_or_after_late_cl
         effects.append(context.execution_id)
         return "done"
 
-    async def model(_messages, _info):
+    async def model(messages, _info):
         nonlocal calls
         calls += 1
+        if calls == 2:
+            assert isinstance(messages[-1], ModelRequest)
+            [result] = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
+            assert (result.tool_name, result.tool_call_id, result.outcome) == ("effect", "effect", "failed")
+            assert "Task interrupted; tool outcome unknown." in str(result.content)
+            return ModelResponse(parts=[TextPart("could not confirm the effect")])
+        assert calls == 1
         return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="effect")])
 
     features = RuntimeFeatures("native-unknown-tool")
@@ -189,11 +196,13 @@ async def test_native_tool_unknown_ack_does_not_dispatch_before_or_after_late_cl
                         **turns._turn_values(key), generation=1, state="accepted",
                     ).values(lease_until=0))
                     assert expired.rowcount == 1
-                with pytest.raises(AIError) as unresolved:
-                    await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
-                assert unresolved.value.code in {ErrorCode.TOOL_EFFECT_UNKNOWN, ErrorCode.STORAGE_RECOVERY_REQUIRED}
-                assert effects == [] and calls == 1
-                assert (await turns.get_session("session"))["active_turn_id"] == key.turn_id.encode()
+                assert await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+                finished = await sent.wait_final(timeout_seconds=5)
+                assert finished.key == key and finished.status is ExecutionStatus.SUCCEEDED
+                assert finished.view["output"] == {"text": "could not confirm the effect"}
+                assert len(pending) == 1 and effects == [] and calls == 2
+                assert await repository.list_by_execution(key.turn_id, tenant_id=runtime.tenant_id) == (stored,)
+                assert (await turns.get_session("session"))["active_turn_id"] is None
         finally:
             release.set()
             await asyncio.gather(*pending, return_exceptions=True)
