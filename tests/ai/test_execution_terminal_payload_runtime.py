@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Execution terminal policies admit real bytes before source materialization."""
+"""Standalone Execution terminal policies retain buffered bytes until source publication."""
 
 import asyncio
 from pathlib import Path
@@ -67,11 +67,11 @@ async def test_completed_turns_release_execution_buffer_ownership(
                 released.set()
 
             monkeypatch.setattr(backend, "release_runtime_execution", observe_release)
-            session = await runtime.agents.get().create_session("session")
+            agent = runtime.agents.get()
             execution_ids = set()
             for index in range(2):
                 released.clear()
-                execution = await session.start("question", idempotency_key=f"request-{index}")
+                execution = await agent.start("question", idempotency_key=f"request-{index}")
                 assert execution.execution_id not in execution_ids
                 execution_ids.add(execution.execution_id)
                 result = (await execution.wait(timeout_seconds=10)).result
@@ -135,11 +135,11 @@ async def test_rejected_start_releases_buffer_owner_after_exact_cleanup(
     async with Persistence.open("execution-buffer-rejected-start", storage=storage) as persistence:
         async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
-            session = await runtime.agents.get().create_session("session")
+            agent = runtime.agents.get()
             backend = runtime._execution_service.runtime_backend()
             for index in range(4):
                 with pytest.raises(AIError) as rejected:
-                    await session.start("question", idempotency_key=f"rejected-{index}")
+                    await agent.start("question", idempotency_key=f"rejected-{index}")
                 assert rejected.value.code is ErrorCode.STORAGE_UNAVAILABLE
                 if admission == "unknown":
                     await asyncio.wait_for(buffer.ack_started.wait(), 1)
@@ -163,7 +163,7 @@ async def test_rejected_start_releases_buffer_owner_after_exact_cleanup(
                 buffer.ack_release.clear()
             buffer.fail = False
             buffer.ack_release.set()
-            execution = await session.start("question", idempotency_key="accepted")
+            execution = await agent.start("question", idempotency_key="accepted")
             result = (await execution.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
             assert result.output == {"text": "answer"}
@@ -172,10 +172,9 @@ async def test_rejected_start_releases_buffer_owner_after_exact_cleanup(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("outcome", "sessionless"), (("success", False), ("failure", False),
-                                                        ("cancelled", False), ("success", True)))
+@pytest.mark.parametrize("outcome", ("success", "failure", "cancelled"))
 async def test_pending_payloads_and_checkpoint_are_read_from_buffer_before_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, sessionless: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
     buffer = _PayloadBuffer()
@@ -241,8 +240,7 @@ async def test_pending_payloads_and_checkpoint_are_read_from_buffer_before_sourc
             monkeypatch.setattr(backend._runtime_commands, "commit_pending_turn", source_commit)
             monkeypatch.setattr(runtime._run_store, "get_agent_run", guarded_run)
             monkeypatch.setattr(runtime._run_store, "latest_checkpoint", guarded_checkpoint)
-            target = runtime.agents.get() if sessionless else await runtime.agents.get().create_session("session")
-            execution = await target.start(prompt, idempotency_key="request")
+            execution = await runtime.agents.get().start(prompt, idempotency_key="request")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 assert buffer.captures and all(capture.reservation is not None for capture in buffer.captures)
@@ -319,8 +317,8 @@ async def test_pending_payload_dispatch_retains_exact_source_evidence(
         if interference == "late_audit":
             monkeypatch.setattr(backend._context_archive, "prepare", gated_prepare)
         try:
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("question", idempotency_key="request")
+            agent = runtime.agents.get()
+            execution = await agent.start("question", idempotency_key="request")
             if interference == "late_audit":
                 await asyncio.wait_for(prepare_entered.wait(), 5)
                 pending = backend._pending_turns.get(execution.execution_id, tenant_id=runtime.tenant_id)

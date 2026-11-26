@@ -163,146 +163,119 @@ async def test_runtime_history_session_reader_empty_unavailable_and_invalid_limi
 
 
 @pytest.mark.asyncio
-async def test_runtime_history_session_reader_shared_display_cache_preserves_sql_budget(tmp_path):
+async def test_runtime_history_session_reader_live_and_readonly_share_bounded_sql_page(tmp_path):
     from sqlalchemy import event
+
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.core import TenantAuthorizationPolicy
-    from linktools.ai.storage import InMemoryCacheBackend
-    from .test_session_display_cache import _prepare, _service
+    from .test_pending_session_projection import _runtimes, _SessionAuthorization
 
-    cache = InMemoryCacheBackend(max_bytes=2**20)
-    state = Persistence(PersistenceStorage.sqlite(tmp_path / "history.db", cache=cache))
-    await _prepare(state, body=True)
-    statements = []
-    engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
-
-    def observe(_connection, _cursor, statement, *_args):
-        statements.append(statement.lstrip().split()[0].upper())
-
-    event.listen(engine, "before_cursor_execute", observe)
-    try:
-        signer = HmacCursorSigner("display", b"display-test-key")
-        reader = History(
-            SimpleNamespace(), tenant_id="tenant", sessions=state.conversation.sessions,
-            executions=state.execution.executions, conversation=state.conversation,
-            authorization=TenantAuthorizationPolicy(), cursor_signer=signer,
-            session_transcript_store=state.run_store.conversation_persistence, cache=cache,
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, *_):
+        runtime, _ = runtimes[0]
+        principal = runtime.default_principal
+        await runtime.agents.get().create_session("session", principal=principal)
+        turn = await runtime.sessions.start(
+            "session", "question", agent="default", principal=principal, idempotency_key="request",
         )
-        live = _service(state, cache)
-        expected = await live.refresh("session", principal=_OWNER, max_age=3)
-        statements.clear()
-        actual = await reader.session_detail("session", principal=_OWNER, max_age=3)
-        assert actual == expected
-        assert actual.timeline.items[0].output == {"text": "ok"}
-        assert not any(value in {"INSERT", "UPDATE", "DELETE", "CREATE"} for value in statements)
-        statements.clear()
-        assert await reader.session_detail("session", principal=_OWNER, max_age=3) == expected
-        assert statements == []
-    finally:
-        event.remove(engine, "before_cursor_execute", observe)
-        await state.close()
+        result = await turn.wait_final(timeout_seconds=5)
+        expected = await runtime.sessions.refresh("session", principal=principal, limit=1)
+        assert expected["timeline"]["items"] == [result.view]
+        async with (
+            Persistence.open(
+                "pending-session-display", read_only=True, storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+            ) as state,
+            History.open(persistence=state, authorization=_SessionAuthorization()) as reader,
+        ):
+            engine = state.execution.executions.state_store.storage_group.context.engine.sync_engine
+            statements = []
+
+            def observe(_connection, _cursor, statement, *_args):
+                statements.append(statement.lstrip().split()[0].upper())
+
+            event.listen(engine, "before_cursor_execute", observe)
+            try:
+                for _ in range(2):
+                    statements.clear()
+                    assert await reader.turn_session("session", principal=principal, limit=1) == expected
+                    assert 0 < statements.count("SELECT") + statements.count("WITH") <= 5
+                    assert set(statements) <= {"SELECT", "WITH", "PRAGMA", "BEGIN"}
+            finally:
+                event.remove(engine, "before_cursor_execute", observe)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transition", ("complete", "cancel", "promote"))
+@pytest.mark.parametrize("transition", ("complete", "cancel"))
 @pytest.mark.parametrize("borrowed", [False, True])
-async def test_runtime_history_session_reader_pending_overlay_and_canonical_boundary(
+async def test_runtime_history_session_reader_observes_native_occupancy_and_terminal(
     tmp_path, monkeypatch, transition, borrowed,
 ):
     import asyncio
     from contextlib import AsyncExitStack, nullcontext
-    from linktools.ai.capability import ExecutionCapability
-    from linktools.ai.runtime import RuntimeFeatures
-    from linktools.ai.core import CommitPolicy, ExecutionStatus
+    from linktools.ai.core import ExecutionStatus
     from linktools.ai.runtime import Runtime
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.execution import CancelExecutionRequest
-    from linktools.ai.storage import InMemoryCacheBackend
     from linktools.ai.storage._database import SqlStorageContext
-    from .test_pending_session_projection import _runtimes
+    from .test_pending_session_projection import _runtimes, _SessionAuthorization
 
-    cache = InMemoryCacheBackend(max_bytes=2**24)
-    async with _runtimes(tmp_path, cache=cache, shared=borrowed) as (runtimes, entered, finish, block), AsyncExitStack() as readers:
+    async with (
+        _runtimes(tmp_path, cache=None, shared=borrowed, native=True) as (runtimes, entered, finish, block),
+        AsyncExitStack() as readers,
+    ):
         owner, _ = runtimes[0]
-        session = await owner.agents.get().create_session("session")
-        features = RuntimeFeatures("read-history")
+        principal = owner.default_principal
+        await owner.agents.get().create_session("session", principal=principal)
 
         def no_runtime(*args, **kwargs):
-            raise AssertionError("read-only history must not build a Runtime")
+            pytest.fail("read-only history must not build a Runtime")
 
         monkeypatch.setattr(Runtime, "open", no_runtime)
-        reader_context = (nullcontext(runtimes[1][0].history) if borrowed else History.open(
+        reader_context = nullcontext(runtimes[1][0].history) if borrowed else History.open(
             persistence=await readers.enter_async_context(Persistence.open(
-                "pending-session-display", read_only=True,
-                storage=PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache),
-            )), authorization=None,
-        ))
+                "pending-session-display", read_only=True, storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+            )), authorization=_SessionAuthorization(),
+        )
         async with reader_context as reader:
-            principal = owner.default_principal
-            await reader.session_detail("session", principal=principal, max_age=3)
+            assert (await reader.turn_session("session", principal=principal))["timeline"]["items"] == []
             block()
-            execution = await session.start("pending question", idempotency_key="pending")
+            turn = await owner.sessions.start(
+                "session", "pending question", agent="default", principal=principal, idempotency_key="pending",
+            )
             await asyncio.wait_for(entered.wait(), 5)
-            mutations = []
-            original = SqlStorageContext.run_mutation
 
-            async def record_mutation(context, callback, **kwargs):
-                mutations.append(kwargs.get("domain"))
-                return await original(context, callback, **kwargs)
+            async def no_mutation(*args, **kwargs):
+                pytest.fail("administrative reads must not enter the write boundary")
 
-            monkeypatch.setattr(SqlStorageContext, "run_mutation", record_mutation)
-            info = await reader.inspect_execution(execution.execution_id, principal=principal, include_usage=False)
-            assert info.status is ExecutionStatus.STARTED and info.usage is None
-            assert (await reader.list_sessions(principal=principal)).items[0].active_execution_id == execution.execution_id
-            assert (await reader.lookup_session("session", principal=principal)).active_execution_id == execution.execution_id
-            detail = await reader.session_detail("session", principal=principal, max_age=3)
-            assert detail.session.active_execution_id == execution.execution_id
-            assert [turn.execution_id for turn in detail.timeline.items] == [execution.execution_id]
-            assert not detail.timeline.items[0].conversation_committed
-            assert (await reader.messages("session", principal=principal)).items == ()
-            assert mutations == []
-            observe = reader._pending_session_execution
-            crossed = False
+            async def capture():
+                with monkeypatch.context() as patch:
+                    patch.setattr(SqlStorageContext, "run_mutation", no_mutation)
+                    listed = await reader.turn_sessions(principal=principal, session_ids=("session",))
+                    state = await reader.turn_session_state("session", principal=principal)
+                    page = await reader.turn_session("session", principal=principal)
+                    exact = await reader.turn_result("session", turn.key.turn_id, principal=principal)
+                    assert listed["items"] == [state] and page["session"] == state
+                    return page, exact
 
-            async def cross_boundary(session_id, *, tenant_id):
-                nonlocal crossed
-                pending = await observe(session_id, tenant_id=tenant_id)
-                if pending is not None and not crossed:
-                    crossed = True
-                    if transition == "complete":
-                        finish.set()
-                        await execution.wait(timeout_seconds=5)
-                    elif transition == "cancel":
-                        await owner.executions.cancel(execution.execution_id, CancelExecutionRequest(principal, "cancel"))
-                    else:
-                        await owner.executions._service.acquire_dependency_hold(
-                            execution.execution_id, tenant_id=owner.tenant_id, hold_id="hold",
-                        )
-                return pending
-
-            reader._pending_session_execution = cross_boundary
-            listed = await reader.list_sessions(principal=principal)
-            assert listed.items[0].active_execution_id == (execution.execution_id if transition == "promote" else None)
-            mutations.clear()
-            looked_up = await reader.lookup_session("session", principal=principal)
-            assert looked_up.active_execution_id == (execution.execution_id if transition == "promote" else None)
-            after = await reader.session_detail("session", principal=principal, max_age=3)
-            final_info = await reader.inspect_execution(execution.execution_id, principal=principal, include_usage=False)
-            assert final_info.status is after.timeline.items[0].status
-            assert mutations == []
-            assert crossed
-            assert [turn.execution_id for turn in after.timeline.items] == [execution.execution_id]
-            assert after.session.active_execution_id == (execution.execution_id if transition == "promote" else None)
-            assert after.timeline.items[0].conversation_committed is (transition != "promote")
-            if transition == "cancel":
-                assert after.timeline.items[0].status is ExecutionStatus.CANCELLED
-                assert after.timeline.items[0].items == () and after.timeline.items[0].output is None
-            if transition == "promote":
-                await owner.executions._service.release_dependency_hold(
-                    execution.execution_id, tenant_id=owner.tenant_id, hold_id="hold",
-                )
-            finish.set()
-            await execution.wait(timeout_seconds=5)
+            try:
+                page, exact = await capture()
+                assert page["session"]["active_turn_id"] == turn.key.turn_id
+                assert page["timeline"]["items"] == []
+                assert not exact["conversation_committed"] and exact["output"] is None
+                if transition == "cancel":
+                    assert await turn.cancel()
+                else:
+                    finish.set()
+                terminal = await turn.wait_final(timeout_seconds=5)
+                page, exact = await capture()
+                assert page["session"]["active_turn_id"] is None
+                assert page["timeline"]["items"] == [terminal.view] and exact == terminal.view
+                assert exact["conversation_committed"]
+                if transition == "cancel":
+                    assert terminal.status is ExecutionStatus.CANCELLED
+                    assert exact["items"] == [] and exact["output"] is None
+                else:
+                    assert terminal.status is ExecutionStatus.SUCCEEDED
+                    assert exact["output"] == {"text": "answer"}
+            finally:
+                finish.set()
 
 
 @pytest.mark.asyncio
@@ -364,66 +337,60 @@ async def test_native_history_reader_fork_prefix_and_cold_readonly_open(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("keep_pending", [True, False])
-async def test_runtime_history_session_reader_independent_terminal_commit_is_authoritative(tmp_path, keep_pending):
-    from linktools.ai.capability import ExecutionCapability
-    from linktools.ai.runtime import RuntimeFeatures
-    from linktools.ai.core import CommitPolicy, ExecutionStatus
+async def test_runtime_history_session_reader_independent_terminal_commit_is_authoritative(
+    tmp_path, keep_pending,
+):
+    import asyncio
+    from linktools.ai.core import ExecutionStatus
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.persistence.coordination import PendingTurnCoordination
     from linktools.ai.storage import InMemoryCacheBackend
     from .test_pending_coordination import _claim
-    from .test_session_timeline import _execution, _commit_empty_turn
+    from .test_pending_session_projection import _runtimes, _SessionAuthorization
+    from .test_session_timeline import _execution
 
-    path = tmp_path / "independent.db"
-    # The writer does not participate in this reader's disposable read cache.
-    writer = Persistence(PersistenceStorage.sqlite(path))
-    await writer.initialize(namespace="independent", tenant_id="tenant")
-    await writer.conversation.sessions.create(_session())
+    # This writer does not use the reader's cache; leave stale pending data there
+    # after a native cancellation, as if a separate publisher lost its acknowledgement.
     coordination = InMemoryCacheBackend(max_bytes=2**20)
-    observer = PendingTurnCoordination.select(coordination, namespace="independent", tenant_id="tenant")
-    pending = _execution("execution", status=ExecutionStatus.STARTED, prompt="question")
-    lease = await _claim(observer)
-    await observer.publish(pending, lease)
-    features = RuntimeFeatures("independent-history")
-    try:
-        async with Persistence.open('independent', storage=PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=2 ** 20), coordination=coordination), tenant_id='tenant', read_only=True) as history_persistence_372, History.open(persistence=history_persistence_372, authorization=None) as reader:
-            assert (await reader.inspect_execution(
-                pending.execution_id, principal=_OWNER, include_usage=False,
-            )).status is ExecutionStatus.STARTED
-            for _ in range(3):
-                current = await reader.session_detail("session", principal=_OWNER, max_age=30)
-                assert current.session.active_execution_id == pending.execution_id
-            cancelled = _execution("execution", status=ExecutionStatus.CANCELLED,
-                                   prompt="question", error_code="EXECUTION_CANCELLED")
-            await writer.execution.executions.create(cancelled)
-            await writer.conversation.sessions.admit_execution(
-                "session", tenant_id="tenant", execution_id="execution", expected=None,
-            )
-            await _commit_empty_turn(writer, cancelled)
-            await writer.conversation.sessions.release_execution(
-                "session", tenant_id="tenant", execution_id="execution",
-            )
-            if not keep_pending:
-                await coordination.release_turn(lease.lease)
-                assert await observer.read_execution("execution", tenant_id="tenant") is None
-                assert (await reader.inspect_execution(
-                    "execution", principal=_OWNER, include_usage=False,
-                )).status is ExecutionStatus.CANCELLED
-            # Simulate a lost acknowledgement: the old live lease/publication
-            # remains, even though canonical cancellation has committed.
-            assert (await observer.read_session_execution("session", tenant_id="tenant") is not None) is keep_pending
-            listed = await reader.list_sessions(principal=_OWNER)
-            assert listed.items[0].active_execution_id is None
-            assert (await reader.lookup_session("session", principal=_OWNER)).active_execution_id is None
-            final = await reader.session_detail("session", principal=_OWNER, max_age=30)
-            assert final.session.active_execution_id is None
-            assert len(final.timeline.items) == 1
-            assert final.timeline.items[0].status is ExecutionStatus.CANCELLED
-            assert final.timeline.items[0].conversation_committed
+    observer = PendingTurnCoordination.select(
+        coordination, namespace="pending-session-display", tenant_id="default",
+    )
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, entered, finish, block):
+        runtime, _ = runtimes[0]
+        principal = runtime.default_principal
+        await runtime.agents.get().create_session("session", principal=principal)
+        block()
+        turn = await runtime.sessions.start(
+            "session", "question", agent="default", principal=principal, idempotency_key="request",
+        )
+        await asyncio.wait_for(entered.wait(), 5)
+        stale = _execution("execution", status=ExecutionStatus.STARTED, prompt="question")
+        lease = await _claim(observer)
+        try:
+            await observer.publish(stale, lease)
+            async with (
+                Persistence.open(
+                    "pending-session-display", read_only=True,
+                    storage=PersistenceStorage.sqlite(tmp_path / "state.db", coordination=coordination),
+                ) as state,
+                History.open(persistence=state, authorization=_SessionAuthorization()) as reader,
+            ):
+                before = await reader.turn_session("session", principal=principal)
+                assert before["session"]["active_turn_id"] == turn.key.turn_id
+                assert before["timeline"]["items"] == []
+                assert await turn.cancel()
+                terminal = await turn.wait_final(timeout_seconds=5)
+                assert terminal.status is ExecutionStatus.CANCELLED
+                if not keep_pending:
+                    assert await coordination.release_turn(lease.lease)
+                assert (await observer.read_session_execution("session", tenant_id="default") is not None) is keep_pending
+                listed = await reader.turn_sessions(principal=principal, session_ids=("session",))
+                after = await reader.turn_session("session", principal=principal)
+                assert listed["items"] == [after["session"]]
+                assert after["session"]["active_turn_id"] is None
+                assert after["timeline"]["items"] == [terminal.view]
+                assert terminal.view["conversation_committed"]
+                assert await reader.turn_result("session", turn.key.turn_id, principal=principal) == terminal.view
+        finally:
             await coordination.release_turn(lease.lease)
-            assert await observer.read_execution("execution", tenant_id="tenant") is None
-            assert (await reader.inspect_execution(
-                "execution", principal=_OWNER, include_usage=False,
-            )).status is ExecutionStatus.CANCELLED
-    finally:
-        await writer.close()
+            finish.set()
