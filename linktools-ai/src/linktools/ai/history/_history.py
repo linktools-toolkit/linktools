@@ -396,7 +396,7 @@ class History:
         self, *, principal: Principal, cursor: str | None = None, limit: int = 100,
         session_ids: Sequence[str] | None = None, local_workspace: bool = False,
     ) -> dict[str, JsonValue]:
-        """List explicitly scoped SQL sessions, or use the trusted local console boundary."""
+        """List SQL sessions by explicit IDs, a host policy prefix, or the trusted local console."""
         return await self._require_ordinary_sessions().sessions(
             principal=principal, cursor=cursor, limit=limit, session_ids=session_ids, local_workspace=local_workspace,
         )

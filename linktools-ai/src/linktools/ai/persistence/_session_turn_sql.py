@@ -746,7 +746,7 @@ class SqlSessionTurnReader:
         }
 
     async def session_page(
-        self, *, session_ids: Sequence[str] | None, before: int | None, limit: int,
+        self, *, session_ids: Sequence[str] | None, before: int | None, limit: int, prefix: str | None = None,
     ) -> tuple[RowMapping, ...]:
         columns = self._sessions.c
         statement = self._sessions.select().where(columns.scope_key == self._scope)
@@ -755,6 +755,12 @@ class SqlSessionTurnReader:
                 return ()
             keys = tuple(self._key(identity, TURN_SESSION_MAX_BYTES) for identity in session_ids)
             statement = statement.where(columns.session_key.in_(keys))
+        if prefix is not None:
+            lower = self._key(prefix, TURN_SESSION_MAX_BYTES)
+            # Valid UTF-8 never ends in 0xff. Compare indexed binary keys without
+            # casting them, so a tenant's unrelated sessions stay out of range.
+            upper = lower[:-1] + bytes((lower[-1] + 1,))
+            statement = statement.where(columns.session_key >= lower, columns.session_key < upper)
         if before is not None:
             statement = statement.where(columns.id < before)
         async with self._context.engine.connect() as connection:

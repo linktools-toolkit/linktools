@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from ..errors import AIError, ErrorCode
 from ._validation import validate_principal_id, validate_resource_id, validate_tenant_id
@@ -74,6 +74,15 @@ class AuthorizationPolicy(Protocol):
     ) -> None: ...
 
 
+@runtime_checkable
+class SessionListingAuthorization(AuthorizationPolicy, Protocol):
+    """Optional policy for listing sessions in a host-authorized ID namespace."""
+
+    async def session_list_prefix(self, principal: Principal) -> "str | None":
+        """Return the caller's nonempty session ID prefix, or deny implicit listing."""
+        ...
+
+
 def service_principal(tenant_id: str, principal_id: str) -> Principal:
     return Principal(principal_id=principal_id, tenant_id=tenant_id, kind=PrincipalKind.SERVICE.value)
 
@@ -117,4 +126,4 @@ class TenantAuthorizationPolicy:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
 
-__all__ = ["AuthorizationAction", "AuthorizationPolicy", "ResourceRef", "TenantAuthorizationPolicy", "service_principal"]
+__all__ = ["AuthorizationAction", "AuthorizationPolicy", "ResourceRef", "SessionListingAuthorization", "TenantAuthorizationPolicy", "service_principal"]

@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, Thinking
 
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, CursorSigner, ExecutionStatus, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
-    ResourceRef, TenantAuthorizationPolicy, UsageMetrics, canonical_sha256, decode_cursor, encode_cursor,
+    ResourceRef, SessionListingAuthorization, TenantAuthorizationPolicy, UsageMetrics, canonical_sha256, decode_cursor, encode_cursor,
     principal_identity_payload, validate_execution_id, validate_page_limit, validate_session_id,
 )
 from ..errors import AIError, ErrorCode
@@ -263,9 +263,16 @@ class _OrdinarySessionHistory:
     ) -> dict[str, JsonValue]:
         self._require_access(principal, local_workspace=local_workspace)
         limit = validate_page_limit(limit)
+        prefix = None
         if session_ids is None:
             if not local_workspace:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED, "Listing requires explicit session IDs")
+                policy = self._authorization
+                if not isinstance(policy, SessionListingAuthorization):
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED, "Listing requires explicit session IDs")
+                prefix = await policy.session_list_prefix(principal)
+                if prefix is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                validate_session_id(prefix)
             selected = None
         else:
             if isinstance(session_ids, (str, bytes)) or len(session_ids) > 1000:
@@ -275,9 +282,12 @@ class _OrdinarySessionHistory:
         digest = canonical_sha256({
             "principal": principal_identity_payload(principal), "local_workspace": local_workspace,
             "session_ids": None if selected is None else list(selected),
+            **({} if prefix is None else {"session_prefix": prefix}),
         })
         before = self._cursor_position(cursor, kind, digest)
-        rows = await self._store.session_page(session_ids=selected, before=before, limit=limit + 1)
+        rows = await self._store.session_page(
+            session_ids=selected, prefix=prefix, before=before, limit=limit + 1,
+        )
         items: list[JsonValue] = []
         for row in rows[:limit]:
             try:
