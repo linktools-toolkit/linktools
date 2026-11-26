@@ -143,8 +143,12 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
     async def require_available(self) -> None:
         if self._current_policy is None:
             await super().require_available()
-        elif not (await self._current_policy()).session.enabled:
+            return
+        session = (await self._current_policy()).session
+        if not session.enabled:
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
+        if session.checkpoints:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, "Session checkpoints require native SQL sessions")
 
     async def _authorize_resume_execution(self, session_id: str, principal: Principal) -> None:
         # The built-in execution owner authorizes the actual new or replayed

@@ -951,7 +951,7 @@ class AgentExecutor:
                         collect_compaction=register_compaction_recorder if scope.capture_compacted_context else None,
                         model=model,
                         skill_sources=skill_sources,
-                        current_agent=None if scope.regenerable or scope.canonical_step is not None else self._current_agent,
+                        current_agent=None if scope.regenerable else self._current_agent,
                         asset_sources=None if scope.regenerable else self._asset_sources,
                         deferred_pause_sink=record_deferred_step,
                         metrics=self._metrics,
@@ -1465,7 +1465,10 @@ async def _materialize_agent(
         if (bound := template.visit_and_replace(bind_workspace)) is not None
     )
     async def current_tools() -> CompiledAgent:
-        return compiled_agent if current_agent is None else await current_agent(compiled_agent)
+        # Native Step keeps the admitted tool registry; only skills can rediscover.
+        if scope.canonical_step is not None or current_agent is None:
+            return compiled_agent
+        return await current_agent(compiled_agent)
 
     if not scope.regenerable:
         raw_toolsets.append(create_current_toolset(

@@ -11,15 +11,20 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from linktools.ai import Runtime
 from linktools.ai.agent import AgentBindingContract, AgentCatalog, AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, DirectoryAssetBackend, InMemoryAssetBackend, PrefixAssetPathAdapter
-from linktools.ai.capability import AssetCapability, AssetSkillSource, CapabilityContribution, ExecutionCapability, SkillCapability, SkillDefinition, SkillResource, SkillSourceRef, SkillSourceRegistry
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.capability import AssetCapability, AssetSkillSource, CapabilityContribution, ExecutionCapability, StepPersistenceCapability, SkillCapability, SkillDefinition, SkillResource, SkillSourceRef, SkillSourceRegistry
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.spec import AgentSpec, MCPServerSpec, RepositoryInstructionDocument, SkillSpec
 from linktools.ai.storage import StorageLayer, StorageOverlay
+from linktools.ai.workspace import Workspace
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel, native_checkpoint
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, native_checkpoint, workspace_features
+
+
+class _NativeHostAuthorization(TenantAuthorizationPolicy):
+    """Authorize this explicit SQL Session host."""
 
 
 def _declaration(identity: str, text: str, *, audience: str = "analyst") -> bytes:
@@ -81,14 +86,16 @@ async def test_runtime_discovers_and_reloads_skills_in_one_native_run(tmp_path, 
         filter=lambda agent, item: item.kind != "skill" or item.value.spec.metadata.get("audience") == agent.metadata.get("role"),
     )
     features.capability(AssetCapability(store))
+    features.capability(StepPersistenceCapability())
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.agent("default", allow_tools=(), allow_skills=selectors, metadata={"role": "analyst"})
     async with Persistence.open("live", storage=PersistenceStorage.sqlite(tmp_path / "live.db")) as persistence:
-        async with Runtime.open(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features, authorization=_NativeHostAuthorization()) as runtime:
             assert runtime.agents.get().derive(model="default").compiled.skill_definitions == ()
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("Use the new skill", idempotency_key="input")
-            result = (await execution.wait(timeout_seconds=10)).result
+            agent = runtime.agents.get()
+            await agent.create_session("session")
+            turn = await agent.start("Use the new skill", session_id="session", idempotency_key="input")
+            result = await turn.wait_final(timeout_seconds=10)
             assert result.status is ExecutionStatus.SUCCEEDED, result
     assert stage == 7
 
@@ -166,17 +173,21 @@ async def test_next_run_materializes_current_local_skill_resources(tmp_path):
         assert returns[-1].content["content"] == expected
         return ModelResponse(parts=[TextPart("done")])
 
-    features = RuntimeFeatures("current-resources")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    features = workspace_features("current-resources", workspace=Workspace.load(workspace))
     features.capability(AssetCapability(store))
+    features.capability(StepPersistenceCapability())
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.agent("default", allow_tools=(), allow_skills=("guide",))
     async with Persistence.open("current-resources", storage=PersistenceStorage.sqlite(tmp_path / "resources.db")) as persistence:
-        async with Runtime.open(persistence=persistence, features=features) as runtime:
+        async with Runtime.open(persistence=persistence, features=features, authorization=_NativeHostAuthorization()) as runtime:
             for expected in ("First", "Second"):
                 resource.write_text(expected)
-                session = await runtime.agents.get().create_session(expected)
-                execution = await session.start("Read the skill", idempotency_key=expected)
-                result = (await execution.wait(timeout_seconds=10)).result
+                agent = runtime.agents.get()
+                await agent.create_session(expected)
+                turn = await agent.start("Read the skill", session_id=expected, idempotency_key=expected)
+                result = await turn.wait_final(timeout_seconds=10)
                 assert result.status is ExecutionStatus.SUCCEEDED, result
 
 
