@@ -246,7 +246,7 @@ class Container(BaseContainer):
         if context.target_services is not None and "nginx" not in context.target_services:
             return
         root_domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if self.get_config("NGINX_WILDCARD_DOMAIN") and not Nginx.is_dns_domain(root_domain):
+        if self.get_config("NGINX_WILDCARD_DOMAIN") and not Nginx.is_dns_domain(root_domain, qualified=False):
             raise ContainerError("Wildcard domain is enabled; configure NGINX_ROOT_DOMAIN with a DNS domain.")
         domain = root_domain if self.get_config("NGINX_HTTPS_ENABLE", type=bool) else None
         if domain is not None:

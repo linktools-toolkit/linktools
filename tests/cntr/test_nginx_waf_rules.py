@@ -92,6 +92,31 @@ def test_authelia_waf_bypass_preserves_auth_and_other_sites(
             assert '"~*^/api/" 1;' not in other_map
 
 
+@pytest.mark.parametrize("https", (False, True))
+def test_safeline_private_dns_suffix_is_http_only(fresh_manager: "ContainerManager", https: bool) -> None:
+    fresh_manager.installed_state.remove(
+        *(name for name in fresh_manager.installed_state.load_names() if name not in ("nginx", "safeline")),
+        force=True,
+    )
+    for key, value in (("NGINX_ROOT_DOMAIN", "lan"), ("NGINX_WILDCARD_DOMAIN", True),
+                       ("NGINX_WAF_ENABLE", True), ("NGINX_HTTPS_ENABLE", https),
+                       ("NGINX_AUTH_ENABLE", False)):
+        fresh_manager.config.set(key, value)
+    nginx = fresh_manager.containers["nginx"]
+    if https:
+        with pytest.raises(ContainerError, match="NGINX_ROOT_DOMAIN with a DNS domain for HTTPS"):
+            nginx.acme_ssl_domains
+        return
+
+    files, waf_enabled = nginx._rendered_site_files
+    rendered = files["sites/generated.conf"]
+    assert waf_enabled
+    assert "server_name safeline.lan;" in rendered
+    assert "ssl_certificate " not in rendered
+    assert "listen 8000" in rendered
+    assert 'set $waf_target "http://172.22.242.254:8000";' in rendered
+
+
 def test_waf_hop_keeps_common_proxy_limits_and_timeouts(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
     rendered = _render_site(nginx, True, ())

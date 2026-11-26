@@ -68,10 +68,11 @@ class Nginx(Integration):
         return value
 
     @classmethod
-    def is_dns_domain(cls, value: object) -> bool:
-        """Distinguish DNS names from defaults and other HTTP routing names."""
+    def is_dns_domain(cls, value: object, *, qualified: bool = True) -> bool:
+        """DNS routes may use a private suffix; certificates require a qualified name."""
         labels = value.split(".") if isinstance(value, str) and len(value) <= 253 else ()
-        return (len(labels) > 1 and not labels[-1].isdigit() and
+        return (len(labels) >= (2 if qualified else 1) and (len(labels) > 1 or labels[0].lower() != "localhost")
+                and not labels[-1].isdigit() and
                 all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels))
 
     @classmethod
@@ -83,7 +84,7 @@ class Nginx(Integration):
             if not container.containers["nginx"].enable:
                 return ""
             root = config.get("NGINX_ROOT_DOMAIN")
-            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool) or not cls.is_dns_domain(root):
+            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool) or not cls.is_dns_domain(root, qualified=False):
                 return root
             if name is None:
                 return f"{container.name}.{root}"

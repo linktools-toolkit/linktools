@@ -388,7 +388,9 @@ Use this provider for a site's routing name, not to decide whether a public
 URL exists. An empty root disables inherited sites. The default root `_` is
 an unnamed nginx routing name, not a public hostname. Wildcard routing
 requires a configured root and does not prefix an empty root, `_`, or
-`localhost`.
+`localhost`. A private DNS suffix such as `lan` works for HTTP
+routes (for example, `safeline.lan`), but not for the built-in HTTPS
+certificate.
 
 The built-in HTTPS configuration requires a DNS root such as `example.com`
 even when wildcard routing is off. Nginx validates that input before the
