@@ -620,7 +620,7 @@ class SqlSessionTurnReader:
         columns = self._turns.c
         request = columns.request_json
         required = ("prompt", "principal", "thinking")
-        optional = ("input", "input_intent", "budgeted", "session_context", "correlation")
+        optional = ("input", "input_intent", "budgeted", "session_context", "correlation", "mode", "planning")
         statement = select(
             columns.turn_id, columns.binding_key, request["explicit_agent_binding"].as_boolean().label("explicit_agent_binding"),
             *(request[name].label(name) for name in (*required, *optional)),
@@ -633,13 +633,14 @@ class SqlSessionTurnReader:
         if row is None:
             return None
         binding = row["binding_json"]
+        spec = binding["agent_spec"]
         return {
             "turn_id": row["turn_id"], "request_json": {
                 name: row[name] for name in (*required, *optional)
                 if name in required or row[name] is not None
             },
-            "agent_id": binding["agent_spec"]["id"], "output_mode": binding["output_mode"],
-            "output_schema": binding["output_schema"],
+            "agent_id": spec["id"], "output_mode": binding["output_mode"], "output_schema": binding["output_schema"],
+            "default_planning": spec["planning"], "default_thinking": spec["thinking"],
             **({"binding_digest": AgentBindingContract.from_payload(binding).binding_digest}
                if row["explicit_agent_binding"] is True else {}),
         }

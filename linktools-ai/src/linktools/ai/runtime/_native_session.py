@@ -207,7 +207,7 @@ class _NativeSession(Generic[AppT, ResultT]):
     async def start(
         self, prompt: UserPromptInput, *, agent: str | Agent[AppT], idempotency_key: str,
         files: Sequence[str] = (), session_context: SessionContext = "all", mode: ExecutionMode = "run",
-        planning: bool = False, thinking: JsonValue = None, budget: RunBudget | None = None,
+        planning: bool | None = None, thinking: JsonValue = None, budget: RunBudget | None = None,
         output: type[BaseModel] | None = None, correlation: Mapping[str, object] | None = None,
         preview: bool = True, principal: Principal | None = None,
     ) -> AsyncIterator[tuple[_NativeSessionTurn[AppT, ResultT], AsyncIterator[dict[str, JsonValue]]]]:

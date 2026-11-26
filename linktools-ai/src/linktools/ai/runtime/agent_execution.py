@@ -13,7 +13,7 @@ from ..agent import AgentBinding, AgentBindingContract, AgentCompiler, CompiledA
 from ..session import SessionContext, normalize_session_context
 from ..capability import MemoryCapability
 from ._capabilities import runtime_feature_leaves
-from ..core import (BudgetUsage, OperationLedgerInput, OperationLedgerRecord, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
+from ..core import (BudgetUsage, OperationLedgerInput, OperationLedgerRecord, ExecutionMode, JsonValue, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
                     normalize_thinking, overlay_correlation, validate_execution_request_key)
 from ..errors import AIError, ErrorCode
 from ..execution import (ExecutionHandle, Execution, ExecutionInputContext, ExecutionRequest,
@@ -330,11 +330,9 @@ class AgentExecutionPort(Generic[AppT]):
         captured = self.captured or requires_task_invocation_capture
         binding = await self._resolve_start_binding(output, captured=captured)
         compiled_agent = binding.compiled_agent
-        resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
-            compiled_agent,
-            mode=mode,
-            planning=planning,
-            thinking=thinking,
+        resolved_mode, resolved_planning, resolved_thinking = resolve_execution_policy(
+            mode=mode, planning=planning, thinking=thinking,
+            default_planning=compiled_agent.spec.planning, default_thinking=compiled_agent.spec.thinking,
         )
         request = ExecutionRequest(
             user_prompt=user_prompt,
@@ -439,27 +437,16 @@ def _memory_scope(compiled_agent: CompiledAgent) -> str | None:
     return scopes[0] if scopes else None
 
 
-def _execution_policy(
-    compiled_agent: CompiledAgent,
-    *,
-    mode: ExecutionMode,
-    planning: "bool | None",
-    thinking: "ThinkingValue | None",
-) -> "tuple[ExecutionMode, bool, ThinkingValue]":
+def resolve_execution_policy(
+    *, mode: ExecutionMode, planning: bool | None, thinking: JsonValue,
+    default_planning: bool, default_thinking: ThinkingValue,
+) -> tuple[ExecutionMode, bool, ThinkingValue]:
     resolved_mode = normalize_execution_mode(mode)
     if planning is not None and not isinstance(planning, bool):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    resolved_planning = (
-        compiled_agent.spec.planning
-        if planning is None
-        else planning
-    )
-    if resolved_mode == "plan":
-        resolved_planning = True
-    resolved_thinking = (
-        compiled_agent.spec.thinking if thinking is None else normalize_thinking(thinking)
-    )
-    return resolved_mode, resolved_planning, resolved_thinking
+    resolved_planning = default_planning if planning is None else planning
+    return (resolved_mode, resolved_mode == "plan" or resolved_planning,
+            default_thinking if thinking is None else normalize_thinking(thinking))
 
 
-__all__ = ["AgentExecutionPort"]
+__all__ = ["AgentExecutionPort", "resolve_execution_policy"]

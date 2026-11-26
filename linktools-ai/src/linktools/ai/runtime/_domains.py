@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn, SessionService, SessionContext, normalize_session_context
 from ..agent import AgentBindingContract
 from ..core import (
-    AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, normalize_thinking, overlay_correlation,
+    AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, overlay_correlation,
     validate_agent_id, validate_resource_id, validate_session_id, validate_session_request_key,
 )
 from ..errors import AIError, ErrorCode
@@ -419,7 +419,7 @@ class RuntimeSessions(Generic[AppT]):
         idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
         session_context: SessionContext = "all",
         mode: "ExecutionMode" = "run",
-        planning: bool = False,
+        planning: bool | None = None,
         budget: "RunBudget | None" = None,
         output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None,
@@ -437,7 +437,7 @@ class RuntimeSessions(Generic[AppT]):
         idempotency_key: str, thinking: JsonValue = None, files: "Sequence[str]" = (),
         session_context: SessionContext = "all",
         mode: "ExecutionMode" = "run",
-        planning: bool = False,
+        planning: bool | None = None,
         budget: "RunBudget | None" = None,
         output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None,
@@ -474,7 +474,7 @@ class RuntimeSessions(Generic[AppT]):
             session_id, agent_id=agent_id, prompt=prompt, principal=principal, namespace=runtime.namespace,
             tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
             resolver=resolver, request_key=idempotency_key, limits=PromptLimits(),
-            event_sink=_discard_turn_emission, thinking=normalize_thinking(thinking), files=files, output=output,
+            event_sink=_discard_turn_emission, thinking=thinking, files=files, output=output,
             session_context=normalize_session_context(session_context), selected_binding=selected_binding,
             mode=mode, planning=planning, budget=budget,
             correlation=overlay_correlation(runtime.correlation, correlation),
@@ -621,7 +621,7 @@ class RuntimeSessions(Generic[AppT]):
             receipt = await self._start_turn_receipt(
                 session_id, user_prompt, agent=agent, principal=principal, idempotency_key=idempotency_key,
                 output=output, correlation=correlation, files=files,
-                planning=False if planning is None else planning, thinking=thinking,
+                planning=planning, thinking=thinking,
             )
             return session._turn(receipt.turn_id, principal)
         self._agent_session_service()

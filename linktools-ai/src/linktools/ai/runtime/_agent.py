@@ -350,7 +350,7 @@ class Agent(Generic[AppT]):
                     session_id, user_prompt, agent=self, principal=actor,
                     idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                     files=files, session_context=session_context, budget=budget, output=output,
-                    mode=mode, planning=False if planning is None else planning,
+                    mode=mode, planning=planning,
                     thinking=thinking, correlation=correlation,
                 )
                 return session._turn(receipt.turn_id, actor)

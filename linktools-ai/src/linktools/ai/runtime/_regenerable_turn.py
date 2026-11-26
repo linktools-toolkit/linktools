@@ -28,6 +28,7 @@ from ..persistence.turns import SessionInstructionFrontier, SessionTurnKey, Sess
 from ..session import SessionContext, ToolProcessItem, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta
+from .agent_execution import resolve_execution_policy
 from ._regenerable_transcript import prepare_native_turn_transcript, reply_from_turn, restore_turn_prompt
 from ._step_store import RuntimeStepStore
 from ._repository_instructions import (
@@ -423,11 +424,11 @@ class _RegenerableTurnRunner:
     async def start_session(
         self, session_id: str, *, agent_id: str, principal: Principal, namespace: str, tenant_id: str,
         app: object, authorization: AuthorizationPolicy, resolver: _AgentBindingResolver,
-        request_key: str, prompt: CanonicalUserInput, limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
+        request_key: str, prompt: CanonicalUserInput, limits: PromptLimits, event_sink: EventSink, thinking: JsonValue,
         files: Sequence[str] = (), session_context: SessionContext = "all", output: type[BaseModel] | None = None,
         correlation: CorrelationData | None = None,
         selected_binding: Callable[[], Awaitable[AgentBinding]] | None = None,
-        mode: ExecutionMode = "run", planning: bool = False, budget: RunBudget | None = None,
+        mode: ExecutionMode = "run", planning: bool | None = None, budget: RunBudget | None = None,
     ) -> _SessionTurnStartReceipt:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
@@ -450,9 +451,6 @@ class _RegenerableTurnRunner:
         if not isinstance(prompt, str):
             prompt = await self._input_materializer.canonicalize_input(prompt)
         output_binding = bind_output(output)
-        if mode not in ("run", "plan") or type(planning) is not bool:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        planning = planning or mode == "plan"
         if budget is not None:
             from ..core import RunBudget
             if not isinstance(budget, RunBudget):
@@ -486,12 +484,16 @@ class _RegenerableTurnRunner:
                 same_input = request["prompt"] == prompt and prior_files == normalized_files
             else:
                 same_input = request.get("input_intent") == self._input_materializer.intent(prompt, normalized_files).digest
+            replay_mode, replay_planning, replay_thinking = resolve_execution_policy(
+                mode=mode, planning=planning, thinking=thinking,
+                default_planning=prior["default_planning"], default_thinking=prior["default_thinking"],
+            )
             if (
                 not same_input or request["principal"] != asdict(principal)
-                or request["thinking"] != thinking
+                or request["thinking"] != replay_thinking
                 or request.get("session_context", "all") != session_context
                 or request.get("correlation", {}) != effective_correlation
-                or request.get("mode", "run") != mode or request.get("planning", False) != planning
+                or request.get("mode", "run") != replay_mode or request.get("planning", False) != replay_planning
                 or bool(request.get("budgeted", False)) != (budget is not None)
                 or prior["agent_id"] != agent_id
                 or (prior.get("binding_digest") is not None) != (selected_binding is not None)
@@ -521,6 +523,10 @@ class _RegenerableTurnRunner:
         )
         files = await self._input_materializer.canonicalize_files(files) if files else ()
         binding = await bind()
+        spec = binding.compiled_agent.spec
+        resolved_mode, resolved_planning, resolved_thinking = resolve_execution_policy(
+            mode=mode, planning=planning, thinking=thinking, default_planning=spec.planning, default_thinking=spec.thinking,
+        )
         config = session["config_json"]
         cwd = config.get("cwd")
         context = AgentContext(
@@ -531,8 +537,8 @@ class _RegenerableTurnRunner:
             if await self.start(
                 key, revision=session["revision"], through=session["last_turn_no"],
                 request_key=request_key, prompt=prompt, binding=binding, context=context,
-                limits=limits, event_sink=event_sink, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
-                session_context=session_context, mode=mode, planning=planning,
+                limits=limits, event_sink=event_sink, thinking=resolved_thinking, cwd=cwd, files=files, lineage=lineage,
+                session_context=session_context, mode=resolved_mode, planning=resolved_planning,
                 explicit_agent_binding=selected_binding is not None, budget=budget,
             ):
                 return _SessionTurnStartReceipt(key.turn_id, replayed=False)

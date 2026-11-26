@@ -152,3 +152,76 @@ async def test_sql_host_without_session_authorization_does_not_fall_back(tmp_pat
         assert await state.conversation.sessions.get("chat", tenant_id=principal.tenant_id) is None
         standalone = await agent.start("no session requested")
         assert (await standalone.wait(timeout_seconds=5)).result.output == {"text": "standalone"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["bound-sdk-agent", "agent-id"])
+async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path, role):
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Authorize native sessions explicitly."""
+
+    calls = 0
+
+    async def model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        return ModelResponse(parts=[TextPart("done")])
+
+    def features(*, revision, planning, thinking):
+        result = RuntimeFeatures("sdk-native-defaults")
+        result.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        result.agent("default", revision=revision, allow_tools=(), allow_capabilities=(), planning=planning, thinking=thinking)
+        return model_features(_Models(_UsageFunctionModel(model)), result)
+
+    storage = PersistenceStorage.from_root(tmp_path)
+    async with (
+        Persistence.open("sdk-native-defaults", storage=storage) as state,
+        Runtime.open(persistence=state, authorization=HostAuthorization(),
+                     features=features(revision=1, planning=True, thinking="high")) as runtime,
+    ):
+        principal = runtime.default_principal
+        agent = runtime.agents.get()
+        await agent.create_session("session")
+        selected = agent if role == "bound-sdk-agent" else "default"
+
+        async def send(key, **options):
+            return await runtime.sessions.start(
+                "session", "question", agent=selected, principal=principal, idempotency_key=key, **options,
+            )
+
+        admitted = (await agent.start("question", session_id="session", idempotency_key="turn")
+                    if role == "bound-sdk-agent" else await send("turn"))
+        assert (await admitted.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        row = await state.session_turns.get_turn(admitted.key)
+        assert row["request_json"]["planning"] is True and row["request_json"]["thinking"] == "high"
+        assert (await send("turn", planning=True, thinking="high")).key == admitted.key
+        assert (await send("turn")).key == admitted.key
+        assert calls == 1
+
+        for options in ({"planning": False}, {"thinking": False}, {"thinking": "low"}):
+            with pytest.raises(AIError) as mismatch:
+                await send("turn", **options)
+            assert mismatch.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert calls == 1
+
+        overriding = await send("override", planning=False, thinking=False)
+        assert (await overriding.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        row = await state.session_turns.get_turn(overriding.key)
+        assert row["request_json"].get("planning", False) is False and row["request_json"]["thinking"] is False
+        with pytest.raises(AIError) as mismatch:
+            await send("override")
+        assert mismatch.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert calls == 2
+
+    if role == "agent-id":
+        async with (
+            Persistence.open("sdk-native-defaults", storage=storage) as state,
+            Runtime.open(persistence=state, authorization=HostAuthorization(),
+                         features=features(revision=2, planning=False, thinking="low")) as runtime,
+        ):
+            same = await runtime.sessions.start(
+                "session", "question", agent="default", principal=runtime.default_principal, idempotency_key="turn",
+            )
+            assert same.key == admitted.key
+            assert (await same.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        assert calls == 2
