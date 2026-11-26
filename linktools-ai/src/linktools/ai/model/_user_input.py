@@ -239,6 +239,7 @@ def plain_text_input_content(value: StoredUserInput) -> str | list[str] | None:
 
 
 _GRAPH_FILE = "linktools.graph_file"
+_GRAPH_BINARY = "linktools.graph_binary"
 
 
 def native_graph_input_metadata(value: StoredUserInput) -> dict[str, JsonValue] | None:
@@ -247,6 +248,10 @@ def native_graph_input_metadata(value: StoredUserInput) -> dict[str, JsonValue] 
     if view is None:
         return None
     files, prompt = view.get("files"), view.get("prompt")
+    if (files == [] and isinstance(prompt, Mapping) and prompt.get("kind") == "items"
+            and isinstance(prompt.get("items"), list)
+            and any(isinstance(item, Mapping) and item.get("kind") == "binary" for item in prompt["items"])):
+        return {_GRAPH_BINARY: True}
     if (not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], Mapping)
             or not isinstance(files[0].get("path"), str) or not isinstance(prompt, Mapping)
             or prompt.get("kind") not in {"text", "items"}):
@@ -263,8 +268,35 @@ def capture_native_graph_input(
     import hashlib
 
     from ..workspace import normalize_workspace_input_path
-    from ._attachment import input_attachment_views, is_binary_attachment_text
+    from ._attachment import binary_attachment_text, input_attachment_views, is_binary_attachment_text
     from ._user_content_codec import encode_user_content_item
+
+    if len(metadata) == 1 and metadata.get(_GRAPH_BINARY) is True:
+        if isinstance(content, str):
+            raise ValueError("invalid admitted Graph binary")
+        binary_positions = [index for index, item in enumerate(content) if type(item) is BinaryContent]
+        if len(binary_positions) != 1 or binary_positions[0] == 0:
+            raise ValueError("Graph turns support one captured direct binary")
+        position, = binary_positions
+        binary = content[position]
+        label = content[position - 1]
+        if (label != binary_attachment_text(binary)
+                or any(not isinstance(item, str) for item in (*content[:position - 1], *content[position + 1:]))):
+            raise ValueError("Graph binary lacks the original materializer framing")
+        original = (*content[:position - 1], *content[position:])
+        items = [
+            {"kind": "text", "text": item} if isinstance(item, str) else {
+                "kind": "binary", "digest": hashlib.sha256(binary.data).hexdigest(), "size": len(binary.data),
+                "media_type": binary.media_type, "identifier": binary.identifier,
+                "vendor_metadata": normalize_json_value(binary.vendor_metadata),
+            } for item in original
+        ]
+        return StoredUserInput(
+            "user-content-v1",
+            StoredPayload.inline_json({"items": [encode_user_content_item(item) for item in content]}),
+            {"version": 1, "prompt": {"kind": "items", "items": items}, "files": [],
+             "attachments": list(input_attachment_views(original))},
+        )
 
     file = metadata.get(_GRAPH_FILE)
     if (set(metadata) != {_GRAPH_FILE} or not isinstance(file, Mapping)

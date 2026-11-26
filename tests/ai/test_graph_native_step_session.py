@@ -24,7 +24,7 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("attachment", ("none", "file"))
+@pytest.mark.parametrize("attachment", ("none", "file", "binary"))
 async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: Path, attachment: str) -> None:
     calls = 0
     seen: list[bytes] = []
@@ -33,6 +33,9 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
     file = workspace / "source.txt"
     file.write_bytes(b"workspace-file")
     files = ("source.txt",) if attachment == "file" else ()
+    binary = b"binary-content"
+    prompt = ("graph question", BinaryContent(binary, media_type="application/octet-stream")) if attachment == "binary" else "graph question"
+    expected = {"none": [], "file": [b"workspace-file"], "binary": [binary]}[attachment]
 
     async def model(_messages, _info):
         nonlocal calls
@@ -69,7 +72,7 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
             task, persistence=state, context=runtime.context, authorization=authorization,
         ))
         graph = TaskGraph("source-graph", (TaskNode(
-            "agent", task=task, input=AgentTaskInput("graph question", files=files, session_id=created.session_id),
+            "agent", task=task, input=AgentTaskInput(prompt, files=files, session_id=created.session_id),
         ),))
         run = await engine.start(graph, principal=principal, idempotency_key="start-graph")
         completed = (await run.wait(timeout_seconds=10)).result
@@ -91,8 +94,7 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
     ):
         turn = await history.turn_result(created.session_id, execution_id, principal=principal)
         assert turn["conversation_committed"] and turn["output"] == {"text": "retained graph output"}
-        if files:
-            projected = turn["user_input"]["attachments"]
-            assert [item["size"] for item in projected] == [len(b"workspace-file")]
+        projected = turn["user_input"]["attachments"]
+        assert [item["size"] for item in projected] == [len(item) for item in expected]
     assert calls == 1
-    assert seen == ([b"workspace-file"] if files else [])
+    assert seen == expected
