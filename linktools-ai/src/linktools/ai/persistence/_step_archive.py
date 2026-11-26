@@ -4208,14 +4208,15 @@ class StateStepArchive(AgentRunStore):
         self, *, agent_run_id: str, event_high_water: int,
         after_timestamp: datetime | None, after_sequence: int, limit: int,
         model_request_seq: int | None = None, step_index: int | None = None,
-        tool_call_id: str | None = None,
+        tool_call_id: str | None = None, model_requests_only: bool = False,
     ) -> list[tuple[int, StepEvent]]:
         """Read immutable events in timestamp order using their derived locators."""
         require_no_run_history_lock("StateStepArchive.list_trace_events")
         if self._trace_events is not None:
             return await self._list_sql_trace_events(agent_run_id=agent_run_id, event_high_water=event_high_water,
                 after_timestamp=after_timestamp, after_sequence=after_sequence, limit=limit,
-                model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id)
+                model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id,
+                model_requests_only=model_requests_only)
         if event_high_water < 0 or after_sequence < 0 or limit < 1:
             raise AIError(ErrorCode.CURSOR_INVALID)
         after_sort_key = (
@@ -4225,10 +4226,11 @@ class StateStepArchive(AgentRunStore):
 
         if event_high_water == 0:
             return []
-        filtered = any(value is not None for value in (model_request_seq, step_index, tool_call_id))
+        filtered = model_requests_only or any(value is not None for value in (model_request_seq, step_index, tool_call_id))
 
         def matches(sequence: int, event: StepEvent) -> bool:
-            if not event.event_type.startswith(("MODEL_REQUEST_", "TOOL_CALL_")):
+            kinds = ("MODEL_REQUEST_",) if model_requests_only else ("MODEL_REQUEST_", "TOOL_CALL_")
+            if not event.event_type.startswith(kinds):
                 return False
             request = event.metadata.get("linktools.ai.model_request_seq")
             if request is not None and (not request.isdigit() or int(request) < 1):
@@ -4337,7 +4339,7 @@ class StateStepArchive(AgentRunStore):
         self, *, agent_run_id: str, event_high_water: int,
         after_timestamp: datetime | None, after_sequence: int, limit: int,
         model_request_seq: int | None = None, step_index: int | None = None,
-        tool_call_id: str | None = None,
+        tool_call_id: str | None = None, model_requests_only: bool = False,
     ) -> list[tuple[int, StepEvent]]:
         """Filter before limiting, with stable timestamp/sequence pagination."""
         require_no_run_history_lock("StateStepArchive.list_trace_events")
@@ -4350,7 +4352,8 @@ class StateStepArchive(AgentRunStore):
         async def read(transaction: StateTransaction) -> list[tuple[int, StepEvent]]:
             facts = await self._trace_events.select(transaction, agent_run_id, high_water=event_high_water,
                 after_timestamp=after_timestamp, after_sequence=after_sequence, limit=limit,
-                model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id)
+                model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id,
+                model_requests_only=model_requests_only)
             return [(fact.sequence, _decode_step(fact.data)) for fact in facts]
         return await self._store.read(read)
 

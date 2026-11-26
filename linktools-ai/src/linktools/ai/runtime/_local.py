@@ -1143,7 +1143,8 @@ class LocalExecutionBackend:
                 or execution.requires_task_invocation_capture
                 or execution.input_context is not None or execution.agent_run_seq != 0
                 or type(self._execution.executions) is not ExecutionRepositoryImpl
-                or type(self._conversation.sessions) is not SessionRepositoryImpl):
+                or (execution.session_id is not None
+                    and type(self._conversation.sessions) is not SessionRepositoryImpl)):
             return False
         stores = (self._execution.executions.state_store,
                   self._session_state_store, self._execution.executions.state_store)

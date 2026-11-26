@@ -944,8 +944,11 @@ async def _build_local_components(
                         or policy.durable_trace or policy.memory_scope is not None
                         or any(type(leaf) not in (StepPersistence, StepPersistenceCapability, ExecutionCapability)
                                for item in policy.capabilities for leaf in runtime_feature_leaves(item))):
-                    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
-                                  "Cross-store Step requires a text agent with no tools or one fixed approval tool")
+                    raise AIError(
+                        ErrorCode.STORAGE_CAPABILITY_MISSING,
+                        "Ordinary sessions with tools require Conversation, Step and tool receipts in one SQL transaction. "
+                        "Cross-store Step supports only text sessions without tools or with one fixed approval tool.",
+                    )
                 if approval_profile:
                     split_approval_ref = CapabilityRef("tool", candidate.id, candidate.revision)
                 selected_store = split_sql_source

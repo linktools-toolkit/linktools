@@ -246,7 +246,7 @@ class SqlTraceEventStore:
                      tool_call_ids: Sequence[str] | None = None, history: bool = False,
                      after_timestamp: datetime | None = None, after_sequence: int = 0, limit: int | None = None,
                      model_request_seq: int | None = None, step_index: int | None = None,
-                     tool_call_id: str | None = None) -> tuple[StoredFact, ...]:
+                     tool_call_id: str | None = None, model_requests_only: bool = False) -> tuple[StoredFact, ...]:
         # Trace sequences start at one; an empty durable prefix has no roles.
         if high_water == 0:
             return ()
@@ -286,7 +286,7 @@ class SqlTraceEventStore:
                     found[fact.sequence] = fact
             ordered = sorted(found)
             return tuple(found[key] for key in (ordered if limit is None else ordered[:limit]))
-        statement = statement.where(t.kind.in_((*_REQUEST_KINDS, *_TOOL_KINDS)))
+        statement = statement.where(t.kind.in_(_REQUEST_KINDS if model_requests_only else (*_REQUEST_KINDS, *_TOOL_KINDS)))
         if after_timestamp is not None:
             statement = statement.where(t.order_key > trace_event_order_key(after_timestamp, after_sequence))
         if model_request_seq is not None:

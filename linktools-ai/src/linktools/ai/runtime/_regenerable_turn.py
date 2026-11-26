@@ -2008,7 +2008,7 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         events = await archive.list_trace_events(
             agent_run_id=key.turn_id, event_high_water=event_head, after_timestamp=None,
-            after_sequence=0, limit=3, model_request_seq=request_head,
+            after_sequence=0, limit=3, model_request_seq=request_head, model_requests_only=True,
         )
         if tuple(event.event_type for _, event in events) != ("MODEL_REQUEST_STARTED", "MODEL_REQUEST_SUCCEEDED"):
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)

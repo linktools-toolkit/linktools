@@ -53,6 +53,20 @@ recovery point to meet a transaction budget.
 
 ## One existing SQL transaction
 
+For ordinary tool-enabled sessions, keep Conversation, native Step and
+Checkpoint tool receipts in one SQL storage group (for example, use one
+`PersistenceStorage.sqlite(path)` or one `PersistenceStorage.sql(engine)`).
+The session owns the turn lifecycle. Step checkpoints and tool receipts join
+the session's existing transaction boundaries: an external tool runs outside
+the database transaction, and each receipt write shares its transaction with
+the corresponding Step facts under the session's generation fence.
+
+An explicitly configured split storage group keeps its existing text-only
+session modes: no tools, or one fixed approval tool. It is not a fallback for
+ordinary tools. Unsupported split session profiles are rejected rather than
+rerouted to another database. Independent Execution and task storage are not
+changed by this ordinary-session constraint.
+
 `SqlStepStore.prepare_step` captures original records and encodes/externalizes
 messages before the transaction. `write_prepared_step(transaction, prepared)`
 uses the current writable StateStore transaction's public `run_sql` operation.
