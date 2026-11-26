@@ -316,7 +316,9 @@ async def _body(request: Request, *, ordinary_turn: bool = False, upload: bool =
     return payload
 
 
-def _uploaded_prompt(prompt: str, value: object) -> str | tuple[str | BinaryContent, ...]:
+def _uploaded_prompt(
+    prompt: str, value: object,
+) -> tuple[str | tuple[str | BinaryContent, ...], tuple[str, ...]]:
     """Convert browser bytes into the Runtime's existing ordered attachment input."""
     def invalid(reason: str) -> AIError:
         return AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "attachments", "reason": reason})
@@ -324,8 +326,9 @@ def _uploaded_prompt(prompt: str, value: object) -> str | tuple[str | BinaryCont
     if not isinstance(value, list) or len(value) > _TURN_UPLOAD_MAX_FILES:
         raise invalid("attachment_count_invalid")
     if not value:
-        return prompt
+        return prompt, ()
     parts: list[str | BinaryContent] = [prompt]
+    names: list[str] = []
     for item in value:
         if not isinstance(item, dict):
             raise invalid("attachment_invalid")
@@ -342,8 +345,9 @@ def _uploaded_prompt(prompt: str, value: object) -> str | tuple[str | BinaryCont
         if not data:
             raise invalid("attachment_empty")
         media_type = media_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
-        parts.append(BinaryContent(data, media_type=media_type, identifier=name))
-    return tuple(parts)
+        parts.append(BinaryContent(data, media_type=media_type))
+        names.append(name)
+    return tuple(parts), tuple(names)
 
 
 class _LocalBoundary:
@@ -588,11 +592,11 @@ class _Console:
                 planning = payload.get("planning", False)
                 if type(planning) is not bool:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "planning"})
-                prompt = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []))
+                prompt, names = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []))
                 turn_id = await runtime.sessions.start_turn(
                     session_id, prompt, agent="default",
                     principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
-                    planning=planning,
+                    planning=planning, attachment_display_names=names,
                 )
                 return _json({"turn_id": turn_id}, 202)
             if action in {"cancel", "recover"}:
@@ -680,7 +684,7 @@ class _Console:
                     value = {
                         **value,
                         "attachments": [
-                            {key: item[key] for key in ("attachment_id", "source", "media_type", "size", "position", "path")
+                            {key: item[key] for key in ("attachment_id", "source", "media_type", "size", "position", "display_name")
                              if key in item}
                             for item in attachments if isinstance(item, Mapping)
                         ],

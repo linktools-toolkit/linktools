@@ -163,7 +163,8 @@ async def _turn_view(
     if row["stored_input"] is not None:
         stored_input = decode_domain(row["stored_input"], StoredUserInput)
         attachments = [
-            {key: item.get(key) for key in ("attachment_id", "source", "media_type", "size", "position")}
+            {key: item[key] for key in ("attachment_id", "source", "media_type", "size", "position", "display_name")
+             if key in item}
             for item in stored_input_attachment_views(stored_input)
         ]
         if prompt == "":

@@ -156,8 +156,9 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     model_features(_Models(_UsageFunctionModel(model)), features)
+    storage = PersistenceStorage.from_root(tmp_path)
     async with (
-        Persistence.open("web-upload", storage=PersistenceStorage.from_root(tmp_path)) as state,
+        Persistence.open("web-upload", storage=storage) as state,
         Runtime.open(persistence=state, features=features, authorization=WorkspacePolicy()) as runtime,
         client(create_app(runtime=runtime)) as http,
     ):
@@ -178,22 +179,49 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
         assert broken.status_code == 400 and broken.json()["safe_details"]["reason"] == "attachment_encoding_invalid"
 
         request = {**payload, "attachments": [{**item, "data": b64encode(binary).decode()}]}
-        accepted = await http.post(url, headers=_HEADERS, json=request)
-        assert accepted.status_code == 202, accepted.text
-        turn_id = accepted.json()["turn_id"]
-        repeat = await http.post(url, headers=_HEADERS, json=request)
-        assert repeat.status_code == 202 and repeat.json() == {"turn_id": turn_id}
-        actor = runtime.default_principal
-        session = await runtime.sessions.get("chat", principal=actor)
-        result = await session._turn(turn_id, actor).wait_final(timeout_seconds=10)
+        frames = []
+        unsubscribe = runtime.sessions.observe_turn_session("chat", frames.append)
+        try:
+            accepted = await http.post(url, headers=_HEADERS, json=request)
+            assert accepted.status_code == 202, accepted.text
+            turn_id = accepted.json()["turn_id"]
+            repeat = await http.post(url, headers=_HEADERS, json=request)
+            assert repeat.status_code == 202 and repeat.json() == {"turn_id": turn_id}
+            renamed = await http.post(url, headers=_HEADERS, json={
+                **payload, "attachments": [{**request["attachments"][0], "name": "different.bin"}],
+            })
+            assert renamed.status_code == 409 and renamed.json()["code"] == "IDEMPOTENCY_CONFLICT"
+            actor = runtime.default_principal
+            session = await runtime.sessions.get("chat", principal=actor)
+            result = await session._turn(turn_id, actor).wait_final(timeout_seconds=10)
+        finally:
+            unsubscribe()
         assert result.view["output"] == {"text": "done"}
-        assert seen == [("file.bin", binary)]
+        (identifier, seen_binary), = seen
+        assert identifier != "file.bin" and seen_binary == binary
+        names = {
+            frame["type"]: frame["attachments"][0]["display_name"]
+            for frame in frames if frame["type"] in {"admitted", "terminal"}
+        }
+        assert names == {"admitted": "file.bin", "terminal": "file.bin"}
         row = await state.session_turn_reader.get_turn(SessionTurnKey("chat", turn_id))
         stored = decode_domain(row["request_json"]["input"], StoredUserInput)
         assert [ref.size for ref in stored.payload.object_refs()] == [len(binary)]
         history = (await http.get(f"/api/session?session_id=chat&turn_id={turn_id}")).json()
-        assert history["user_input"]["attachments"][0]["size"] == len(binary)
+        attachment, = history["user_input"]["attachments"]
+        assert attachment["size"] == len(binary) and attachment["display_name"] == "file.bin"
+        assert set(attachment) == {"attachment_id", "media_type", "source", "position", "display_name", "size"}
         assert request["attachments"][0]["data"] not in json.dumps(history)
+
+
+    async with (
+        Persistence.open("web-upload", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=WorkspacePolicy()) as runtime,
+        client(create_app(runtime=runtime)) as http,
+    ):
+        reopened = await http.get("/api/session", params={"session_id": "chat", "turn_id": turn_id})
+        assert reopened.status_code == 200, reopened.text
+        assert reopened.json()["user_input"]["attachments"] == [attachment]
 
 
 @pytest.mark.asyncio

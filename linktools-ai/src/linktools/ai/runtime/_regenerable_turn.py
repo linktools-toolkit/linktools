@@ -464,6 +464,7 @@ class _RegenerableTurnRunner:
         correlation: CorrelationData | None = None,
         selected_binding: Callable[[], Awaitable[AgentBinding]] | None = None,
         mode: ExecutionMode = "run", planning: bool | None = None, budget: RunBudget | None = None,
+        attachment_display_names: tuple[str, ...] = (),
     ) -> _SessionTurnStartReceipt:
         """Start on the authoritative SQL session after session and execution authorization."""
         if principal.tenant_id != tenant_id:
@@ -483,6 +484,11 @@ class _RegenerableTurnRunner:
         )
 
         files = normalize_input_files(files)
+        if attachment_display_names and (not isinstance(attachment_display_names, tuple) or isinstance(prompt, str) or any(
+            not isinstance(name, str) or not 0 < len(name) <= 255 or not name.isprintable()
+            or "/" in name or chr(92) in name for name in attachment_display_names
+        )):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "attachment_display_names"})
         if not isinstance(prompt, str):
             prompt = await self._input_materializer.canonicalize_input(prompt)
         output_binding = bind_output(output)
@@ -523,6 +529,12 @@ class _RegenerableTurnRunner:
                     same_input = request["prompt"] == prompt and prior_files == normalized_files
             else:
                 same_input = request.get("input_intent") == self._input_materializer.intent(prompt, normalized_files).digest
+            if same_input and not isinstance(prompt, str):
+                stored = self._stored_input(request)
+                saved_names = () if stored is None else tuple(
+                    item["display_name"] for item in stored_input_attachment_views(stored) if "display_name" in item
+                )
+                same_input = saved_names == attachment_display_names
             replay_mode, replay_planning, replay_thinking = resolve_execution_policy(
                 mode=mode, planning=planning, thinking=thinking,
                 default_planning=prior["default_planning"], default_thinking=prior["default_thinking"],
@@ -579,6 +591,7 @@ class _RegenerableTurnRunner:
                 limits=limits, event_sink=event_sink, thinking=resolved_thinking, cwd=cwd, files=files, lineage=lineage,
                 session_context=session_context, mode=resolved_mode, planning=resolved_planning,
                 explicit_agent_binding=selected_binding is not None, budget=budget,
+                attachment_display_names=attachment_display_names,
             ):
                 return _SessionTurnStartReceipt(key.turn_id, replayed=False)
         except (IntegrityError, AIError):
@@ -1063,6 +1076,7 @@ class _RegenerableTurnRunner:
         files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
         session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
         explicit_agent_binding: bool = False, budget: RunBudget | None = None,
+        attachment_display_names: tuple[str, ...] = (),
     ) -> bool:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
@@ -1077,6 +1091,7 @@ class _RegenerableTurnRunner:
                     prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
                     session_context=session_context, mode=mode, planning=planning,
                     explicit_agent_binding=explicit_agent_binding, budget=budget,
+                    attachment_display_names=attachment_display_names,
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
@@ -1393,6 +1408,7 @@ class _RegenerableTurnRunner:
         cwd: str | None = None, files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
         session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
         explicit_agent_binding: bool = False, budget: RunBudget | None = None,
+        attachment_display_names: tuple[str, ...] = (),
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, 1)
@@ -1457,6 +1473,14 @@ class _RegenerableTurnRunner:
             model_prompt = tuple(materialized)
             captured = self._input_materializer.capture(materialized)
             attachments = stored_input_attachment_views(captured)
+            if attachment_display_names:
+                # Upload names annotate occurrences, not provider identifiers.
+                if len(attachments) != len(attachment_display_names):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "attachment_display_names"})
+                attachments = tuple(
+                    {**item, "display_name": name}
+                    for item, name in zip(attachments, attachment_display_names, strict=True)
+                )
             input_size = captured.payload.size
             if input_size > _CONTEXT_BYTES:
                 raise AIError(ErrorCode.PROMPT_TOO_LARGE)

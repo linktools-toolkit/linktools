@@ -357,7 +357,9 @@ function ordinaryStatus(value) {
 function ordinaryInput(prompt,attachments=[]) {
   return {
     version:1,prompt:typeof prompt==='string'?{kind:'text',text:prompt}:prompt,files:[],
-    attachments:attachments.map(item=>({...item,identifier:item.identifier || item.path || (item.source==='workspace'?'Workspace file':undefined)})),
+    attachments:attachments.map(({display_name,source,media_type,size})=>({
+      display_name,source,media_type,size,identifier:display_name || (source==='workspace'?'Workspace file':undefined),
+    })),
   };
 }
 function ordinaryTurnNode(turn, previous=null) {
@@ -2510,7 +2512,7 @@ async function sendMessage(event) {
     if(ordinary){
       if(!state.turns.some(turn=>turn.turn_id===result.turn_id)){
         if(state.session && !state.session.active_turn_id)state.session.active_turn_id=result.turn_id;
-        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue,uploads.map(({file})=>({identifier:file.name,media_type:file.type,size:file.size}))),items:[],conversation_committed:false});
+        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue,uploads.map(({file})=>({display_name:file.name,media_type:file.type,size:file.size}))),items:[],conversation_committed:false});
       }
       return;
     }

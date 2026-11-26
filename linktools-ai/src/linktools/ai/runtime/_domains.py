@@ -425,12 +425,18 @@ class RuntimeSessions(Generic[AppT]):
         budget: "RunBudget | None" = None,
         output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None,
+        attachment_display_names: tuple[str, ...] = (),
     ) -> str:
-        """Admit a turn; plan mode selects plan-safe execution, not a dry run."""
+        """Admit a turn; plan mode selects plan-safe execution, not a dry run.
+
+        Optional attachment display names are public conversation labels in
+        attachment order; they are not provider identifiers.
+        """
         receipt = await self._start_turn_receipt(
             session_id, prompt, agent=agent, principal=principal, idempotency_key=idempotency_key,
             thinking=thinking, files=files, session_context=session_context, mode=mode, planning=planning,
             budget=budget, output=output, correlation=correlation,
+            attachment_display_names=attachment_display_names,
         )
         return receipt.turn_id
 
@@ -443,6 +449,7 @@ class RuntimeSessions(Generic[AppT]):
         budget: "RunBudget | None" = None,
         output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None,
+        attachment_display_names: tuple[str, ...] = (),
     ) -> "_SessionTurnStartReceipt":
         from ..model import validate_user_input
         from ._agent import Agent
@@ -480,6 +487,7 @@ class RuntimeSessions(Generic[AppT]):
             session_context=normalize_session_context(session_context), selected_binding=selected_binding,
             mode=mode, planning=planning, budget=budget,
             correlation=overlay_correlation(runtime.correlation, correlation),
+            attachment_display_names=attachment_display_names,
         )
 
     async def budget_usage(self, session_id: str, turn_id: str, *, principal: Principal) -> BudgetUsage | None:
