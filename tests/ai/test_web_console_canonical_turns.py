@@ -7,6 +7,7 @@ import json
 from contextlib import AsyncExitStack
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
 from pydantic_ai_harness.step_persistence import StepPersistence
 
 pytest.importorskip("starlette")
@@ -18,7 +19,7 @@ from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.web import create_app
 
-from ._runtime_test_helpers import RuntimeUsageModels, model_features
+from ._runtime_test_helpers import RuntimeUsageModels, _Models, _UsageFunctionModel, model_features
 from .test_web_console import _HEADERS, client
 
 
@@ -28,6 +29,11 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
     class WorkspacePolicy(TenantAuthorizationPolicy):
         async def authorize(self, principal, action, resource):
             await super().authorize(principal, action, resource)
+
+    async def model(_messages, _info):
+        return ModelResponse(parts=[
+            ThinkingPart("displayable thought", signature="private-provider-signature"), TextPart("done"),
+        ])
 
     features = RuntimeFeatures("web-canonical")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
@@ -40,7 +46,7 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
             stack.push_async_callback(native.close)
             features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
         runtime = await stack.enter_async_context(Runtime.open(
-            persistence=state, features=model_features(RuntimeUsageModels(), features),
+            persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
             authorization=WorkspacePolicy(),
         ))
         app = create_app(runtime=runtime, local_workspace=True)
@@ -85,13 +91,18 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
                     assert set(accepted.json()) == {"turn_id"}
                     turn_id = accepted.json()["turn_id"]
                     seen = []
+                    deltas = []
                     while True:
                         frame = await frames.get()
                         assert frame["turn_id"] == turn_id
                         seen.append(frame["type"])
+                        if frame["type"] == "delta":
+                            assert "private-provider-signature" not in json.dumps(frame)
+                            deltas.append((frame["delta_kind"], frame["text"]))
                         if frame["type"] == "terminal":
                             break
-                    assert seen[0] == "admitted" and "delta" in seen
+                    assert seen[0] == "admitted"
+                    assert deltas == [("thinking", "displayable thought"), ("text", "done")]
                     assert frame.get("error_code") is None
             finally:
                 disconnect.set()
@@ -109,11 +120,10 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
 async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_store(tmp_path):
     from base64 import b64encode
 
-    from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, UserPromptPart
+    from pydantic_ai.messages import BinaryContent, UserPromptPart
 
     from linktools.ai.execution import StoredUserInput
     from linktools.ai.persistence.codec import decode_domain
-    from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
     class WorkspacePolicy(TenantAuthorizationPolicy):
         pass

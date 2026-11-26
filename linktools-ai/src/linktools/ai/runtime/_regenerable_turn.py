@@ -1120,7 +1120,9 @@ class _RegenerableTurnRunner:
             })
 
         async def emit(emission: AgentEmission) -> None:
-            if isinstance(emission, LiveDelta) and emission.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
+            if isinstance(emission, LiveDelta) and emission.event_type in (
+                ExecutionDeltaType.ASSISTANT_TEXT_DELTA, ExecutionDeltaType.ASSISTANT_THINKING_DELTA,
+            ):
                 position = emission.position or {}
                 key = model_key(position)
                 attempt = position.get("stream_attempt_seq")
@@ -1134,9 +1136,14 @@ class _RegenerableTurnRunner:
                         reset_preview(key, previous)
                     attempts[key] = attempt
                     scope = {"model_key": key, "attempt": attempt}
-                self._publish(turn.key.session_id, {
-                    **fields, **scope, "type": "delta", "delta_kind": "text", "text": emission.content,
-                })
+                part_index = position.get("part_index")
+                if type(part_index) is int and part_index >= 0:
+                    scope["part_index"] = part_index
+                kind = "thinking" if emission.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA else "text"
+                if emission.content:
+                    self._publish(turn.key.session_id, {
+                        **fields, **scope, "type": "delta", "delta_kind": kind, "text": emission.content,
+                    })
             elif isinstance(emission, DurableBoundary):
                 item = project_tool_process_event(emission.event_type.value, emission.payload)
                 if item is not None:

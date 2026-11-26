@@ -348,14 +348,20 @@ if(process.argv[3]==='session-published-turn') {
   assert.equal(ordinaryWatch.id,'b');
   const emitTurn=frame=>ordinaryWatch.listeners.get('turn')({data:JSON.stringify(frame)});
   emitTurn({type:'snapshot',session:{...ordinarySession}});
-  emitTurn({type:'delta',turn_id:ordinaryTurn,generation:1,delta_kind:'text',text:'Native preview'});
+  const live={turn_id:ordinaryTurn,generation:1,model_key:'model:1:1',attempt:1};
+  emitTurn({type:'delta',...live,delta_kind:'thinking',part_index:0,text:'Stale thought'});
+  emitTurn({type:'preview_reset',...live});
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'thinking',part_index:0,text:'Native thought'});
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:1,text:'Native preview'});
   await node('chat-mode').click();
   assert.equal(node('composer').hidden,false);
-  assert.match(node('conversation').textContent,/Native question.*Native preview/s);
+  assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native preview/s);
+  assert.doesNotMatch(node('conversation').textContent,/Stale thought/);
   assert.equal(node('send').disabled,true);
   emitTurn({type:'terminal',turn_id:ordinaryTurn,turn_no:1,revision:2,generation:1,state:'succeeded',
-    prompt:'Native question',items:[{item_kind:'assistant',content:'Native finished'}]});
-  assert.match(node('conversation').textContent,/Native question.*Native finished/s);
+    prompt:'Native question',items:[{item_kind:'thinking',content:'Native thought'}, {item_kind:'assistant',content:'Native finished'}]});
+  assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native finished/s);
+  assert.equal(node('conversation').textContent.split('Native thought').length,2);
   assert.doesNotMatch(node('conversation').textContent,/Native preview/);
   node('prompt').value='Next native question';
   const nextNative=deferred('POST /api/sessions/b/messages'),sendNative=node('composer').requestSubmit();

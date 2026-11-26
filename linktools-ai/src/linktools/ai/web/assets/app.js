@@ -390,12 +390,10 @@ function ordinaryTurnNode(turn, previous=null) {
       answers.append(card);
       continue;
     }
-    const text=element('div','message ordinary-live',part.text);
-    answers.append(text);
-    if(!turn.conversation_committed && part===parts.at(-1))node.liveAnswer=text;
-  }
-  if(!turn.conversation_committed && !node.liveAnswer){
-    node.liveAnswer=element('div','message ordinary-live');node.liveAnswer.hidden=true;answers.append(node.liveAnswer);
+    const thought=part.kind==='thinking'?thinkingMessage('Thinking',part.text):null;
+    const body=thought?.body || element('div','message ordinary-live',part.text);
+    answers.append(thought || body);
+    if(!turn.conversation_committed && part===parts.at(-1))node.liveDeltaBody=body;
   }
   for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
   node.append(answers);
@@ -547,10 +545,11 @@ function watchOrdinarySession(id) {
       }
       return;
     }
-    if(typeof frame.text!=='string' || frame.delta_kind!=='text' || !frame.text)return;
-    let part=turn.liveParts.at(-1);
-    if(!part || typeof part.text!=='string' || part.modelKey!==frame.model_key || part.attempt!==frame.attempt){
-      part={text:frame.text,modelKey:frame.model_key,attempt:frame.attempt};turn.liveParts.push(part);
+    const kind=frame.delta_kind;
+    if(typeof frame.text!=='string' || (kind!=='text' && kind!=='thinking') || !frame.text)return;
+    const part=turn.liveParts.at(-1);
+    if(part?.kind!==kind || part.modelKey!==frame.model_key || part.attempt!==frame.attempt || part.index!==frame.part_index){
+      turn.liveParts.push({kind,text:frame.text,modelKey:frame.model_key,attempt:frame.attempt,index:frame.part_index});
       patchOrdinaryTurn(turn);
       return;
     }
@@ -562,7 +561,7 @@ function watchOrdinarySession(id) {
       const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
       const node=[...$('conversation').children].find(item=>item.dataset.turn===active);
       const tail=row?.liveParts?.at(-1);
-      if(node?.liveAnswer && typeof tail?.text==='string'){node.liveAnswer.hidden=!tail.text;node.liveAnswer.textContent=tail.text;}
+      if(node?.liveDeltaBody && typeof tail?.text==='string')node.liveDeltaBody.textContent=tail.text;
     });
   }
   source.addEventListener('session_error',event=>{
