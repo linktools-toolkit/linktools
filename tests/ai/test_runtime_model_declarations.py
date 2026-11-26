@@ -320,7 +320,7 @@ async def test_recovery_uses_one_fresh_binding_for_validation_and_model(tmp_path
     from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities, _storage
 
     database = tmp_path / "recovery.db"
-    owner = _RuntimeProcess(database, phase=phase)
+    owner = _RuntimeProcess(database, mode="standalone", phase=phase)
     execution_id = owner.initial["execution_id"]
     owner.crash()
     owner.close()
@@ -338,7 +338,7 @@ async def test_recovery_uses_one_fresh_binding_for_validation_and_model(tmp_path
     async with Persistence.open(_NAMESPACE, storage=_storage(database, phase)) as persistence_326, Runtime.open(persistence=persistence_326, features=features) as runtime:
         before = len(loads)
         if phase == "reserved":
-            handle = await runtime.agents.get("default").session("session").start("Wait", idempotency_key="start")
+            handle = await runtime.agents.get("default").start("Wait", idempotency_key="start")
             assert handle.execution_id == execution_id
         else:
             await runtime.executions.recover(execution_id, principal=runtime.default_principal, idempotency_key="recover")
