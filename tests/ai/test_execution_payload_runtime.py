@@ -11,11 +11,12 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
+from pydantic_ai_harness.step_persistence import SqliteStepStore
 from sqlalchemy import event
 
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy, canonical_json_bytes
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import NativeCheckpoint, Persistence, PersistenceStorage
 from linktools.ai.persistence._archive import ContentArchive
 from linktools.ai.model import StoredUserInput
 from linktools.ai.persistence.codec import decode_domain, decode_envelope, execution_payload_slots, payload_reference
@@ -247,9 +248,8 @@ async def test_native_session_retains_large_messages_without_execution_control_r
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("restart", (False, True), ids=("conversation-only", "native-checkpoint"))
 async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold_completion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared, release = asyncio.Event(), asyncio.Event()
     calls = 0
@@ -261,12 +261,11 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
 
     features = RuntimeFeatures("execution-payload-handoff")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    if restart:
-        features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "handoff.db"
-    async with Persistence.open("execution-payload-handoff", storage=_split_sqlite_storage(database)) as state:
+    storage = _split_sqlite_storage(database)
+    async with Persistence.open("execution-payload-handoff", storage=storage) as state:
         async with Runtime.open(persistence=state, features=model_features(models, features), metrics=None) as owner:
             backend = owner._execution_service.runtime_backend()
             reconcile = backend._reconcile_handoff
@@ -278,9 +277,8 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                 return await reconcile(checkpoint)
 
             monkeypatch.setattr(backend, "_reconcile_handoff", pause_handoff)
-            session = await owner.agents.get().create_session("session")
             with _execution_sql_bindings(state) as bindings:
-                execution = await session.start(_INPUT, idempotency_key="handoff")
+                execution = await owner.agents.get().start(_INPUT, idempotency_key="handoff")
                 try:
                     await asyncio.wait_for(prepared.wait(), 10)
                     row = await _compact_row(state, execution.execution_id)
@@ -289,7 +287,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                     stored = await state.execution.executions.get_fresh(execution.execution_id, tenant_id=owner.tenant_id)
                     assert stored.recovery.handoff_phase is RecoveryHandoffPhase.PREPARED
                     assert stored.recovery.terminal_handoff.outcome.output.decode() == {"text": _OUTPUT}
-                    async with Persistence.open("execution-payload-handoff", storage=_split_sqlite_storage(database)) as reader_state:
+                    async with Persistence.open("execution-payload-handoff", storage=storage) as reader_state:
                         async with Runtime.open(persistence=reader_state,
                             features=model_features(models, features), metrics=None, auto_recover=True) as reader:
                             result = await reader.executions.result(execution.execution_id, principal=reader.default_principal)
@@ -304,6 +302,53 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                     release.set()
                 assert (await execution.wait(timeout_seconds=10)).result.output == {"text": _OUTPUT}
                 assert bindings and calls == 1
+
+
+@pytest.mark.asyncio
+async def test_execution_payload_runtime_native_checkpoint_retains_body_after_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "execution-payload-checkpoint"
+    features = RuntimeFeatures(name)
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    step_database = tmp_path / "steps.db"
+    features.capability(native_checkpoint(database=step_database), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    calls = []
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        calls.append(tuple(part.content for message in messages for part in message.parts if isinstance(part, UserPromptPart)))
+        return ModelResponse(parts=[TextPart(_OUTPUT)])
+
+    storage = _split_sqlite_storage(tmp_path / "checkpoints.db")
+    models = _Models(_UsageFunctionModel(model))
+    async with Persistence.open(name, storage=storage) as state:
+        async with Runtime.open(persistence=state, features=model_features(models, features), metrics=None) as runtime:
+            with _execution_sql_bindings(state) as bindings:
+                execution = await runtime.agents.get().start(_INPUT, idempotency_key="checkpoint")
+                assert (await execution.wait(timeout_seconds=10)).result.output == {"text": _OUTPUT}
+                row = await _compact_row(state, execution.execution_id)
+                refs = _payload_refs(row)
+                assert set(refs) == {_INPUT_SLOT, _RESULT_SLOT, _OUTPUT_SLOT}
+                stored = await state.execution.executions.get_fresh(execution.execution_id, tenant_id=runtime.tenant_id)
+                assert stored.restart_checkpoints and stored.status is ExecutionStatus.SUCCEEDED
+                assert bindings and calls == [(_INPUT,)]
+
+    steps = SqliteStepStore(database=step_database)
+    run, = await steps.list_runs()
+    snapshot = await steps.latest_snapshot(run_id=run.run_id)
+    assert snapshot is not None
+    transcript = NativeCheckpoint.decode(snapshot).messages
+    assert [part.content for message in transcript for part in message.parts
+            if isinstance(part, (UserPromptPart, TextPart))] == [_INPUT, _OUTPUT]
+
+    async with Runtime.open(name, storage=storage, features=model_features(models, features), metrics=None,
+                            auto_recover=True) as reopened:
+        await _inspect_without_payload_reads(reopened, execution.execution_id, monkeypatch)
+        replay = await reopened.agents.get().start(_INPUT, idempotency_key="checkpoint")
+        assert replay.execution_id == execution.execution_id
+        assert (await replay.wait(timeout_seconds=10)).result.output == {"text": _OUTPUT}
+        assert calls == [(_INPUT,)]
 
 
 @pytest.mark.asyncio
