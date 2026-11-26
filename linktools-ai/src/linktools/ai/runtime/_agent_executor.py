@@ -1021,7 +1021,11 @@ class AgentExecutor:
                             _validate_deferred_requests(output)
                             return output
                         run = await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id)
-                        if scope.canonical_step is not None:
+                        if scope.regenerable:
+                            # Trace is optional for Step-off Session turns and
+                            # does not own their authoritative conversation.
+                            checkpoint = None
+                        elif scope.canonical_step is not None:
                             checkpoint = await scope.canonical_step.store.latest_snapshot(run_id=scope.agent_run_id)
                         else:
                             checkpoint = (await scope.run_store.checkpoint_persistence.reader.latest_snapshot(run_id=scope.agent_run_id)
@@ -1042,7 +1046,7 @@ class AgentExecutor:
                                      and isinstance(scope.tool_operations, RuntimeToolOperationBridge)
                                      and scope.tool_operations.reported_interruption(operation))
                         )
-                        requires_checkpoint = (
+                        requires_checkpoint = not scope.regenerable and (
                             not isinstance(scope.run_store, RuntimeAgentRunStore)
                             or any(scope.run_store.execution_persistence(scope.agent_run_id))
                         )

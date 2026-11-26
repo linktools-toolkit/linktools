@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """Web reads and explicit controls share the cross-process Runtime owner."""
-from ._runtime_test_helpers import model_features
 
 import asyncio
 import multiprocessing
@@ -20,12 +18,13 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.history import History
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.core import TenantAuthorizationPolicy
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.capability import TraceCapability
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.web import create_app
 
-from ._runtime_test_helpers import _wait_for_committed
+from ._runtime_test_helpers import _wait_for_committed, model_features
 from .test_live_history_readback_integration import _Models
-from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities
 from .test_web_console import _HEADERS, client
 
 
@@ -35,192 +34,51 @@ async def _get(http: httpx.AsyncClient, path: str) -> dict[str, object]:
     return response.json()
 
 
-@pytest.mark.asyncio
-async def test_web_reads_live_process_history_without_taking_ownership(tmp_path: Path) -> None:
-    database = tmp_path / "runtime.db"
-    owner = await asyncio.to_thread(_RuntimeProcess, database)
-    identity = owner.initial["execution_id"]
-    calls = []
-
-    async def model(messages, info):
-        del messages, info
-        calls.append("unexpected replay")
-        yield "unexpected replay"
-
-    try:
-        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_45, Runtime.open(persistence=persistence_45, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database), tenant_id="default", read_only=True) as history_persistence_48, History.open(persistence=history_persistence_48) as history, client(create_app(runtime=runtime)) as writable, client(create_app(history=history)) as readonly:
-            for http, strict_history in ((writable, runtime.history), (readonly, history)):
-                page = await _wait_for_committed(
-                    lambda: _get(http, f"/api/executions/{identity}/models?include_content=true"),
-                    lambda value: bool(value["items"]), timeout=10,
-                )
-                request = page["items"][0]
-                assert request["execution_id"] == identity and request["model_request_seq"] == 1
-                assert request["status"] == "RUNNING"
-                assert request["request"] == {} and request["response"] is None
-                assert request["usage"] is None and request["duration_ns"] is None
-                content = await _get(http, f"/api/executions/{identity}/history?include_content=true")
-                assert any(item["content"] == "Wait" for item in content["items"])
-                for _ in range(2):
-                    assert (await _get(http, f"/api/executions/{identity}"))["status"] == "STARTED"
-                # This producer uses the strict Execution API. The SQL Web
-                # session route selects canonical turns, not strict records.
-                session = await strict_history.inspect_session("session", principal=runtime.default_principal)
-                assert session.active_execution_id == identity
-            assert not calls
-            assert (await asyncio.to_thread(owner.request, "finish"))["status"] == "SUCCEEDED"
-            for http in (writable, readonly):
-                result = await _get(http, f"/api/executions/{identity}/result")
-                assert result["output"] == {"text": "owner answer"}
-                models = await _get(http, f"/api/executions/{identity}/models?include_content=true")
-                assert models["items"][0]["status"] == "SUCCEEDED"
-                assert models["items"][0]["content_included"]
-            assert not calls
-    finally:
-        await asyncio.to_thread(owner.close)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("control", ("recover", "cancel_live", "cancel_after_exit"))
-async def test_web_recovery_requires_explicit_control_after_process_exit(
-    tmp_path: Path, control: str, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = tmp_path / "runtime.db"
-    owner = await asyncio.to_thread(_RuntimeProcess, database)
-    identity = owner.initial["execution_id"]
-    calls = []
-    cancel_first = control == "cancel_live"
-
-    async def model(messages, info):
-        del messages, info
-        calls.append("recovered")
-        yield "recovered answer"
-
-    try:
-        if not cancel_first:
-            await asyncio.to_thread(owner.crash)
-        storage = PersistenceStorage.sqlite(database)
-        async with Persistence.open(_NAMESPACE, storage=storage) as persistence_99, Runtime.open(persistence=persistence_99, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, client(create_app(runtime=runtime)) as http:
-            if cancel_first:
-                await _wait_for_committed(
-                    lambda: _get(http, f"/api/executions/{identity}/models"),
-                    lambda value: bool(value["items"]), timeout=10,
-                )
-                tenant = runtime.default_principal.tenant_id
-                backend = runtime._execution_service.runtime_backend()
-                commit_cancel = backend.commit_cancel_checkpoint
-                advanced = False
-
-                async def race_revision(commit, *, expected_status):
-                    nonlocal advanced
-                    if not advanced:
-                        advanced = True
-                        await runtime._state.execution.executions.acquire_dependency_hold(
-                            identity, tenant_id=tenant, hold_id="concurrent-reader",
-                        )
-                    return await commit_cancel(commit, expected_status=expected_status)
-
-                # Schedule one real SQL write between the control read and its CAS.
-                monkeypatch.setattr(backend, "commit_cancel_checkpoint", race_revision)
-                path = f"/api/executions/{identity}/cancel"
-                request = {"request_id": "cancel"}
-                conflict = await http.post(path, json=request, headers=_HEADERS)
-                assert conflict.status_code == 409, conflict.text
-                assert conflict.json()["code"] == "STORAGE_CONFLICT"
-                assert (await _get(http, f"/api/executions/{identity}"))["status"] == "STARTED"
-                assert (await asyncio.to_thread(owner.request, "snapshot"))["status"] == "STARTED"
-                events = await runtime._state.execution.events.list(identity, tenant_id=tenant, after_event_seq=0, limit=100)
-                assert not any(item.event_type == "CANCEL_REQUESTED" for item in events.items)
-                await runtime._state.execution.executions.release_dependency_hold(
-                    identity, tenant_id=tenant, hold_id="concurrent-reader",
-                )
-                for _ in range(2):
-                    cancelled = await http.post(path, json=request, headers=_HEADERS)
-                    assert cancelled.status_code == 200, cancelled.text
-                    assert cancelled.json()["cancelled"] is False
-                events = await runtime._state.execution.events.list(identity, tenant_id=tenant, after_event_seq=0, limit=100)
-                assert sum(item.event_type == "CANCEL_REQUESTED" for item in events.items) == 1
-                await asyncio.to_thread(owner.crash)
-            for _ in range(2):
-                info = await _get(http, f"/api/executions/{identity}")
-                assert info["status"] == ("CANCELLING" if cancel_first else "STARTED")
-            session = await runtime.history.inspect_session("session", principal=runtime.default_principal)
-            assert session.active_execution_id == identity
-            assert not calls
-            if control == "cancel_after_exit":
-                cancelled = await http.post(
-                    f"/api/executions/{identity}/cancel", json={"request_id": "cancel"}, headers=_HEADERS,
-                )
-                assert cancelled.status_code == 200, cancelled.text
-                info = await _get(http, f"/api/executions/{identity}")
-                assert info["status"] in {"CANCELLING", "CANCELLED"}
-                assert not calls
-        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as persistence_157, Runtime.open(persistence=persistence_157, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities())) as runtime, client(create_app(runtime=runtime)) as http:
-            if control == "cancel_after_exit":
-                replay = await http.post(
-                    f"/api/executions/{identity}/cancel", json={"request_id": "cancel"}, headers=_HEADERS,
-                )
-                assert replay.status_code == 200, replay.text
-            info = await _get(http, f"/api/executions/{identity}")
-            assert info["status"] in ({"STARTED"} if control == "recover" else {"CANCELLING", "CANCELLED"})
-            assert not calls
-            if info["status"] != "CANCELLED":
-                recovered = await http.post(
-                    f"/api/executions/{identity}/recover", json={"request_id": "recover"}, headers=_HEADERS,
-                )
-                assert recovered.status_code == 202, recovered.text
-                assert recovered.json()["execution_id"] == identity
-            expected = "SUCCEEDED" if control == "recover" else "CANCELLED"
-            await _wait_for_committed(
-                lambda: _get(http, f"/api/executions/{identity}"),
-                lambda value: value["status"] == expected, timeout=10,
-            )
-            result = await _get(http, f"/api/executions/{identity}/result")
-            assert result["status"] == expected
-            assert result["output"] == ({"text": "recovered answer"} if control == "recover" else None)
-            await _wait_for_committed(
-                lambda: runtime.history.inspect_session("session", principal=runtime.default_principal),
-                lambda session: session.active_execution_id is None, timeout=10,
-            )
-            assert calls == (["recovered"] if control == "recover" else [])
-    finally:
-        await asyncio.to_thread(owner.close)
-
-
-
 class _NativeProcessPolicy(TenantAuthorizationPolicy):
     async def authorize(self, principal, action, resource):
         await super().authorize(principal, action, resource)
 
 
-def _native_process_features(model):
+def _native_process_features(model, *, trace: bool = False):
     features = RuntimeFeatures("web-native-process")
+    if trace:
+        features.capability(TraceCapability(), scope="runtime")
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     return model_features(_Models(FunctionModel(stream_function=model)), features)
 
 
-def _native_web_turn_owner(database: Path, channel) -> None:
+def _native_web_turn_owner(database: Path, channel, finish=None, close=None, trace: bool = False) -> None:
     async def run():
         entered = asyncio.Event()
 
         async def model(messages, info):
             entered.set()
-            await asyncio.Event().wait()
-            yield "producer must not finish"
+            if finish is None:
+                await asyncio.Event().wait()
+            else:
+                while not finish.is_set():
+                    await asyncio.sleep(0.01)
+            yield "owner answer"
 
         async with (
             Persistence.open("web-native-process", storage=PersistenceStorage.sqlite(database)) as state,
-            Runtime.open(persistence=state, features=_native_process_features(model),
+            Runtime.open(persistence=state, features=_native_process_features(model, trace=trace),
                          authorization=_NativeProcessPolicy()) as runtime,
         ):
             principal = runtime.default_principal
             await runtime.sessions.create_turn_session("session", principal=principal, idempotency_key="create")
-            turn_id = await runtime.sessions.start_turn(
+            turn = await runtime.sessions.start(
                 "session", "original prompt", agent="default", principal=principal, idempotency_key="send",
             )
             await entered.wait()
-            channel.send(turn_id)
-            await asyncio.Event().wait()
+            channel.send(turn.key.turn_id)
+            if finish is not None:
+                settled = await turn.wait_final()
+                assert settled.status.value == "SUCCEEDED", settled.view
+                while not close.is_set():
+                    await asyncio.sleep(0.01)
+            else:
+                await asyncio.Event().wait()
 
     try:
         asyncio.run(run())
@@ -229,7 +87,78 @@ def _native_web_turn_owner(database: Path, channel) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("control", ("recover", "stop"))
+@pytest.mark.parametrize("trace", (False, True))
+async def test_web_reads_live_process_history_without_taking_ownership(tmp_path: Path, trace: bool) -> None:
+    database = tmp_path / "canonical.db"
+    ctx = multiprocessing.get_context("spawn")
+    parent, child = ctx.Pipe(duplex=False)
+    finish, close = ctx.Event(), ctx.Event()
+    owner = ctx.Process(target=_native_web_turn_owner, args=(database, child, finish, close, trace))
+    owner.start()
+    child.close()
+    calls = []
+
+    async def model(messages, info):
+        calls.append("unexpected replay")
+        yield "unexpected replay"
+
+    policy = _NativeProcessPolicy()
+    try:
+        assert await asyncio.to_thread(parent.poll, 45), "native subprocess did not enter the model"
+        turn_id = parent.recv()
+        path = f"/api/session?session_id=session&turn_id={turn_id}"
+        metadata = "/api/session?session_id=session&include_timeline=false"
+        storage = PersistenceStorage.sqlite(database)
+        async with (
+            Persistence.open("web-native-process", storage=storage) as state,
+            Runtime.open(persistence=state, features=_native_process_features(model, trace=trace),
+                         authorization=policy) as runtime,
+            Persistence.open("web-native-process", storage=storage, read_only=True) as read_state,
+            History.open(persistence=read_state, authorization=policy) as history,
+            client(create_app(runtime=runtime, local_workspace=True)) as writable,
+            client(create_app(history=history, local_workspace=True)) as readonly,
+        ):
+            for http in (writable, readonly):
+                for _ in range(2):
+                    active = await _get(http, path)
+                    assert active["status"] == "PENDING_START" and not active["conversation_committed"]
+                    assert active["user_input"]["prompt"] == "original prompt"
+                    assert (await _get(http, metadata))["session"]["active_turn_id"] == turn_id
+            assert not calls and owner.is_alive()
+            finish.set()
+            terminal = await _wait_for_committed(
+                lambda: _get(writable, path),
+                lambda view: view["conversation_committed"], timeout=10,
+            )
+            assert terminal["status"] == "SUCCEEDED", terminal
+            for http in (writable, readonly):
+                result = await _get(http, path)
+                assert result["status"] == "SUCCEEDED" and result["conversation_committed"]
+                assert any(item["item_kind"] == "assistant" and item["content"] == "owner answer"
+                           for item in result["items"])
+                assert (await _get(http, metadata))["session"]["active_turn_id"] is None
+                if not trace:
+                    continue
+                # The lossy, optional Trace writer may publish after the Session.
+                models = await _wait_for_committed(
+                    lambda: _get(http, f"{path}&models=true&include_content=true"),
+                    lambda value: bool(value["items"]), timeout=10,
+                )
+                interaction, = models["items"]
+                assert interaction["status"] == "SUCCEEDED" and interaction["content_included"]
+            assert not calls
+            close.set()
+            await asyncio.to_thread(owner.join, 10)
+            assert owner.exitcode == 0
+    finally:
+        parent.close()
+        if owner.is_alive():
+            owner.kill()
+        await asyncio.to_thread(owner.join, 10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control", ("recover", "stop", "live_stop"))
 async def test_web_native_crashed_producer_keeps_occupancy_until_explicit_control(tmp_path: Path, control: str) -> None:
     database = tmp_path / "canonical.db"
     ctx = multiprocessing.get_context("spawn")
@@ -262,6 +191,14 @@ async def test_web_native_crashed_producer_keeps_occupancy_until_explicit_contro
             assert (await _get(http, metadata))["session"]["active_turn_id"] == turn_id
             assert not calls
 
+            if control == "live_stop":
+                for _ in range(2):
+                    stopped = await http.post("/api/session/cancel?session_id=session", headers=_HEADERS,
+                                              json={"turn_id": turn_id, "request_id": "stop"})
+                    assert stopped.status_code == 200 and stopped.json()["accepted"], stopped.text
+                assert (await _get(http, path))["status"] == "CANCELLING"
+                assert (await _get(http, metadata))["session"]["active_turn_id"] == turn_id
+
             owner.kill()
             await asyncio.to_thread(owner.join, 10)
             assert owner.exitcode is not None
@@ -280,6 +217,9 @@ async def test_web_native_crashed_producer_keeps_occupancy_until_explicit_contro
                 assert observed["status"] == "RECOVERY_REQUIRED" and not observed["conversation_committed"]
                 assert (await _get(http, metadata))["session"]["active_turn_id"] == turn_id
             assert not calls
+            if control == "live_stop":
+                row = await turns.get_turn(SessionTurnKey("session", turn_id))
+                assert row["state"] == "cancelling" and row["generation"] == 1
 
             if control == "stop":
                 stopped = await http.post("/api/session/cancel?session_id=session", headers=_HEADERS,
@@ -287,6 +227,19 @@ async def test_web_native_crashed_producer_keeps_occupancy_until_explicit_contro
                 assert stopped.status_code == 200 and stopped.json()["accepted"], stopped.text
                 assert (await _get(http, metadata))["session"]["active_turn_id"] == turn_id
 
+        async with (
+            Persistence.open("web-native-process", storage=store) as state,
+            Runtime.open(persistence=state, features=_native_process_features(model),
+                         authorization=_NativeProcessPolicy()) as runtime,
+            client(create_app(runtime=runtime, local_workspace=True)) as http,
+        ):
+            assert (await _get(http, metadata))["session"]["active_turn_id"] == turn_id
+            assert not calls
+            if control != "recover":
+                replayed = await http.post("/api/session/cancel?session_id=session", headers=_HEADERS,
+                                           json={"turn_id": turn_id, "request_id": "stop"})
+                assert replayed.status_code == 200 and replayed.json()["accepted"], replayed.text
+                assert (await _get(http, metadata))["session"]["active_turn_id"] == turn_id
             recovered = await http.post("/api/session/recover?session_id=session", headers=_HEADERS,
                                         json={"turn_id": turn_id, "request_id": "recover"})
             assert recovered.status_code == 200 and recovered.json()["accepted"], recovered.text
