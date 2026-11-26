@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from ._runtime_service import Runtime
     from ._regenerable_turn import _RegenerableTurnRunner, _SessionTurnStartReceipt
     from ._agent_executor import AgentEmission
-    from ._native_session import _NativeSession, _NativeTurnRead, _NativeTurnResult
+    from ._native_session import _NativeSession, _NativeSessionTurn, _NativeTurnRead, _NativeTurnResult
 
 AppT = TypeVar("AppT")
 
@@ -592,13 +592,40 @@ class RuntimeSessions(Generic[AppT]):
             return self._bind_native_session(session_id, principal=native[0], local_workspace=False)
         return await self._get_session(session_id, principal)
 
+    @overload
+    async def start(
+        self, session_id: str, user_prompt: "UserPromptInput", *, principal: Principal,
+        agent: "str | Agent[AppT]",
+        idempotency_key: str, output: "type[BaseModel] | None" = None,
+        correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
+        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
+    ) -> "_NativeSessionTurn[AppT, _NativeTurnResult]": ...
+
+    @overload
     async def start(
         self, session_id: str, user_prompt: "UserPromptInput", *, principal: Principal,
         idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
-        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
-    ) -> "Execution[AppT]":
-        """Start a turn on an existing authorized session using its current Agent."""
+        planning: bool | None = None, thinking: "ThinkingValue | None" = None, agent: None = None,
+    ) -> "Execution[AppT]": ...
+
+    async def start(
+        self, session_id: str, user_prompt: "UserPromptInput", *, principal: Principal,
+        idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
+        correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
+        planning: bool | None = None, thinking: "ThinkingValue | None" = None, agent: "str | Agent[AppT] | None" = None,
+    ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
+        """Start a native turn with an explicit agent, or an agent-bound execution."""
+        if agent is not None:
+            if idempotency_key is None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "idempotency_key"})
+            session = self._bind_native_session(session_id, principal=principal, local_workspace=False)
+            receipt = await self._start_turn_receipt(
+                session_id, user_prompt, agent=agent, principal=principal, idempotency_key=idempotency_key,
+                output=output, correlation=correlation, files=files,
+                planning=False if planning is None else planning, thinking=thinking,
+            )
+            return session._turn(receipt.turn_id, principal)
         await self._require_agent_session(session_id)
         return await self._start_session(session_id, user_prompt, principal=principal,
             idempotency_key=idempotency_key, output=output, correlation=correlation,

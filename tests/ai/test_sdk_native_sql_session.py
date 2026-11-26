@@ -62,5 +62,8 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
             assert same.key == turn.key
             [terminal] = [frame async for frame in frames]
             assert terminal["type"] == "terminal" and terminal["state"] == "succeeded"
+        direct = await runtime.sessions.start("chat", "Hello", principal=principal, agent=agent, idempotency_key="send")
+        assert direct.key == turn.key
+        assert (await direct.result()).usage == result.usage
         assert calls == [True]
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id=principal.tenant_id) is None

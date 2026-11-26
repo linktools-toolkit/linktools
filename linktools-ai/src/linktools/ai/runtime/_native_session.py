@@ -141,6 +141,9 @@ class _NativeSession(Generic[AppT, ResultT]):
             mode="plan", thinking=thinking, budget=budget, output=output, correlation=correlation, preview=preview, principal=principal,
         )
 
+    def _turn(self, turn_id: str, actor: Principal) -> _NativeSessionTurn[AppT, ResultT]:
+        return _NativeSessionTurn(SessionTurnKey(self.session_id, turn_id), actor, self._sessions, self._read_result)
+
     @asynccontextmanager
     async def start(
         self, prompt: UserPromptInput, *, agent: str | Agent[AppT], idempotency_key: str,
@@ -159,9 +162,7 @@ class _NativeSession(Generic[AppT, ResultT]):
                 files=files, session_context=session_context, mode=mode, planning=planning, thinking=thinking,
                 budget=budget, output=output, correlation=correlation,
             )
-            turn = _NativeSessionTurn(
-                SessionTurnKey(self.session_id, receipt.turn_id), actor, self._sessions, self._read_result,
-            )
+            turn = self._turn(receipt.turn_id, actor)
             events = turn._replay_events() if receipt.replayed else observer.events(receipt.turn_id)
             try:
                 yield turn, events
