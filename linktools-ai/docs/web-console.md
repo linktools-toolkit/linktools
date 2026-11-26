@@ -68,8 +68,8 @@ attachment bytes do not change. Use strict execution when identical prior tool
 results must be continued rather than regenerated.
 
 If recovery reports that a stopped ordinary turn cannot resume, the same
-composer control can offer **End turn**. This is a separate confirmation:
-it does not retry recovery or rerun tools. The Runtime releases only the
+**Recover** control stays visible. Choosing it again asks whether to end the
+failed turn, without retrying recovery or rerunning tools. The Runtime releases only the
 confirmed producer generation after its lease expires and preserves recorded
 tool uncertainty. This control does not end Graph or split-store turns, and
 turns with persisted children need a separate disposition. The child-absence

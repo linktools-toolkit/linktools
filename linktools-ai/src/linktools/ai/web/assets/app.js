@@ -201,9 +201,9 @@ function setDisabled() {
       || state.actionsPending.has(`${active.execution_id}:end-stopped`)));
   const send=$('send'), reader=$('reader-stop');
   const turnAction=stop && ordinary ? activeTurnAction() : 'cancel';
-  const recover=turnAction==='recover', endFailed=turnAction==='abandon';
-  const activeLabel=endFailed?'End turn':recover?'Recover':'Stop';
-  const activeAriaLabel=endFailed?'End the failed turn without replay':recover?'Recover current turn':'Stop current turn';
+  const recover=turnAction==='recover' || turnAction==='abandon';
+  const activeLabel=recover?'Recover':'Stop';
+  const activeAriaLabel=recover?'Recover current turn':'Stop current turn';
   send.type=stop?'button':'submit';
   const actionLabel=stop?activeLabel:'Send ↑';
   if(send.textContent!==actionLabel)send.textContent=actionLabel;
@@ -2567,11 +2567,11 @@ async function ordinaryAction(action) {
       if(!canOfferEnd || !row)throw error;
       if((row.liveGeneration || 0)>failedGeneration)return;
       patchOrdinaryTurn({...row,blockedGeneration:failedGeneration});
-      notice('Recovery could not resume this turn. Choose End turn to continue without replaying tools.');
+      notice('This turn cannot resume. Choose Recover again to confirm ending it without replaying tools.');
       return;
     }
     if(current() && !result.accepted)
-      notice(action==='abandon'?'The turn could not be ended yet. Wait for its lease to expire, then choose End turn again.'
+      notice(action==='abandon'?'The turn could not be ended yet. Wait for its lease to expire, then choose Recover again.'
         :action==='recover'?'Turn still owned or already complete.':'Stop not confirmed. Watch the turn for its final status.');
   } finally {state.actionsPending.delete(key);setDisabled();}
 }
