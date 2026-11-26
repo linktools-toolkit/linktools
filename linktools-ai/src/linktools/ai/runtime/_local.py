@@ -2158,7 +2158,7 @@ class LocalExecutionBackend:
         """Restore the originally admitted prefix, without reopening mutable workspace inputs."""
         from ..core import AuthorizationAction, ImmutableJsonMapping, ResourceRef
         from ..persistence.turns import decode_session_lineage
-        from ._regenerable_turn import _AttachedGraphTurn, _CONTEXT_BYTES, _TURN_BYTES, _TERMINAL_RESERVE
+        from ._regenerable_turn import _AttachedGraphTurn, _TURN_BYTES, _TERMINAL_RESERVE
 
         if (execution.execution_id != key.turn_id or execution.session_id is not None
                 or not execution.requires_task_invocation_capture or (not ready and execution.producer_generation != 0)
@@ -2228,7 +2228,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         history = await runner._read_admitted_history(
             key, context_from=context_from, context_through=through, lineage=lineage,
-            session_context=execution.session_context, remaining=_CONTEXT_BYTES - runner._input_bytes(prompt, stored),
+            session_context=execution.session_context, prompt=prompt, stored=stored,
         )
         return _AttachedGraphTurn(
             key, generation, row["turn_no"], prompt, tuple(history), terminal_bytes, session["revision"], cwd,

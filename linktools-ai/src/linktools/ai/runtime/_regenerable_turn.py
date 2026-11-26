@@ -327,10 +327,21 @@ class _RegenerableTurnRunner:
             "generation": turn.generation,
         })
 
+    @staticmethod
+    def _notice_prompt(turn: _AdmittedTurn | _AttachedGraphTurn) -> JsonValue:
+        if turn.prompt or turn.stored_input is None:
+            return turn.prompt
+        stored = decode_domain(turn.stored_input, StoredUserInput)
+        if stored.codec == "text":
+            return turn.prompt
+        from ..history import project_ordinary_multipart_prompt
+
+        return project_ordinary_multipart_prompt(stored)
+
     def _admitted(self, turn: _AdmittedTurn | _AttachedGraphTurn) -> None:
         self._publish(turn.key.session_id, {
             "type": "admitted", "turn_id": turn.key.turn_id, "turn_no": turn.number,
-            "generation": turn.generation, "revision": turn.revision, "prompt": turn.prompt, "attachments": list(turn.attachments),
+            "generation": turn.generation, "revision": turn.revision, "prompt": self._notice_prompt(turn), "attachments": list(turn.attachments),
         })
         self._notice_lifecycle(turn.key, "admitted", turn.revision)
 
@@ -356,7 +367,7 @@ class _RegenerableTurnRunner:
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
             "generation": turn.generation, "revision": turn.revision + 1,
-            "state": state, "prompt": turn.prompt, "attachments": list(turn.attachments), "output": output,
+            "state": state, "prompt": self._notice_prompt(turn), "attachments": list(turn.attachments), "output": output,
             "error_code": error_code, **activity,
         })
         self._notice_lifecycle(turn.key, "terminal", turn.revision + 1)
@@ -764,7 +775,7 @@ class _RegenerableTurnRunner:
         turn = _AdmittedTurn(
             key, row["turn_no"], request["prompt"], [], 0, revision, None, generation + 1,
             attachments=() if stored is None else stored_input_attachment_views(stored),
-            trace_enabled=trace_enabled, trace_event_base=trace_event_base,
+            stored_input=request.get("input"), trace_enabled=trace_enabled, trace_event_base=trace_event_base,
         )
         code = ErrorCode.EXECUTION_CANCELLED.value
         trace = await self._terminal_trace(turn, trace_agent_id, "cancelled", code)
@@ -913,12 +924,10 @@ class _RegenerableTurnRunner:
             through = row["context_through"]
             session_context = request.get("session_context", "all")
             stored = self._stored_input(request)
-            input_bytes, media_bytes = self._input_usage(prompt, stored)
             history = await self._read_admitted_history(
                 key, context_from=row["context_from"], context_through=row["context_through"],
                 lineage=lineage, session_context=session_context,
-                remaining=_CONTEXT_BYTES - input_bytes,
-                remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
+                prompt=prompt, stored=stored,
             )
             frozen_binding = row["binding_json"]
             if frozen_binding is None:
@@ -1404,8 +1413,12 @@ class _RegenerableTurnRunner:
 
     async def _read_admitted_history(
         self, key: SessionTurnKey, *, context_from: int, context_through: int,
-        lineage: tuple[SessionTurnSegment, ...], session_context: SessionContext, remaining: int, remaining_media: int,
+        lineage: tuple[SessionTurnSegment, ...], session_context: SessionContext,
+        prompt: str, stored: StoredUserInput | None,
     ) -> tuple[ModelMessage, ...]:
+        input_bytes, media_bytes = self._input_usage(prompt, stored)
+        remaining = _CONTEXT_BYTES - input_bytes
+        remaining_media = self.attachment_limits.max_binary_input_bytes - media_bytes
         after = context_from - 1
         if (not 0 <= context_through - after <= 128 or session_context not in ("all", "current_turn")
                 or session_context == "current_turn" and after != context_through):

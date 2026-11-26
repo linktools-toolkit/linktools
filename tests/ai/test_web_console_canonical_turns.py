@@ -211,10 +211,15 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
             for frame in frames if frame["type"] in {"admitted", "terminal"}
         }
         assert names == {"admitted": "file.bin", "terminal": "file.bin"}
+        display_prompt = {"kind": "items", "items": [{"kind": "text", "text": payload["prompt"]}]}
+        assert {frame["type"]: frame["prompt"] for frame in frames if frame["type"] in {"admitted", "terminal"}} == {
+            "admitted": display_prompt, "terminal": display_prompt,
+        }
         row = await state.session_turn_reader.get_turn(SessionTurnKey("chat", turn_id))
         stored = decode_domain(row["request_json"]["input"], StoredUserInput)
         assert [ref.size for ref in stored.payload.object_refs()] == [len(binary)]
         history = (await http.get(f"/api/session?session_id=chat&turn_id={turn_id}")).json()
+        assert history["user_input"]["prompt"] == display_prompt
         attachment, = history["user_input"]["attachments"]
         assert attachment["size"] == len(binary) and attachment["display_name"] == "file.bin"
         assert set(attachment) == {"attachment_id", "media_type", "source", "position", "display_name", "size"}
@@ -229,6 +234,7 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
         reopened = await http.get("/api/session", params={"session_id": "chat", "turn_id": turn_id})
         assert reopened.status_code == 200, reopened.text
         assert reopened.json()["user_input"]["attachments"] == [attachment]
+        assert reopened.json()["user_input"]["prompt"] == display_prompt
 
 
 @pytest.mark.asyncio

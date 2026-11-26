@@ -71,7 +71,7 @@ def _session_view(row: RowMapping) -> dict[str, JsonValue]:
     }
 
 
-def _multipart_prompt(value: StoredUserInput) -> dict[str, JsonValue]:
+def project_ordinary_multipart_prompt(value: StoredUserInput) -> dict[str, JsonValue]:
     """Project admitted text without opening attachments or exposing provider metadata."""
     payload = value.payload
     content = payload.value
@@ -169,7 +169,7 @@ async def _turn_view(
         ]
         if prompt == "":
             prompt = (await read_scalar_input(stored_input) if stored_input.codec == "text"
-                      else _multipart_prompt(stored_input))
+                      else project_ordinary_multipart_prompt(stored_input))
     return {
         "turn_id": row["turn_id"].decode("utf-8"),
         "turn_no": row["turn_no"],
