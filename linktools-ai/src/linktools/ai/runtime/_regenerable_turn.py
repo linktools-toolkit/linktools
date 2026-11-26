@@ -1680,7 +1680,7 @@ class _RegenerableTurnRunner:
                 repository_boundary = self._step_instruction_boundary(turn, binding)
                 outcome = await self._executor.execute_regenerable(
                     binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
-                    event_sink=event_sink, thinking=thinking, streamed_output_bytes=turn.terminal_bytes,
+                    event_sink=event_sink, thinking=thinking, streamed_output_bytes=_CONTEXT_BYTES,
                     workspace=self._workspace, repository_instructions=turn.repository_instructions,
                     repository_instruction_boundary=repository_boundary,
                     canonical_step=None if turn.native_step is None else turn.native_step[0],
@@ -1739,15 +1739,21 @@ class _RegenerableTurnRunner:
                 model_prompt, turn.history, messages, output,
                 instructions=frozen_spec.instructions, system_prompt=frozen_spec.system_prompt, structured=structured,
             )
-            # Charge actual encoded message bytes and binding ref positions.
+            # The transcript is published as a native archive root, not in the
+            # turn row. Bound its body separately from the terminal receipt.
+            if len(encode_model_messages(transcript)) > _CONTEXT_BYTES:
+                raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
             output_ref = canonical_structured_output_reference(transcript) if structured else None
-            encoded_body = len(encode_model_messages(transcript))
+            receipt_metadata = {}
+            if binding_refs:
+                receipt_metadata["binding_refs"] = [list(item) for item in binding_refs]
             if output_ref is not None:
-                encoded_body += len(canonical_json_bytes({"output_ref": list(output_ref)}))
+                receipt_metadata["output_ref"] = list(output_ref)
             if usage is not None:
-                encoded_body += len(canonical_json_bytes({"usage": asdict(usage)}))
-            encoded_refs = len(canonical_json_bytes([list(item) for item in binding_refs])) if binding_refs else 0
-            if encoded_body + encoded_refs > turn.terminal_bytes:
+                receipt_metadata["usage"] = asdict(usage)
+            # Leave the existing reservation for the root descriptor and fixed
+            # receipt fields; only variable metadata competes with that margin.
+            if receipt_metadata and len(canonical_json_bytes(receipt_metadata)) > turn.terminal_bytes - _TERMINAL_RESERVE:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         except Exception as error:
             if (turn.native_step is not None and isinstance(error, AIError)
