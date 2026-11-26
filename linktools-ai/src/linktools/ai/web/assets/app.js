@@ -176,7 +176,7 @@ function setDisabled() {
   $('run-recovery').disabled=!state.execution;
   $('detail-view').disabled=!state.execution;
   $('native-mode').disabled=ordinary?!state.config.turn_model_messages || !defaultOrdinaryTurn():!state.selectedExecution;
-  $('activity-mode').disabled=!state.selectedExecution;
+  $('activity-mode').disabled=ordinary?!state.config.turn_trace || !defaultOrdinaryTurn():!state.selectedExecution;
   $('detail-turn-picker').hidden=state.view!=='sessions';
   $('detail-view').disabled=ordinary;
   $('run-actions').hidden=ordinary;
@@ -219,8 +219,7 @@ function setDisabled() {
   reader.setAttribute('aria-label',activeAriaLabel);
   if(ordinary){
     $('open-recovery').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
-    $('inspector-toggle').hidden=!state.config.turn_trace || (!turn && !state.turns.some(row=>row.turn_id));
-    $('inspector-toggle').textContent='Turn trace';
+    $('inspector-toggle').hidden=true;
     if(turn && sessionWatch?.ready){
       const status=state.turns.find(row=>row.turn_id===turn)?.status;
       $('current-status').hidden=false;
@@ -2964,9 +2963,6 @@ $('inspector-toggle').onclick=()=>{
   const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';
   showInspector(open,true);
   if(!open)return;
-  if(nativeTurnInspector()){
-    return loadOrdinaryInspection(chooseOrdinaryInspectionTurn()).catch(showError);
-  }
   return loadDetail(false,{},reuseNative).catch(showError);
 };
 $('inspector-close').onclick=()=>showInspector(false,true);
@@ -2987,7 +2983,11 @@ $('native-mode').onclick=()=>{
   }
   state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;state.conversationMode='original';showInspector(false);renderPage();renderConversation();$('conversation').scrollTop=0;$('native-mode').focus();return loadNativeTimeline().catch(showError);};
 $('chat-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');$('action-menu').open=false;state.conversationMode='chat';showInspector(false);renderPage();renderConversation();($('prompt').disabled?$('chat-mode'):$('prompt')).focus();};
-$('activity-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();return loadDetail().catch(showError);};
+$('activity-mode').onclick=()=>{
+  state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;
+  showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();
+  return (nativeTurnInspector()?loadOrdinaryInspection(chooseOrdinaryInspectionTurn()):loadDetail()).catch(showError);
+};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>(
   nativeTurnInspector()?loadOrdinaryInspection(ordinaryInspection?.turnId,true,state.tab):loadDetail(true,state.detailSelectors)

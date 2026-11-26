@@ -290,7 +290,9 @@ if(process.argv[3]==='native-model-messages') {
     model:{},content_included:true,request:{messages:[{kind:'request',parts:[{part_kind:'user-prompt',content:prompt}]}]},
     response:{parts:[{part_kind:'text',content:'Retained model response'}]}});
   assert.equal(node('native-mode').disabled,false);
-  assert.equal(queries().length,0,'opening Chat does not read diagnostic Trace');
+  assert.equal(node('activity-mode').disabled,false);
+  assert.equal(node('inspector-toggle').hidden,true,'Activity is the single native Trace entry');
+  assert.equal(calls.filter(call=>call.query.models || call.query.trace).length,0,'opening Chat does not read diagnostics');
 
   const first=deferred('GET /api/sessions/b'),open=node('native-mode').click();
   await first.requested;
@@ -320,15 +322,26 @@ if(process.argv[3]==='native-model-messages') {
   slow({items:[entry(4,'Obsolete prompt')],next_cursor:null});await stale;
   assert.equal(node('inspector').hidden,true);
   assert.doesNotMatch(node('inspector-content').textContent,/Obsolete prompt/);
-  const tracePage=deferred('GET /api/sessions/b'),openTrace=node('inspector-toggle').click();
+  const tracePage=deferred('GET /api/sessions/b'),openTrace=node('activity-mode').click();
   await tracePage.requested;
   const traceCall=calls.at(-1);
   assert.equal(traceCall.query.trace,'true');assert.equal(traceCall.query.models,undefined);
-  tracePage({items:[{turn_id:last,step_event_seq:1,payload:{kind:'TOOL_CALL',status:'STARTED',tool_name:'trace only tool'}}],next_cursor:null});
+  assert.equal(traceCall.query.turn_id,last,'Activity retains the exact selected turn');
+  assert.ok(node('activity-mode').className.includes('active'));
+  tracePage({items:[{turn_id:last,step_event_seq:1,payload:{kind:'TOOL_CALL',status:'STARTED',tool_name:'trace only tool'}}],next_cursor:'more-activity'});
   await openTrace;
   assert.match(node('inspector-content').textContent,/trace only tool/);
+  const nextTrace=deferred('GET /api/sessions/b'),moreTrace=node('detail-more').click();
+  await nextTrace.requested;
+  assert.equal(calls.at(-1).query.cursor,'more-activity');
+  assert.equal(calls.at(-1).query.trace,'true');assert.equal(calls.at(-1).query.turn_id,last);
+  nextTrace({items:[{turn_id:last,step_event_seq:2,payload:{kind:'TOOL_RESULT',status:'SUCCEEDED',tool_name:'next activity row'}}],next_cursor:null});
+  await moreTrace;
+  assert.match(node('inspector-content').textContent,/trace only tool.*next activity row/s);
+  await node('inspector-close').click();
+  assert.ok(node('chat-mode').className.includes('active'));
   assert.equal(calls.filter(call=>call.key.startsWith('/api/executions/')).length,0);
-  console.log('Native Model messages lazily reads authorized paged SDK content and ignores obsolete responses');
+  console.log('Native Model messages and Activity lazily read their exact paged turn and ignore obsolete responses');
   process.exit(0);
 }
 if(process.argv[3]==='native-stop') {
