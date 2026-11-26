@@ -302,6 +302,7 @@ class _OwnedNativeParent(_ChildWorkerScope):
     key: "SessionTurnKey"
     generation: int
     principal: Principal
+    child_approvals: dict[str, "NativeSubagentAdmission"] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1377,7 +1378,7 @@ class LocalExecutionBackend:
 
     async def _run_owned_action(
         self, execution: ExecutionRecord, parent_generation: int | None,
-        action: Callable[[], Awaitable[_TurnActionT]],
+        action: Callable[[], Awaitable[_TurnActionT]], *, native_parent: "NativeSubagentAdmission | None" = None,
     ) -> _TurnActionT:
         identity = await self._recovery_idempotency(execution)
         result: list[_TurnActionT] = []
@@ -1390,7 +1391,8 @@ class LocalExecutionBackend:
 
         await self.run_turn(ExecutionStartReservation(
             execution, identity, parent_producer_generation=parent_generation,
-        ), Principal(execution.principal_id, self._tenant_id, execution.principal_kind), admit, _existing_owner=True)
+        ), Principal(execution.principal_id, self._tenant_id, execution.principal_kind), admit,
+            _existing_owner=True, _native_parent=native_parent)
         return result[0]
 
     async def run_existing_turn(
@@ -1545,6 +1547,8 @@ class LocalExecutionBackend:
             if parent is not None:
                 parent.children[execution.execution_id] = owner
                 parent.delegated_children.add(execution.execution_id)
+                if isinstance(parent, _OwnedNativeParent) and native_parent is not None:
+                    parent.child_approvals[execution.execution_id] = native_parent
             if scope is not None or graph_claim is not None:
                 watch = self._watch_turn(owner) if graph_claim is None else self._watch_attached_graph(owner)
                 monitor = asyncio.create_task(watch, name=f"ai-turn-control-{execution.execution_id}")
@@ -3078,6 +3082,41 @@ class LocalExecutionBackend:
             return
         if self._queue_deferred_graph is not None and await self._queue_deferred_graph(execution):
             return
+        native = self._native_parents.get(execution.parent_execution_id)
+        if native is not None:
+            proof = native.child_approvals.get(execution_id)
+            pending = None if execution.recovery is None else execution.recovery.pending_tools
+            if proof is None or pending is None or not pending.approvals or pending.calls:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            def parent_stopped() -> bool:
+                return native.stopping or self._native_parents.get(native.key.turn_id) is not native
+
+            if parent_stopped():
+                return
+            proof.require_deferred_child(execution)
+            old_owner = self._turn_owners.get(execution_id)
+            if old_owner is not None:
+                # The paused worker can still be unwinding its durable park.
+                await old_owner.closed.wait()
+            if parent_stopped():
+                return
+            try:
+                await self._run_owned_action(
+                    execution, native.generation,
+                    lambda: self._reconcile_deferred_owned(execution_id, tenant_id=tenant_id), native_parent=proof,
+                )
+            except asyncio.CancelledError:
+                # A concurrent Stop may have withdrawn the local producer.
+                # The explicit approval decision is already durable; preserve
+                # independent caller cancellation rather than masking it.
+                caller = asyncio.current_task()
+                if not parent_stopped() or caller is not None and caller.cancelling():
+                    raise
+            except AIError as error:
+                if not (parent_stopped() and error.code is ErrorCode.STORAGE_CONFLICT
+                        and error.safe_details.get("phase") == "subagent_parent_unavailable"):
+                    raise
+            return
         await self.run_recovery_turn(
             execution_id, lambda: self._reconcile_deferred_owned(execution_id, tenant_id=tenant_id),
         )
@@ -3109,6 +3148,10 @@ class LocalExecutionBackend:
             session_context=current.session_context,
             resolved_binding=decision.binding,
         )
+        owner = self._turn_owners.get(current.execution_id)
+        if owner is not None and owner.native_parent is not None:
+            self._require_turn_dispatch(owner)
+            self._parent_turn(owner.reservation, owner.native_parent)
         if not self._prepare_recovery_relaunch(current.execution_id):
             return
         await self.launch(request, current, resume=decision)
@@ -3347,6 +3390,11 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         if execution.recovery is None or execution.recovery.pending_tools is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        owner = self._turn_owners.get(execution.execution_id)
+        native = None if owner is None else owner.native_parent
+        if native is not None:
+            self._require_turn_dispatch(owner)
+            self._parent_turn(owner.reservation, native)
         resumed = await self._runtime_commands.claim_deferred_resume_checkpoint(
             execution_id=execution.execution_id,
             tenant_id=self._tenant_id,
@@ -3355,8 +3403,11 @@ class LocalExecutionBackend:
             expected_agent_run_seq=execution.agent_run_seq,
             expected_pending_tools=execution.recovery.pending_tools,
             background_tasks=self._execution_task_set(execution.execution_id),
-            recovery_operation=recovery_operation,
+            recovery_operation=recovery_operation, _native_child=native,
         )
+        if native is not None:
+            self._require_turn_dispatch(owner)
+            self._parent_turn(owner.reservation, native)
         if recovery_operation is not None:
             receipt = await self._recovery_receipt(recovery_operation)
             if receipt is None:

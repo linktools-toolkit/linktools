@@ -4,16 +4,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..core import Principal
+from ..core import ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
     from ..execution import ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult
     from ..persistence.commands import StateCommands
     from ..persistence.repositories import ExecutionRepositoryImpl, ToolRepositoryImpl
+    from ..persistence.state import StateStore, StateTransaction
     from ..persistence.turns import ExecutionAuthority, SessionTurnKey, SqlSessionTurns
     from ._tool import ToolOperationDecision
 
@@ -51,4 +53,19 @@ class NativeSubagentAdmission:
             claim, turns=self.turns, key=self.key, generation=self.generation, tools=self.tools,
             operation_id=self.decision.operation_id, owner=self.decision.owner, fence=self.decision.fence,
             invocation_id=self.invocation_id, principal=self.principal,
+        )
+
+
+    def require_deferred_child(self, child: ExecutionRecord) -> None:
+        if child.lineage_kind is not ExecutionLineageKind.SUBAGENT or child.session_id is not None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self.require_child(child, self.principal, self.generation)
+
+    async def guard_deferred_resume(
+        self, child_store: StateStore, write: Callable[[StateTransaction], Awaitable[ExecutionRecord]],
+    ) -> ExecutionRecord:
+        return await self.turns.with_claimed_subagent_parent(
+            self.key, generation=self.generation, tools=self.tools, operation_id=self.decision.operation_id,
+            owner=self.decision.owner, fence=self.decision.fence, invocation_id=self.invocation_id,
+            child_store=child_store, principal=self.principal, write=write,
         )

@@ -214,7 +214,10 @@ class DefaultApprovalService:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(
             principal, action,
-            ResourceRef(ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id),
+            ResourceRef(
+                ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id,
+                execution.principal_id if execution.parent_execution_id is not None else None,
+            ),
         )
         if execution.status is not ExecutionStatus.WAITING_DEFERRED:
             return None

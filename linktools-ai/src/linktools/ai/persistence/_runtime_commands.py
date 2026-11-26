@@ -7,7 +7,7 @@ import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import uuid4
 
 from linktools.core import environ
@@ -191,6 +191,14 @@ class _GroupedStartUnavailable(AIError):
 
     def __init__(self) -> None:
         super().__init__(ErrorCode.STORAGE_CONFLICT)
+
+
+class _NativeChildResume(Protocol):
+    async def guard_deferred_resume(
+        self, child_store: StateStore, write: Callable[[StateTransaction], Awaitable[ExecutionRecord]],
+    ) -> ExecutionRecord: ...
+
+    def require_deferred_child(self, child: ExecutionRecord) -> None: ...
 
 
 class StateCommands:
@@ -1064,9 +1072,12 @@ class StateCommands:
         background_tasks: "set[asyncio.Task[object]] | None" = None,
         recovery_operation: OperationLedgerInput | None = None,
         _graph_ready: "tuple[_GraphDeferredWait, int] | None" = None,
+        _native_child: _NativeChildResume | None = None,
     ) -> ExecutionRecord:
         stores = [self._execution.state_store]
         operations = self._operations
+        if _native_child is not None and (_graph_ready is not None or recovery_operation is not None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if _graph_ready is not None:
             from sqlalchemy import select
             from ._session_turn_sql import CanonicalDeferredFrontier
@@ -1117,9 +1128,8 @@ class StateCommands:
 
         async def operation() -> ExecutionRecord:
             async def mutate(
-                group: StateGroupTransaction,
+                execution_tx: StateTransaction, group: StateGroupTransaction | None,
             ) -> ExecutionRecord:
-                execution_tx = group.transaction(self._execution.state_store)
                 execution = await self._execution.get_in_transaction(
                     execution_tx,
                     execution_id,
@@ -1157,6 +1167,8 @@ class StateCommands:
                     or checkpoint.recovery.pending_tools != expected_pending_tools
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if _native_child is not None:
+                    _native_child.require_deferred_child(execution)
                 if _graph_ready is not None and (
                     execution.root_execution_id != execution_id or execution.session_id is not None
                     or execution.parent_execution_id is not None or execution.parent_invocation_id is not None
@@ -1204,10 +1216,16 @@ class StateCommands:
                     )
                 return updated_execution
 
-            return await stores[0].storage_group.mutate(stores, mutate)
+            if _native_child is not None:
+                return await _native_child.guard_deferred_resume(
+                    self._execution.state_store, lambda transaction: mutate(transaction, None),
+                )
+            return await stores[0].storage_group.mutate(
+                stores, lambda group: mutate(group.transaction(self._execution.state_store), group),
+            )
 
         async def readback() -> CommitObservation[ExecutionRecord]:
-            if _graph_ready is not None:
+            if _graph_ready is not None or _native_child is not None:
                 # A lost ACK must not launch a producer or replay any effect.
                 # The caller can reconcile through the existing exact ledgers.
                 return CommitObservation(DurableCommitState.UNRESOLVED)
