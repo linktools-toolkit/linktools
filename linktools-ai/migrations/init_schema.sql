@@ -455,7 +455,7 @@ CREATE TABLE ai_trace_events (
 	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Trace event type.',
 	step_index BIGINT NOT NULL COMMENT 'Original agent graph step index.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original event timestamp encoded as ISO 8601.',
-	order_key VARBINARY(64) NOT NULL COMMENT 'UTC event timestamp and sequence for stable chronological paging.',
+	order_key VARBINARY(16) NOT NULL COMMENT 'UTC event timestamp and sequence for stable chronological paging.',
 	request_identity VARBINARY(128) NULL COMMENT 'Original model request correlation string; leading zeros remain significant.',
 	request_number VARBINARY(54) NULL COMMENT 'Unsigned binary request number used only for numeric filtering.',
 	message_identity VARBINARY(128) NULL COMMENT 'Successful response message identity; other message metadata remains in the body.',

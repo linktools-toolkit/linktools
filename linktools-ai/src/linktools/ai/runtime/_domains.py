@@ -753,9 +753,16 @@ class RuntimeSessions(Generic[AppT]):
             observation_timeout_seconds=observation_timeout_seconds,
         )
 
-    async def refresh(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100, max_age: float = 0) -> SessionDetail:
-        """Refresh a session; opt in to bounded stale display with positive max_age."""
+    async def refresh(
+        self, session_id: str, *, principal: Principal, cursor: str | None = None,
+        limit: int = 100, max_age: float = 0,
+    ) -> "SessionDetail | dict[str, JsonValue]":
+        """Read one session and timeline page; legacy display captures may opt into staleness."""
         self._ensure_open()
+        if self.supports_turn_sessions:
+            if isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or max_age != 0:
+                raise ValueError("Native session refresh requires max_age=0")
+            return await self.history(session_id, principal=principal, cursor=cursor, limit=limit)
         return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit, max_age=max_age)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:

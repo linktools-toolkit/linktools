@@ -107,6 +107,10 @@ async def test_local_runtime_retains_terminal_model_history(
             result = await turn.wait_final()
             assert result.view['output'] == {'text': 'done'}
             identity = turn.key.turn_id
+            detail = await runtime.sessions.refresh(session.session_id, principal=runtime.default_principal)
+            assert detail["timeline"]["items"][0]["turn_id"] == identity
+            with pytest.raises(ValueError, match="requires max_age=0"):
+                await runtime.sessions.refresh(session.session_id, principal=runtime.default_principal, max_age=1)
         else:
             execution = await agent.start('hello', idempotency_key='turn')
             waited = await execution.wait()

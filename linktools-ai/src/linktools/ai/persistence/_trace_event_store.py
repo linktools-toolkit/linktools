@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 _STEP_EVENT_ADAPTER = TypeAdapter(StepEvent)
 
+_UTC_START = datetime.min.replace(tzinfo=timezone.utc)
+
 _REQUEST = "linktools.ai.model_request_seq"
 _MESSAGE = "linktools.ai.message_seq"
 _INLINE_SCALARS = ("agent_conversation_id", "parent_agent_run_id", "agent_id", "tool_name", "error", "idempotency_key")
@@ -69,7 +71,9 @@ def _request_number(value: str | None) -> bytes | None:
 
 
 def _order(timestamp: datetime, sequence: int) -> bytes:
-    return f"{timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}".encode("ascii")
+    elapsed = timestamp.astimezone(timezone.utc) - _UTC_START
+    micros = (elapsed.days * 86400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
+    return micros.to_bytes(8, "big") + sequence.to_bytes(8, "big")
 
 
 def history_identities(event: StepEvent) -> tuple[tuple[str, str], ...]:
