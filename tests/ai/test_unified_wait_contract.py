@@ -455,7 +455,7 @@ async def test_convenience_wait_preserves_container_and_all_options(owner, metho
 
     runtime = SimpleNamespace(
         _agent_execution_port=lambda *_args, derivations=(), observed_binding=None: SimpleNamespace(start=start),
-        sessions=SimpleNamespace(supports_turn_sessions=False),
+        sessions=SimpleNamespace(_uses_turn_sessions=False),
     )
     handle = Agent(runtime, "agent", 1) if owner == "agent" else Session(runtime, "agent", 1, "session")
     callback = _ignore if observe else None

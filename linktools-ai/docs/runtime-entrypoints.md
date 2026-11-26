@@ -82,13 +82,15 @@ derived or restored Agent, and does not check that the session exists.
 Non-SQL `Session.fork` and `Agent.create_session` preserve that binding.
 
 For a persistent SQL chat, compose Runtime with an explicit host authorization
-policy and use the turn API. Create the session once, choose the Agent on every
-send, and use the returned turn ID for exact readback:
+policy and use the turn API. SQL does not support agent-bound sessions or
+fallback to another session store. Without a host policy, SQL session operations
+are unavailable; independent executions still work. Create the session once,
+choose the Agent on every send, and use the returned turn ID for exact readback:
 
 ```python
 await runtime.sessions.create_turn_session(session_id, principal=actor)
 turn_id = await runtime.sessions.start_turn(
-    session_id, "Hello", agent_id="default", principal=actor, idempotency_key=request_id,
+    session_id, "Hello", agent="default", principal=actor, idempotency_key=request_id,
 )
 page = await runtime.history.turn_session(session_id, principal=actor, limit=20)
 turn = await runtime.history.turn_result(session_id, turn_id, principal=actor)

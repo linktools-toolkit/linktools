@@ -120,3 +120,35 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         assert (await lazy.history())["timeline"] == await lazy.timeline()
         async with aclosing(lazy.watch()) as occupancy:
             assert (await anext(occupancy)).active_turn_id is None
+
+
+@pytest.mark.asyncio
+async def test_sql_host_without_session_authorization_does_not_fall_back(tmp_path):
+    runtime_name = "sdk-sql-no-session-auth"
+    features = RuntimeFeatures(runtime_name)
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("default", allow_tools=(), allow_capabilities=())
+
+    async def model(_messages, _info):
+        return ModelResponse(parts=[TextPart("standalone")])
+
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    async with (
+        Persistence.open(runtime_name, storage=PersistenceStorage.from_root(tmp_path)) as state,
+        Runtime.open(persistence=state, features=features) as runtime,
+    ):
+        principal = runtime.default_principal
+        agent = runtime.agents.get()
+        for operation in (
+            lambda: agent.create_session("chat"),
+            lambda: runtime.sessions.create(CreateSessionRequest(principal, "chat", "create")),
+            lambda: runtime.sessions.get("chat", principal=principal),
+            lambda: runtime.sessions.inspect("chat", principal=principal),
+            lambda: agent.start("must not create a legacy session", session_id="chat"),
+        ):
+            with pytest.raises(AIError) as missing:
+                await operation()
+            assert missing.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+        assert await state.conversation.sessions.get("chat", tenant_id=principal.tenant_id) is None
+        standalone = await agent.start("no session requested")
+        assert (await standalone.wait(timeout_seconds=5)).result.output == {"text": "standalone"}

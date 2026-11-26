@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import Protocol, TypeVar
 
 
 from ._feature_policy import _RuntimeFeaturePolicy, _runtime_feature_policy
@@ -56,13 +56,6 @@ from ..persistence.repositories import SessionRepositoryImpl
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.state import active_state_scope
 
-if TYPE_CHECKING:
-    from ._regenerable_turn import _RegenerableTurnRunner
-
-
-
-
-
 class _SessionExecutionService(ExecutionService, Protocol):
     async def lookup_session_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,
@@ -96,9 +89,8 @@ class _SessionTranscriptStore(Protocol):
 
 
 class _SessionExecutionAdapter:
-    def __init__(self, execution: _SessionExecutionService, *, canonical_turns: bool = False) -> None:
+    def __init__(self, execution: _SessionExecutionService) -> None:
         self._execution = execution
-        self._canonical_turns = canonical_turns
         self.start_read: _SessionStartRead | None = None
 
     async def start_for_session(self, agent_id: str, binding_digest: str, session_id: str,
@@ -109,11 +101,6 @@ class _SessionExecutionAdapter:
                                 dependency_hold_id: str | None = None,
                                 requires_task_invocation_capture: bool = False,
                                 budget_scope_id: str | None = None) -> ExecutionHandle:
-        if self._canonical_turns and (request.planning or request.mode == "plan"):
-            raise AIError(
-                ErrorCode.CAPABILITY_POLICY_CONFLICT,
-                "SQL session planning must use Runtime.sessions.start_turn(planning=True)",
-            )
         execution_request = ExecutionRequest(
             user_prompt=request.user_prompt, principal=request.principal,
             idempotency_key=request.idempotency_key, memory_scope=request.memory_scope,
@@ -153,10 +140,6 @@ class _SessionWatch:
 class RuntimeSessionService(SessionManager[ExecutionHandle]):
     """Enforce session ownership, Agent identity immutability, and revision CAS."""
 
-    @property
-    def regenerable_turns(self) -> "_RegenerableTurnRunner | None":
-        return self._regenerable_turns
-
     async def require_available(self) -> None:
         if self._current_policy is None:
             await super().require_available()
@@ -179,7 +162,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             adapter = self._execution
             read_session = self._read_session
             if isinstance(execution, DefaultExecutionService):
-                adapter = _SessionExecutionAdapter(execution, canonical_turns=self._canonical_turns)
+                adapter = _SessionExecutionAdapter(execution)
                 async def read_session(identity: str, *, tenant_id: str) -> SessionRecord | None:
                     adapter.start_read = await execution._read_session_start(
                         identity, idempotency_key, tenant_id=tenant_id)
@@ -204,7 +187,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         execution = self._admission_execution
         if not isinstance(execution, DefaultExecutionService):
             return await super()._resume(agent_id, binding_digest, session_id, request, **kwargs)
-        adapter = _SessionExecutionAdapter(execution, canonical_turns=self._canonical_turns)
+        adapter = _SessionExecutionAdapter(execution)
         async def read_session(identity: str, *, tenant_id: str) -> SessionRecord | None:
             adapter.start_read = await execution._read_session_start(identity, request.idempotency_key, tenant_id=tenant_id)
             return adapter.start_read.session
@@ -257,8 +240,6 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         cursor_signer: CursorSigner,
         *,
         history_reader: SessionHistoryReader,
-        regenerable_turns: "_RegenerableTurnRunner | None" = None,
-        canonical_turns: bool = False,
         enabled: bool = True,
         current_policy: Callable[[], Awaitable[_RuntimeFeaturePolicy]] | None = None,
         transcript_store: "_SessionTranscriptStore | None" = None,
@@ -277,7 +258,6 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         self._change_subscriptions: set[Callable[[], None]] = set()
         self._current_policy = current_policy
         self._admission_execution = execution
-        self._canonical_turns = canonical_turns
         self._runtime_conversation = conversation
         self._runtime_executions = executions
         self._runtime_authorization = authorization
@@ -288,7 +268,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         self._local_waiter = local_waiter
         self._capture_terminal_publication = capture_terminal_publication
         super().__init__(
-            conversation, executions, authorization, _SessionExecutionAdapter(execution, canonical_turns=self._canonical_turns), cursor_signer,
+            conversation, executions, authorization, _SessionExecutionAdapter(execution), cursor_signer,
             enabled=enabled, release_terminal=release_terminal,
             canonicalize_path=None if workspace_access is None else workspace_access.canonicalize_path,
             pending_session_execution=pending_session_execution,
@@ -296,7 +276,6 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             observe_view=self._observe_session_view,
         )
         self._history_reader = history_reader
-        self._regenerable_turns = regenerable_turns
         self._transcript_store = transcript_store
         self._cache = cache if isinstance(cache, CacheBackend) else None
         self._display_cache = SessionDisplayCache(
@@ -481,8 +460,6 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
 
     async def close_watches(self) -> None:
         self._watches_closed = True
-        if self._regenerable_turns is not None:
-            await self._regenerable_turns.close()
         for unsubscribe in tuple(self._change_subscriptions):
             unsubscribe()
         tasks = []

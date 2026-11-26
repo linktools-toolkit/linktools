@@ -270,7 +270,7 @@ async def _discard_turn_emission(_event: "AgentEmission") -> None:
 class RuntimeSessions(Generic[AppT]):
     def __init__(
         self,
-        service: SessionService,
+        service: SessionService | None,
         get_session: Callable[[str, Principal | None], Awaitable["Session[AppT]"]],
         *,
         start_session: Callable[..., Awaitable["Execution[AppT]"]],
@@ -279,6 +279,7 @@ class RuntimeSessions(Generic[AppT]):
         turn_runner: "_RegenerableTurnRunner | None" = None,
         runtime: "Runtime[AppT] | None" = None,
         native_turn_read: "_NativeTurnRead | None" = None,
+        require_session_available: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._start_session = start_session
         self._service = service
@@ -288,6 +289,7 @@ class RuntimeSessions(Generic[AppT]):
         self._turn_runner = turn_runner
         self._runtime = runtime
         self._native_turn_read = native_turn_read
+        self._require_session_available = require_session_available
 
     @property
     def _uses_turn_sessions(self) -> bool:
@@ -306,7 +308,7 @@ class RuntimeSessions(Generic[AppT]):
     def _require_turn_sessions(self) -> "tuple[_RegenerableTurnRunner, Runtime[AppT]]":
         self._ensure_open()
         runner, runtime = self._turn_runner, self._runtime
-        if runner is None or runtime is None:
+        if runner is None or runtime is None or self._require_session_available is None:
             raise AIError(
                 ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                 safe_details={"reason": "turn_session_authorization_not_configured"
@@ -339,7 +341,7 @@ class RuntimeSessions(Generic[AppT]):
         validate_session_id(session_id)
         if idempotency_key is not None:
             validate_session_request_key(idempotency_key)
-        await self._service.require_available()
+        await self._require_session_available()
         return await runner.create_session(
             session_id, principal=principal, tenant_id=runtime.tenant_id,
             authorization=runtime._authorization,
@@ -357,7 +359,7 @@ class RuntimeSessions(Generic[AppT]):
         validate_session_request_key(idempotency_key)
         if source_id == target_id or type(expected_revision) is not int or expected_revision < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        await self._service.require_available()
+        await self._require_session_available()
         return await runner.fork_session(
             source_id, target_id, principal=principal, tenant_id=runtime.tenant_id,
             authorization=runtime._authorization, expected_revision=expected_revision, request_id=idempotency_key,
@@ -466,7 +468,7 @@ class RuntimeSessions(Generic[AppT]):
         if isinstance(prompt, str) and not prompt.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A nonempty prompt is required")
         prompt = validate_user_input(prompt)
-        await self._service.require_available()
+        await self._require_session_available()
         return await runner.start_session(
             session_id, agent_id=agent_id, prompt=prompt, principal=principal, namespace=runtime.namespace,
             tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
@@ -561,9 +563,12 @@ class RuntimeSessions(Generic[AppT]):
             finally:
                 detach()
 
-    def _require_agent_session(self) -> None:
-        if self.supports_turn_sessions:
+    def _agent_session_service(self) -> SessionService:
+        service = self._service
+        if service is None:
+            self._require_turn_sessions()
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT, "Use the native session API on this host")
+        return service
 
     async def _inspect_native_session(
         self, session_id: str, principal: Principal | None,
@@ -578,7 +583,7 @@ class RuntimeSessions(Generic[AppT]):
     async def get(
         self, session_id: str, *, principal: Principal | None = None,
     ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
-        if self.supports_turn_sessions:
+        if self._uses_turn_sessions:
             actor, _ = await self._inspect_native_session(session_id, principal)
             return self._bind_native_session(session_id, principal=actor, local_workspace=False)
         return await self._get_session(session_id, principal)
@@ -617,7 +622,7 @@ class RuntimeSessions(Generic[AppT]):
                 planning=False if planning is None else planning, thinking=thinking,
             )
             return session._turn(receipt.turn_id, principal)
-        self._require_agent_session()
+        self._agent_session_service()
         return await self._start_session(session_id, user_prompt, principal=principal,
             idempotency_key=idempotency_key, output=output, correlation=correlation,
             files=files, planning=planning, thinking=thinking)
@@ -627,14 +632,14 @@ class RuntimeSessions(Generic[AppT]):
     ) -> "SessionView | dict[str, JsonValue]":
         """Read the owning session's current state without constructing a handle."""
         self._ensure_open()
-        if self.supports_turn_sessions:
+        if self._uses_turn_sessions:
             _, state = await self._inspect_native_session(session_id, principal)
             return state
         return await self._inspect_agent_session(session_id, principal=principal)
 
     async def _inspect_agent_session(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()
-        return await self._service.get(session_id, principal=principal)
+        return await self._agent_session_service().get(session_id, principal=principal)
 
     @contextmanager
     def capture_published_turn(
@@ -646,7 +651,7 @@ class RuntimeSessions(Generic[AppT]):
         committed turn through History when needed. This is not current state.
         """
         self._ensure_open()
-        with self._service.capture_published_turn(session_id, execution_id, principal=principal) as captured:
+        with self._agent_session_service().capture_published_turn(session_id, execution_id, principal=principal) as captured:
             async def read() -> PublishedSessionTurn | None:
                 self._ensure_open()
                 return await captured()
@@ -661,7 +666,7 @@ class RuntimeSessions(Generic[AppT]):
         perform I/O. Unsubscribe when done; Runtime close removes subscriptions.
         """
         self._ensure_open()
-        return self._service.observe_changes(session_id, on_invalidate)
+        return self._agent_session_service().observe_changes(session_id, on_invalidate)
 
     def observe_turns(
         self, handler: Callable[[SessionTurnNotice], None],
@@ -677,22 +682,21 @@ class RuntimeSessions(Generic[AppT]):
         provided. Read current state through the authorized API as needed.
         """
         self._ensure_open()
-        self._require_agent_session()
-        return self._service.observe_turns(handler)
+        return self._agent_session_service().observe_turns(handler)
 
     def invalidate(self, session_id: str) -> None:
         """Wake existing local watches to reread current authorized session state."""
         self._ensure_open()
-        self._service.invalidate(session_id)
+        self._agent_session_service().invalidate(session_id)
 
     def watch(
         self, session_id: str, *, principal: Principal,
     ) -> "AsyncIterator[SessionView] | AsyncIterator[_SessionOccupancy]":
         """Observe the configured session owner's local occupancy changes."""
         self._ensure_open()
-        if self.supports_turn_sessions:
+        if self._uses_turn_sessions:
             return self._bind_native_session(session_id, principal=principal, local_workspace=False).watch()
-        return self._service.watch(session_id, principal=principal)
+        return self._agent_session_service().watch(session_id, principal=principal)
 
     async def lookup_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,
@@ -704,7 +708,7 @@ class RuntimeSessions(Generic[AppT]):
         Callers must still compare their original request with the frozen input.
         """
         self._ensure_open()
-        return await self._service.lookup_admission(
+        return await self._agent_session_service().lookup_admission(
             session_id, principal=principal, idempotency_key=idempotency_key,
         )
 
@@ -737,13 +741,11 @@ class RuntimeSessions(Generic[AppT]):
     async def create_view(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
         """Return the authorized creation result without a separate session read."""
         self._ensure_open()
-        self._require_agent_session()
-        return await self._service.create(agent_id, request)
+        return await self._agent_session_service().create(agent_id, request)
 
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()
-        self._require_agent_session()
-        return await self._service.reconcile(session_id, principal=principal)
+        return await self._agent_session_service().reconcile(session_id, principal=principal)
 
     async def wait_inactive(
         self, session_id: str, *, principal: Principal, timeout_seconds: float | None = None,
@@ -751,7 +753,7 @@ class RuntimeSessions(Generic[AppT]):
     ) -> SessionView:
         """Wait for a non-consuming, point-in-time inactive session observation."""
         self._ensure_open()
-        return await self._service.wait_inactive(
+        return await self._agent_session_service().wait_inactive(
             session_id, principal=principal, timeout_seconds=timeout_seconds,
             observation_timeout_seconds=observation_timeout_seconds,
         )
@@ -762,48 +764,45 @@ class RuntimeSessions(Generic[AppT]):
     ) -> "SessionDetail | dict[str, JsonValue]":
         """Read one session and timeline page; legacy display captures may opt into staleness."""
         self._ensure_open()
-        if self.supports_turn_sessions:
+        if self._uses_turn_sessions:
             if isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or max_age != 0:
                 raise ValueError("Native session refresh requires max_age=0")
             return await self.history(session_id, principal=principal, cursor=cursor, limit=limit)
-        return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit, max_age=max_age)
+        return await self._agent_session_service().refresh(session_id, principal=principal, cursor=cursor, limit=limit, max_age=max_age)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
-        return await self._service.list(request)
+        return await self._agent_session_service().list(request)
 
     async def history(
         self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
     ) -> "Page[SessionHistoryItem] | dict[str, JsonValue]":
-        if self.supports_turn_sessions:
+        if self._uses_turn_sessions:
             return await self._bind_native_session(session_id, principal=principal, local_workspace=False).history(
                 cursor=cursor, limit=limit,
             )
-        return await self._service.history(session_id, principal=principal, cursor=cursor, limit=limit)
+        return await self._agent_session_service().history(session_id, principal=principal, cursor=cursor, limit=limit)
 
     async def timeline(
         self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
     ) -> "Page[SessionTurn] | dict[str, JsonValue]":
-        if self.supports_turn_sessions:
+        if self._uses_turn_sessions:
             return await self._bind_native_session(session_id, principal=principal, local_workspace=False).timeline(
                 cursor=cursor, limit=limit,
             )
-        return await self._service.timeline(session_id, principal=principal, cursor=cursor, limit=limit)
+        return await self._agent_session_service().timeline(session_id, principal=principal, cursor=cursor, limit=limit)
 
     async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> "Session[AppT]":
         self._ensure_open()
-        self._require_agent_session()
-        view = await self._service.fork(agent_id, session_id, request)
+        view = await self._agent_session_service().fork(agent_id, session_id, request)
         return self._bind_session(view, request.principal)
 
     async def update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         self._ensure_open()
-        self._require_agent_session()
-        return await self._service.update(agent_id, session_id, request)
+        return await self._agent_session_service().update(agent_id, session_id, request)
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
         self._ensure_open()
-        self._require_agent_session()
-        return await self._service.close(session_id, request)
+        return await self._agent_session_service().close(session_id, request)
 
 
 class RuntimeMetrics(RuntimeMetricsControl):

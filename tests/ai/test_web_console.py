@@ -700,6 +700,7 @@ async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_s
 @pytest.mark.asyncio
 async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_path: Path) -> None:
     from linktools.ai.core import TenantAuthorizationPolicy
+    from linktools.ai.errors import AIError, ErrorCode
 
     class WorkspacePolicy(TenantAuthorizationPolicy):
         async def authorize(self, principal, action, resource):
@@ -738,6 +739,9 @@ async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_p
         History.open(persistence=persistence, authorization=WorkspacePolicy()) as history,
         client(create_app(history=history, local_workspace=True)) as http,
     ):
+        with pytest.raises(AIError) as legacy_read:
+            await history.lookup_session("session", principal=principal)
+        assert legacy_read.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
         assert (await http.get("/api/config")).json()["read_only"]
         sessions = (await http.get("/api/sessions")).json()
         assert [item["session_id"] for item in sessions["items"]] == ["session"]

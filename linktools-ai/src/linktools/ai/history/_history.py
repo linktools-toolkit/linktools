@@ -1802,6 +1802,8 @@ async def _open_runtime_history(
     selected_state = persistence
     resolved_namespace = persistence.namespace
     effective_tenant_id = persistence.tenant_id
+    session_turn_reader = persistence.session_turn_reader
+    agent_bound_conversation = persistence.conversation if session_turn_reader is None else None
     pending_coordination = persistence.pending_turn_coordination
     history_store = selected_state.run_store.read_store(PersistenceDomain.TRACE)
     if selected_state.plan.route(PersistenceDomain.TRACE).retention is StorageRetentionMode.TRANSIENT:
@@ -1842,7 +1844,7 @@ async def _open_runtime_history(
         tenant_id=effective_tenant_id,
         executions=selected_state.execution.executions,
         events=selected_state.execution.events,
-        sessions=selected_state.conversation.sessions,
+        sessions=None if agent_bound_conversation is None else agent_bound_conversation.sessions,
         _task_source=lambda: selected_state.task.tasks,
         authorization=effective_authorization,
         namespace=resolved_namespace,
@@ -1853,14 +1855,15 @@ async def _open_runtime_history(
             "runtime-history",
             token_seed(resolved_namespace),
         ),
-        pending_session_execution=(None if pending_coordination is None
+        pending_session_execution=(None if pending_coordination is None or agent_bound_conversation is None
                                    else pending_coordination.read_session_execution),
         pending_execution=None if pending_coordination is None else pending_coordination.read_execution,
-        conversation=selected_state.conversation,
-        session_turn_reader=selected_state.session_turn_reader if authorization is not None else None,
+        conversation=agent_bound_conversation,
+        session_turn_reader=session_turn_reader if authorization is not None else None,
         session_trace_source=history_store if isinstance(history_store, StateStepArchive) else None,
-        session_transcript_store=selected_state.run_store.conversation_persistence,
-        cache=(selected_state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
+        session_transcript_store=(None if agent_bound_conversation is None
+                                  else selected_state.run_store.conversation_persistence),
+        cache=(selected_state.plan.route(PersistenceDomain.CONVERSATION).cache if agent_bound_conversation is not None and all(
             selected_state.plan.route(domain).retention is StorageRetentionMode.DURABLE
             for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
         ) else None),

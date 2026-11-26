@@ -44,6 +44,7 @@ from ..errors import AIError, ErrorCode
 
 
 if TYPE_CHECKING:
+    from ._regenerable_turn import _RegenerableTurnRunner
     from ..core import ThinkingValue
     from ..inputs import InputCaptures
     from ..history import History
@@ -297,7 +298,8 @@ class Runtime(Generic[AppT]):
                         tree_streamer=components.tree_streamer, metric_control=components.metric_control,
                         _binding_resolver=components.binding_resolver, input_captures=components.input_captures,
                         memory_scope=components.memory_scope,
-                        native_turn_read=components.native_turn_read,
+                        native_turn_read=components.native_turn_read, turn_runner=components.turn_runner,
+                        require_session_available=components.require_session_available,
                     )
                 self._ready = True
             return self
@@ -367,7 +369,7 @@ class Runtime(Generic[AppT]):
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         execution: ExecutionService,
-        session: SessionService,
+        session: SessionService | None,
         approval: ApprovalService,
         external: ExternalService,
         event: EventService,
@@ -385,6 +387,8 @@ class Runtime(Generic[AppT]):
         input_captures: "InputCaptures | None" = None,
         memory_scope: str | None = None,
         native_turn_read: "_NativeTurnRead | None" = None,
+        turn_runner: "_RegenerableTurnRunner | None" = None,
+        require_session_available: "Callable[[], Awaitable[None]] | None" = None,
     ) -> None:
         if any(
             value is None
@@ -392,7 +396,6 @@ class Runtime(Generic[AppT]):
                 catalog,
                 compiler,
                 execution,
-                session,
                 approval,
                 external,
                 event,
@@ -411,15 +414,13 @@ class Runtime(Generic[AppT]):
             execution, self._get_execution, input_captures,
             bind_execution=self._execution_handle, ensure_open=self._ensure_open,
         )
-        from ._session import RuntimeSessionService
-
         self._session_service = session
         self._sessions = RuntimeSessions(
             session, self._get_session, start_session=self._start_existing_session,
             bind_session=self._session_handle, ensure_open=self._ensure_open,
-            turn_runner=session.regenerable_turns if isinstance(session, RuntimeSessionService) else None,
+            turn_runner=turn_runner,
             runtime=self,
-            native_turn_read=native_turn_read,
+            native_turn_read=native_turn_read, require_session_available=require_session_available,
         )
         self._approvals = approval
         self._external_calls = external
@@ -623,7 +624,7 @@ class Runtime(Generic[AppT]):
         self._ensure_open()
         validate_resource_id(session_id)
         resolved_principal = self._resolve_principal(principal)
-        view = await self._session_service.get(
+        view = await self.sessions._agent_session_service().get(
             session_id,
             principal=resolved_principal,
         )
@@ -651,7 +652,7 @@ class Runtime(Generic[AppT]):
                 correlation=correlation, _resume=resume)
 
         with sql_observation_scope("runtime.session.start"):
-            return await self._session_service.start_existing(session_id, principal, key, start)
+            return await self.sessions._agent_session_service().start_existing(session_id, principal, key, start)
 
     def _session_handle(self, view: SessionView, principal: Principal) -> Session[AppT]:
         return Session(self, view.agent_id, None, view.session_id, principal)

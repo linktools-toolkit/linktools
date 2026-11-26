@@ -125,7 +125,9 @@ class _RuntimeComponents:
     catalog: AgentCatalog
     compiler: AgentCompiler
     execution: DefaultExecutionService
-    session: RuntimeSessionService
+    session: RuntimeSessionService | None
+    turn_runner: _RegenerableTurnRunner | None
+    require_session_available: Callable[[], Awaitable[None]]
     approval: DefaultApprovalService
     external: DefaultExternalService
     event: DefaultEventService
@@ -154,6 +156,7 @@ class _AgentLifecycle:
         self.execution: DefaultExecutionService | None = None
         self.backend: LocalExecutionBackend | None = None
         self.session: RuntimeSessionService | None = None
+        self.turn_runner: _RegenerableTurnRunner | None = None
         self.step_store_cleanup: Callable[[], Awaitable[None]] | None = None
         self._coordinator: _RuntimeCloseCoordinator | None = None
 
@@ -177,7 +180,7 @@ class _AgentLifecycle:
             actions = _runtime_close_actions(
                 execution=self.execution, backend=self.backend,
                 input_materializer=None, metric_buffer=None, run_store=None,
-                session=self.session,
+                session=self.session, turn_runner=self.turn_runner,
             )
             if self.input_materializer is not None:
                 actions = (*actions, ("runtime.input", self.input_materializer.close))
@@ -482,9 +485,12 @@ def _runtime_close_actions(
     metric_buffer: MetricsService | None,
     run_store: RuntimeAgentRunStore | None,
     session: RuntimeSessionService | None = None,
+    turn_runner: _RegenerableTurnRunner | None = None,
     handoff: bool = False,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+    if turn_runner is not None:
+        actions.append(("runtime.turns", turn_runner.close))
     if session is not None:
         actions.append(("runtime.session.watch", session.close_watches))
         actions.append(("runtime.session.display", session.drain_display_reads))
@@ -1020,6 +1026,7 @@ async def _build_local_components(
                                 and budget_repository.state_store.storage_group is turn_state.storage_group else None),
             )
         )
+        lifecycle.turn_runner = turn_runner
         if turn_runner is not None:
             if split_sql_source is not None:
                 turn_runner._split_recovery_source = open_split_recovery_source
@@ -1061,6 +1068,11 @@ async def _build_local_components(
             turn_runner._cancel_graph_turn = cancel_graph_turn
         if state.session_turns is not None:
             async def canonical_graph_session(session_id: str, principal: Principal):
+                if not enable_turn_sessions:
+                    raise AIError(
+                        ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                        safe_details={"reason": "turn_session_authorization_not_configured"},
+                    )
                 await authorization.authorize(
                     principal, AuthorizationAction.SESSION_READ,
                     ResourceRef(ResourceKind.SESSION, session_id, tenant_id),
@@ -1147,34 +1159,37 @@ async def _build_local_components(
                 return True
 
             execution._recover_undispatched_graph_turn = recover_undispatched_graph_turn
-        session = RuntimeSessionService(
-            state.conversation,
-            state.execution.executions,
-            authorization,
-            execution,
-            HmacCursorSigner("session", runtime_token_seed),
-            history_reader=session_history_reader,
-            regenerable_turns=turn_runner, canonical_turns=state.session_turns is not None,
-            enabled=session_execution_ready,
-            current_policy=current_policy,
-            cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
-                state.plan.route(domain).retention is StorageRetentionMode.DURABLE
-                for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
-            ) else None),
-            transcript_store=run_store.conversation_persistence,
-            release_terminal=state.retention.release_session,
-            pending_session_execution=runtime_bridge.pending_turns.read_session_execution,
-            observe_local_session=runtime_bridge.pending_turns.observe_session,
-            read_session_owner=(None if runtime_bridge.pending_turns.coordination is None else
-                                runtime_bridge.pending_turns.coordination.read_session_owner),
-            local_waiter=backend,
-            workspace_access=input_materializer.access,
-            capture_terminal_publication=state.retention.capture_terminal_publication,
-        )
-        if turn_runner is None:
+        async def require_session_available() -> None:
+            if not (await current_policy()).session.enabled:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
+
+        if state.session_turns is None:
+            session = RuntimeSessionService(
+                state.conversation,
+                state.execution.executions,
+                authorization,
+                execution,
+                HmacCursorSigner("session", runtime_token_seed),
+                history_reader=session_history_reader,
+                enabled=session_execution_ready,
+                current_policy=current_policy,
+                cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
+                    state.plan.route(domain).retention is StorageRetentionMode.DURABLE
+                    for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
+                ) else None),
+                transcript_store=run_store.conversation_persistence,
+                release_terminal=state.retention.release_session,
+                pending_session_execution=runtime_bridge.pending_turns.read_session_execution,
+                observe_local_session=runtime_bridge.pending_turns.observe_session,
+                read_session_owner=(None if runtime_bridge.pending_turns.coordination is None else
+                                    runtime_bridge.pending_turns.coordination.read_session_owner),
+                local_waiter=backend,
+                workspace_access=input_materializer.access,
+                capture_terminal_publication=state.retention.capture_terminal_publication,
+            )
             session.bind_turn_observer(backend.observe_turns)
-        lifecycle.session = session
-        runtime_bridge.pending_turns.session_changed = state.conversation.sessions.notify_session_change
+            lifecycle.session = session
+            runtime_bridge.pending_turns.session_changed = state.conversation.sessions.notify_session_change
 
         async def prepare_pending_capture(execution_id: str, principal) -> None:
             await execution.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT)
@@ -1350,11 +1365,11 @@ async def _build_local_components(
             input_materializer=input_materializer,
             metric_buffer=metric_buffer,
             run_store=run_store,
-            session=session,
+            session=session, turn_runner=turn_runner,
         )
         handoff_actions = _runtime_close_actions(
             execution=execution, backend=backend, input_materializer=input_materializer,
-            metric_buffer=metric_buffer, run_store=run_store, session=session, handoff=True,
+            metric_buffer=metric_buffer, run_store=run_store, session=session, turn_runner=turn_runner, handoff=True,
         )
         lifecycle.configure(close_actions, handoff_actions)
         await run_store.prepare_archives()
@@ -1371,6 +1386,8 @@ async def _build_local_components(
         compiler=compiler,
         execution=execution,
         session=session,
+        turn_runner=turn_runner,
+        require_session_available=require_session_available,
         approval=approval,
         external=external,
         event=event,
@@ -1403,21 +1420,22 @@ def _borrowed_runtime_history(
     pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
     pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
 ) -> "History":
+    conversation = state.conversation if state.session_turns is None else None
     trace_archive = run_store.trace_persistence.archive if enable_turn_sessions else None
     return History(
         service,
         tenant_id=tenant_id,
         executions=state.execution.executions,
         events=state.execution.events,
-        sessions=state.conversation.sessions,
+        sessions=None if conversation is None else conversation.sessions,
         session_turn_reader=state.session_turn_reader if enable_turn_sessions else None,
         session_trace_source=trace_archive if isinstance(trace_archive, StateStepArchive) else None,
         _bind_runtime_turn_read=bind_native_turn_read,
-        conversation=state.conversation,
-        session_transcript_store=run_store.conversation_persistence,
-        pending_session_execution=pending_session_execution,
+        conversation=conversation,
+        session_transcript_store=None if conversation is None else run_store.conversation_persistence,
+        pending_session_execution=None if conversation is None else pending_session_execution,
         pending_execution=pending_execution,
-        cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
+        cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if conversation is not None and all(
             state.plan.route(domain).retention is StorageRetentionMode.DURABLE
             for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
         ) else None),

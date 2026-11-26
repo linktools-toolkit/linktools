@@ -163,9 +163,8 @@ async def test_sql_run_counter_pages_bound_each_physical_source(tmp_path: Path, 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_run_counter_routing_requires_matching_step_partition(backend: str, tmp_path: Path) -> None:
     async with _open_store(backend, tmp_path) as bare:
-        store = await bare.storage_group.open_partition(
-            state_store_key("run-counter", "tenant", "trace"), create=True,
-        )
+        store_key = state_store_key("run-counter", "tenant", "trace")
+        store = await bare.storage_group.open_partition(store_key, create=True)
         assert store is not None
         owned = stream_key("run-counter", "tenant", "trace", "event", ("run",))
         too_long = "界" * 21 + "ab"
@@ -176,7 +175,7 @@ async def test_run_counter_routing_requires_matching_step_partition(backend: str
                 ("run-counter", "other", "trace"), ("run-counter", "tenant", "checkpoint"))
         ), stream_key("run-counter", "tenant", "trace", "event", (too_long,)))
         assert record_owner_table(generic.key) == "ai_state_records"
-        assert run_counter_streams(generic.key, store_key=store.store_key) == ()
+        assert run_counter_streams(generic.key, store_key=store_key) == ()
         await store.mutate(lambda tx: tx.insert_record(generic))
         assert await store.read_record(generic.key) == generic
         # A generic State owner accepts all legal stream tuples without Step admissions.

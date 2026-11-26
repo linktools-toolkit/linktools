@@ -40,7 +40,7 @@ class AgentExecutionPort(Generic[AppT]):
     _binding_contract: AgentBindingContract | None
     _compiler: AgentCompiler
     _service: DefaultExecutionService
-    _sessions: SessionService
+    _sessions: SessionService | None
     _operations: ExecutionBinding
     watch_tree: ExecutionTreeWatcher
     resolve_binding: Callable[[AgentBinding], Awaitable[AgentBinding]]
@@ -378,6 +378,10 @@ class AgentExecutionPort(Generic[AppT]):
                     budget_scope_id=budget_scope_id,
                 )
             if handle is None:
+                if self._sessions is None:
+                    raise AIError(
+                        ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "Use the native session API on this host",
+                    )
                 resume_request = ResumeSessionRequest(
                     principal=resolved_principal,
                     user_prompt=request.user_prompt,

@@ -47,10 +47,11 @@ write receipt addresses are at most 301 bytes. The original caller key
 remains exact. Execution, execution request, logical tool operation, Task Graph and native
 agent run IDs now have a 64 UTF-8 byte ingress limit. Provider tool-call IDs
 and independently named task/node IDs keep their own contracts. Native
-Web/CLI turn request IDs are generated as 12 URL-safe ASCII characters with
-72 random bits scoped by session. Buffer entry IDs use a 12-character
-sequence within each producer scope. Global durable identities, lease
-tokens and digests are not truncated. Dropping the namespace/tenant/domain string merely because SQL
+Web/CLI/ACP turn request IDs are generated as 12 URL-safe ASCII characters with
+72 random bits scoped by session. Buffer confirmations can outlive a producer
+and must never acknowledge a successor's entry, so buffer IDs do not repeat
+a producer-local sequence. Global durable identities, lease tokens and
+digests are not truncated. Dropping the namespace/tenant/domain string merely because SQL
 has a `store_key` is unsafe for public record and stream key generators:
 their contract is globally scoped and backups can stage multiple owners
 without the original SQL partition.

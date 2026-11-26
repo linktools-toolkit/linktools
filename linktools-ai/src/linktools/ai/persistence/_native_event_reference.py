@@ -20,6 +20,7 @@ from ._step_contracts import AgentRunRecord, StepEvent
 from ._official_step_reader import OfficialStepReader
 from ._step_schema import build_step_sql_metadata
 from ._step_store import PreparedStep, SqlStepStore, StepWriteReceipt
+from ._trace_event_store import trace_event_order_key
 from ..core import deterministic_id, validate_resource_id
 from ..steps import native_store_locator, NativeLifecycleEvent, validate_native_replay_key
 from .codec import _encode_step_envelope, decode_envelope, encode_envelope
@@ -359,7 +360,6 @@ class NativeEventReferences:
         rows: Sequence[Mapping[str, object]], full_source: bool = False,
     ) -> tuple[StoredFact, ...]:
         """Verify joined Native proof and the caller's original Trace rows."""
-        from datetime import timezone
         if len(rows) != len(facts):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         references = {index: self.decode_reference(fact.data) for index, fact in enumerate(facts)
@@ -385,7 +385,7 @@ class NativeEventReferences:
                 expected = dict(store_key=self._state.store_key, run_id=event.agent_run_id.encode("utf-8"),
                     sequence=fact.sequence, event_index=event.event_index, kind=event.event_type,
                     step_index=event.step_index, timestamp=event.timestamp.isoformat(),
-                    order_key=f"{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{fact.sequence:020d}".encode("ascii"),
+                    order_key=trace_event_order_key(event.timestamp, fact.sequence),
                     request_identity=None, request_number=None, message_identity=None, tool_call_id=None, error_code=None,
                     history_identity=None, agent_conversation_id=None, parent_agent_run_id=None,
                     agent_id=None, tool_name=None, error=None, idempotency_key=None)

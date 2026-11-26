@@ -339,7 +339,7 @@ class Agent(Generic[AppT]):
     ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
         if session_id is not None:
             sessions = self._runtime.sessions
-            if sessions.supports_turn_sessions:
+            if sessions._uses_turn_sessions:
                 if input_context is not None or legacy_observation:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
                         "field": "input_context" if input_context is not None else "observation",
@@ -505,7 +505,7 @@ class Agent(Generic[AppT]):
         idempotency_key: "str | None" = None,
     ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
         sessions = self._runtime.sessions
-        if sessions.supports_turn_sessions:
+        if sessions._uses_turn_sessions:
             from ..session import CreateSessionRequest
 
             return await sessions.create(CreateSessionRequest(

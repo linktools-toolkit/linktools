@@ -70,7 +70,7 @@ def _request_number(value: str | None) -> bytes | None:
     return number.to_bytes((number.bit_length() + 7) // 8, "big")
 
 
-def _order(timestamp: datetime, sequence: int) -> bytes:
+def trace_event_order_key(timestamp: datetime, sequence: int) -> bytes:
     elapsed = timestamp.astimezone(timezone.utc) - _UTC_START
     micros = (elapsed.days * 86400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
     return micros.to_bytes(8, "big") + sequence.to_bytes(8, "big")
@@ -135,7 +135,7 @@ class SqlTraceEventStore:
         message_identity = _identity(event.metadata.get(_MESSAGE))
         return dict(store_key=self.state.store_key, run_id=_identity(event.agent_run_id), sequence=fact.sequence,
                     event_index=event.event_index, kind=event.event_type, step_index=event.step_index,
-                    timestamp=event.timestamp.isoformat(), order_key=_order(event.timestamp, fact.sequence),
+                    timestamp=event.timestamp.isoformat(), order_key=trace_event_order_key(event.timestamp, fact.sequence),
                     request_identity=_identity(event.metadata.get(_REQUEST)),
                     request_number=_request_number(event.metadata.get(_REQUEST)),
                     message_identity=message_identity if response else None, tool_call_id=_identity(event.tool_call_id),
@@ -160,7 +160,7 @@ class SqlTraceEventStore:
             timestamp = datetime.fromisoformat(row["timestamp"])
             if timestamp.tzinfo is None or timestamp.isoformat() != row["timestamp"] or len(row["timestamp"]) > 64:
                 raise ValueError("Trace timestamp is not canonical")
-            if row["order_key"] != _order(timestamp, sequence):
+            if row["order_key"] != trace_event_order_key(timestamp, sequence):
                 raise ValueError("Trace order differs")
             if row["request_number"] != _request_number(_text(row["request_identity"])):
                 raise ValueError("Trace numeric request projection differs")
@@ -191,7 +191,7 @@ class SqlTraceEventStore:
                 payload["value"]["payload"]["fields"].update(
                     (key, value) for key, value in residual.items() if key != "metadata"
                 )
-                if row["order_key"] != _order(event.timestamp, sequence) or row["request_number"] != _request_number(event.metadata.get(_REQUEST)):
+                if row["order_key"] != trace_event_order_key(event.timestamp, sequence) or row["request_number"] != _request_number(event.metadata.get(_REQUEST)):
                     raise ValueError("Trace query projection differs")
                 message_identity = _identity(event.metadata.get(_MESSAGE))
                 if (row["history_identity"] != _history_identity(event)
@@ -288,7 +288,7 @@ class SqlTraceEventStore:
             return tuple(found[key] for key in (ordered if limit is None else ordered[:limit]))
         statement = statement.where(t.kind.in_((*_REQUEST_KINDS, *_TOOL_KINDS)))
         if after_timestamp is not None:
-            statement = statement.where(t.order_key > _order(after_timestamp, after_sequence))
+            statement = statement.where(t.order_key > trace_event_order_key(after_timestamp, after_sequence))
         if model_request_seq is not None:
             statement = statement.where(t.request_number == _request_number(str(model_request_seq)))
         if step_index is not None:

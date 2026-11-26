@@ -22,9 +22,8 @@ from .test_pending_session_projection import _runtimes
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize('sqlite', [False, True])
 @pytest.mark.parametrize('outcome', ['success', 'cancel', 'failure'])
-async def test_watch_shares_reads_and_tracks_real_turn_release(tmp_path, monkeypatch, sqlite, outcome):
+async def test_watch_shares_reads_and_tracks_real_turn_release(monkeypatch, outcome):
     entered, finish = asyncio.Event(), asyncio.Event()
     async def model(messages, info):
         entered.set()
@@ -34,7 +33,7 @@ async def test_watch_shares_reads_and_tracks_real_turn_release(tmp_path, monkeyp
         return ModelResponse(parts=[TextPart('answer')])
     features = model_features(_Models(_UsageFunctionModel(model)))
     features.capability(ExecutionCapability(retain_history=True))
-    storage = PersistenceStorage.sqlite(tmp_path/'state.db') if sqlite else PersistenceStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     async with Runtime.open('watch', storage=storage, features=features) as runtime:
         session = await runtime.agents.get().create_session('session')
         other = await runtime.agents.get().create_session('other')
@@ -110,11 +109,10 @@ async def test_watch_authorizes_each_observation_and_isolates_tenant():
             await anext(stream)
 
 
-@pytest.mark.parametrize('sqlite', [False, True])
-async def test_watch_does_not_publish_outer_transaction_rollback(tmp_path, sqlite):
+async def test_watch_does_not_publish_outer_transaction_rollback():
     from dataclasses import replace
     from ._runtime_test_helpers import RuntimeUsageModels
-    storage = PersistenceStorage.sqlite(tmp_path/'state.db') if sqlite else PersistenceStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     async with Runtime.open('watch-rollback', storage=storage,
                             features=model_features(RuntimeUsageModels())) as runtime:
         session = await runtime.agents.get().create_session('session')
@@ -167,7 +165,7 @@ async def test_watch_rechecks_authorization_and_closes_with_runtime(monkeypatch)
 
 
 @pytest.mark.parametrize('kind', ['retry', 'fork'])
-async def test_watch_observes_execution_reentry_without_session_start(tmp_path, kind):
+async def test_watch_observes_execution_reentry_without_session_start(kind):
     from linktools.ai.execution import RetryExecutionRequest, ForkExecutionRequest
     entered, finish = asyncio.Event(), asyncio.Event()
     count = 0
@@ -182,7 +180,7 @@ async def test_watch_observes_execution_reentry_without_session_start(tmp_path, 
         return ModelResponse(parts=[TextPart('answer')])
     features = model_features(_Models(_UsageFunctionModel(model)))
     features.capability(ExecutionCapability(retain_history=True))
-    async with Runtime.open('watch-reentry', storage=PersistenceStorage.sqlite(tmp_path/'state.db'), features=features) as runtime:
+    async with Runtime.open('watch-reentry', storage=PersistenceStorage.in_memory(), features=features) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('initial', idempotency_key='initial')
         await execution.wait(timeout_seconds=5)
@@ -237,8 +235,7 @@ async def test_memory_commit_observer_failure_does_not_change_commit():
         assert (await repository.get('session', tenant_id=runtime.tenant_id)).metadata == {'saved': True}
 
 
-@pytest.mark.parametrize("sqlite", [False, True])
-async def test_host_invalidations_follow_sync_turn_without_reading_state(tmp_path, monkeypatch, sqlite):
+async def test_host_invalidations_follow_sync_turn_without_reading_state(monkeypatch):
     from linktools.ai.core import CommitPolicy, ExecutionStatus
 
     entered, finish = asyncio.Event(), asyncio.Event()
@@ -250,7 +247,7 @@ async def test_host_invalidations_follow_sync_turn_without_reading_state(tmp_pat
 
     features = model_features(_Models(_UsageFunctionModel(model)))
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
-    storage = PersistenceStorage.sqlite(tmp_path / "invalidation.db") if sqlite else PersistenceStorage.in_memory()
+    storage = PersistenceStorage.in_memory()
     invalidated, failed = asyncio.Event(), asyncio.Event()
     async with Runtime.open("invalidations", storage=storage, features=features) as runtime:
         session = await runtime.agents.get().create_session("session")

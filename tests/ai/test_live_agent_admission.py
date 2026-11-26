@@ -247,7 +247,7 @@ async def test_unresolved_handle_is_honest_and_async_observation_does_not_pin_st
     runtime = SimpleNamespace(
         _agent_execution_port=execution_port,
         _compiled_agent=lambda agent_id, revision, compiled: compiled,
-        sessions=SimpleNamespace(supports_turn_sessions=False),
+        sessions=SimpleNamespace(_uses_turn_sessions=False),
     )
     handle = Agent(runtime, "new", None)
     assert handle.revision is None and handle.model is None
