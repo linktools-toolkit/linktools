@@ -125,17 +125,27 @@ async def test_pending_session_projection_paging_and_completion(
             assert [turn["turn_id"] for turn in warm["timeline"]["items"]] == completed[-2:]
 
         mutations = []
+        publications = []
         finish_committed = asyncio.Event()
         original_mutation = SqlStorageContext.run_mutation
+        turns = storage.session_turns
+        assert turns is not None
+        original_finish = turns.finish
 
         async def count_mutation(context, callback, **kwargs):
             result = await original_mutation(context, callback, **kwargs)
             mutations.append(kwargs.get("domain"))
-            if kwargs.get("domain") == "session.finish":
+            return result
+
+        async def track_finish(key, **kwargs):
+            result = await original_finish(key, **kwargs)
+            publications.append((key.turn_id, kwargs["generation"], kwargs["state"], result))
+            if result:
                 finish_committed.set()
             return result
 
         monkeypatch.setattr(SqlStorageContext, "run_mutation", count_mutation)
+        monkeypatch.setattr(turns, "finish", track_finish)
         block()
         turn_id = await start("pending question", "pending")
         cursors = []
@@ -180,7 +190,8 @@ async def test_pending_session_projection_paging_and_completion(
         await asyncio.wait_for(finish_committed.wait(), 5)
         terminal = await committed(turn_id)
         assert terminal["status"] == "SUCCEEDED" and terminal["output"] == {"text": "answer"}
-        assert sum(domain == "session.finish" for domain in mutations[len(admitted_mutations):]) == 1
+        assert publications == [(turn_id, 1, "succeeded", True)]
+        assert len(mutations) > len(admitted_mutations)
         completed_mutations = tuple(mutations)
         for reader, _ in runtimes:
             detail = await reader.history.turn_session("session", principal=principal, limit=2)
@@ -208,15 +219,19 @@ async def test_pending_session_projection_source_wins_observation_race(
         block()
         execution = await session.start("question")
         await asyncio.wait_for(entered.wait(), 5)
+        # This non-SQL runtime durably exposes admission before invocation.
+        # Feed that exact, now-stale snapshot in through the advisory port.
+        reader_principal = reader.default_principal
+        pending = await reader_storage.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id)
+        assert pending is not None and pending.status is ExecutionStatus.STARTED and pending.result is None
         service = reader.sessions._service
-        observe = service._runtime_pending_session_execution
         crossed = False
 
         async def cross_boundary(session_id, *, tenant_id):
             nonlocal crossed
             assert active_state_scope() is None
-            pending = await observe(session_id, tenant_id=tenant_id)
-            if pending is not None and not crossed:
+            assert (session_id, tenant_id) == ("session", reader_principal.tenant_id)
+            if not crossed:
                 crossed = True
                 if transition == "complete":
                     finish.set()
@@ -298,7 +313,7 @@ async def test_pending_session_projection_rejects_unbound_observations(fault: st
         await storage.close()
 
 
-async def test_pending_session_projection_remote_requires_live_coordination(tmp_path: Path) -> None:
+async def test_pending_session_projection_peer_retains_source_when_live_coordination_is_hidden(tmp_path: Path) -> None:
     class HiddenOwnerCache(InMemoryCacheBackend):
         hidden = False
 
@@ -317,7 +332,9 @@ async def test_pending_session_projection_remote_requires_live_coordination(tmp_
         cache.hidden = True
         try:
             detail = await reader.sessions.refresh("session", principal=reader.default_principal, max_age=60)
-            assert detail.session.active_execution_id is None and detail.timeline.items == ()
+            assert detail.session.active_execution_id == execution.execution_id
+            [turn] = detail.timeline.items
+            assert turn.execution_id == execution.execution_id and not turn.conversation_committed
         finally:
             cache.hidden = False
             finish.set()
@@ -467,9 +484,14 @@ async def test_local_committed_turn_capture_matches_canonical_and_never_claims_o
         session = await owner.agents.get().create_session("session")
         warm = await session.start("previous")
         assert (await warm.wait()).result.status is ExecutionStatus.SUCCEEDED
+        inactive = await owner.sessions.wait_inactive("session", principal=owner.default_principal, timeout_seconds=5)
+        assert inactive.active_execution_id is None
         block()
         execution = await session.start("current")
         await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(AIError) as busy:
+            await session.start("competing", idempotency_key="competing")
+        assert busy.value.code is ErrorCode.SESSION_BUSY
         with (owner.sessions.capture_published_turn(
                   "session", execution.execution_id, principal=owner.default_principal,
               ) as captured,
@@ -479,7 +501,7 @@ async def test_local_committed_turn_capture_matches_canonical_and_never_claims_o
               reader.sessions.capture_published_turn(
                   "session", execution.execution_id, principal=reader.default_principal,
               ) as remote):
-            assert await captured() is None
+            assert await captured() is None and await remote() is None
             lost = False
             if transition == "lost_ack":
                 from linktools.ai.persistence.contracts import ExecutionTerminalPublication
@@ -515,7 +537,9 @@ async def test_local_committed_turn_capture_matches_canonical_and_never_claims_o
                 scoped.setattr(persistence.conversation.sessions, "get", forbidden_source_get)
                 local = await captured()
             assert await wrong_session() is None
-            assert await remote() is None
+            # Both in-process runtimes borrow the same Memory Persistence:
+            # peer sees the same after-image, not a claim on session occupancy.
+            assert await remote() == local
             expected = await reader.history.session_detail(
                 "session", principal=reader.default_principal, limit=1, max_age=0,
             )
@@ -546,6 +570,8 @@ async def test_local_committed_turn_capture_matches_canonical_and_never_claims_o
                 assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
+            inactive = await owner.sessions.wait_inactive("session", principal=owner.default_principal, timeout_seconds=5)
+            assert inactive.active_execution_id is None
             finish.clear()
             entered.clear()
             later = await session.start("later")
