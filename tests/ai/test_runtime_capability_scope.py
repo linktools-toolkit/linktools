@@ -32,7 +32,7 @@ from linktools.ai.capability import ExecutionCapability
 from linktools.ai.capability import AgentContext, CapabilityContribution
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.spec import AgentSpec
-from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
+from linktools.ai.core import ExecutionStatus, JsonValue, Principal, TaskStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model._binding import _RetryingModel
 from linktools.ai.inputs import AgentTaskInput
@@ -349,24 +349,38 @@ async def test_anonymous_native_capabilities_remain_distinct_in_combined_runtime
 
 
 async def test_reopened_session_and_historical_retry_use_current_host_runtime_capability(tmp_path: Path) -> None:
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """The SQLite host explicitly authorizes its native sessions."""
+
     first_backend, next_backend = _Backend(), _Backend()
     models = _Models(_UsageFunctionModel(_immediate))
+    principal = Principal("conversation-owner", "default", "service")
+    authorization = HostAuthorization()
     first_features = _policies(_group(), _GlobalPolicy(first_backend), ExecutionCapability(retain_history=True))
-    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_370, Runtime.open(persistence=persistence_370, features=model_features(models, first_features)) as runtime:
-        first = await runtime.agents.get().start("standalone")
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
+    async with Persistence.open("runtime_capability-reopen", storage=storage) as persistence, Runtime.open(
+        persistence=persistence, features=model_features(models, first_features), authorization=authorization,
+    ) as runtime:
+        agent = runtime.agents.get()
+        first = await agent.start("standalone", principal=principal)
         assert (await first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        session_first = await runtime.agents.get().session("conversation").start("first")
-        assert (await session_first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+        await agent.create_session("conversation", principal=principal)
+        session_first = await agent.start("first", session_id="conversation", principal=principal)
+        assert (await session_first.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+
     current = _GlobalPolicy(next_backend)
     current.id = "host.replacement"
-    async with Persistence.open('runtime_capability-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_380, Runtime.open(persistence=persistence_380, features=model_features(models, _policies(_group(), current, ExecutionCapability(retain_history=True)))) as runtime:
-        historical = await runtime.executions.get(first.execution_id)
+    next_features = _policies(_group(), current, ExecutionCapability(retain_history=True))
+    async with Persistence.open("runtime_capability-reopen", storage=storage) as persistence, Runtime.open(
+        persistence=persistence, features=model_features(models, next_features), authorization=authorization,
+    ) as runtime:
+        historical = await runtime.executions.get(first.execution_id, principal=principal)
         retry = await historical.retry("retry")
         assert (await retry.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        second = await runtime.agents.get().session("conversation").start("second")
-        assert (await second.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        assert first_backend.entered == [first.execution_id, session_first.execution_id]
-        assert next_backend.entered == [retry.execution_id, second.execution_id]
+        second = await runtime.agents.get().start("second", session_id="conversation", principal=principal)
+        assert (await second.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        assert first_backend.entered == [first.execution_id, session_first.key.turn_id]
+        assert next_backend.entered == [retry.execution_id, second.key.turn_id]
         assert next_backend.entered == next_backend.released
 
 
