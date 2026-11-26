@@ -222,12 +222,21 @@ def _crash_session_process(
             if phase != "recovered_before_terminal":
                 await provision_runtime_database(engine)
             state = PersistenceStorage.sql(engine)
+        standalone = phase == "standalone_effect_unconfirmed"
+        started = asyncio.Event() if standalone else None
         application = _application(
-            [], effect_policy="non_replay_safe", effect_log=Path(effect_log)
+            [], effect_policy="non_replay_safe", effect_log=Path(effect_log),
+            started=started, release=asyncio.Event() if standalone else None,
         )
         application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_222, Runtime.open(persistence=persistence_222, features=model_features(_ToolModels(), application)) as runtime:
+            if started is not None:
+                await runtime.agents.get("default").start("inspect", idempotency_key="turn-1")
+                # The synthetic effect has fsynced, but is held before its
+                # result can be committed to the original claim.
+                await asyncio.wait_for(started.wait(), 10)
+                os._exit(91)
             if phase != "recovered_before_terminal":
                 await runtime.agents.get("default").create_session("session")
             execution = (

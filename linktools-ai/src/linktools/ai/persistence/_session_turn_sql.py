@@ -2256,6 +2256,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
             checkpoint = await step_store.capture_turn_checkpoint(
                 session, run_id=key.turn_id, conversation_id=key.session_id,
             )
+            if checkpoint is None:
+                # Refuse inside the transaction so the regrant rolls back.
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             instructions = await self._capture_instruction_frontier(session, key)
             return True, checkpoint, instructions
 

@@ -235,6 +235,7 @@ async def test_local_cancel_waits_for_owned_worker_durable_settlement() -> None:
         execution_id="execution",
         tenant_id="tenant",
         status=ExecutionStatus.CANCELLING,
+        requires_task_invocation_capture=False,
     )
     backend = _local_backend(current)
     cancelled = asyncio.Event()
@@ -253,18 +254,19 @@ async def test_local_cancel_waits_for_owned_worker_durable_settlement() -> None:
             )
             raise
 
-    worker_task = asyncio.create_task(worker())
-    backend._tasks["execution"] = worker_task
-    cancel_task = asyncio.create_task(backend.cancel(current))
+    async with asyncio.TaskGroup() as tasks:
+        worker_task = tasks.create_task(worker())
+        backend._tasks["execution"] = worker_task
+        cancel_task = tasks.create_task(backend.cancel(current))
 
-    await cancelled.wait()
-    await asyncio.sleep(0)
-    assert not cancel_task.done()
+        await cancelled.wait()
+        await asyncio.sleep(0)
+        assert not cancel_task.done()
 
-    release.set()
-    assert await cancel_task is CancelEffectOutcome.CONFIRMED
-    assert backend._tasks == {}
-    assert backend._execution.executions.current.status is ExecutionStatus.CANCELLED
+        release.set()
+        assert await cancel_task is CancelEffectOutcome.CONFIRMED
+        assert backend._tasks == {}
+        assert backend._execution.executions.current.status is ExecutionStatus.CANCELLED
 
 
 @pytest.mark.asyncio
@@ -273,6 +275,7 @@ async def test_local_cancel_does_not_repeat_cancel_during_owned_cleanup() -> Non
         execution_id="execution",
         tenant_id="tenant",
         status=ExecutionStatus.CANCELLING,
+        requires_task_invocation_capture=False,
     )
     backend = _local_backend(current)
     first_cancel = asyncio.Event()
@@ -298,21 +301,22 @@ async def test_local_cancel_does_not_repeat_cancel_during_owned_cleanup() -> Non
             )
             raise
 
-    worker_task = asyncio.create_task(worker())
-    backend._tasks["execution"] = worker_task
-    first = asyncio.create_task(backend.cancel(current))
-    await first_cancel.wait()
+    async with asyncio.TaskGroup() as tasks:
+        worker_task = tasks.create_task(worker())
+        backend._tasks["execution"] = worker_task
+        first = tasks.create_task(backend.cancel(current))
+        await first_cancel.wait()
 
-    second = asyncio.create_task(backend.cancel(current))
-    await asyncio.sleep(0)
-    assert not first.done()
-    assert not second.done()
-    assert cancellation_count == 1
+        second = tasks.create_task(backend.cancel(current))
+        await asyncio.sleep(0)
+        assert not first.done()
+        assert not second.done()
+        assert cancellation_count == 1
 
-    release.set()
-    assert await first is CancelEffectOutcome.CONFIRMED
-    assert await second is CancelEffectOutcome.CONFIRMED
-    assert cancellation_count == 1
+        release.set()
+        assert await first is CancelEffectOutcome.CONFIRMED
+        assert await second is CancelEffectOutcome.CONFIRMED
+        assert cancellation_count == 1
 
 
 @pytest.mark.asyncio
