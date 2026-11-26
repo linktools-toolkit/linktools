@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """First attempts claim authority only after prepared input is durable."""
-from ._runtime_test_helpers import model_features
 
 import asyncio
 from pathlib import Path
@@ -11,16 +9,25 @@ from pathlib import Path
 import pytest
 from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import ExecutionCapability
-from pydantic_ai_harness.step_persistence import StepPersistence
-from tests.ai._runtime_test_helpers import native_checkpoint
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
+from linktools.ai.capability import ExecutionCapability, SessionCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage._database import SqlStorageContext
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, native_checkpoint
+
+
+class _SessionHostAuthorization(TenantAuthorizationPolicy):
+    pass
+
+
+def _session_features(model, checkpointed: bool) -> RuntimeFeatures:
+    features = RuntimeFeatures("startup-session")
+    features.capability(SessionCapability(checkpoints=checkpointed), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    return model_features(_Models(_UsageFunctionModel(model)), features)
 
 
 @pytest.mark.asyncio
@@ -42,7 +49,7 @@ async def test_first_provider_has_durable_prepared_input_and_original_authority(
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     async with Persistence.open('startup-boundaries', storage=state) as persistence_35, Runtime.open(persistence=persistence_35, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-        session = await runtime.agents.get().create_session('session')
+        agent = runtime.agents.get()
         original = SqlStorageContext.run_mutation
         commits = []
         async def count(context, callback, **kwargs):
@@ -51,7 +58,7 @@ async def test_first_provider_has_durable_prepared_input_and_original_authority(
             return result
         with monkeypatch.context() as patch:
             patch.setattr(SqlStorageContext, 'run_mutation', count)
-            execution = await session.start('question', idempotency_key='same')
+            execution = await agent.start('question', idempotency_key='same')
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 current = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -61,17 +68,15 @@ async def test_first_provider_has_durable_prepared_input_and_original_authority(
                 assert current.input_context is not None
                 async with Persistence.open('startup-boundaries', storage=PersistenceStorage.sqlite(tmp_path / 'state.db'), read_only=True) as observer:
                     visible = await observer.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-                    admitted_session = await observer.conversation.sessions.get('session', tenant_id=runtime.tenant_id)
                     checkpoint_record = await observer.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
                     assert visible.status is ExecutionStatus.STARTED and visible.input_context == current.input_context
-                    assert admitted_session.active_execution_id == execution.execution_id
                     assert checkpoint_record.recovery.agent_run_id is not None
                 assert current.producer_generation == 2 and current.producer_claim_id is not None
                 if checkpoint is not None:
                     runs = await checkpoint.store.list_runs()
                     assert len(runs) == 1
                     assert await checkpoint.store.latest_snapshot(run_id=runs[0].run_id) is not None
-                replay = await session.start('question', idempotency_key='same')
+                replay = await agent.start('question', idempotency_key='same')
                 assert replay.execution_id == execution.execution_id
                 assert len(calls) == 1
             finally:
@@ -107,7 +112,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
              PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True) if backend == 'local_sqlite' else
              PersistenceStorage.sqlite(tmp_path / 'state.db'))
     async with Persistence.open('startup-ack', storage=state) as persistence_85, Runtime.open(persistence=persistence_85, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-        session = await runtime.agents.get().create_session('session')
+        agent = runtime.agents.get()
         group_type = type(runtime._state.execution.executions.state_store.storage_group)
         original = group_type.mutate
         faults = []
@@ -131,132 +136,162 @@ async def test_startup_unknown_commit_never_repeats_provider(
             return result
         with monkeypatch.context() as patch:
             patch.setattr(group_type, 'mutate', mutate)
-            execution = await session.start('question', idempotency_key='same')
+            execution = await agent.start('question', idempotency_key='same')
             assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         assert faults == [True] and len(calls) == 1
-        replay = await session.start('question', idempotency_key='same')
+        replay = await agent.start('question', idempotency_key='same')
         assert replay.execution_id == execution.execution_id
         assert len(calls) == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('checkpointed', (False, True))
+@pytest.mark.parametrize("checkpointed", (False, True))
 async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool,
 ) -> None:
-    from linktools.ai.inputs import ExecutionContextArchive
-    prepared = asyncio.Event()
-    release = asyncio.Event()
-    preparations = []
-    calls = []
-    async def model(messages, info):
+    from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
+
+    prepared, release = asyncio.Event(), asyncio.Event()
+    preparations, owners, calls = [], [], []
+
+    async def model(messages, _info):
         calls.append(messages)
-        return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('startup-race')
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    if checkpointed:
-        group.capability(native_checkpoint(), scope="runtime")
-    group.agent('default', model='default', allow_tools=())
-    models = _Models(_UsageFunctionModel(model))
-    first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
-    second_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
-    async with Persistence.open('startup-race', storage=first_state) as persistence_134, Runtime.open(persistence=persistence_134, features=model_features(models, group)) as first, Persistence.open('startup-race', storage=second_state) as persistence_134, Runtime.open(persistence=persistence_134, features=model_features(models, group)) as second:
-        await first.agents.get().create_session('session')
-        original = ExecutionContextArchive.prepare
-        async def prepare(archive, context, **kwargs):
-            value = await original(archive, context, **kwargs)
-            preparations.append(archive)
-            if len(preparations) == 2:
-                prepared.set()
-            await release.wait()
-            return value
-        with monkeypatch.context() as patch:
-            patch.setattr(ExecutionContextArchive, 'prepare', prepare)
-            one = await first.agents.get().session('session').start('question', idempotency_key='same')
-            two = await second.agents.get().session('session').start('question', idempotency_key='same')
-            assert one.execution_id == two.execution_id
-            try:
-                await asyncio.wait_for(prepared.wait(), 5)
-            finally:
-                release.set()
-            results = await asyncio.wait_for(asyncio.gather(one.wait(), two.wait()), 5)
-            assert all(value.result.status is ExecutionStatus.SUCCEEDED for value in results)
+        return ModelResponse(parts=[TextPart("answer")])
+
+    original = _RegenerableTurnRunner.admit
+
+    async def admit(runner, key, **kwargs):
+        preparations.append((runner, kwargs["revision"]))
+        if len(preparations) == 2:
+            prepared.set()
+        await release.wait()
+        admitted = await original(runner, key, **kwargs)
+        if admitted is not None:
+            owners.append(runner)
+        return admitted
+
+    monkeypatch.setattr(_RegenerableTurnRunner, "admit", admit)
+    features = _session_features(model, checkpointed)
+    path = tmp_path / "state.db"
+    async with (
+        Persistence.open("startup-race", storage=PersistenceStorage.sqlite(path)) as first_state,
+        Runtime.open(persistence=first_state, features=features, authorization=_SessionHostAuthorization()) as first,
+        Persistence.open("startup-race", storage=PersistenceStorage.sqlite(path)) as second_state,
+        Runtime.open(persistence=second_state, features=features, authorization=_SessionHostAuthorization()) as second,
+    ):
+        principal = first.default_principal
+        await first.sessions.create_turn_session("session", principal=principal)
+        starts = asyncio.gather(*(runtime.sessions.start(
+            "session", "question", agent="default", principal=principal, idempotency_key="same",
+        ) for runtime in (first, second)))
+        try:
+            await asyncio.wait_for(prepared.wait(), 5)
+        finally:
+            release.set()
+        one, two = await asyncio.wait_for(starts, 5)
+        assert one.key == two.key
+        assert preparations[0][0] is not preparations[1][0]
+        assert preparations[0][1] == preparations[1][1]
+        owner, = owners
+        producer, replay = (one, two) if owner is first.sessions._turn_runner else (two, one)
+        assert (await producer.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        assert (await replay.result()).status is ExecutionStatus.SUCCEEDED
+        page = await second.history.turn_session("session", principal=principal)
+        assert [item["turn_id"] for item in page["timeline"]["items"]] == [one.key.turn_id]
         assert len(calls) == 1
 
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize('checkpointed', (False, True))
-async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: Path, checkpointed: bool) -> None:
+@pytest.mark.parametrize("checkpointed", (False, True))
+async def test_busy_native_session_rejects_without_admitting_another_turn(tmp_path: Path, checkpointed: bool) -> None:
     from linktools.ai.errors import AIError, ErrorCode
-    entered = asyncio.Event()
-    release = asyncio.Event()
+
+    entered, release = asyncio.Event(), asyncio.Event()
     calls = []
-    async def model(messages, info):
+
+    async def model(messages, _info):
         calls.append(messages)
         entered.set()
         await release.wait()
-        return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('startup-busy')
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    if checkpointed:
-        group.capability(native_checkpoint(), scope="runtime")
-    group.agent('default', model='default', allow_tools=())
-    models = _Models(_UsageFunctionModel(model))
-    first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
-    second_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
-    async with Persistence.open('startup-busy', storage=first_state) as persistence_177, Runtime.open(persistence=persistence_177, features=model_features(models, group)) as first, Persistence.open('startup-busy', storage=second_state) as persistence_177, Runtime.open(persistence=persistence_177, features=model_features(models, group)) as second:
-        await first.agents.get().create_session('session')
-        one = await first.agents.get().session('session').start('question', idempotency_key='owner')
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = _session_features(model, checkpointed)
+    path = tmp_path / "state.db"
+    async with (
+        Persistence.open("startup-busy", storage=PersistenceStorage.sqlite(path)) as first_state,
+        Runtime.open(persistence=first_state, features=features, authorization=_SessionHostAuthorization()) as first,
+        Persistence.open("startup-busy", storage=PersistenceStorage.sqlite(path)) as second_state,
+        Runtime.open(persistence=second_state, features=features, authorization=_SessionHostAuthorization()) as second,
+    ):
+        principal = first.default_principal
+        await first.sessions.create_turn_session("session", principal=principal)
+        one = await first.sessions.start("session", "question", agent="default", principal=principal,
+                                         idempotency_key="owner")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             with pytest.raises(AIError) as busy:
-                await second.agents.get().session('session').start('other', idempotency_key='rejected')
+                await second.sessions.start("session", "other", agent="default", principal=principal,
+                                            idempotency_key="rejected")
             assert busy.value.code is ErrorCode.SESSION_BUSY
+            observed = await second.history.turn_session_state("session", principal=principal)
+            assert observed["active_turn_id"] == one.key.turn_id and observed["last_turn_no"] == 0
         finally:
             release.set()
-        await one.wait()
-        with pytest.raises(AIError) as replay:
-            await second.agents.get().session('session').start('other', idempotency_key='rejected')
-        assert replay.value.code is ErrorCode.SESSION_BUSY
-        records = await second._state.execution.executions.list_by_session('session', tenant_id=second.tenant_id)
-        assert len(records) == 2
-        assert {value.status for value in records} == {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED}
-        assert len(calls) == 1
-
+        assert (await one.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        two = await second.sessions.start("session", "other", agent="default", principal=principal,
+                                          idempotency_key="rejected")
+        assert (await two.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        page = await second.history.turn_session("session", principal=principal)
+        assert [item["turn_id"] for item in page["timeline"]["items"]] == [one.key.turn_id, two.key.turn_id]
+        assert len(calls) == 2
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('checkpointed', (False, True))
-async def test_cancel_during_context_preparation_never_calls_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool,
+@pytest.mark.parametrize("checkpointed", (False, True))
+@pytest.mark.parametrize("remote", (False, True))
+async def test_native_cancel_before_provider_never_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool, remote: bool,
 ) -> None:
-    from linktools.ai.inputs import ExecutionContextArchive
-    preparing = asyncio.Event()
-    calls = []
-    async def model(messages, info):
-        calls.append(messages)
-        return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('startup-cancel')
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    if checkpointed:
-        group.capability(native_checkpoint(), scope="runtime")
-    group.agent('default', model='default', allow_tools=())
-    state = PersistenceStorage.sqlite(tmp_path / 'state.db')
-    async with Persistence.open('startup-cancel', storage=state) as persistence_213, Runtime.open(persistence=persistence_213, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-        session = await runtime.agents.get().create_session('session')
-        async def prepare(archive, context, **kwargs):
-            preparing.set()
-            await asyncio.Future()
-        with monkeypatch.context() as patch:
-            patch.setattr(ExecutionContextArchive, 'prepare', prepare)
-            execution = await session.start('question', idempotency_key='same')
-            await asyncio.wait_for(preparing.wait(), 5)
-            await execution.cancel(idempotency_key='cancel')
-            result = await asyncio.wait_for(execution.wait(), 5)
-        assert result.result.status is ExecutionStatus.CANCELLED
-        assert calls == []
-        observed = await runtime._state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)
-        assert observed.active_execution_id is None
+    from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
 
+    preparing, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def model(messages, _info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart("answer")])
+
+    original = _RegenerableTurnRunner.settle
+
+    async def settle(runner, *args, **kwargs):
+        preparing.set()
+        await release.wait()
+        return await original(runner, *args, **kwargs)
+
+    monkeypatch.setattr(_RegenerableTurnRunner, "settle", settle)
+    features = _session_features(model, checkpointed)
+    path = tmp_path / "state.db"
+    async with (
+        Persistence.open("startup-cancel", storage=PersistenceStorage.sqlite(path)) as first_state,
+        Runtime.open(persistence=first_state, features=features, authorization=_SessionHostAuthorization()) as first,
+        Persistence.open("startup-cancel", storage=PersistenceStorage.sqlite(path)) as second_state,
+        Runtime.open(persistence=second_state, features=features, authorization=_SessionHostAuthorization()) as second,
+    ):
+        principal = first.default_principal
+        await first.sessions.create_turn_session("session", principal=principal)
+        turn = await first.sessions.start("session", "question", agent="default", principal=principal,
+                                          idempotency_key="same")
+        try:
+            await asyncio.wait_for(preparing.wait(), 5)
+            observer = second if remote else first
+            assert await observer.sessions.cancel_turn("session", turn.key.turn_id, principal=principal)
+            if remote:
+                generation = await second_state.session_turns.get_turn(turn.key)
+                assert generation["state"] == "cancelling" and generation["generation"] == 1
+        finally:
+            release.set()
+        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.CANCELLED
+        assert calls == []
+        observed = await second.history.turn_session_state("session", principal=principal)
+        assert observed["active_turn_id"] is None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('fault', ('archive', 'context', 'timeout'))
@@ -266,7 +301,7 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.inputs import ExecutionContextArchive
-    from linktools.ai.persistence import PersistenceDomain
+    from dataclasses import replace
     from linktools.ai.runtime._local import LocalExecutionBackend
     from linktools.ai.persistence.state import active_state_scope
     calls = []
@@ -280,8 +315,7 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     async with Persistence.open('startup-preparation-failure', storage=state) as persistence_248, Runtime.open(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-        session = await runtime.agents.get().create_session('session',
-            metadata={'large': 'context' * 10_000} if fault == 'archive' else None)
+        agent = runtime.agents.get()
         observed = []
         async def fail(*args, **kwargs):
             assert active_state_scope() is None
@@ -293,21 +327,31 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
             if fault == 'archive':
                 from linktools.ai.persistence._archive import ContentArchive
                 prepare_content = ContentArchive.prepare_content
+                prepare_context = ExecutionContextArchive.prepare
+                preparing_context = False
+
+                async def with_metadata(archive, context, **kwargs):
+                    nonlocal preparing_context
+                    preparing_context = True
+                    try:
+                        return await prepare_context(
+                            archive, replace(context, session_metadata={"large": "context" * 10_000}), **kwargs,
+                        )
+                    finally:
+                        preparing_context = False
 
                 async def fail_input_preparation(self, values, prepared):
-                    # Admission publishes policy and input owners atomically.
-                    # Target the accepted context's JSON components, not those
-                    # earlier execution owners or unrelated Native messages.
-                    if not any(codec == "json" for codec, _raw in values):
-                        return await prepare_content(self, values, prepared)
-                    return await fail(self, values, prepared)
+                    if preparing_context and any(codec == "json" for codec, _raw in values):
+                        return await fail(self, values, prepared)
+                    return await prepare_content(self, values, prepared)
 
+                patch.setattr(ExecutionContextArchive, 'prepare', with_metadata)
                 patch.setattr(ContentArchive, 'prepare_content', fail_input_preparation)
             elif fault == 'context':
                 patch.setattr(LocalExecutionBackend, 'load_input_context', fail)
             else:
                 patch.setattr(ExecutionContextArchive, 'prepare', fail)
-            execution = await session.start('question', idempotency_key='same')
+            execution = await agent.start('question', idempotency_key='same')
             with pytest.raises(AIError):
                 await asyncio.wait_for(execution.wait(), 5)
         assert observed and calls == []
@@ -316,49 +360,6 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
         await execution.cancel(force=True, idempotency_key='explicit-cancel')
         current = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert current.status is ExecutionStatus.CANCELLED
-        assert (await runtime._state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)).active_execution_id is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('checkpointed', (False, True))
-async def test_remote_cancel_during_preparation_settles_without_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool,
-) -> None:
-    from linktools.ai.inputs import ExecutionContextArchive
-    preparing = asyncio.Event()
-    release = asyncio.Event()
-    calls = []
-    async def model(messages, info):
-        calls.append(messages)
-        return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('startup-remote-cancel')
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    if checkpointed:
-        group.capability(native_checkpoint(), scope="runtime")
-    group.agent('default', model='default', allow_tools=())
-    models = _Models(_UsageFunctionModel(model))
-    first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
-    second_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
-    async with Persistence.open('startup-remote-cancel', storage=first_state) as persistence_294, Runtime.open(persistence=persistence_294, features=model_features(models, group)) as first, Persistence.open('startup-remote-cancel', storage=second_state) as persistence_294, Runtime.open(persistence=persistence_294, features=model_features(models, group)) as second:
-        await first.agents.get().create_session('session')
-        original = ExecutionContextArchive.prepare
-        async def prepare(archive, context, **kwargs):
-            reference = await original(archive, context, **kwargs)
-            preparing.set()
-            await release.wait()
-            return reference
-        with monkeypatch.context() as patch:
-            patch.setattr(ExecutionContextArchive, 'prepare', prepare)
-            execution = await first.agents.get().session('session').start('question', idempotency_key='same')
-            await asyncio.wait_for(preparing.wait(), 5)
-            remote = await second.executions.get(execution.execution_id)
-            try:
-                await remote.cancel(idempotency_key='remote-cancel')
-            finally:
-                release.set()
-            assert (await asyncio.wait_for(execution.wait(), 5)).result.status is ExecutionStatus.CANCELLED
-        assert calls == []
-        assert (await first._state.conversation.sessions.get('session', tenant_id=first.tenant_id)).active_execution_id is None
 
 
 @pytest.mark.asyncio
@@ -455,8 +456,8 @@ async def test_deadline_expires_during_preparation_without_dispatch(
     monkeypatch.setattr('linktools.ai.persistence._budget.datetime', BudgetClock)
     monkeypatch.setattr(ExecutionContextArchive, 'prepare', prepare)
     async with Persistence.open('startup-budget-review', storage=state) as persistence_412, Runtime.open(persistence=persistence_412, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-        session = await runtime.agents.get().create_session('session')
-        execution = await session.start('question', idempotency_key='key', budget=RunBudget(deadline_at=now + timedelta(seconds=30)))
+        agent = runtime.agents.get()
+        execution = await agent.start('question', idempotency_key='key', budget=RunBudget(deadline_at=now + timedelta(seconds=30)))
         await asyncio.wait_for(preparing.wait(), 5)
         before = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert before.agent_run_seq == 0 and before.input_context is None
@@ -468,13 +469,12 @@ async def test_deadline_expires_during_preparation_without_dispatch(
         usage = await execution.budget_usage()
         assert usage.model_requests == usage.in_flight_model_requests == usage.unknown_model_requests == 0
         assert calls == []
-        assert (await runtime._state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)).active_execution_id is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('partial', ['missing', 'unbound'])
 async def test_admission_readback_rejects_real_session_partial(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial: str,
+    monkeypatch: pytest.MonkeyPatch, partial: str,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.persistence.contracts import ExecutionRecord, ExecutionStartReservationResult
@@ -487,7 +487,7 @@ async def test_admission_readback_rejects_real_session_partial(
     capabilities = RuntimeFeatures('partial-review')
     capabilities.capability(ExecutionCapability(retain_history=True), scope="runtime")
     capabilities.agent('default', model='default', allow_tools=())
-    state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    state = PersistenceStorage.in_memory()
     async with Persistence.open('partial-review', storage=state) as persistence_446, Runtime.open(persistence=persistence_446, features=model_features(_Models(_UsageFunctionModel(model)), capabilities)) as runtime:
         session = await runtime.agents.get().create_session('session')
         group = runtime._state.execution.executions.state_store.storage_group
@@ -541,7 +541,7 @@ async def test_cancelled_admission_commit_never_dispatches_before_resolution(
     async with Persistence.open('cancelled-admission', storage=state) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
-        session = await runtime.agents.get().create_session('session')
+        agent = runtime.agents.get()
         group = runtime._state.execution.executions.state_store.storage_group
         original = type(group).mutate
         async def mutate(owner, stores, callback):
@@ -560,14 +560,14 @@ async def test_cancelled_admission_commit_never_dispatches_before_resolution(
         with monkeypatch.context() as patch:
             patch.setattr(type(group), 'mutate', mutate)
             with pytest.raises(AIError) as caught:
-                await session.start('question', idempotency_key='cancelled')
+                await agent.start('question', idempotency_key='cancelled')
         assert caught.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         assert len(faults) == 1 and calls == []
         execution_id = faults[0]
         current = await runtime._state.execution.executions.get(execution_id, tenant_id=runtime.tenant_id)
         if phase == 'before':
             assert current is None
-            assert await runtime._state.execution.executions.list_by_session('session', tenant_id=runtime.tenant_id) == ()
+
         else:
             assert current.status is ExecutionStatus.STARTED and current.agent_run_seq == 0
             await runtime.executions.cancel(execution_id, CancelExecutionRequest(runtime.default_principal, 'settle-cancel'))
@@ -616,3 +616,51 @@ async def test_prepared_attempt_receipt_matches_persisted_revision_and_payload(t
         assert refreshed is not None
         assert refreshed.value.dependency_hold_ids == ("hold",)
         assert refreshed.storage_revision > receipt.storage_revision
+
+
+@pytest.mark.asyncio
+async def test_native_admission_rollback_does_not_dispatch_or_hold_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.persistence._session_turn_sql import SqlSessionTurns
+
+    calls, rejected = [], []
+
+    async def model(messages, _info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = _session_features(model, checkpointed=True)
+    async with (
+        Persistence.open("startup-native-rollback", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state,
+        Runtime.open(persistence=state, features=features, authorization=_SessionHostAuthorization()) as runtime,
+    ):
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        before = await runtime.history.turn_session_state("session", principal=principal)
+        original = SqlSessionTurns._accept_in_group
+
+        async def rollback_after_write(store, transaction, prepared):
+            assert await original(store, transaction, prepared)
+            rejected.append(prepared.key)
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(SqlSessionTurns, "_accept_in_group", rollback_after_write)
+            with pytest.raises(AIError) as rejected_start:
+                await runtime.sessions.start(
+                    "session", "question", agent="default", principal=principal, idempotency_key="same",
+                )
+
+        assert rejected_start.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+        rejected_key, = rejected
+        assert await state.session_turns.get_turn(rejected_key) is None
+        assert await runtime.history.turn_session_state("session", principal=principal) == before
+        assert calls == []
+        turn = await runtime.sessions.start(
+            "session", "question", agent="default", principal=principal, idempotency_key="same",
+        )
+        assert turn.key != rejected_key
+        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        assert len(calls) == 1

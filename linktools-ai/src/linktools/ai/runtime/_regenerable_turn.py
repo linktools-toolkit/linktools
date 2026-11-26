@@ -2159,6 +2159,12 @@ class _RegenerableTurnRunner:
                                 raise
                             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
                         native_subagent_leaf = None
+                    # Accepted turns can be stopped by another worker before
+                    # the local lease monitor has observed the cancellation.
+                    if turn.native_step is None and not await self._store.can_dispatch(
+                        turn.key, generation=turn.generation,
+                    ):
+                        return False
                     outcome = await self._executor.execute_regenerable(
                         binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
                         event_sink=event_sink, thinking=thinking, streamed_output_bytes=_CONTEXT_BYTES,

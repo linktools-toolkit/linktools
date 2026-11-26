@@ -1920,6 +1920,17 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         return await self._context.run_mutation(write, domain="session.cancel")
 
+    async def can_dispatch(self, key: SessionTurnKey, *, generation: int) -> bool:
+        """Check the live generation without reading the turn body."""
+        from sqlalchemy import select
+
+        turns = self._turns
+        statement = select(turns.c.id).filter_by(
+            **self._turn_values(key), generation=generation, state="accepted",
+        ).where(turns.c.lease_until > self._now)
+        async with self._context.engine.connect() as connection:
+            return (await connection.execute(statement)).scalar_one_or_none() is not None
+
     async def renew(self, key: SessionTurnKey, *, generation: int, lease_seconds: int) -> bool:
         from sqlalchemy import case
 
