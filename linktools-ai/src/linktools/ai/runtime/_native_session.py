@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import aclosing, AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
@@ -136,17 +136,22 @@ class _NativeSession(Generic[AppT, ResultT]):
         return history
 
     async def inspect(self) -> dict[str, JsonValue]:
+        await self._sessions._require_session_available()
         return await self._history().turn_session_state(
             self.session_id, principal=self.principal, local_workspace=self._local_workspace,
         )
 
-    def watch(self) -> AsyncIterator[_SessionOccupancy]:
-        return _watch_turn_occupancy(
+    async def watch(self) -> AsyncIterator[_SessionOccupancy]:
+        await self._sessions._require_session_available()
+        async with aclosing(_watch_turn_occupancy(
             self._runtime, self.session_id, self.principal, local_workspace=self._local_workspace,
-        )
+        )) as frames:
+            async for frame in frames:
+                yield frame
 
     async def history(self, *, cursor: str | None = None, limit: int = 100) -> dict[str, JsonValue]:
         """Read one signed native history page, including its session state."""
+        await self._sessions._require_session_available()
         return await self._history().turn_session(
             self.session_id, principal=self.principal, local_workspace=self._local_workspace,
             cursor=cursor, limit=limit,

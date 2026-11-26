@@ -5,7 +5,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from ..core import AGENT_RUN_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner
+from ..core import AGENT_RUN_ID_MAX_BYTES, EXECUTION_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
@@ -81,6 +81,17 @@ RUN_ADMISSION_KEY_MAX_BYTES = 27 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 1
 # Seven framed components: role, namespace, tenant, domain, agent_run, relation, ID.
 RUN_ADMISSION_SCOPE_MAX_BYTES = 40 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + RESOURCE_ID_MAX_BYTES
 RUN_ADMISSION_PARENT_MAX_BYTES = 35 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + AGENT_RUN_ID_MAX_BYTES
+# Tool ledger accepts both exact resource IDs at the 128-byte public boundary.
+TOOL_OPERATION_SCOPE_MAX_BYTES = 52 + 2 * 128 + RESOURCE_ID_MAX_BYTES
+TOOL_OPERATION_PARENT_MAX_BYTES = 53 + 2 * 128 + RESOURCE_ID_MAX_BYTES
+# Execution can carry a session scope or an EXECUTION idempotency resource scope.
+EXECUTION_SCOPE_MAX_BYTES = 2 * 128 + max(44 + RESOURCE_ID_MAX_BYTES, 58 + EXECUTION_ID_MAX_BYTES)
+EXECUTION_PARENT_MAX_BYTES = 47 + 2 * 128 + EXECUTION_ID_MAX_BYTES
+RECORD_OWNER_RELATION_WIDTHS = {
+    "ai_execution_records": (EXECUTION_SCOPE_MAX_BYTES, EXECUTION_PARENT_MAX_BYTES),
+    "ai_step_run_admissions": (RUN_ADMISSION_SCOPE_MAX_BYTES, RUN_ADMISSION_PARENT_MAX_BYTES),
+    "ai_step_tool_operations": (TOOL_OPERATION_SCOPE_MAX_BYTES, TOOL_OPERATION_PARENT_MAX_BYTES),
+}
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
 _EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}

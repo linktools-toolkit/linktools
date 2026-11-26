@@ -185,7 +185,7 @@ async def test_execution_authority_point_queries_use_sqlite_unique_locator(tmp_p
         clock = literal("2026-11-20T12:00:00.000")
         key = source.execution_key(execution_id)
         statements = (
-            ("ai_execution_records", source.select_native_execution_receipt(
+            ("ai_execution_records", source.select_standalone_execution_receipt(
                 route="execution", identity=execution_id, clock=clock,
             )),
             ("ai_execution_records", source.control_guard(

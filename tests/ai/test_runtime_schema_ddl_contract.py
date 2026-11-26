@@ -659,7 +659,7 @@ def test_strict_turn_sql_uses_only_exact_native_owner_routes() -> None:
     assert sql.startswith("INSERT INTO AI_EXECUTION_RECORDS") and " VALUES " in sql and "SELECT" not in sql
     assert compiled.params["turn_request_route"] == request.encode()
     assert compiled.params["turn_receipt"]["receipt_id"] == proof.receipt_id
-    lookup = source.select_native_execution_receipt(route="request", identity=request, clock=func.current_timestamp())
+    lookup = source.select_standalone_execution_receipt(route="request", identity=request, clock=func.current_timestamp())
     query = str(lookup.compile(dialect=mysql.dialect()))
     assert "ai_execution_records.turn_request_route =" in query
     assert "ai_turn_admissions" not in query and "ai_turn_slots" not in query

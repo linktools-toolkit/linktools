@@ -339,7 +339,7 @@ class StoredRecord:
 
     def __post_init__(self) -> None:
         from ._record_owner import (
-            RUN_ADMISSION_PARENT_MAX_BYTES, RUN_ADMISSION_SCOPE_MAX_BYTES, record_owner_table, record_owner_values,
+            RECORD_OWNER_RELATION_WIDTHS, record_owner_table, record_owner_values,
         )
 
         owner = record_owner_table(self.key)
@@ -355,11 +355,13 @@ class StoredRecord:
             validate_relation_key(self.scope_key)
         if self.parent_key is not None:
             validate_parent_key(self.parent_key)
-        if owner == "ai_step_run_admissions":
-            if self.scope_key is not None and len(self.scope_key) > RUN_ADMISSION_SCOPE_MAX_BYTES:
-                raise ValueError("run admission scope exceeds its bounded relation size")
-            if self.parent_key is not None and len(self.parent_key) > RUN_ADMISSION_PARENT_MAX_BYTES:
-                raise ValueError("run admission parent exceeds its bounded relation size")
+        widths = RECORD_OWNER_RELATION_WIDTHS.get(owner)
+        if widths is not None:
+            scope_width, parent_width = widths
+            if self.scope_key is not None and len(self.scope_key) > scope_width:
+                raise ValueError(f"{owner} scope exceeds its bounded relation size")
+            if self.parent_key is not None and len(self.parent_key) > parent_width:
+                raise ValueError(f"{owner} parent exceeds its bounded relation size")
         if self.subject_id is not None:
             _require_subject_id(self.subject_id)
         if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:

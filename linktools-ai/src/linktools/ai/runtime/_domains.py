@@ -393,6 +393,7 @@ class RuntimeSessions(Generic[AppT]):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if principal.tenant_id != runtime.tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._require_session_available()
         store = runtime._state.session_turns
         if store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -574,6 +575,7 @@ class RuntimeSessions(Generic[AppT]):
         self, session_id: str, principal: Principal | None,
     ) -> "tuple[Principal, dict[str, JsonValue]]":
         _, runtime = self._require_turn_sessions()
+        await self._require_session_available()
         history = runtime.history
         if history is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

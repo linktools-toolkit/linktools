@@ -299,7 +299,7 @@ class StateTurnCoordination:
                             execution_id=execution_id, owner_id=owner_id, token=token, duration=_duration(seconds),
                         )
                     return await transaction._regrant_native_execution_receipt(
-                        scope, session_store=None, session_key=session_key,
+                        scope, session_key=session_key,
                         execution_id=execution_id, request_key=request_key, request_digest=request_digest,
                         owner_id=owner_id, token=token, duration=_duration(seconds),
                         split=self._split_execution_receipts,

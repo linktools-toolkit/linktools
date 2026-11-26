@@ -348,13 +348,13 @@ async def test_native_history_reader_fork_prefix_and_cold_readonly_open(tmp_path
         History.open(persistence=state, authorization=authorization) as history,
     ):
         recent = (await history.turn_session("child", principal=principal, limit=1))["timeline"]
-        assert [(turn["turn_id"], turn["prompt"]) for turn in recent["items"]] == [
+        assert [(turn["turn_id"], turn["user_input"]["prompt"]) for turn in recent["items"]] == [
             (child_turn.key.turn_id, "child suffix"),
         ]
         assert recent["next_cursor"] is not None
         older = (await history.turn_session("child", principal=principal,
                                             cursor=recent["next_cursor"], limit=1))["timeline"]
-        assert [(turn["turn_id"], turn["prompt"]) for turn in older["items"]] == [
+        assert [(turn["turn_id"], turn["user_input"]["prompt"]) for turn in older["items"]] == [
             (first.key.turn_id, "prefix question"),
         ]
         assert older["next_cursor"] is None

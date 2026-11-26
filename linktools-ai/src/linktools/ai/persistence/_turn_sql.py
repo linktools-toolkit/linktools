@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScopeIdentity
-from .state import record_key, state_store_key
+from .state import record_key
 from ._turn_sql_schema import (
     TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES,
     RUNTIME_TURN_SCOPE, TURN_SESSION_MAX_BYTES, unoccupied_turn_route,
@@ -166,41 +166,27 @@ class SqlTurnRows:
             session.c.strict_turn_fence == fence,
         ))
 
-    def select_native_execution_receipt(
-        self, *, route: Route, identity: str, clock: "ColumnElement",
+    def select_standalone_execution_receipt(
+        self, *, route: Literal["execution", "request"], identity: str, clock: "ColumnElement",
     ) -> "Select":
-        """Indexed exact Execution or active-request lookup, joined to its physical SessionRecord."""
-        from sqlalchemy import and_, select
+        """Select the standalone owner directly from its indexed Execution row."""
+        from sqlalchemy import select
 
         if not self.coowned:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         control = self._control
-        owner = self._metadata.tables["ai_state_records"]
-        store = state_store_key(self._scope.namespace, self._scope.tenant_id, "conversation")
         if route == "execution":
             exact = self._execution_address(control, identity)
         elif route == "request":
             exact = control.c.turn_request_route == turn_hex(identity, TURN_REQUEST_MAX_BYTES)
-        elif route == "session":
-            exact = and_(*self._strict_session_address(owner, store_key=store, session_key=identity),
-                         control.c.turn_slot_kind == SESSION,
-                         owner.c.strict_turn_execution_id.is_not(None),
-                         owner.c.strict_turn_fence == control.c.turn_fence,
-                         control.c.turn_token.is_not(None))
         else:
-            raise ValueError("invalid native receipt route")
+            raise ValueError("invalid standalone receipt route")
         return select(
-            control.c.key, control.c.key_locator, control.c.turn_slot_kind, control.c.turn_slot_key, control.c.turn_request_route,
-            control.c.turn_session_owner_id, control.c.turn_receipt, control.c.turn_token,
+            control.c.key, control.c.key_locator, control.c.turn_slot_kind, control.c.turn_slot_key,
+            control.c.turn_request_route, control.c.turn_receipt, control.c.turn_token,
             control.c.turn_fence, control.c.turn_expiry, control.c.turn_revision, control.c.kind,
-            owner.c.key.label("session_owner_key"), owner.c.key_locator.label("session_owner_locator"),
-            owner.c.strict_turn_execution_id.label("session_owner_execution_id"),
-            owner.c.strict_turn_fence.label("session_owner_fence"),
-            owner.c.storage_revision.label("session_owner_revision"), clock.label("observed_at"),
-        ).select_from(control.outerjoin(owner, and_(
-            owner.c.id == control.c.turn_session_owner_id, owner.c.store_key == store,
-            owner.c.kind == "session",
-        ))).where(self._owns(control), control.c.turn_slot_kind.in_((SESSION, STANDALONE)), control.c.turn_receipt.is_not(None), exact)
+            clock.label("observed_at"),
+        ).where(self._owns(control), control.c.turn_slot_kind == STANDALONE, control.c.turn_receipt.is_not(None), exact)
 
     def parse_native_session_receipt(
         self, row: Mapping[str, object], *, decode_time: Callable[[object], datetime],

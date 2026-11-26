@@ -98,6 +98,8 @@ class ExecutionRecord:
     def __post_init__(self) -> None:
         validate_execution_id(self.execution_id)
         validate_execution_id(self.root_execution_id)
+        if self.session_id is not None:
+            validate_resource_id(self.session_id)
         for related in (self.parent_execution_id, self.previous_execution_id, self.fork_base_execution_id):
             if related is not None:
                 validate_execution_id(related)

@@ -25,7 +25,10 @@ if TYPE_CHECKING:
 
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
-from ._record_owner import EXECUTION_SORT_KEY_MAX_BYTES, SCAN_KIND_OWNERS, TASK_GRAPH_KEY_MAX_BYTES, TOOL_OPERATION_KEY_MAX_BYTES
+from ._record_owner import (
+    EXECUTION_SORT_KEY_MAX_BYTES, RECORD_OWNER_RELATION_WIDTHS, SCAN_KIND_OWNERS,
+    TASK_GRAPH_KEY_MAX_BYTES, TOOL_OPERATION_KEY_MAX_BYTES,
+)
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 
 
@@ -40,6 +43,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         "ai_task_graphs": TASK_GRAPH_KEY_MAX_BYTES,
         "ai_step_tool_operations": TOOL_OPERATION_KEY_MAX_BYTES,
     }.get(name, RECORD_KEY_MAX_BYTES)
+    scope_key_width, parent_key_width = RECORD_OWNER_RELATION_WIDTHS.get(name, (RELATION_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES))
     columns = [
         sql_id_column(),
         Column(
@@ -56,7 +60,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         ),
         Column(
             "scope_key",
-            LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
+            LargeBinary(scope_key_width).with_variant(mysql.VARBINARY(scope_key_width), "mysql"),
             nullable=True,
             comment="Bounded binary grouping identity used by the record kind's primary list query.",
         ),
@@ -68,7 +72,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         ),
         Column(
             "parent_key",
-            LargeBinary(PARENT_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(PARENT_KEY_MAX_BYTES), "mysql"),
+            LargeBinary(parent_key_width).with_variant(mysql.VARBINARY(parent_key_width), "mysql"),
             nullable=True,
             comment="Bounded binary parent identity used by hierarchical list queries.",
         ),
