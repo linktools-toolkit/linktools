@@ -190,7 +190,7 @@ function setDisabled() {
   $('detail-attention-text').textContent=state.execution?.status==='FAILED'?`Failed${state.execution.error_code?' · '+state.execution.error_code:''}. Actions offers retry or fork.`:needsRecovery?`${state.execution.status.replaceAll('_',' ')}${state.execution.error_code?' · '+state.execution.error_code:''}. Review the recorded state before continuing.`:'';
   $('detail-recovery').hidden=!needsRecovery;
   $('recovery-controls').hidden=ordinary || state.tab!=='recovery';
-  $('session-details').hidden=state.tab!=='overview' || state.view!=='sessions' || !state.session || state.execution?.session_id!==state.session.session_id;
+  $('session-details').hidden=ordinary || state.tab!=='overview' || state.view!=='sessions' || !state.session || state.execution?.session_id!==state.session.session_id;
   const active=!ordinary && state.session?.active_execution_id===state.observedExecution?state.observedInfo:null;
   $('end-active').hidden=readonly || !active || !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(active.status) && state.endReadbackId!==active.execution_id;
   $('end-active').disabled=Boolean(active && [...state.actionsPending].some(key=>key.startsWith(`${active.execution_id}:`)));
@@ -254,7 +254,10 @@ function renderPage() {
   $('conversation-column').classList.toggle('reading',state.conversationMode==='original');
   if($('composer').hidden)setThinkingPanel(false);
   $('reader-stop').hidden=$('send').type!=='button' || state.conversationMode==='chat';
-  $('session-details').hidden=!sessions;
+  const traceWorkspace=sessions && inspectorMode && state.config?.turn_sessions;
+  $('session-details').hidden=!sessions || Boolean(state.config?.turn_sessions);
+  $('inspector').classList.toggle('trace-workspace-mode',Boolean(traceWorkspace));
+  $('trace-stats').hidden=!traceWorkspace;
   $('inspector-close').hidden=executions;
   $('inspector').classList.toggle('execution-page',executions || sessions && inspectorMode);
   if(executions || sessions && inspectorMode)showInspector(true);
@@ -1132,7 +1135,7 @@ function renderSessionHeader() {
     state.session.status==='CLOSED'?'CLOSED':null,
     state.session.history_quality && state.session.history_quality!=='complete'?'history '+state.session.history_quality:null,
   ].filter(Boolean).join(' · ');
-  $('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
+  if(!state.config?.turn_sessions)$('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
 }
 const thinkingLevels=['low','medium','high','xhigh','max'];
 const thinkingLabels=['Low','Medium','High','Extra high','Maximum'];
@@ -2222,7 +2225,8 @@ function traceItem(item) {
 }
 function renderDetails() {
   $('inspector-content').classList.remove('native-reader','turn-trace');
-  const requestFocus=requestFocusWithin($('inspector-content'));
+  const content=$('inspector-content'),requestFocus=requestFocusWithin(content);
+  const previousLog=content.querySelector('.trace-log')?.scrollTop ?? 0;
   clear('inspector-content');
   if(['history','transcript','sdkmodels'].includes(state.tab)) {
     const note=element('div','source-note');
@@ -2236,8 +2240,9 @@ function renderDetails() {
     $('inspector-content').append(element('p','empty','Resume continues the original work and may call models or tools. To end it instead, use End stopped execution.'),resume);setDisabled();
   }
   if(state.tab==='trace' && nativeTurnInspector()){
-    renderOrdinaryTrace($('inspector-content'));
-    restoreRequestFocus($('inspector-content'),requestFocus);return;
+    renderOrdinaryTrace(content);
+    const log=content.querySelector('.trace-log');if(log)log.scrollTop=previousLog;
+    restoreRequestFocus(content,requestFocus);return;
   }
   if(state.tab==='models'){renderNativeTimeline($('inspector-content'));restoreRequestFocus($('inspector-content'),requestFocus);return;}
   if(!state.details.length) $('inspector-content').append(element('p','empty',terminal(state.execution?.status)?'No records for this selection.':'No committed detail yet; live progress may arrive first.'));
@@ -2930,25 +2935,76 @@ function chooseOrdinaryInspectionTurn() {
 function renderOrdinaryTrace(container) {
   const inspection=ordinaryInspection;
   container.classList.add('turn-trace');
-  const turn=state.turns.find(row=>row.turn_id===inspection.turnId);
-  if(turn?.status)container.append(element('p','source-note',`Turn${turn.turn_no?' '+turn.turn_no:''} · ${turn.status.replaceAll('_',' ').toLowerCase()}`));
-  if(!state.details.length)container.append(element('p','empty','No trace events were captured for this turn.'));
-  const groups=new Map(),rows=[];
-  for(const item of state.details){
-    const {kind,model_request_seq:seq,scope}=item.payload;
+  const events=state.details,turn=state.turns.find(row=>row.turn_id===inspection.turnId);
+  const groups=new Map(),toolGroups=new Map(),rows=[];
+  if(turn?.user_input?.prompt)rows.push({input:turn.user_input.prompt});
+  for(const item of events){
+    const {kind,model_request_seq:seq,scope,tool_call_id:id}=item.payload;
     if((kind==='MODEL_REQUEST' || kind==='MODEL_RESPONSE') && seq!=null && scope==='root'){
       let row=groups.get(seq);
       if(!row){row={seq,events:[]};groups.set(seq,row);rows.push(row);}
       row.events.push(item);
-    } else rows.push(item);
+    } else if(id && ['TOOL_CALL','TOOL_RESULT','TOOL_ERROR'].includes(kind)){
+      let row=toolGroups.get(id);
+      if(!row){row={events:[]};toolGroups.set(id,row);rows.push(row);}
+      row.events.push(item);
+    } else rows.push({events:[item]});
   }
-  for(const row of rows){
-    if(!row.events){container.append(traceItem(row));continue;}
-    const {seq,events}=row,key=`trace:model:${seq}`,last=events.at(-1).payload;
+
+  clear('trace-stats');
+  const heading=$('trace-stats');
+  const timestamps=events.map(({payload})=>Date.parse(payload.occurred_at)).filter(Number.isFinite);
+  const start=Math.min(...timestamps),end=Math.max(...timestamps),range=end-start;
+  heading.append(element('span','',range>0?`◷ ${duration(range*1e6)} observed`:'◷ Timing unavailable'),
+    element('span','',`${events.length} events`),element('span','',`${groups.size} model calls`));
+  if(turn?.status)heading.append(element('span','trace-log-state',turn.status.replaceAll('_',' ').toLowerCase()));
+  if(range>0){
+    const timings=element('div','trace-bands');timings.setAttribute('aria-label','Observed timing');
+    for(const [label,owners,started,finished] of [
+      ['Model',[...groups.values()].map(row=>row.events),'MODEL_REQUEST',['MODEL_RESPONSE']],
+      ['Tools',[...toolGroups.values()].map(row=>row.events),'TOOL_CALL',['TOOL_RESULT','TOOL_ERROR']],
+    ]){
+      const band=element('div','trace-band'),track=element('div','trace-band-track');
+      band.append(element('span','',label),track);
+      for(const captured of owners){
+        let first=null;
+        for(const {payload:last} of captured){
+          if(last.kind===started){first=last;continue;}
+          if(!first || !finished.includes(last.kind))continue;
+          const from=Date.parse(first.occurred_at),to=Date.parse(last.occurred_at);
+          if(to>from){
+            const span=element('span',`trace-band-span ${label.toLowerCase()}${['FAILED','EFFECT_UNKNOWN'].includes(last.status)?' failed':''}`);
+            span.setAttribute('style',`left:${100*(from-start)/range}%;width:${100*(to-from)/range}%`);
+            span.title=`${first.tool_name || (first.model_request_seq!=null?'Request '+first.model_request_seq:label)} · ${duration((to-from)*1e6)}`;
+            track.append(span);
+          }
+          first=null;
+        }
+      }
+      if(track.children.length)timings.append(band);
+    }
+    if(timings.children.length)container.append(timings);
+  }
+
+  const workspace=element('div','trace-workspace'),log=element('div','trace-log');
+  log.setAttribute('aria-label','Captured turn events');
+  const pane=element('section','trace-record');pane.setAttribute('aria-label','Selected trace record');
+  workspace.append(log,pane);container.append(workspace);
+  if(!events.length)log.append(element('p','trace-record-empty','No trace events were captured for this turn.'));
+
+  const controls=[];
+  for(const {seq,events:captured=[],input} of rows){
+    const first=captured[0],last=captured.at(-1)?.payload,isModel=seq!=null;
+    const key=input?'trace:input':isModel?`trace:model:${seq}`:`trace:event:${first.step_event_seq}`;
+    const isTool=Boolean(last?.tool_name || last?.kind.startsWith('TOOL_'));
+    const type=input?'Input':isModel?'Model':isTool?'Tool':last.kind.replaceAll('_',' ').toLowerCase();
+    const summary=input || (isModel?`Model request ${seq}`:last.tool_name || type);
     const selected=state.traceSelection===key;
-    const card=element('section','trace-item'),toggle=button('',async()=>{
-      state.traceSelection=selected?null:key;
-      if(!selected && state.config.turn_model_messages && (inspection.model?.seq!==seq || !inspection.model.items)){
+    const select=button('',async()=>{
+      if(selected && !(isModel && inspection.model?.seq===seq && inspection.model.error))return;
+      state.traceSelection=key;
+      inspection.tab='Summary';
+      if(isModel && state.config.turn_model_messages && (inspection.model?.seq!==seq || !inspection.model.items)){
         const read={seq};inspection.model=read;renderDetails();
         const current=()=>ordinaryInspection===inspection && inspection.model===read
           && state.traceSelection===key && nativeTurnInspector() && !$('inspector').hidden;
@@ -2960,23 +3016,77 @@ function renderOrdinaryTrace(container) {
         if(!current())return;
       }
       renderDetails();
-    });
-    toggle.className='trace-row';toggle.dataset.requestFocus=key;toggle.setAttribute('aria-expanded',String(selected));
-    toggle.append(element('span','trace-seq',`#${events[0].step_event_seq}`),element('span','trace-label',`Model request ${seq}`),
-      element('span','trace-status',last.status),element('span','trace-duration',duration(last.duration_ns)));card.append(toggle);
-    if(selected){
-      const detail=element('div','trace-detail');
-      for(const {payload:event} of events)detail.append(element('p','muted',
-        [event.kind==='MODEL_REQUEST'?'Model input':'Model response',event.status,event.purpose,event.occurred_at].filter(Boolean).join(' · ')));
-      const read=inspection.model;
-      if(!state.config.turn_model_messages)detail.append(element('p','muted','Model message capture is not available.'));
-      else if(read?.error)detail.append(element('p','source-warning',read.error));
-      else if(!read?.items)detail.append(element('p','muted','Loading captured model messages…'));
-      else if(!read.items.length)detail.append(element('p','muted','No model messages were captured for this request.'));
-      else for(const item of read.items)sdkMessages(detail,item,`${inspection.turnId}:${seq}`);
-      card.append(detail);
+    },'trace-log-select');
+    select.dataset.requestFocus=key;select.setAttribute('aria-pressed',String(selected));
+    select.setAttribute('aria-label',input?'User input':summary);
+    const glyph=element('span',`trace-glyph ${input?'input':isModel?'model':isTool?'tools':'other'}`,input?'➤':isModel?'✦':isTool?'⚒':'•');
+    glyph.setAttribute('aria-hidden','true');
+    select.append(element('span','trace-log-no',first?String(first.step_event_seq):''),glyph,
+      element('span','trace-log-label',summary),
+      element('span',`trace-log-status ${['FAILED','EFFECT_UNKNOWN'].includes(last?.status)?'failed':''}`,last?.error_code || last?.status || ''));
+    select.onkeydown=event=>{
+      const direction=event.key==='ArrowDown'?1:event.key==='ArrowUp'?-1:0;
+      const target=direction && controls[controls.indexOf(select)+direction];
+      if(target){event.preventDefault();target.focus();}
+    };
+    controls.push(select);log.append(select);
+    if(!selected)continue;
+
+    const title=element('div','trace-record-heading');
+    const close=button('×',async()=>{state.traceSelection=null;renderDetails();
+      restoreRequestFocus(container,key);},'trace-record-close');
+    close.setAttribute('aria-label','Close trace record');
+    title.append(element('span',`trace-record-type ${isModel?'model':isTool?'tools':'other'}`,type),
+      element('span','trace-log-count',`Turn${turn?.turn_no?' '+turn.turn_no:''}${first?' · #'+first.step_event_seq:''}`),close);
+    pane.append(title);
+    const tabs=element('div','trace-record-tabs'),active=inspection.tab || 'Summary';
+    for(const name of ['Summary','Preview','Raw']){
+      const tab=button(name,async()=>{inspection.tab=name;renderDetails();},'trace-record-tab');
+      tab.dataset.requestFocus=`trace:tab:${name}`;tab.setAttribute('aria-pressed',String(name===active));tabs.append(tab);
     }
-    container.append(card);
+    pane.append(tabs);
+    const fields=element('div','trace-record-body');pane.append(fields);
+    if(input){
+      fields.append(element('p','muted','Source: admitted user input'));
+      fields.append(element('pre','native-literal',active==='Raw'?json({prompt:input}):input));
+      continue;
+    }
+    if(active==='Raw'){
+      fields.append(element('pre','native-literal',json(captured)));continue;
+    }
+    if(active==='Summary'){
+      fields.append(properties({Source:summary,Status:last.status,Duration:last.duration_ns==null?undefined:duration(last.duration_ns),
+        Started:first.payload.occurred_at,'Error code':last.error_code,Tokens:last.token_usage?usageLabel(last.token_usage):undefined}));
+      if(isModel || isTool)for(const {payload:event,step_event_seq:ordinal} of captured){
+        const record=element('details','trace-record-event');
+        record.append(element('summary','',`#${ordinal} · ${event.kind==='MODEL_REQUEST'?'Model input':event.kind==='MODEL_RESPONSE'?'Model response':event.kind.replaceAll('_',' ').toLowerCase()} · ${event.status}`),properties(event));
+        fields.append(record);
+      }
+    } else if(!isModel) {
+      fields.append(element('p','muted','This event has no captured content preview.'));continue;
+    }
+    if(!isModel)continue;
+    const read=inspection.model;
+    if(active==='Summary'){
+      if(read?.items?.some(item=>item.response!=null)){
+        const preview=button('Preview ›',async()=>{inspection.tab='Preview';renderDetails();},'trace-record-link');
+        fields.append(preview);
+        const excerpt=read.items.flatMap(item=>item.response?.parts || [])
+          .filter(part=>part.part_kind==='text' && typeof part.content==='string')
+          .map(part=>part.content).join('\n');
+        if(excerpt)fields.append(element('p','trace-preview-text',excerpt.length>600?excerpt.slice(0,600)+'…':excerpt));
+      }
+      continue;
+    }
+    if(!state.config.turn_model_messages)fields.append(element('p','muted','Model message capture is not available.'));
+    else if(read?.error)fields.append(element('p','source-warning',read.error));
+    else if(!read?.items)fields.append(element('p','muted','Loading captured model messages…'));
+    else if(!read.items.length)fields.append(element('p','muted','No model messages were captured for this request.'));
+    else for(const item of read.items)sdkMessages(fields,item,`${inspection.turnId}:${seq}`);
+  }
+  if(!pane.children.length){
+    const title=element('div','trace-record-heading');title.append(element('strong','','Record details'));
+    pane.append(title,element('p','trace-record-empty','Select an event to inspect its details.'));
   }
 }
 async function loadOrdinaryInspection(turnId,more=false) {
@@ -2987,7 +3097,7 @@ async function loadOrdinaryInspection(turnId,more=false) {
   if(!more || ordinaryInspection?.session!==session || ordinaryInspection.turnId!==turnId){
     ordinaryInspection={session,turnId,cursor:null};
     state.tab='trace';state.details=[];state.traceSelection=null;
-    $('detail-title').textContent='Turn trace';
+    clear('trace-stats');
     $('execution-meta').textContent='Turn '+short(turnId);
     $('inspector-content').classList.remove('native-reader','turn-trace');clear('inspector-content');
   }

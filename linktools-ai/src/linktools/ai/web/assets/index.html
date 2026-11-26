@@ -26,7 +26,7 @@
       </div>
       <aside id="inspector" class="inspector" aria-label="Execution details" hidden>
         <div class="inspector-heading"><h2 id="detail-title">Turn details</h2><details id="run-actions" class="action-menu"><summary id="run-actions-toggle" aria-label="Selected execution actions">Actions</summary><div class="action-items"><button id="retry" class="quiet">Retry with a new prompt</button><button id="fork-run" class="quiet">Fork run</button><button id="export" class="quiet">Download result JSON</button><button id="run-recovery" class="quiet">Resume or end stopped work</button></div></details><button id="inspector-close" class="quiet" aria-label="Close execution details">✕</button></div>
-        <label id="detail-turn-picker" class="detail-turn-picker">Conversation turn<select id="detail-turn" aria-label="Choose turn to inspect"></select></label>
+        <div id="detail-turn-toolbar"><label id="detail-turn-picker" class="detail-turn-picker"><span>Conversation turn</span><select id="detail-turn" aria-label="Choose turn to inspect"></select></label><div id="trace-stats" class="trace-log-heading" hidden></div></div>
         <div id="execution-meta" tabindex="-1" class="execution-meta">Select a turn to inspect</div>
         <div id="execution-actions" class="execution-actions"><button id="inspector-active-stop" class="danger" hidden>Stop active conversation</button><button id="stop-run" class="danger" hidden>Stop selected execution</button></div>
         <div id="detail-attention" class="detail-attention" hidden><p id="detail-attention-text"></p><button id="detail-recovery" class="quiet" hidden>Review recovery</button></div>

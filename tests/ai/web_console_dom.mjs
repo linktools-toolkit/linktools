@@ -286,11 +286,11 @@ if(process.argv[3]==='native-model-messages') {
     conversation_committed:true,user_input:{prompt:'Earlier question',attachments:[]},items:[]}],next_cursor:null});
   await select('#session=b');
   const models=()=>calls.filter(call=>call.query.models==='true');
-  const event=(ordinal,kind,status,fields={})=>({turn_id:id,step_event_seq:ordinal,payload:{kind,status,scope:'root',...fields}});
+  const event=(ordinal,kind,status,fields={})=>({turn_id:id,step_event_seq:ordinal,payload:{kind,status,scope:'root',occurred_at:`2026-01-01T00:00:0${ordinal}Z`,...fields}});
   const model=(seq,prompt)=>({turn_id:id,agent_run_seq:1,model_request_seq:seq,purpose:'agent',status:'SUCCEEDED',
     model:{},content_included:true,request:{messages:[{kind:'request',parts:[{part_kind:'user-prompt',content:prompt}]}]},
     response:{parts:[{part_kind:'text',content:'Retained model response'}]}});
-  const rows=()=>descendants(node('inspector-content')).filter(item=>item.className==='trace-row');
+  const rows=()=>descendants(node('inspector-content')).filter(item=>item.className==='trace-log-select');
   assert.equal(node('native-mode').hidden,true);
   assert.equal(node('activity-mode').textContent,'Trace');
   assert.equal(node('activity-mode').disabled,false);
@@ -304,17 +304,33 @@ if(process.argv[3]==='native-model-messages') {
   await first.requested;
   assert.equal(calls.at(-1).query.turn_id,id);assert.equal(calls.at(-1).query.trace,'true');
   first({items:[event(1,'MODEL_REQUEST','STARTED',{model_request_seq:1}),
-    event(2,'TOOL_CALL','STARTED',{tool_name:'trace only tool'})],next_cursor:'more-trace'});await open;
+    event(2,'TOOL_CALL','STARTED',{tool_name:'trace only tool',tool_call_id:'t1'})],next_cursor:'more-trace'});await open;
   assert.equal(models().length,0,'opening Trace does not load model bodies');
   const next=deferred('GET /api/sessions/b'),more=node('detail-more').click();
   await next.requested;
   assert.equal(calls.at(-1).query.cursor,'more-trace');
   next({items:[event(3,'MODEL_RESPONSE','SUCCEEDED',{model_request_seq:1,duration_ns:250000000}),
-    event(4,'MODEL_REQUEST','STARTED',{model_request_seq:2})],next_cursor:null});await more;
+    event(4,'MODEL_REQUEST','STARTED',{model_request_seq:2}),
+    event(5,'TOOL_RESULT','SUCCEEDED',{tool_name:'trace only tool',tool_call_id:'t1'})],next_cursor:null});await more;
   assert.equal(models().length,0,'paging Trace does not load model bodies');
-  assert.deepEqual(rows().map(row=>row.children[1].textContent),['Model request 1','tool call · trace only tool','Model request 2']);
-  assert.match(rows()[0].textContent,/SUCCEEDED.*250/);
+  assert.deepEqual(rows().map(row=>row.getAttribute('aria-label')),['Model request 1','trace only tool','Model request 2']);
+  const findClass=type=>descendants(node('inspector-content')).find(item=>item.className===type);
+  const pane=()=>findClass('trace-record'),log=()=>findClass('trace-log');
+  const tab=name=>descendants(pane()).find(item=>item.className==='trace-record-tab' && item.textContent===name);
+  assert.equal(log().parentElement,pane().parentElement,'stream and detail are siblings');
+  assert.match(node('trace-stats').textContent,/5 events.*2 model calls/s);
+  assert.equal(node('session-details').hidden,true);
+  assert.equal(findClass('trace-bands').textContent,'ModelTools','only observed complete phases get timing bands');
+  assert.equal(descendants(findClass('trace-bands')).filter(item=>item.className.startsWith('trace-band-span')).length,2);
+  assert.doesNotMatch(findClass('trace-bands').textContent,/Input/);
+  assert.match(pane().textContent,/Select an event/);
+  rows()[0].onkeydown({key:'ArrowDown',preventDefault(){}});
+  assert.equal(document.activeElement,rows()[1]);
   await rows()[1].click();
+  assert.equal(rows()[1].getAttribute('aria-pressed'),'true');
+  assert.match(pane().textContent,/trace only tool.*tool call.*tool result/s);
+  await tab('Raw').click();
+  assert.match(pane().textContent,/TOOL_CALL.*TOOL_RESULT/s);
   assert.equal(models().length,0,'opening a tool event does not read a model body');
 
   const body=deferred('GET /api/sessions/b'),openBody=rows()[0].click();
@@ -323,7 +339,14 @@ if(process.argv[3]==='native-model-messages') {
   assert.equal(models().at(-1).query.model_request_seq,'1');
   assert.equal(models().at(-1).query.include_content,'true');
   body({items:[model(1,'Retained SDK prompt')],next_cursor:null});await openBody;
-  assert.match(node('inspector-content').textContent,/Model input.*Model response.*Retained SDK prompt.*Retained model response/s);
+  assert.match(pane().textContent,/Model input.*Model response.*Retained model response/s);
+  await tab('Preview').click();
+  assert.match(pane().textContent,/Retained SDK prompt.*Retained model response/s);
+  assert.doesNotMatch(log().textContent,/Retained SDK prompt/);
+  await tab('Raw').click();
+  assert.match(pane().textContent,/MODEL_REQUEST.*MODEL_RESPONSE/s);
+  assert.doesNotMatch(pane().textContent,/Retained SDK prompt/);
+  assert.equal(rows()[0].getAttribute('aria-pressed'),'true');
   assert.doesNotMatch(node('inspector-content').textContent,/Original HTTP diagnostics|Open subagent/);
 
   const staleBody=deferred('GET /api/sessions/b'),loading=rows()[2].click();
@@ -340,10 +363,14 @@ if(process.argv[3]==='native-model-messages') {
   const priorPage=deferred('GET /api/sessions/b'),prior=node('detail-turn').onchange();await priorPage.requested;
   assert.equal(calls.at(-1).query.turn_id,last);
   priorPage({items:[event(1,'MODEL_REQUEST','STARTED',{model_request_seq:3})],next_cursor:null});await prior;
-  const missingPage=deferred('GET /api/sessions/b'),missing=rows()[0].click();await missingPage.requested;
+  const missingPage=deferred('GET /api/sessions/b'),missing=rows().find(row=>row.getAttribute('aria-label')==='Model request 3').click();await missingPage.requested;
   assert.equal(models().at(-1).query.turn_id,last);assert.equal(models().at(-1).query.model_request_seq,'3');
   missingPage({items:[],next_cursor:null});await missing;
-  assert.match(node('inspector-content').textContent,/No model messages were captured for this request/);
+  await tab('Preview').click();
+  assert.match(pane().textContent,/No model messages were captured for this request/);
+  const input=rows().find(row=>row.getAttribute('aria-label')==='User input');
+  await input.click();
+  assert.match(pane().textContent,/Source: admitted user input.*Earlier question/s);
   assert.equal(calls.filter(call=>call.key.startsWith('/api/executions/')).length,0);
   console.log('Native Trace groups captured records and reads one authorized model body only on selection');
   process.exit(0);
