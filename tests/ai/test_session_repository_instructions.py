@@ -12,15 +12,14 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import ExecutionCapability, SessionCapability
+from linktools.ai.capability import ExecutionCapability, SessionCapability, StepPersistenceCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, CommitPolicy, ExecutionStatus, Principal, SessionStatus, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage, SqlStepStore
+from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
@@ -174,6 +173,8 @@ async def test_session_reloads_known_scopes_before_first_model_request(
 ) -> None:
     # Backend/checkpoint coverage exercises durable scope reload and union.
     # Filesystem mutations and new-session isolation share the same implementation.
+    native = backend != "memory"
+    split_selects_step_only = backend == "split" and capture_frontier
     full_mutation_path = backend == "sql" and capture_frontier
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -213,70 +214,105 @@ async def test_session_reloads_known_scopes_before_first_model_request(
         )])
 
     features = workspace_features("scope-memory", workspace=Workspace.load(workspace_root))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.agent("reader", model="default", allow_tools=("read_file",))
+    if native:
+        features.capability(SessionCapability(checkpoints=capture_frontier and not split_selects_step_only), scope="runtime")
+    else:
+        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("reader", model="default", allow_tools=("read_file",), allow_subagents=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
 
-    async def run(session, name: str, *, initial: str | None = None,
+    async def run(runtime, session_id: str, name: str, *, initial: str | None = None,
                   discover: str | None = None, absent: tuple[str, ...] = ()) -> None:
         nonlocal turn, attempts, initial_rule, discovery_rule, forbidden_rules
         turn, attempts = name, 0
         initial_rule, discovery_rule, forbidden_rules = initial, discover, absent
-        result = (await session.run(name, timeout_seconds=10)).result
+        if native:
+            try:
+                handle = await runtime.sessions.start(
+                    session_id, name, agent="reader", principal=runtime.default_principal, idempotency_key=name,
+                )
+            except AIError as error:
+                pytest.fail(f"native admission failed: {error.code} {error.safe_details}")
+            result = await handle.wait_final(timeout_seconds=10)
+        else:
+            session = runtime.agents.get("reader").session(session_id)
+            result = (await session.run(name, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert attempts == 2
 
     async with _storage(tmp_path, backend) as storage:
         async with Persistence.open("scope-memory", storage=storage) as persistence:
-            if capture_frontier:
-                if backend == "sql":
-                    steps = SqlStepStore(
-                        persistence.execution.executions.state_store.context,
-                        namespace="scope-memory", tenant_id=persistence.tenant_id,
-                    )
-                    await steps.initialize()
-                    capability = StepPersistence(store=steps, capture_frontier=True)
+            if capture_frontier and not native:
+                features.capability(native_checkpoint(database=tmp_path / "native.db"), scope="runtime")
+
+            auth = {"authorization": _HostAuthorization()} if native else {}
+
+            async def assert_scope(session_id, expected):
+                if native:
+                    stored = await persistence.session_turns.get_session(session_id)
+                    assert tuple(stored["config_json"].get("instruction_scopes", ())) == expected
+                    assert "PACKAGE-V1" not in str(stored["config_json"])
                 else:
-                    capability = native_checkpoint(database=tmp_path / "native.db")
-                features.capability(capability, scope="runtime")
-            async with Runtime.open(persistence=persistence, features=features) as runtime:
-                session = await runtime.agents.get("reader").create_session("session")
-                await run(session, "learn", discover="PACKAGE-V1")
-                stored = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-                assert stored is not None and stored.repository_instruction_scopes == ("pkg",)
-                assert "PACKAGE-V1" not in str(encode_domain(stored))
+                    stored = await persistence.conversation.sessions.get(session_id, tenant_id=persistence.tenant_id)
+                    assert stored is not None and stored.repository_instruction_scopes == expected
+                    assert "PACKAGE-V1" not in str(encode_domain(stored))
+
+            async with Runtime.open(persistence=persistence, features=features, **auth) as runtime:
+                await runtime.agents.get("reader").create_session("session")
+                await run(runtime, "session", "learn", discover="PACKAGE-V1")
+                await assert_scope("session", ("pkg",))
 
             if full_mutation_path:
-                async with Runtime.open(persistence=persistence, features=features) as runtime:
-                    session = runtime.agents.get("reader").session("session")
-                    await run(session, "same", initial="PACKAGE-V1")
+                async with Runtime.open(persistence=persistence, features=features, **auth) as runtime:
+                    await run(runtime, "session", "same", initial="PACKAGE-V1")
 
             # Reload the scope, not the previous execution's content pin, before
             # the first model request in the new Runtime.
             rules.write_text("PACKAGE-V2", encoding="utf-8")
-            async with Runtime.open(persistence=persistence, features=features) as runtime:
-                session = runtime.agents.get("reader").session("session")
-                await run(session, "changed", initial="PACKAGE-V2", absent=("PACKAGE-V1",))
+            async with Runtime.open(persistence=persistence, features=features, **auth) as runtime:
+                await run(runtime, "session", "changed", initial="PACKAGE-V2", absent=("PACKAGE-V1",))
                 current_rule = "PACKAGE-V2"
                 if full_mutation_path:
                     rules.write_text("PACKAGE-V3", encoding="utf-8")
-                    await run(session, "overwritten", initial="PACKAGE-V3", absent=("PACKAGE-V1", "PACKAGE-V2"))
+                    await run(runtime, "session", "overwritten", initial="PACKAGE-V3", absent=("PACKAGE-V1", "PACKAGE-V2"))
                     rules.unlink()
-                    await run(session, "deleted", absent=("PACKAGE-V1", "PACKAGE-V2", "PACKAGE-V3"))
+                    await run(runtime, "session", "deleted", absent=("PACKAGE-V1", "PACKAGE-V2", "PACKAGE-V3"))
                     rules.write_text("PACKAGE-V4", encoding="utf-8")
-                    await run(session, "recreated", initial="PACKAGE-V4", absent=("PACKAGE-V1", "PACKAGE-V2", "PACKAGE-V3"))
+                    await run(runtime, "session", "recreated", initial="PACKAGE-V4", absent=("PACKAGE-V1", "PACKAGE-V2", "PACKAGE-V3"))
                     current_rule = "PACKAGE-V4"
                 target = "other/file.txt"
-                await run(session, "unknown", initial=current_rule, discover="OTHER-RULE")
+                await run(runtime, "session", "unknown", initial=current_rule, discover="OTHER-RULE")
                 if full_mutation_path:
-                    fork = await session.fork("fork")
-                    await run(fork, "fork", discover="OTHER-RULE", absent=(current_rule,))
-                    isolated = await runtime.agents.get("reader").create_session("isolated")
-                    await run(isolated, "isolated", discover="OTHER-RULE", absent=(current_rule,))
-        if backend != "memory":
+                    row = await persistence.session_turns.get_session("session")
+                    assert await runtime.sessions.fork_turn_session(
+                        "session", "fork", principal=runtime.default_principal,
+                        expected_revision=row["revision"], idempotency_key="fork",
+                    )
+                    await run(runtime, "fork", "fork", discover="OTHER-RULE", absent=(current_rule,))
+                    await runtime.agents.get("reader").create_session("isolated")
+                    await run(runtime, "isolated", "isolated", discover="OTHER-RULE", absent=(current_rule,))
+        if native:
             async with Persistence.open("scope-memory", storage=storage) as reopened:
-                stored = await reopened.conversation.sessions.get("session", tenant_id=reopened.tenant_id)
-                assert stored is not None and stored.repository_instruction_scopes == ("other", "pkg")
+                stored = await reopened.session_turns.get_session("session")
+                assert stored["config_json"]["instruction_scopes"] == ["other", "pkg"]
+                if split_selects_step_only:
+                    # The split Step profile explicitly excludes the workspace
+                    # capability. Its rejected admission cannot change learned scopes.
+                    async def model_without_tools(_messages, _info):
+                        pytest.fail("Unsupported split Step workspace reached the provider")
+
+                    configured = workspace_features("scope-memory", workspace=Workspace.load(workspace_root))
+                    configured.capability(StepPersistenceCapability(), scope="runtime")
+                    configured.agent("reader", model="default", allow_tools=(), allow_subagents=())
+                    model_features(_Models(_UsageFunctionModel(model_without_tools)), configured)
+                    async with Runtime.open(persistence=reopened, features=configured, **auth) as runtime:
+                        with pytest.raises(AIError) as rejected:
+                            await runtime.sessions.start(
+                                "session", "split Step reopen", agent="reader", principal=runtime.default_principal,
+                                idempotency_key="split-step-reopen",
+                            )
+                        assert rejected.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+                    assert await reopened.session_turns.get_session("session") == stored
 
 
 @pytest.mark.asyncio
@@ -325,6 +361,47 @@ async def test_session_scope_union_is_transactional_and_requires_execution_owner
 ) -> None:
     async with _storage(tmp_path, backend) as storage:
         async with Persistence.open("scope-union", storage=storage, tenant_id="tenant") as persistence:
+            if backend != "memory":
+                from linktools.ai.persistence.turns import SessionInstructionFrontier, SessionTurnKey
+                from .test_session_turn_sql import accept
+
+                turns = persistence.session_turns
+                await turns.create("chat", config={})
+                assert await accept(turns, "active")
+                key = SessionTurnKey("chat", "active")
+                frontier = SessionInstructionFrontier(RepositoryInstructions((
+                    RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "scope only"),
+                )))
+                mutation = type(turns._context).run_mutation
+
+                async def simulate_rollback(context, write, *, domain, **options):
+                    if context is not turns._context:
+                        return await mutation(context, write, domain=domain, **options)
+                    async def rollback(connection):
+                        await write(connection)
+                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+                    return await mutation(context, rollback, domain=domain, **options)
+
+                async def remember(scopes, *, generation=1):
+                    await turns.append_instruction_frontier(key, generation=generation, frontier=frontier,
+                                                            max_bytes=4096, instruction_scopes=scopes)
+
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(type(turns._context), "run_mutation", simulate_rollback)
+                    with pytest.raises(AIError) as failed:
+                        await remember(("pkg",))
+                    assert failed.value.code is ErrorCode.STORAGE_UNAVAILABLE
+                assert not (await turns.get_session("chat"))["config_json"]
+                assert "instruction_frontier" not in (await turns.get_turn(key))["request_json"]
+                await remember(("pkg",))
+                with pytest.raises(AIError) as stale:
+                    await remember(("forbidden", "pkg"), generation=2)
+                assert stale.value.code is ErrorCode.STORAGE_CONFLICT
+                assert (await turns.get_session("chat"))["config_json"]["instruction_scopes"] == ["pkg"]
+                assert not await turns.update_session("chat", expected_revision=0, config={})
+                await remember(("other", "pkg", "third"))
+                assert (await turns.get_session("chat"))["config_json"]["instruction_scopes"] == ["other", "pkg", "third"]
+                return
             sessions = persistence.conversation.sessions
             await sessions.create(_session())
             await sessions.admit_execution("session", tenant_id="tenant", execution_id="active", expected=None)
@@ -493,9 +570,9 @@ async def test_discovery_scope_commit_precedes_execution_pin_across_storage_grou
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ("files", "inline", "both"))
-@pytest.mark.parametrize("session_backed", (False, True))
+@pytest.mark.parametrize(("native", "session_backed"), ((False, False), (False, True), (True, True)))
 async def test_attachment_scopes_are_in_first_request_and_sources_are_deduplicated(
-    tmp_path: Path, entry: str, session_backed: bool,
+    tmp_path: Path, entry: str, session_backed: bool, native: bool,
 ) -> None:
     package = tmp_path / "pkg"
     package.mkdir()
@@ -519,21 +596,33 @@ async def test_attachment_scopes_are_in_first_request_and_sources_are_deduplicat
         features = workspace_features("attachment-scopes", assets=store, workspace=Workspace.load(
             tmp_path, policy=WorkspacePolicy(max_repository_instruction_documents=2),
         ))
-        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-        features.agent("reader", model="default", allow_tools=())
+        if not native:
+            features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        features.agent("reader", model="default", allow_tools=(), allow_subagents=())
         features = model_features(_Models(_UsageFunctionModel(model)), features)
-        async with Persistence.open("attachment-scopes", storage=PersistenceStorage.in_memory()) as persistence:
-            async with Runtime.open(persistence=persistence, features=features) as runtime:
+        storage = PersistenceStorage.from_root(tmp_path / "state") if native else PersistenceStorage.in_memory()
+        auth = {"authorization": _HostAuthorization()} if native else {}
+        async with Persistence.open("attachment-scopes", storage=storage) as persistence:
+            async with Runtime.open(persistence=persistence, features=features, **auth) as runtime:
                 agent = runtime.agents.get("reader")
                 target = await agent.create_session("session") if session_backed else agent
                 prompt = ("inspect", WorkspaceFileInput("pkg/file.txt")) if entry != "files" else "inspect"
                 files = ("pkg/file.txt",) if entry != "inline" else ()
-                result = (await target.run(prompt, files=files, timeout_seconds=10)).result
+                if native:
+                    handle = await runtime.sessions.start(
+                        "session", prompt, agent=agent, principal=runtime.default_principal,
+                        idempotency_key="attachment", files=files,
+                    )
+                    result = await handle.wait_final(timeout_seconds=10)
+                    session = await persistence.session_turns.get_session("session")
+                    assert session["config_json"]["instruction_scopes"] == ["pkg"]
+                else:
+                    result = (await target.run(prompt, files=files, timeout_seconds=10)).result
+                    if session_backed:
+                        session = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
+                        assert session is not None and session.repository_instruction_scopes == ("pkg",)
                 assert result.status is ExecutionStatus.SUCCEEDED
                 assert len(requests) == 1
-                if session_backed:
-                    session = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-                    assert session is not None and session.repository_instruction_scopes == ("pkg",)
     finally:
         await store.close()
 

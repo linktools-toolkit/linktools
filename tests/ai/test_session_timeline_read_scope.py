@@ -83,6 +83,7 @@ async def test_timeline_read_scope_preserves_turns_and_authority_in_memory() -> 
 
 class _NativeAuthorization(_Authorization):
     def __init__(self, markers: list[tuple[str, object]]) -> None:
+        super().__init__("tenant")
         self.markers = markers
 
     async def authorize(self, principal, action, resource):

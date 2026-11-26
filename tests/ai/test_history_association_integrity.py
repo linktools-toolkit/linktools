@@ -46,18 +46,18 @@ async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> 
 
 
 def test_trace_order_key_is_fixed_binary_and_keeps_chronological_ties() -> None:
-    from linktools.ai.persistence._trace_event_store import _order
+    from linktools.ai.persistence._trace_event_store import trace_event_order_key
 
     older = datetime(1960, 1, 1, tzinfo=timezone.utc)
     adjacent = older + timedelta(microseconds=1)
     latest = datetime.max.replace(tzinfo=timezone.utc)
     converted = older.astimezone(timezone(timedelta(hours=8)))
     first, tied, next_time, last = (
-        _order(older, 255), _order(older, 256), _order(adjacent, 1), _order(latest, (1 << 63) - 1),
+        trace_event_order_key(older, 255), trace_event_order_key(older, 256), trace_event_order_key(adjacent, 1), trace_event_order_key(latest, (1 << 63) - 1),
     )
     assert all(len(key) == 16 for key in (first, tied, next_time, last))
     assert first < tied < next_time < last
-    assert _order(converted, 255) == first
+    assert trace_event_order_key(converted, 255) == first
 
 
 @pytest.mark.asyncio

@@ -34,12 +34,14 @@ _NAMESPACE = "recovery-ownership"
 
 def _capabilities(
     *, conversation: bool = False, native_database: Path | None = None,
+    retain_only: bool = False,
 ) -> RuntimeFeatures:
     group = RuntimeFeatures(_NAMESPACE)
-    if conversation:
+    if conversation or retain_only:
         group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    group.capability(native_checkpoint(database=native_database), scope="runtime")
-    group.capability(TraceCapability(), scope="runtime")
+    if not retain_only:
+        group.capability(native_checkpoint(database=native_database), scope="runtime")
+        group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -85,14 +87,24 @@ def _runtime_process(
             yield "owner answer"
 
         state = _storage(Path(database), phase)
-        async with Persistence.open(_NAMESPACE, storage=state) as persistence_77, Runtime.open(persistence=persistence_77, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=mode == 'session', native_database=native_database)), auto_recover=auto_recover) as runtime:
+        # Retained Conversation alone exercises a real split standalone handoff.
+        features = _capabilities(
+            conversation=mode == "session", native_database=native_database,
+            retain_only=mode == "standalone" and phase == "handoff",
+        )
+        async with (
+            Persistence.open(_NAMESPACE, storage=state) as persistence,
+            Runtime.open(persistence=persistence, features=model_features(_Models(FunctionModel(stream_function=model)), features),
+                         auto_recover=auto_recover) as runtime,
+        ):
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None
                 tenant = runtime.default_principal.tenant_id
                 execution = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
                 assert execution is not None
                 checkpoint = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
-                session = await runtime._state.conversation.sessions.get("session", tenant_id=tenant)
+                session = (await runtime._state.conversation.sessions.get("session", tenant_id=tenant)
+                           if mode == "session" else None)
                 return {
                     "handoff_phase": None if checkpoint is None or checkpoint.recovery is None else checkpoint.recovery.handoff_phase.value,
                     "active_execution_id": None if session is None else session.active_execution_id,
@@ -174,16 +186,24 @@ def _runtime_process(
 
                     backend.launch = pause_launch
                 elif phase == "pending":
-                    original_claim = runtime._state.execution.executions.claim_start
+                    if mode == "standalone":
+                        # Exercise the reserve-before-claim protocol rather than grouped admission.
+                        runtime._execution_service._runtime_bridge.prepare_reserved_start = None
+                        original_claim = backend._runtime_commands.commit_start_attempt_checkpoint
+                    else:
+                        original_claim = runtime._state.execution.executions.claim_start
 
-                    async def pause_claim(claim):
+                    async def pause_claim(claim, **kwargs):
                         nonlocal execution_id
                         execution_id = claim.execution_id
                         admitted.set()
                         await release_admission.wait()
-                        return await original_claim(claim)
+                        return await original_claim(claim, **kwargs)
 
-                    runtime._state.execution.executions.claim_start = pause_claim
+                    if mode == "standalone":
+                        backend._runtime_commands.commit_start_attempt_checkpoint = pause_claim
+                    else:
+                        runtime._state.execution.executions.claim_start = pause_claim
                 elif phase == "finalizing":
                     original_finalizing = backend._claim_session_or_recovery_finalizing
 

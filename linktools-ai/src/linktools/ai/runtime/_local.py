@@ -1656,6 +1656,13 @@ class LocalExecutionBackend:
                 owner.closed.set()
                 if parent is not None and parent.children.get(execution.execution_id) is owner:
                     parent.children.pop(execution.execution_id)
+                changed = self._pending_turns.session_changed
+                if owner.coordination is not None and execution.session_id is not None and changed is not None:
+                    # Notify after the enclosing TurnScope releases its admission lease.
+                    try:
+                        changed(execution.session_id, tenant_id=principal.tenant_id)
+                    except Exception as error:
+                        _logger.warning("Session owner release notification failed: %s", type(error).__name__)
 
     def _stop_child_workers(self, owner: _ChildWorkerScope) -> None:
         for child in tuple(owner.children.values()):

@@ -22,14 +22,21 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_lost_response_returns_frozen_input_without_rebuilding_context(tmp_path, monkeypatch):
-    async with _runtimes(tmp_path, cache=None, shared=False) as (runtimes, *_):
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, *_):
         runtime, _ = runtimes[0]
-        session = await runtime.agents.get().create_session("conversation")
+        agent = runtime.agents.get()
+        principal = runtime.default_principal
+        await agent.create_session("conversation", principal=principal)
         prompt = '{"question":"q","context_revision":1}'
-        execution = await session.start(prompt, idempotency_key="request-1")
-        await execution.wait()
+        execution = await runtime.sessions.start(
+            "conversation", prompt, agent=agent, principal=principal, idempotency_key="request-1",
+        )
+        assert (await execution.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         with pytest.raises(AIError) as conflict:
-            await session.start('{"question":"q","context_revision":2}', idempotency_key="request-1")
+            await runtime.sessions.start(
+                "conversation", '{"question":"q","context_revision":2}', agent=agent,
+                principal=principal, idempotency_key="request-1",
+            )
         assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
         async def no_write(*args, **kwargs):
@@ -40,7 +47,7 @@ async def test_lost_response_returns_frozen_input_without_rebuilding_context(tmp
             admission = await runtime.sessions.lookup_admission(
                 "conversation", principal=runtime.default_principal, idempotency_key="request-1",
             )
-            assert admission.execution_id == execution.execution_id
+            assert admission.turn_id == execution.key.turn_id
             assert admission.user_input == prompt
             assert await runtime.sessions.lookup_admission(
                 "conversation", principal=runtime.default_principal, idempotency_key="absent",
@@ -104,18 +111,22 @@ async def test_uncertain_admission_is_not_absence(tmp_path, monkeypatch, status)
 
 
 async def test_lookup_survives_persistence_reopen(tmp_path):
-    async with _runtimes(tmp_path, cache=None, shared=False) as (runtimes, *_):
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, *_):
         runtime, _ = runtimes[0]
-        session = await runtime.agents.get().create_session("conversation")
-        execution = await session.start("frozen input", idempotency_key="request")
-        await execution.wait()
-        execution_id = execution.execution_id
-    async with _runtimes(tmp_path, cache=None, shared=False) as (runtimes, *_):
+        agent = runtime.agents.get()
+        principal = runtime.default_principal
+        await agent.create_session("conversation", principal=principal)
+        execution = await runtime.sessions.start(
+            "conversation", "frozen input", agent=agent, principal=principal, idempotency_key="request",
+        )
+        assert (await execution.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        execution_id = execution.key.turn_id
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, *_):
         runtime, _ = runtimes[0]
         admission = await runtime.sessions.lookup_admission(
             "conversation", principal=runtime.default_principal, idempotency_key="request",
         )
-        assert admission.execution_id == execution_id
+        assert admission.turn_id == execution_id
         assert admission.user_input == "frozen input"
 
 

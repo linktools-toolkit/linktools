@@ -22,6 +22,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart, U
 
 from ..model.messages import decode_model_messages, encode_model_messages, project_transient_binary_content
 from ..spec import RepositoryInstructions
+from ..workspace import validate_workspace_path
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
@@ -907,6 +908,24 @@ class _PreparedSessionTerminal:
         return tuple(dict.fromkeys((self.store, self.transcript[0].store)))
 
 
+
+MAX_REMEMBERED_SCOPES = 128
+MAX_REMEMBERED_SCOPE_BYTES = 16 * 1024
+
+
+def decode_instruction_scopes(config: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    raw = config.get("instruction_scopes", [])
+    try:
+        if (not isinstance(raw, list) or len(raw) > MAX_REMEMBERED_SCOPES
+                or len(canonical_json_bytes(raw)) > MAX_REMEMBERED_SCOPE_BYTES
+                or any(not isinstance(scope, str) or validate_workspace_path(scope) != scope for scope in raw)
+                or raw != sorted(set(raw))):
+            raise ValueError("invalid remembered scope list")
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    return tuple(raw)
+
+
 class SqlSessionTurns(SqlSessionTurnReader):
     """Write authority for one tenant’s ordinary SQL sessions."""
 
@@ -1022,11 +1041,13 @@ class SqlSessionTurns(SqlSessionTurnReader):
         self, key: SessionTurnKey, *, expected_revision: int, context_from: int, context_through: int,
         request_key: str, request: JsonValue, binding: JsonValue, lease_seconds: int,
         _budget: tuple[BudgetRepository, RunBudget] | None = None,
+        _instruction_scopes: tuple[str, ...] | None = None,
     ) -> bool:
         """Claim and record a turn atomically; a uniqueness failure rolls back the claim."""
         prepared = await self._prepare_accept(
             key, expected_revision=expected_revision, context_from=context_from, context_through=context_through,
             request_key=request_key, request=request, binding=binding, lease_seconds=lease_seconds, budget=_budget,
+            instruction_scopes=_instruction_scopes,
         )
         if prepared.archive is None and prepared.budget is None:
             accepted = await self._context.run_mutation(prepared.write, domain="session.accept")
@@ -1043,6 +1064,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         self, key: SessionTurnKey, *, expected_revision: int, context_from: int, context_through: int,
         request_key: str, request: JsonValue, binding: JsonValue, lease_seconds: int,
         budget: tuple[BudgetRepository, RunBudget] | None,
+        instruction_scopes: tuple[str, ...] | None = None,
     ) -> _PreparedSessionAdmission:
         if lease_seconds < 1:
             raise ValueError("the turn lease must be positive")
@@ -1074,11 +1096,17 @@ class SqlSessionTurns(SqlSessionTurnReader):
             await archive.prepare_agent_binding(content, prepared)
             archive_write = archive, prepared
 
+        values = {"active_turn_id": turn_key["turn_id"], "revision": expected_revision + 1}
+        if instruction_scopes is not None:
+            values["config_json"] = self._context.dialect.set_json_member(
+                self._sessions.c.config_json, "instruction_scopes", list(instruction_scopes),
+            )
+
         async def write(connection: AsyncSession) -> bool:
             claim = await connection.execute(self._sessions.update().filter_by(
                 **session_key, status="open", revision=expected_revision,
                 last_turn_no=context_through, active_turn_id=None,
-            ).values(active_turn_id=turn_key["turn_id"], revision=expected_revision + 1))
+            ).values(**values))
             if claim.rowcount != 1:
                 return False
             await connection.execute(self._turns.insert().values(
@@ -1643,6 +1671,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
     async def append_instruction_frontier(
         self, key: SessionTurnKey, *, generation: int, frontier: SessionInstructionFrontier, max_bytes: int,
+        instruction_scopes: tuple[str, ...] | None = None,
     ) -> None:
         """Store a discovery from the live serialized producer before exposing it."""
         payload = frontier.to_json()
@@ -1650,6 +1679,16 @@ class SqlSessionTurns(SqlSessionTurnReader):
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
 
         async def write(connection: AsyncSession) -> None:
+            if instruction_scopes is not None:
+                # Same transaction and Session→Turn ordering as accept/finish.
+                session = await connection.execute(self._sessions.update().filter_by(
+                    **self._session_values(key.session_id), status="open",
+                    active_turn_id=self._turn_values(key)["turn_id"],
+                ).values(config_json=self._context.dialect.set_json_member(
+                    self._sessions.c.config_json, "instruction_scopes", list(instruction_scopes),
+                )))
+                if session.rowcount != 1:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
             changed = await connection.execute(self._turns.update().filter_by(
                 **self._turn_values(key), generation=generation, state="accepted",
             ).where(self._turns.c.lease_until > self._now).values(

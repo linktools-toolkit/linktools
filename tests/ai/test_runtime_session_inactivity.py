@@ -85,9 +85,12 @@ async def test_native_inactivity_observers_do_not_consume_committed_turn(
     async with _runtimes(tmp_path, cache=None, native=True) as (runtimes, entered, finish, block):
         (owner, state), (peer, _) = runtimes
         principal = owner.default_principal
-        session = await owner.agents.get().create_session("session", principal=principal)
+        agent = owner.agents.get()
+        await agent.create_session("session", principal=principal)
         block()
-        turn = await session.start("question", idempotency_key="native-pending")
+        turn = await owner.sessions.start(
+            "session", "question", agent=agent, principal=principal, idempotency_key="native-pending",
+        )
         await asyncio.wait_for(entered.wait(), 5)
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id=owner.tenant_id) is None
 

@@ -569,9 +569,21 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                             active.execution_id if active is not None else owner.execution_id)
             return None, execution_id
 
+        changed = asyncio.Event()
+
+        async def wait_for_change(delay: float) -> None:
+            passive = asyncio.timeout(delay)
+            try:
+                async with passive:
+                    await changed.wait()
+            except TimeoutError:
+                if not passive.expired():
+                    raise
+
         async def observe_inactivity() -> SessionView:
             retry_delay = 1.0
             while True:
+                changed.clear()
                 observation = asyncio.timeout(observation_timeout_seconds)
                 try:
                     async with observation:
@@ -585,7 +597,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 if view is not None:
                     return view
                 if execution_id is None:
-                    await asyncio.sleep(retry_delay)
+                    await wait_for_change(retry_delay)
                     retry_delay = min(30.0, retry_delay * 2)
                     continue
                 waiter = self._local_waiter
@@ -598,10 +610,12 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                         if not wake.expired():
                             raise
                 else:
-                    await asyncio.sleep(30)
+                    # The worker can exit before its publication/release is visible.
+                    await wait_for_change(30)
                 retry_delay = 1.0
 
         deadline = asyncio.timeout(timeout_seconds)
+        unsubscribe = self.observe_changes(session_id, changed.set)
         try:
             async with deadline:
                 view = await observe_inactivity()
@@ -612,6 +626,8 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             if not deadline.expired():
                 raise
             raise AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"scope": "session", "resource_id": session_id}) from error
+        finally:
+            unsubscribe()
 
     async def history(
         self,

@@ -33,7 +33,7 @@ def _scope(root: Path, name: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_instruction_discovery_and_sibling_fences_work_with_zero_retry_budgets(tmp_path: Path) -> None:
+async def test_instruction_discovery_and_same_step_sibling_reads_succeed_with_zero_retry_budgets(tmp_path: Path) -> None:
     scopes = tuple(f"pkg{index}" for index in range(5))
     for scope in scopes:
         _scope(tmp_path, scope)
@@ -45,9 +45,9 @@ async def test_instruction_discovery_and_sibling_fences_work_with_zero_retry_bud
         if 2 <= requests <= len(scopes) + 1:
             feedback = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
             assert len(feedback) == (2 if requests == 2 else 1)
-            assert all(part.outcome == "failed" for part in feedback)
-            assert all("Re-check the current instructions" in part.content for part in feedback)
-            assert not any(is_tool_retry(part) for part in feedback)
+            assert all(part.outcome == "success" for part in feedback)
+            assert all(f"CONTENTS-{scopes[requests - 2]}" in str(part.content) for part in feedback)
+            assert not any(is_tool_retry(part) for part in messages[-1].parts)
             for scope in scopes[:requests - 1]:
                 assert f"RULE-{scope}" in (info.instructions or "")
         if requests <= len(scopes):
@@ -75,7 +75,7 @@ async def test_instruction_discovery_and_sibling_fences_work_with_zero_retry_bud
 
 
 @pytest.mark.asyncio
-async def test_instruction_feedback_preserves_previously_consumed_ordinary_retry_budget(tmp_path: Path) -> None:
+async def test_instruction_discovery_uses_normal_per_tool_retry_budget(tmp_path: Path) -> None:
     _scope(tmp_path, "pkg")
     requests = 0
 
@@ -87,9 +87,15 @@ async def test_instruction_feedback_preserves_previously_consumed_ordinary_retry
             return ModelResponse(parts=[ToolCallPart("read_file", {"path": "pkg/file.txt"}, "discover")])
         if requests == 3:
             assert "RULE-pkg" in (info.instructions or "")
-            assert any(isinstance(part, ToolReturnPart) and part.outcome == "failed"
-                       for part in messages[-1].parts)
-        assert requests in (1, 3)
+            assert any(isinstance(part, ToolReturnPart) and part.outcome == "success"
+                       and "CONTENTS-pkg" in str(part.content) for part in messages[-1].parts)
+            assert not any(is_tool_retry(part) for part in messages[-1].parts)
+        if requests == 4:
+            # A successful invocation clears the earlier tool's retries. The
+            # next genuine failure gets exactly one retry, not an extra one.
+            assert "RULE-pkg" in (info.instructions or "")
+            assert any(is_tool_retry(part) and part.tool_call_id == "invalid-3" for part in messages[-1].parts)
+        assert requests in (1, 3, 4)
         return ModelResponse(parts=[ToolCallPart("read_file", {"path": "missing.txt"}, f"invalid-{requests}")])
 
     features = workspace_features("preserve-retry-budget", workspace=Workspace.load(tmp_path))
@@ -99,7 +105,7 @@ async def test_instruction_feedback_preserves_previously_consumed_ordinary_retry
             result = (await runtime.agents.get("reader").run("read", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.FAILED
             assert result.error_code == ErrorCode.MODEL_RESPONSE_INVALID.value
-            assert requests == 3
+            assert requests == 4
 
 
 @pytest.mark.asyncio
@@ -114,7 +120,7 @@ async def test_instruction_feedback_does_not_override_same_response_final_answer
         assert requests == 1
         assert "RULE-pkg" not in (info.instructions or "")
         return ModelResponse(parts=[
-            ToolCallPart("read_file", {"path": "pkg/file.txt"}, "blocked"),
+            ToolCallPart("read_file", {"path": "pkg/file.txt"}, "discover"),
             ToolCallPart(info.output_tools[0].name, {"answer": "same-response answer"}, "final"),
         ])
 
@@ -134,10 +140,10 @@ async def test_instruction_feedback_does_not_override_same_response_final_answer
             assert requests == 1
             stored = await persistence.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
             assert stored is not None and stored.repository_instruction_scopes == ("pkg",)
-            trace = (await execution.trace(tool_call_id="blocked")).items
-            errors = [item for item in trace if item.payload["kind"] == "TOOL_ERROR"]
-            assert len(errors) == 1 and errors[0].payload["status"] == "FAILED"
-            assert not any("CONTENTS-pkg" in str(item.payload) for item in trace)
+            trace = (await execution.trace(tool_call_id="discover")).items
+            assert [(item.payload["kind"], item.payload["status"]) for item in trace] == [
+                ("TOOL_CALL", "STARTED"), ("TOOL_RESULT", "SUCCEEDED"),
+            ]
 
 
 @pytest.mark.asyncio
@@ -213,15 +219,12 @@ async def test_reading_instruction_files_discovers_scopes_without_a_retry(tmp_pa
             return ModelResponse(parts=[
                 ToolCallPart("read_file", {"path": ["mixed/AGENTS.md", "mixed/file.txt"]}, "mixed-files"),
             ])
-        if requests == 3:
-            assert "RULE-mixed" in instructions
-            assert len(returns) == 1 and returns[0].outcome == "failed"
-            assert "CONTENTS-mixed" not in str(returns[0].content)
-            return ModelResponse(parts=[
-                ToolCallPart("read_file", {"path": "mixed/file.txt"}, "known-file"),
-            ])
-        assert requests == 4
-        assert len(returns) == 1 and "CONTENTS-mixed" in str(returns[0].content)
+        assert requests == 3
+        assert "RULE-mixed" in instructions
+        assert len(returns) == 1 and returns[0].outcome == "success"
+        assert "RULE-mixed" in str(returns[0].content)
+        assert "CONTENTS-mixed" in str(returns[0].content)
+        assert not any(is_tool_retry(part) for part in messages[-1].parts)
         return ModelResponse(parts=[TextPart("done")])
 
     features = workspace_features("instruction-read", workspace=Workspace.load(tmp_path))
@@ -230,7 +233,7 @@ async def test_reading_instruction_files_discovers_scopes_without_a_retry(tmp_pa
         async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
             result = (await runtime.agents.get("reader").run("read", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
-            assert requests == 4
+            assert requests == 3
 
 
 @pytest.mark.asyncio

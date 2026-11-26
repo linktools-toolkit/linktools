@@ -28,6 +28,7 @@ from ..model import MaterializedUserContent, StoredUserInput, native_graph_input
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.contracts import ToolOperationRecord
 from ..persistence.repositories import ToolRepositoryImpl
+from ..persistence._session_turn_sql import MAX_REMEMBERED_SCOPES, MAX_REMEMBERED_SCOPE_BYTES, decode_instruction_scopes
 from ..persistence.turns import CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
 from ..session import SessionContext, SessionTurnAdmission, project_tool_process_event
 from ..spec import RepositoryInstructions
@@ -78,6 +79,41 @@ _T = TypeVar("_T", bool, None)
 _logger = environ.get_logger(__name__)
 
 
+async def _resolve_initial_instruction_scopes(
+    resolver: RepositoryInstructionResolver | None,
+    cwd: str | None,
+    scopes: tuple[str, ...],
+    files: Sequence[Mapping[str, JsonValue]] = (),
+) -> RepositoryInstructions | None:
+    if resolver is None:
+        return None
+    documents = {}
+    for path in dict.fromkeys((cwd or ".", *scopes, *(file["path"] for file in files))):
+        resolved = await resolver.resolve(path, exclude_sources=frozenset(documents))
+        for document in resolved.documents:
+            documents.setdefault(document.source, document)
+    instructions = RepositoryInstructions(tuple(documents.values()))
+    resolver.validate(instructions)
+    return instructions
+
+
+def _merging_instruction_scopes(scopes: tuple[str, ...], instructions: RepositoryInstructions | None) -> tuple[str, ...]:
+    if instructions is None:
+        return scopes
+    merged = set(scopes)
+    byte_size = len(canonical_json_bytes(scopes))
+    for document in instructions.documents:
+        if len(merged) == MAX_REMEMBERED_SCOPES:
+            break
+        scope = document.scope
+        if scope not in merged:
+            size = len(canonical_json_bytes(scope)) + bool(merged)
+            if byte_size + size <= MAX_REMEMBERED_SCOPE_BYTES:
+                merged.add(scope)
+                byte_size += size
+    return tuple(sorted(merged))
+
+
 @dataclass(frozen=True, slots=True)
 class _AdmittedTurn:
     key: SessionTurnKey
@@ -101,6 +137,7 @@ class _AdmittedTurn:
     settled_native_subagents: bool = False
     recover_native_results: Callable[[], Awaitable[DeferredToolResults | None]] | None = None
     instruction_frontier: SessionInstructionFrontier | None = None
+    instruction_scopes: tuple[str, ...] = ()
     completed_checkpoint: bool = False
     output_retries_used: int = 0
     mode: ExecutionMode = "run"
@@ -639,7 +676,7 @@ class _RegenerableTurnRunner:
                 limits=limits, event_sink=event_sink, thinking=resolved_thinking, cwd=cwd, files=files, lineage=lineage,
                 session_context=session_context, mode=resolved_mode, planning=resolved_planning,
                 explicit_agent_binding=selected_binding is not None, budget=budget,
-                attachment_display_names=attachment_display_names,
+                attachment_display_names=attachment_display_names, instruction_scopes=decode_instruction_scopes(config),
             ):
                 return _SessionTurnStartReceipt(key.turn_id, replayed=False)
         except (IntegrityError, AIError):
@@ -1215,6 +1252,10 @@ class _RegenerableTurnRunner:
                 settled_native_subagents=settle_subagents and not completed_checkpoint,
                 recover_native_results=recover_native_results,
                 instruction_frontier=instruction_frontier,
+                instruction_scopes=_merging_instruction_scopes(
+                    decode_instruction_scopes(session["config_json"]),
+                    None if instruction_frontier is None else instruction_frontier.overlay,
+                ),
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
                 mode=mode, planning=planning, plan_store=plan_store, budget=budget,
                 split_source=split,
@@ -1272,7 +1313,7 @@ class _RegenerableTurnRunner:
         files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
         session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
         explicit_agent_binding: bool = False, budget: RunBudget | None = None,
-        attachment_display_names: tuple[str, ...] = (),
+        attachment_display_names: tuple[str, ...] = (), instruction_scopes: tuple[str, ...] = (),
     ) -> bool:
         """Return only after admission commits; a disconnected observer cannot cancel the producer."""
         if self._closed:
@@ -1287,7 +1328,7 @@ class _RegenerableTurnRunner:
                     prompt=prompt, binding=binding, context=context, thinking=thinking, cwd=cwd, files=files, lineage=lineage,
                     session_context=session_context, mode=mode, planning=planning,
                     explicit_agent_binding=explicit_agent_binding, budget=budget,
-                    attachment_display_names=attachment_display_names,
+                    attachment_display_names=attachment_display_names, instruction_scopes=instruction_scopes,
                 )
                 accepted.set_result(turn is not None)
                 if turn is not None:
@@ -1660,7 +1701,7 @@ class _RegenerableTurnRunner:
         cwd: str | None = None, files: Sequence[str] = (), lineage: tuple[SessionTurnSegment, ...] = (),
         session_context: SessionContext = "all", mode: ExecutionMode = "run", planning: bool = False,
         explicit_agent_binding: bool = False, budget: RunBudget | None = None,
-        attachment_display_names: tuple[str, ...] = (),
+        attachment_display_names: tuple[str, ...] = (), instruction_scopes: tuple[str, ...] = (),
     ) -> _AdmittedTurn | None:
         """Called by the session owner with authorized identity and execution binding."""
         native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, 1)
@@ -1684,10 +1725,6 @@ class _RegenerableTurnRunner:
         if await self.canonicalize_cwd(cwd) != cwd:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd"})
         instruction_resolver = self._resolver_for(binding)
-        repository_instructions = None
-        if instruction_resolver is not None:
-            repository_instructions = await instruction_resolver.resolve(cwd or ".")
-            instruction_resolver.validate(repository_instructions)
         frozen_binding = binding.binding_contract.to_payload()
         # A nonempty scalar owns its own text. A multipart sequence has one
         # complete typed input manifest and no duplicate text field.
@@ -1698,7 +1735,6 @@ class _RegenerableTurnRunner:
             "thinking": thinking,
             "session_metadata": dict(context.session_metadata),
             "cwd": cwd,
-            "repository_instructions": None if repository_instructions is None else repository_instructions.to_payload(),
         }
         preload_skill_inputs = await self._executor.capture_preload_skills(binding)
         if preload_skill_inputs:
@@ -1720,12 +1756,16 @@ class _RegenerableTurnRunner:
         if planning:
             request["planning"] = True
         model_prompt = None
+        repository_instructions = None
         attachments = ()
         input_size = len(text.encode("utf-8"))
         media_bytes = 0
         if not isinstance(prompt, str):
             materialized = await self._input_materializer.materialize(prompt, files)
             validate_model_inputs(binding.compiled_agent.model, materialized)
+            repository_instructions = await _resolve_initial_instruction_scopes(
+                instruction_resolver, cwd, instruction_scopes, materialized.view.get("files", ()),
+            )
             model_prompt = tuple(materialized)
             captured = self._input_materializer.capture(materialized)
             attachments = stored_input_attachment_views(captured)
@@ -1750,10 +1790,15 @@ class _RegenerableTurnRunner:
         elif files:
             materialized = await self._input_materializer.materialize(prompt, files)
             validate_model_inputs(binding.compiled_agent.model, materialized)
+            repository_instructions = await _resolve_initial_instruction_scopes(
+                instruction_resolver, cwd, instruction_scopes, materialized.view.get("files", ()),
+            )
             # The materializer prepends attachment parts and retains the text as the last item.
             # Store the text once, separately from replayable file parts.
             model_prompt = tuple(materialized)
-            detached = MaterializedUserContent(model_prompt[:-1], {"attachments": materialized.view["attachments"]})
+            detached = MaterializedUserContent(
+                model_prompt[:-1], {"version": 1, "attachments": materialized.view["attachments"]},
+            )
             captured = self._input_materializer.capture(detached)
             input_size, media_bytes = self._input_usage(text, captured, content=model_prompt[:-1])
             if input_size > _CONTEXT_BYTES:
@@ -1763,6 +1808,10 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "Attachment object storage is required")
             request["input"] = encode_domain(stored)
             attachments = stored_input_attachment_views(stored)
+        else:
+            repository_instructions = await _resolve_initial_instruction_scopes(instruction_resolver, cwd, instruction_scopes)
+        request["repository_instructions"] = None if repository_instructions is None else repository_instructions.to_payload()
+        scopes = _merging_instruction_scopes(instruction_scopes, repository_instructions)
         terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding}))
         if input_size > _CONTEXT_BYTES:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
@@ -1798,13 +1847,14 @@ class _RegenerableTurnRunner:
             key, expected_revision=revision, context_from=context_from, context_through=through,
             request_key=request_key, request=request, binding=frozen_binding, lease_seconds=_LEASE_SECONDS,
             **({} if run_budget is None else {"_budget": (run_budget.repository, budget)}),
+            **({} if scopes == instruction_scopes else {"_instruction_scopes": scopes}),
         ):
             return None
         return _AdmittedTurn(
             key, through + 1, text,
             history, terminal_bytes, revision + 1,
             repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
-            stored_input=request.get("input"),
+            stored_input=request.get("input"), instruction_scopes=scopes,
             native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
             budget=run_budget, split_source=split, preload_skill_inputs=preload_skill_inputs,
             native_subagents=native_subagents, previous_turn_interrupted=interrupted,
@@ -1885,12 +1935,11 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Detached turn input is not multipart")
         return (*detached, prompt) if prompt else tuple(detached)
 
-    def _step_instruction_boundary(
+    def _instruction_boundary(
         self, turn: _AdmittedTurn, binding: AgentBinding,
     ) -> _RepositoryInstructionBoundary | None:
-        if turn.native_step is None:
-            return None
         resolver = self._resolver_for(binding)
+        scopes = turn.instruction_scopes
         initial = turn.repository_instructions
         frontier = turn.instruction_frontier
         overlay = None if frontier is None else frontier.overlay
@@ -1903,6 +1952,7 @@ class _RegenerableTurnRunner:
             return None
 
         async def check(*, initial, overlay, tool_name, tool_call_id, arguments, path_fields):
+            nonlocal scopes
             paths = _instruction_paths(arguments, path_fields)
             if not paths:
                 return overlay
@@ -1915,10 +1965,13 @@ class _RegenerableTurnRunner:
             if discovered is None:
                 return overlay
             # Expose new instructions only after the fenced transaction commits.
+            merged = _merging_instruction_scopes(scopes, discovered)
             await self._store.append_instruction_frontier(
                 turn.key, generation=turn.generation, max_bytes=turn.terminal_bytes,
                 frontier=SessionInstructionFrontier(discovered),
+                instruction_scopes=None if merged == scopes else merged,
             )
+            scopes = merged
             return discovered
 
         return _RepositoryInstructionBoundary(check, initial, overlay)
@@ -1976,7 +2029,7 @@ class _RegenerableTurnRunner:
                 output = reply_from_turn(messages, structured=structured)
                 binding.output_binding.validate_payload(output)
             else:
-                repository_boundary = self._step_instruction_boundary(turn, binding)
+                repository_boundary = self._instruction_boundary(turn, binding)
                 native_subagents = nullcontext()
                 if turn.native_subagents or turn.recover_native_results is not None:
                     if self._prepare_subagents is None:

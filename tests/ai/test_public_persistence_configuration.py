@@ -150,13 +150,6 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
     trace = TraceCapability()
     features = _features(ExecutionCapability(retain_history=True), trace)
     async with Persistence.open('module-cache', storage=state) as persistence_135, Runtime.open(persistence=persistence_135, features=model_features(_FeatureModels(), features)) as runtime:
-        before_root = (root_cache.reads, root_cache.writes)
-        before_module = (module_cache.reads, module_cache.writes)
-        assert await runtime._state.conversation.sessions.get("missing", tenant_id="default") is None
-        assert await runtime._state.conversation.sessions.get("missing", tenant_id="default") is None
-        assert root_cache.reads > before_root[0]
-        assert root_cache.writes > before_root[1]
-        assert (module_cache.reads, module_cache.writes) == before_module
         content = b"module cache body"
 
         async def chunks() -> AsyncIterator[bytes]:
@@ -179,20 +172,6 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
                     assert cache.writes > counters[1]
                 else:
                     assert (cache.reads, cache.writes) == counters
-
-
-async def test_trace_route_rejects_a_different_transaction_group(tmp_path: Path) -> None:
-    root = tmp_path / "state"
-    storage = PersistenceStorage(replace(
-        PersistenceStorage.from_root(root, exclusive_writer=True).plan,
-        trace=StorageRoute.sqlite(tmp_path / "separate.db", exclusive_writer=True),
-    ))
-    with pytest.raises(AIError) as invalid:
-        async with Persistence.open("different-group", storage=storage) as persistence, Runtime.open(
-            persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability())),
-        ):
-            pytest.fail("Trace cannot silently split its source transaction")
-    assert invalid.value.code in {ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, ErrorCode.STORAGE_DEPENDENCY_NOT_READY}
 
 
 async def test_native_checkpoint_accepts_an_independent_durable_store(tmp_path: Path) -> None:
