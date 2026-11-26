@@ -140,7 +140,11 @@ async def test_native_parent_approves_exact_child_without_shadow_execution(
                 assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.CANCELLED
             except (AIError, TimeoutError) as error:
                 detail = error.code.value if isinstance(error, AIError) else type(error).__name__
-                raise AssertionError(f"{phase}: {detail}") from error
+                parent = await state.session_turns.get_turn(turn.key)
+                current = await child_parked()
+                parent_status = None if parent is None else (parent["state"], parent["generation"])
+                child_status = None if current is None else (current.status.value, current.producer_generation)
+                raise AssertionError(f"{phase}: {detail} (parent={parent_status}, child={child_status})") from error
             finally:
                 continue_resume.set()
                 [decided] = await asyncio.gather(approval_task, return_exceptions=True)
@@ -150,6 +154,9 @@ async def test_native_parent_approves_exact_child_without_shadow_execution(
             assert decided.approval_id == pending.approval_id and decided.decision is ApprovalDecision.APPROVE
             assert len(parent_models) == len(child_models) == 1
             assert child_entries == [child_id] and not child_effects and not returned_ids
+            current = await child_parked()
+            assert current.status is ExecutionStatus.CANCELLED
+            assert current.agent_run_seq == parked.agent_run_seq
         else:
             decided = await runtime.approvals.decide(child_id, request)
             assert decided.approval_id == pending.approval_id and decided.decision is ApprovalDecision.APPROVE

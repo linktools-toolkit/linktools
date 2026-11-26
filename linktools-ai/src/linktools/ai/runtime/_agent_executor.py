@@ -421,7 +421,7 @@ class AgentExecutor:
             ("subagents", compiled.selected_subagents and (
                 not native_subagents or not canonical_step or split_step
             )),
-            ("checkpoints", policy.restart_checkpoints != canonical_step),
+            ("checkpoints", (policy.session.checkpoints or policy.restart_checkpoints) != canonical_step),
             ("trace", policy.durable_trace != canonical_trace),
             ("tool_response_fixture", policy.tool_responses is not None),
         ) if selected]

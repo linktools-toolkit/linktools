@@ -312,8 +312,18 @@ async def compose_runtime_components(
         default_step_store = None
         resource_lock = asyncio.Lock()
 
-        async def prepare_runtime_policy(selected_policy: _RuntimeFeaturePolicy):
+        async def open_default_steps():
             nonlocal default_step_store
+            if default_step_store is None:
+                default_step_store = await persistence.create_step_store()
+                lifecycle.step_store_cleanup = default_step_store.close
+            return default_step_store
+
+        async def prepare_session_step():
+            async with resource_lock:
+                return StepPersistenceCapability().bind(await open_default_steps())
+
+        async def prepare_runtime_policy(selected_policy: _RuntimeFeaturePolicy):
             values = selected_policy.capabilities
             async with resource_lock:
                 for identity in selected_policy.capability_ids:
@@ -327,10 +337,7 @@ async def compose_runtime_components(
                 if declaration is not None:
                     store = declaration.store
                     if store is None:
-                        if default_step_store is None:
-                            default_step_store = await persistence.create_step_store()
-                            lifecycle.step_store_cleanup = default_step_store.close
-                        store = default_step_store
+                        store = await open_default_steps()
                     native = declaration.bind(store)
 
                     def bind_steps(value):
@@ -446,6 +453,7 @@ async def compose_runtime_components(
             current_agent=current_agent,
             current_compiler=current_compiler,
             prepare_runtime_capabilities=prepare_runtime_capabilities,
+            prepare_session_step=prepare_session_step,
             current_policy=current_policy,
             runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
@@ -612,6 +620,7 @@ async def _build_local_components(
     current_agent: Callable[[CompiledAgent], Awaitable[CompiledAgent]],
     current_compiler: Callable[[], Awaitable[AgentCompiler]],
     prepare_runtime_capabilities: Callable[[CompiledAgent], Awaitable[Sequence[AbstractCapability[AgentContext[AppT]]]]],
+    prepare_session_step: Callable[[], Awaitable[StepPersistence]],
     current_policy: Callable[[], Awaitable[_RuntimeFeaturePolicy]],
     runtime_capabilities: Sequence[AbstractCapability[AgentContext[AppT]]],
     asset_sources: Mapping[str, AssetStoreReader],
@@ -897,12 +906,22 @@ async def _build_local_components(
             from ._tool import RuntimeToolOperationBridge
 
             policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
-            if not policy.restart_checkpoints:
-                return None
-            values = await prepare_runtime_capabilities(binding.compiled_agent)
-            steps = tuple(leaf for value in values for leaf in runtime_feature_leaves(value)
-                          if isinstance(leaf, StepPersistence))
-            native = AtomicStepPersistence.adapt(steps[0]) if len(steps) == 1 else None
+            if policy.session.checkpoints:
+                if settled_split or any(member.storage_group is not conversation_group for member in (
+                    state.execution.executions.state_store, state.checkpoint.tools.state_store,
+                )):
+                    raise AIError(
+                        ErrorCode.STORAGE_CAPABILITY_MISSING,
+                        "Session checkpoints require Session, Step and tool receipts in one SQL transaction",
+                    )
+                native = await prepare_session_step()
+            else:
+                if not policy.restart_checkpoints:
+                    return None
+                values = await prepare_runtime_capabilities(binding.compiled_agent)
+                steps = tuple(leaf for value in values for leaf in runtime_feature_leaves(value)
+                              if isinstance(leaf, StepPersistence))
+                native = AtomicStepPersistence.adapt(steps[0]) if len(steps) == 1 else None
             if (type(native) is not AtomicStepPersistence or type(native.store) is not SqlStepStore
                     or native.store.store_key != SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical Step requires native SQL persistence")
@@ -1226,8 +1245,11 @@ async def _build_local_components(
 
             execution._recover_undispatched_graph_turn = recover_undispatched_graph_turn
         async def require_session_available() -> None:
-            if not (await current_policy()).session.enabled:
+            session_policy = (await current_policy()).session
+            if not session_policy.enabled:
                 raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
+            if session_policy.checkpoints and turn_runner is None:
+                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, "Session checkpoints require native SQL sessions")
 
         if (repository := state.conversation.sessions) is not None:
             session = RuntimeSessionService(

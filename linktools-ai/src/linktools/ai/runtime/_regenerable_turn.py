@@ -1037,6 +1037,9 @@ class _RegenerableTurnRunner:
                 native_step = await self._prepare_step(binding, key, generation + 1, settled_split=True)
             else:
                 binding = await resolver.restore(contract)
+                session_policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions).session
+                if session_policy.checkpoints != request.get("session_checkpoints", False):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted session checkpoint policy changed")
                 native_step = None if self._prepare_step is None else await self._prepare_step(binding, key, generation + 1)
             split = (native_step[0].store._canonical_split_source
                      if native_step is not None and isinstance(native_step[0].store, RuntimeStepStore) else None)
@@ -1761,6 +1764,8 @@ class _RegenerableTurnRunner:
             request["trace"] = True
         if split is not None:
             request["split_step"] = True
+        if _runtime_feature_policy(binding.compiled_agent.runtime_contributions).session.checkpoints:
+            request["session_checkpoints"] = True
         if run_budget is not None:
             request["budgeted"] = True
         if explicit_agent_binding:

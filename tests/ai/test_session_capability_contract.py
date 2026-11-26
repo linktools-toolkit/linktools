@@ -13,7 +13,8 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistencePlan, PersistenceStorage
+from linktools.ai.storage import StorageRoute
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -46,6 +47,11 @@ async def test_default_session_owner_and_explicit_replacement_work_without_conve
         result = await turn.wait_final(timeout_seconds=5)
         assert result.view['output'] == {'text': 'answer'}
         assert (await runtime.sessions.get("session", principal=runtime.default_principal)).session_id == 'session'
+        steps = await persistence_36.create_step_store()
+        try:
+            assert await steps.latest_snapshot(run_id=turn.key.turn_id) is None
+        finally:
+            await steps.close()
 
 
 @pytest.mark.asyncio
@@ -125,3 +131,63 @@ async def test_disabling_session_owner_blocks_existing_session_read_and_resume(t
         with pytest.raises(AIError) as unavailable:
             await runtime.agents.get().session('existing').start('question')
         assert unavailable.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
+
+
+
+@pytest.mark.asyncio
+async def test_session_checkpoints_do_not_enable_step_for_standalone_execution(tmp_path):
+    features = model_features(_models(), _features(SessionCapability(checkpoints=True)))
+    async with (
+        Persistence.open('owner-contract', storage=PersistenceStorage.sqlite(tmp_path / 'state.db')) as state,
+        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
+    ):
+        agent = runtime.agents.get()
+        session = await agent.create_session('session')
+        turn = await agent.start('session question', session_id=session.session_id)
+        assert (await turn.wait_final(timeout_seconds=5)).view['output'] == {'text': 'answer'}
+
+        steps = await state.create_step_store()
+        try:
+            checkpoint = await steps.latest_snapshot(run_id=turn.key.turn_id)
+            assert checkpoint is not None and checkpoint.state == 'complete'
+        finally:
+            await steps.close()
+
+        execution = await agent.start('independent question')
+        assert (await execution.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
+        record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        assert record is not None and not record.restart_checkpoints
+
+
+@pytest.mark.asyncio
+async def test_session_checkpoints_reject_split_sql_before_claiming_a_turn(tmp_path):
+    execution = StorageRoute.sqlite(tmp_path / 'execution.db')
+    conversation = StorageRoute.sqlite(tmp_path / 'conversation.db')
+    storage = PersistenceStorage(PersistencePlan(conversation=conversation, execution=execution, checkpoint=execution))
+    features = model_features(_models(), _features(SessionCapability(checkpoints=True)))
+    async with Runtime.open('owner-contract', storage=storage, features=features,
+                            authorization=_HostAuthorization()) as runtime:
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session('session', principal=principal)
+        before = await runtime.history.turn_session('session', principal=principal)
+        assert before['session']['active_turn_id'] is None
+        assert before['timeline']['items'] == []
+        with pytest.raises(AIError) as unsupported:
+            await runtime.sessions.start_turn(
+                'session', 'question', agent='default', principal=principal, idempotency_key='send',
+            )
+        assert unsupported.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+        assert await runtime.history.turn_session('session', principal=principal) == before
+
+
+@pytest.mark.asyncio
+async def test_session_checkpoints_reject_memory_without_disabling_standalone_execution():
+    features = model_features(_models(), _features(SessionCapability(checkpoints=True)))
+    async with Runtime.open('owner-contract', storage=PersistenceStorage.in_memory(), features=features,
+                            authorization=_HostAuthorization()) as runtime:
+        agent = runtime.agents.get()
+        with pytest.raises(AIError) as unsupported:
+            await agent.create_session('session')
+        assert unsupported.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+        execution = await agent.start('independent question')
+        assert (await execution.wait(timeout_seconds=5)).result.output == {'text': 'answer'}

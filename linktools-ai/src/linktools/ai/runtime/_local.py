@@ -3056,16 +3056,21 @@ class LocalExecutionBackend:
             )
             return CancelEffectOutcome.CONFIRMED
         link = None if current is None else await self._graph_cancel_link(current)
+
+        def has_parked_stop(record: ExecutionRecord | None) -> bool:
+            if record is None or record.status is not ExecutionStatus.CANCELLING:
+                return False
+            parent = self._native_parents.get(record.parent_execution_id)
+            return (parent is not None and parent.stopping
+                    and parent.parked_cancels.get(record.execution_id) == (record.revision, record.producer_generation))
+
         task = self._tasks.get(execution.execution_id)
         if task is None:
             if link is not None:
                 # A remote immutable cancel intent does not prove worker effects
                 # settled. Never let the generic manager write a standalone terminal.
                 return CancelEffectOutcome.UNKNOWN
-            parent = None if current is None else self._native_parents.get(current.parent_execution_id)
-            parked = (current is not None and parent is not None and parent.stopping
-                      and parent.parked_cancels.get(current.execution_id) == (current.revision, current.producer_generation))
-            return await self._confirm_cancel_effects(current, force=force, parked_cancel_committed=parked)
+            return await self._confirm_cancel_effects(current, force=force, parked_cancel_committed=has_parked_stop(current))
         scope = self._handoff_scopes.get(execution.execution_id)
         if scope is not None:
             scope.cancel_tools()
@@ -3080,7 +3085,12 @@ class LocalExecutionBackend:
                     if current is not None and current.status in {
                         ExecutionStatus.CANCELLED, ExecutionStatus.FAILED, ExecutionStatus.SUCCEEDED,
                     } else CancelEffectOutcome.UNKNOWN)
-        return await self._confirm_cancel_effects(current, force=force, producer_drained=True)
+        # A parked worker can still be unwinding after the initial WAITING
+        # commit. The precise Stop receipt remains valid only if the same
+        # cancelling revision/generation is still present after the drain.
+        return await self._confirm_cancel_effects(
+            current, force=force, producer_drained=True, parked_cancel_committed=has_parked_stop(current),
+        )
 
     async def _confirm_cancel_effects(
         self,
