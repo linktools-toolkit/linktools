@@ -380,8 +380,8 @@ async def test_runtime_selects_source_authority_before_sync_execution_reservatio
     cache = _BorrowedCache()
     async with _opened("sqlite", tmp_path, cache) as state:
         async with Runtime.open(persistence=state, features=features) as runtime:
-            session = await runtime.agents.get().create_session("session")
-            starting = asyncio.create_task(session.start("question", idempotency_key="request"))
+            agent = runtime.agents.get()
+            starting = asyncio.create_task(agent.start("question", idempotency_key="request"))
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 admitted = observed["result"]
@@ -449,12 +449,6 @@ async def test_failed_host_binding_does_not_admit_runtime_or_close_borrowed_cach
     assert unbound.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
 
 
-async def _create_scoped_owner(state):
-    from .test_session_timeline_storage import _session
-
-    await state.conversation.sessions.create(_session())
-
-
 @pytest.mark.parametrize("layout", ("one_group", "side_group", "capability_group", "memory", "custom"))
 async def test_builtin_turn_authority_requires_one_durable_source_at_composition(tmp_path, layout):
     from linktools.ai.persistence import StateTurnResources
@@ -481,9 +475,8 @@ async def test_builtin_turn_authority_requires_one_durable_source_at_composition
         assert bound._coowned is (layout in {"one_group", "custom"})
         with pytest.raises(AttributeError):
             bound._coowned = not bound._coowned
-        await _create_scoped_owner(state)
         claim = await bound.claim_turn(
-            scope, session_key="session:session", request_key="a" * 64,
+            scope, session_key="request:" + "a" * 64, request_key="a" * 64,
             request_digest="b" * 64, execution_id="execution",
             owner_id="c" * 32, lease_seconds=60,
         )
@@ -502,33 +495,46 @@ async def test_builtin_can_read_active_turn_from_another_host_on_same_topology(t
     resource = PersistenceStorage.sqlite(path, coordination=StateTurnResources())
     custom = PersistenceStorage.sqlite(path, coordination=CustomStateTurns())
     async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=resource) as original:
-        await _create_scoped_owner(original)
         authority = original.coordination_backend
         reserved = await authority.claim_turn(
-            scope, session_key="session:session", request_key="a" * 64,
+            scope, session_key="request:" + "a" * 64, request_key="a" * 64,
             request_digest="b" * 64, execution_id="execution",
             owner_id="c" * 32, lease_seconds=60,
         )
         async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom, read_only=True) as observer:
             assert observer.coordination_backend._coowned
-            active = await observer.coordination_backend.read_turn_by_session(scope, "session:session")
+            active = await observer.coordination_backend.read_turn_by_session(scope, "request:" + "a" * 64)
             assert active == replace(reserved, lease=None)
         assert await authority.release_turn(reserved.lease)
     async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=custom) as after:
         assert after.coordination_backend._coowned
 
 
-@pytest.mark.parametrize("family", ("session", "standalone"))
-async def test_builtin_active_private_shell_restores_through_default_composition(tmp_path, family):
+async def test_builtin_execution_authority_cannot_claim_an_ordinary_sql_session(tmp_path):
+    from linktools.ai.persistence import StateTurnResources
+
+    scope = TurnScopeIdentity("default-shell-snapshot", "tenant", "runtime-pending-turn")
+    storage = PersistenceStorage.from_root(tmp_path / "source", coordination=StateTurnResources())
+    async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=storage) as state:
+        await state.session_turns.create("session", config={})
+        with pytest.raises(AIError) as rejected:
+            await state.coordination_backend.claim_turn(
+                scope, session_key="session:session", request_key="a" * 64, request_digest="b" * 64,
+                execution_id="hidden-shell", owner_id="c" * 32, lease_seconds=120,
+            )
+        assert rejected.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+        assert await state.coordination_backend.read_turn(scope, "hidden-shell") is None
+        assert (await state.session_turns.get_session("session"))["active_turn_id"] is None
+
+
+async def test_builtin_active_private_shell_restores_through_default_composition(tmp_path):
     from linktools.ai.persistence import StateTurnResources
 
     archive = InMemoryObjectStore()
     scope = TurnScopeIdentity("default-shell-snapshot", "tenant", "runtime-pending-turn")
-    session_key = "session:session" if family == "session" else "request:" + "a" * 64
+    session_key = "request:" + "a" * 64
     source = PersistenceStorage.from_root(tmp_path / "source", coordination=StateTurnResources())
     async with Persistence.open(scope.namespace, tenant_id=scope.tenant_id, storage=source) as state:
-        if family == "session":
-            await _create_scoped_owner(state)
         claim = await state.coordination_backend.claim_turn(
             scope, session_key=session_key, request_key="a" * 64, request_digest="b" * 64,
             execution_id="hidden-shell", owner_id="c" * 32, lease_seconds=120,
@@ -544,13 +550,11 @@ async def test_builtin_active_private_shell_restores_through_default_composition
         assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
         assert await state.coordination_backend.read_turn(scope, "hidden-shell") is None
         assert not await state.coordination_backend.release_turn(claim.lease)
-        successor = "next-shell" if family == "session" else "hidden-shell"
         takeover = await state.coordination_backend.claim_turn(
             scope, session_key=session_key, request_key="a" * 64, request_digest="b" * 64,
-            execution_id=successor, owner_id="d" * 32, lease_seconds=120,
+            execution_id="hidden-shell", owner_id="d" * 32, lease_seconds=120,
         )
         assert takeover is not None and takeover.lease is not None
         assert takeover.lease.fence == claim.lease.fence + 1
         assert await state.execution.executions.get("hidden-shell", tenant_id=scope.tenant_id) is None
-        assert await state.execution.executions.get(successor, tenant_id=scope.tenant_id) is None
         assert await state.coordination_backend.release_turn(takeover.lease)
