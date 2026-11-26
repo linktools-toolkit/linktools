@@ -132,6 +132,7 @@ from ._compaction import CompactionPolicy
 from ..inputs import CanonicalUserInput
 from ..observe.journal import ModelRequestJournal
 from pydantic_ai_harness.memory import MemoryStore
+from pydantic_ai_harness.step_persistence import StepPersistence
 from ._metric_capability import ModelObservationCapability
 from ..capability.planning import PlanningStore
 from ._harness import (
@@ -139,6 +140,7 @@ from ._harness import (
     FallbackProviderModel,
 )
 from ..capability.steps import AtomicStepPersistence, StepBoundaryCapabilities
+from ..persistence.capabilities import CapabilityPersistence
 from ..model.messages import without_history_system_prompts
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
@@ -904,18 +906,32 @@ class AgentExecutor:
                         agent_run_id=scope.agent_run_id,
                         next_model_request_seq=interaction_high_water + 1,
                     )
-                    if scope.canonical_step is not None:
-                        runtime_capabilities = (*(
-                            capability for capability in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
-                            if (type(capability) in (ExecutionCapability, FileSystemCapability)
-                                or type(capability) is TraceCapability and scope.stage_session_trace)
-                        ), scope.canonical_step)
-                    elif scope.regenerable:
+                    if scope.regenerable or scope.canonical_step is not None:
+                        def select_session_capability(
+                            capability: AbstractCapability[AgentContext[object]],
+                        ) -> AbstractCapability[AgentContext[object]] | None:
+                            if isinstance(capability, (StepPersistence, StepPersistenceCapability, CapabilityPersistence)):
+                                # A native Session uses its own checkpoint and cannot lend an
+                                # independent Execution's durable capability-write authority.
+                                return None
+                            if isinstance(capability, TraceCapability) and not scope.stage_session_trace:
+                                return None
+                            if isinstance(capability, WrapperCapability):
+                                wrapped = capability.wrapped.visit_and_replace(select_session_capability)
+                                if wrapped is None:
+                                    return None
+                                if wrapped is not capability.wrapped:
+                                    rebound = copy(capability)
+                                    rebound.wrapped = wrapped
+                                    return rebound
+                            return capability
+
                         runtime_capabilities = tuple(
-                            capability for capability in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
-                            if (type(capability) in (ExecutionCapability, FileSystemCapability, StepPersistenceCapability)
-                                or type(capability) is TraceCapability and scope.stage_session_trace)
+                            selected for template in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
+                            if (selected := template.visit_and_replace(select_session_capability)) is not None
                         )
+                        if scope.canonical_step is not None:
+                            runtime_capabilities = (*runtime_capabilities, scope.canonical_step)
                     else:
                         runtime_capabilities = (self._runtime_capabilities if self._prepare_runtime_capabilities is None
                                                 else await self._prepare_runtime_capabilities(compiled_agent))

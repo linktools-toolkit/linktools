@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability
+from linktools.ai.capability import ExecutionCapability, SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -24,8 +24,9 @@ class _SessionAuthorization(TenantAuthorizationPolicy):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoints", (False, True))
 @pytest.mark.parametrize("selection", ("primary", "secondary", "alias", "producer", "replaced", "compaction_replaced"))
-async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, selection):
+async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, selection, checkpoints):
     def model(name, fail=False):
         async def respond(messages, info):
             if fail:
@@ -76,6 +77,7 @@ async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, select
         result.model("default", _Binding(first))
         for index, capability in enumerate(capabilities):
             result.capability(capability, id=f"identity-{index}")
+        result.capability(SessionCapability(checkpoints=checkpoints))
         result.capability(ExecutionCapability(retain_history=True))
         return result
 
