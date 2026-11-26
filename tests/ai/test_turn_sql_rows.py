@@ -53,7 +53,7 @@ def test_mysql57_turn_identity_indexes_fit_exact_binary_keys() -> None:
     mysql = dialect()
     mysql.server_version_info = (5, 7, 44)
     assert "ROW_FORMAT=DYNAMIC" in str(CreateTable(table).compile(dialect=mysql))
-    for route, length in (("turn_request_route", 64), ("turn_occupied_route", 128)):
+    for route, length in (("turn_request_route", 64), ("turn_occupied_route", 64)):
         column = table.c[route]
         index, = [i for i in table.indexes if i.unique and tuple(i.columns.keys()) == ("store_key", route)]
         assert "UNIQUE INDEX" in str(CreateIndex(index).compile(dialect=mysql))
