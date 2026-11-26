@@ -823,6 +823,7 @@ class _PreparedSessionTerminal:
     write: Callable[[AsyncSession], Awaitable[bool]]
     store: StateStore | None
     transcript: tuple[ContentArchive, PreparedArchive, NativeMessageRoot] | None
+    result: JsonValue
     publish_transcript: bool = True
 
     @property
@@ -1139,7 +1140,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
                 )
             return True
 
-        return _PreparedSessionTerminal(write, store, body, publish_transcript=_graph_trace_suffix is None)
+        return _PreparedSessionTerminal(write, store, body, result, publish_transcript=_graph_trace_suffix is None)
 
     async def _finish_in_group(
         self, transaction: StateGroupTransaction, prepared: _PreparedSessionTerminal,

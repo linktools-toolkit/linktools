@@ -126,7 +126,10 @@ def rekey_ordinary_messages(
 
     def move(row: dict[str, object]) -> dict[str, object]:
         request = row["request_json"]
-        reference = decode_session_input_reference(request, row["turn_id"].decode("utf-8"))
+        turn_id = row["turn_id"]
+        if isinstance(turn_id, bytes):
+            turn_id = turn_id.decode("utf-8")
+        reference = decode_session_input_reference(request, turn_id)
         if reference is not None:
             row = {**row, "request_json": {
                 **request, "input": replace(reference, root=rekey(reference.root)).to_json(),

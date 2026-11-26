@@ -50,18 +50,9 @@ class Session(Generic[AppT]):
             self.session_id, principal=self.principal if principal is None else principal,
         )
 
-    def _native_reader(self, principal: Principal) -> "_NativeSession[AppT, _NativeTurnResult] | None":
-        sessions = self._runtime.sessions
-        if not sessions.supports_turn_sessions:
-            return None
-        return sessions._bind_native_session(self.session_id, principal=principal, local_workspace=False)
-
     def watch(self, *, principal: Principal | None = None) -> "AsyncIterator[SessionView] | AsyncIterator[_SessionOccupancy]":
         """Observe occupancy changes made by this Runtime without polling."""
         actor = self.principal if principal is None else principal
-        native = self._native_reader(actor)
-        if native is not None:
-            return native.watch()
         return self._runtime.sessions.watch(self.session_id, principal=actor)
 
     def _definition(self) -> "Agent[AppT]":
@@ -174,9 +165,6 @@ class Session(Generic[AppT]):
         limit: int = 100,
     ) -> "Page[SessionHistoryItem] | dict[str, JsonValue]":
         actor = self._runtime._resolve_principal(principal or self._principal)
-        native = self._native_reader(actor)
-        if native is not None:
-            return await native.history(cursor=cursor, limit=limit)
         return await self._runtime.sessions.history(
             self.session_id,
             principal=actor,
@@ -192,9 +180,6 @@ class Session(Generic[AppT]):
         limit: int = 100,
     ) -> "Page[SessionTurn] | dict[str, JsonValue]":
         actor = self._runtime._resolve_principal(principal or self._principal)
-        native = self._native_reader(actor)
-        if native is not None:
-            return await native.timeline(cursor=cursor, limit=limit)
         return await self._runtime.sessions.timeline(
             self.session_id,
             principal=actor,

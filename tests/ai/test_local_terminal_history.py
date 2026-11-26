@@ -125,7 +125,10 @@ async def test_local_runtime_retains_terminal_model_history(
             params = {'session_id': 'session', 'turn_id': identity}
             turn_response = await http.get('/api/session', params=params)
             assert turn_response.status_code == 200, turn_response.text
-            assert turn_response.json()['output'] == {'text': 'done'}
+            published = turn_response.json()
+            assert published['conversation_committed']
+            assert [item['content'] for item in published['items'] if item['item_kind'] == 'assistant'] == ['done']
+            assert 'output' not in published
             trace = await http.get('/api/session', params={**params, 'trace': 'true'})
             assert trace.status_code == 200 and trace.json()['items']
         else:

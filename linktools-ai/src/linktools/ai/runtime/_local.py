@@ -18,6 +18,7 @@ from linktools.core import environ
 from ..steps import NativeStepSource
 from pydantic import ValidationError
 from pydantic_ai.messages import (
+    BinaryContent,
     ModelMessage,
     ModelRequest,
     ToolCallPart,
@@ -112,7 +113,7 @@ from ..observe.service import (
     record_storage_operation,
     release_metric_execution_context,
 )
-from ..model.messages import encode_model_messages, freeze_model_messages, project_transient_binary_content
+from ..model.messages import encode_model_messages
 from ..execution import ExecutionInputContext
 from pydantic_ai_harness.memory import MemoryStore
 from ..memory import PersistentMemoryStore
@@ -6549,12 +6550,23 @@ class LocalExecutionBackend:
             elif current.restart_checkpoints and status is ExecutionStatus.SUCCEEDED:
                 assert step_alias is not None
                 step_run, root, recorded = step_alias
-                if (trace_run_id != step_run or trace_messages is None
-                        or freeze_model_messages(project_transient_binary_content(freeze_model_messages(trace_messages)))
-                        != tuple(recorded) or root.count != len(recorded)):
-                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 prefix = len(turn.history)
-                step_suffix = (root.slice(prefix, root.count), tuple(recorded[prefix:]))
+                prompt = turn.model_prompt
+                media = prompt is not None and not isinstance(prompt, str) and any(
+                    isinstance(item, BinaryContent) for item in prompt
+                )
+                if (trace_run_id != step_run or trace_messages is None or root.count != len(recorded)
+                        or root.count <= prefix or (not media and tuple(trace_messages) != tuple(recorded))):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                # The complete Step owns the context projection; its consumed
+                # attachments need not match the live provider representation.
+                # Grouped settlement verifies the exact root and terminal output.
+                recorded_suffix = tuple(recorded[prefix:])
+                if output_ref is not None:
+                    from ..model.messages import canonical_structured_output_reference
+
+                    output_ref = canonical_structured_output_reference(recorded_suffix)
+                step_suffix = (root.slice(prefix, root.count), recorded_suffix)
             async with self._audit_lock(current.execution_id):
                 owner = self._turn_owners.get(current.execution_id)
                 if owner is None or owner.producer_generation != producer_generation:

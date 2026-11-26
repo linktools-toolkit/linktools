@@ -1255,7 +1255,7 @@ The send does not wait for completion. Keep the real turn ID to read its
 status or invoke an explicit cancel/recovery. Agent selection belongs to each
 turn, and application ownership belongs to the host's authorization policy.
 
-### Definition-bound Session API
+### Non-SQL definition-bound sessions
 
 Session metadata and a first turn are available through the default Session capability.
 An unretained completed turn makes its Session context unavailable for later

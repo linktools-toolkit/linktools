@@ -2552,7 +2552,7 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         "native_messages": ordered_unique(list(native_messages.values())),
         "objects": ordered_unique(normalized_objects),
         **({"ordinary_sessions": {section: ordered_unique(rows)
-                                  for section, rows in manifest["ordinary_sessions"].items()}}
+                                  for section, rows in rekey_ordinary_messages(manifest["ordinary_sessions"], groups).items()}}
            if "ordinary_sessions" in manifest else {}),
     })
 

@@ -41,6 +41,10 @@ def decode_session_transcript_root(result: object) -> NativeMessageRoot:
         fields.add("graph_trace_suffix")
         if result["graph_trace_suffix"] is not True or result.get("binding_refs") != []:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid raw Graph transcript reference")
+        if "graph_step_source" in result:
+            fields.add("graph_step_source")
+            if result["graph_step_source"] is not True:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid Graph Step transcript reference")
     if not fields <= result.keys() <= fields | {"usage"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session transcript reference")
     if "usage" in result:

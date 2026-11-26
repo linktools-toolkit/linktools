@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from ._regenerable_turn import _RegenerableTurnRunner, _SessionTurnStartReceipt
     from ._agent_executor import AgentEmission
     from ._native_session import _NativeSession, _NativeSessionTurn, _NativeTurnRead, _NativeTurnResult
+    from .turn_clients import _SessionOccupancy
 
 AppT = TypeVar("AppT")
 
@@ -681,9 +682,13 @@ class RuntimeSessions(Generic[AppT]):
         self._ensure_open()
         self._service.invalidate(session_id)
 
-    def watch(self, session_id: str, *, principal: Principal) -> AsyncIterator[SessionView]:
-        """Observe this Runtime's session changes; external writes need explicit refresh."""
+    def watch(
+        self, session_id: str, *, principal: Principal,
+    ) -> "AsyncIterator[SessionView] | AsyncIterator[_SessionOccupancy]":
+        """Observe the configured session owner's local occupancy changes."""
         self._ensure_open()
+        if self.supports_turn_sessions:
+            return self._bind_native_session(session_id, principal=principal, local_workspace=False).watch()
         return self._service.watch(session_id, principal=principal)
 
     async def lookup_admission(
@@ -734,6 +739,7 @@ class RuntimeSessions(Generic[AppT]):
 
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()
+        self._require_agent_session()
         return await self._service.reconcile(session_id, principal=principal)
 
     async def wait_inactive(
@@ -755,10 +761,22 @@ class RuntimeSessions(Generic[AppT]):
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
         return await self._service.list(request)
 
-    async def history(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100) -> Page[SessionHistoryItem]:
+    async def history(
+        self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
+    ) -> "Page[SessionHistoryItem] | dict[str, JsonValue]":
+        if self.supports_turn_sessions:
+            return await self._bind_native_session(session_id, principal=principal, local_workspace=False).history(
+                cursor=cursor, limit=limit,
+            )
         return await self._service.history(session_id, principal=principal, cursor=cursor, limit=limit)
 
-    async def timeline(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100) -> Page[SessionTurn]:
+    async def timeline(
+        self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
+    ) -> "Page[SessionTurn] | dict[str, JsonValue]":
+        if self.supports_turn_sessions:
+            return await self._bind_native_session(session_id, principal=principal, local_workspace=False).timeline(
+                cursor=cursor, limit=limit,
+            )
         return await self._service.timeline(session_id, principal=principal, cursor=cursor, limit=limit)
 
     async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> "Session[AppT]":

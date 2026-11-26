@@ -4951,16 +4951,7 @@ class StateCommands:
         outcome = select(row.c.state, row.c.result_json, row.c.lease_until, occupied).where(
             *predicate, row.c.turn_no == turn_no,
         )
-        expected_result = result
-        if prepared.transcript is not None:
-            expected_result = {
-                "transcript": prepared.transcript[2].to_json(),
-                "binding_refs": [list(ref) for ref in binding_refs],
-            }
-            if trace_suffix is not None:
-                expected_result["graph_trace_suffix"] = True
-            if output_ref is not None:
-                expected_result["output_ref"] = list(output_ref)
+        expected_result = prepared.result
 
         async def observe(group: StateGroupTransaction) -> ExecutionTerminalCommitResult | None:
             async def read_turn(session):

@@ -1417,13 +1417,12 @@ def capability_receipt_key(
     namespace: str, tenant_id: str, capability_id: str, revision: int,
     run_id: str, write_key: str,
 ) -> bytes:
-    """Address the retained capability write identity in its operation family."""
-    return b"\x02" + _encode_key_components(
-        ("capability-write", validate_persistence_namespace(namespace),
-         validate_tenant_id(tenant_id), validate_capability_id(capability_id),
-         str(validate_capability_revision(revision)), validate_resource_id(run_id),
-         validate_capability_write_key(write_key)),
-        OPERATION_KEY_MAX_BYTES - 1,
+    """Address a capability write by its logical partition and exact run/write IDs."""
+    partition = capability_store_key(namespace, tenant_id, capability_id)
+    revision_bytes = validate_capability_revision(revision).to_bytes(8, "big")
+    return b"\x02" + partition + revision_bytes + _encode_key_components(
+        (validate_resource_id(run_id), validate_capability_write_key(write_key)),
+        OPERATION_KEY_MAX_BYTES - 1 - len(partition) - len(revision_bytes),
     )
 
 

@@ -76,11 +76,10 @@ same Agent producer. `Session.principal` resolves to the Runtime principal when
 its lazy handle was created without an explicit principal. Neither convenience
 path requires an explicitly created Session.
 
-For a stored Session use `sessions.create/get`; for a definition-bound lazy
-handle use `agent.session`. The latter keeps derived or restored Agent semantics
-and deliberately does not check that a Session exists. `Session.fork` and
-`Agent.create_session` preserve those definition bindings rather than replacing
-them with a fresh default Agent.
+For a non-SQL stored Session use `sessions.create(agent_id, request)` and
+`sessions.get`. The definition-bound `agent.session` is lazy, preserves the
+derived or restored Agent, and does not check that the session exists.
+Non-SQL `Session.fork` and `Agent.create_session` preserve that binding.
 
 For a persistent SQL chat, compose Runtime with an explicit host authorization
 policy and use the turn API. Create the session once, choose the Agent on every
@@ -103,10 +102,8 @@ Agent or application owner; the host policy authorizes the session.
 
 Enable the planning capability for a writable SQL session with
 `runtime.sessions.start_turn(..., planning=True)`. The plan belongs to the
-session, and only the current turn producer can update it. A bound legacy
-session cannot start a second planning writer. To run an independent,
-plan-only execution, call `Agent.start_plan(...)` without a session ID.
-Non-SQL sessions retain their bound Session and execution-handle contract.
+session, and only the current turn producer can update it. To run an
+independent, plan-only execution, call `Agent.start_plan(...)` without a session ID.
 
 ## Task and graph semantics stay with Task
 

@@ -15,7 +15,7 @@ from linktools.ai.persistence.snapshots import _decode_snapshot_sequences
 from linktools.ai.persistence.state import (
     STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, FactQuery, FactScanCursor,
     OperationQuery, OperationScanCursor, StateTransaction, StoredFact, StoredOperation,
-    capability_receipt_key, record_key, stream_key, validate_stream_key,
+    capability_receipt_key, capability_store_key, record_key, stream_key, validate_stream_key,
 )
 
 from .test_state_batch_delete_backends import _open_store, _record
@@ -69,8 +69,12 @@ def test_stream_and_receipt_bounds_preserve_current_wire_and_private_repr() -> N
     namespace = capability = write = "界" * 42 + "ab"
     tenant = run = "界" * 42 + "ab"
     receipt = capability_receipt_key(namespace, tenant, capability, (1 << 63) - 1, run, write)
-    assert receipt == b"\x02" + _tuple("capability-write", namespace, tenant, capability, str((1 << 63) - 1), run, write)
-    assert len(receipt) == 690 <= OPERATION_KEY_MAX_BYTES
+    assert receipt == (b"\x02" + capability_store_key(namespace, tenant, capability)
+                       + ((1 << 63) - 1).to_bytes(8, "big") + _tuple(run, write))
+    assert len(receipt) == 301 <= OPERATION_KEY_MAX_BYTES
+    assert capability_receipt_key(namespace, tenant, capability, 1, "a", "bc") != capability_receipt_key(
+        namespace, tenant, capability, 1, "ab", "c",
+    )
 
 
 @pytest.mark.asyncio
