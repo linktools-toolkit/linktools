@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Canonical deferred decisions settle the admitted turn and original leaf."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from pydantic_ai.exceptions import ApprovalRequired, CallDeferred
 from pydantic_ai.messages import ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
 
 from linktools.ai.capability import AgentContext
-from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExternalCallStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
+from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExternalCallStatus, ExecutionStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest, ExternalCallSucceeded, ExternalSupplyRequest
 from linktools.ai.persistence.turns import SessionTurnKey
@@ -106,7 +107,23 @@ async def test_canonical_deferred_outcome_uses_original_turn_and_pending_leaf(
             )
             settle = runtime.external_calls.supply
             conflict = ErrorCode.EXTERNAL_RESULT_CONFLICT
-        await settle(key, request)
+        turn = await runtime.sessions.start(
+            "chat", "question", agent="default", principal=principal, idempotency_key="original",
+        )
+        assert turn.key == key
+        assert (await turn.wait()).status is ExecutionStatus.WAITING_DEFERRED
+        waiting = asyncio.create_task(turn.wait_final(timeout_seconds=10))
+        try:
+            await asyncio.sleep(0)
+            assert not waiting.done()
+            await settle(key, request)
+            final = await waiting
+        finally:
+            if not waiting.done():
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
+        assert final.key == key and final.status is ExecutionStatus.SUCCEEDED
+        assert final.view["output"] == {"text": "finished"}
 
         turns = persistence.session_turns
         terminal = await _wait_for_committed(

@@ -468,9 +468,9 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
                     raise AssertionError((table.name, column.name, column.type))
             maxima[tuple(index.columns.keys())] = size
             assert size + 40 < 2704 < 3072
-    assert maxima[("store_key", "key_locator")] == 384
-    assert maxima[("store_key", "operation_locator")] == 384
-    assert maxima[("store_key", "stream_locator", "sequence")] == 392
+    assert maxima[("store_key", "key_locator")] == 320
+    assert maxima[("store_key", "operation_locator")] == 320
+    assert maxima[("store_key", "stream_locator", "sequence")] == 328
 
     assert maxima[("store_locator", "sha256")] == 512
 

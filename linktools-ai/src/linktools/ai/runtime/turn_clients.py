@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 
 
 _PREVIEW_BYTES = 256 * 1024
-_END_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "RECOVERY_REQUIRED", "WAITING_DEFERRED", "WAITING_RETRY"}
+_WAITING_STATES = {"WAITING_DEFERRED", "WAITING_RETRY"}
+_FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "RECOVERY_REQUIRED"}
+_END_STATES = _FINAL_STATES | _WAITING_STATES
 
 
 def uses_turn_sessions(runtime: "Runtime") -> bool:
@@ -80,8 +82,9 @@ class TurnObserver:
         self._queue.put_nowait((frame, size))
         self._bytes += size
 
-    async def events(self, turn_id: str) -> "AsyncIterator[dict[str, JsonValue]]":
+    async def events(self, turn_id: str, *, final_only: bool = False) -> "AsyncIterator[dict[str, JsonValue]]":
         self._turn_id = turn_id
+        end_states = _FINAL_STATES if final_only else _END_STATES
         while True:
             frame, size = await self._queue.get()
             self._bytes -= size
@@ -89,19 +92,29 @@ class TurnObserver:
                 continue
             kind = frame["type"]
             if kind == "terminal":
+                if final_only and str(frame.get("state", "")).upper() in _WAITING_STATES:
+                    continue
                 yield frame
                 return
             if kind == "waiting":
+                if final_only:
+                    continue
                 yield {**frame, "type": "terminal", "state": "waiting_deferred"}
                 return
             if kind == "gap":
+                if final_only and frame.get("phase") == "waiting":
+                    continue
                 self.incomplete = True
                 yield frame
-                if self._terminal is not None and self._terminal.get("turn_id") == turn_id:
-                    yield self._terminal if self._terminal["type"] == "terminal" else {
-                        **self._terminal, "type": "terminal", "state": "waiting_deferred",
-                    }
-                    return
+                cached = self._terminal
+                if cached is not None and cached.get("turn_id") == turn_id:
+                    if not final_only or (
+                        cached["type"] == "terminal" and str(cached.get("state", "")).upper() not in _WAITING_STATES
+                    ):
+                        yield cached if cached["type"] == "terminal" else {
+                            **cached, "type": "terminal", "state": "waiting_deferred",
+                        }
+                        return
                 stopped = self._stopped
                 stop_context = (
                     {"producer_stopped_generation": stopped["generation"]}
@@ -113,7 +126,7 @@ class TurnObserver:
                     **stop_context,
                 )
                 status = result.get("status")
-                if isinstance(status, str) and status in _END_STATES:
+                if isinstance(status, str) and status in end_states:
                     yield {**result, "type": "terminal", "state": status.lower()}
                     return
             elif kind == "preview_reset":

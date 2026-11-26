@@ -4,14 +4,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
 from ..errors import AIError, ErrorCode
+from ..observe.stream import validate_timeout
 from ..persistence.turns import SessionTurnKey
-from .turn_clients import TurnObserver, _END_STATES, _SessionOccupancy, _watch_turn_occupancy
+from .turn_clients import TurnObserver, _END_STATES, _FINAL_STATES, _SessionOccupancy, _watch_turn_occupancy
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -84,14 +86,24 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
 
     async def wait(self) -> ResultT:
         """Wait for this attempt to settle and read its authorized, typed result."""
+        return await self._wait(final_only=False)
+
+    async def wait_final(self, *, timeout_seconds: float | None = None) -> ResultT:
+        """Wait across approval and retry pauses without starting or resuming work."""
+        validate_timeout(timeout_seconds)
+        async with asyncio.timeout(timeout_seconds):
+            return await self._wait(final_only=True)
+
+    async def _wait(self, *, final_only: bool) -> ResultT:
+        end_states = _FINAL_STATES if final_only else _END_STATES
         with TurnObserver(
             self._runtime, self.key.session_id, self.principal,
             local_workspace=self._local_workspace, preview=False,
         ) as observer:
             initial = await self.result()
-            if initial.status.value in _END_STATES:
+            if initial.status.value in end_states:
                 return initial
-            events = observer.events(self.key.turn_id)
+            events = observer.events(self.key.turn_id, final_only=final_only)
             try:
                 async for event in events:
                     if event["type"] == "terminal":
