@@ -20,6 +20,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence.runs import ModelInteractionStateStepArchive
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
@@ -325,9 +326,23 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                     turns._turns.update().filter_by(**turns._turn_values(key)).values(lease_until=0),
                 )
                 assert changed.rowcount == 1
+            async def missing_latest_trace(_archive, **_kwargs):
+                return ()
+
+            with monkeypatch.context() as unavailable:
+                unavailable.setattr(ModelInteractionStateStepArchive, "list_model_interactions", missing_latest_trace)
+                with pytest.raises(AIError) as failure:
+                    await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
+                assert failure.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+                assert failure.value.safe_details["reason"] == "native_subagent_trace_incomplete"
+
+            # The failed pre-dispatch proof expires exactly its own successor.
+            rejected = await turns.get_turn(key)
+            assert rejected["state"] == "accepted" and rejected["generation"] == 2
+            assert not await turns.renew(key, generation=2, lease_seconds=60)
             assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
             row = await turns.get_turn(key)
-            assert row["state"] == "succeeded" and row["generation"] == 2
+            assert row["state"] == "succeeded" and row["generation"] == 3
             after = await runtime.history.turn_trace(_SESSION, turn_id, principal=runtime.default_principal)
             assert after == before
         assert await request(http) == turn_id

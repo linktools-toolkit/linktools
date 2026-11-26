@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
@@ -40,7 +40,7 @@ def _append(path: Path, value: str) -> None:
         os.fsync(log.fileno())
 
 
-def _features(root: Path, *, interrupted: bool = False, crash: bool = False) -> RuntimeFeatures:
+def _features(root: Path, *, interrupted: bool = False, crash: bool = False, traced: bool = False) -> RuntimeFeatures:
     async def effect(context: AgentContext[None]) -> str:
         _append(root / "effects.log", context.execution_id)
         if crash:
@@ -69,7 +69,11 @@ def _features(root: Path, *, interrupted: bool = False, crash: bool = False) -> 
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(StepPersistenceCapability(), scope="runtime")
     features.tool(effect, effect_policy="non_replay_safe")
-    features.agent("default", model="default", allow_tools=("effect",), allow_skills=(), allow_subagents=())
+    if traced:
+        features.capability(TraceCapability(), scope="runtime")
+        features.agent("reviewer", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    features.agent("default", model="default", allow_tools=("effect",), allow_skills=(),
+                   allow_subagents=("reviewer",) if traced else ())
     return model_features(_Models(_UsageFunctionModel(model)), features)
 
 
@@ -103,7 +107,7 @@ def _crash_native_process(root_path: str, phase: str) -> None:
     async def run() -> None:
         async with (
             Persistence.open(_NAME, storage=PersistenceStorage.from_root(root / "runtime")) as state,
-            Runtime.open(persistence=state, features=_features(root, crash=phase.startswith("tool_interrupted")),
+            Runtime.open(persistence=state, features=_features(root, crash=phase.startswith("tool_interrupted"), traced=phase.endswith("_trace")),
                          authorization=_HostAuthorization()) as runtime,
         ):
             await runtime.agents.get().create_session(_SESSION)
@@ -114,7 +118,7 @@ def _crash_native_process(root_path: str, phase: str) -> None:
     asyncio.run(run())
 
 
-def _crash_interruption_recovery(root_path: str, turn_id: str) -> None:
+def _crash_interruption_recovery(root_path: str, turn_id: str, traced: bool) -> None:
     root = Path(root_path)
     commit = RuntimeStepStore.commit_step
 
@@ -135,7 +139,7 @@ def _crash_interruption_recovery(root_path: str, turn_id: str) -> None:
     async def run():
         async with (
             Persistence.open(_NAME, storage=PersistenceStorage.from_root(root / "runtime")) as state,
-            Runtime.open(persistence=state, features=_features(root, interrupted=True),
+            Runtime.open(persistence=state, features=_features(root, interrupted=True, traced=traced),
                          authorization=_HostAuthorization()) as runtime,
         ):
             key = SessionTurnKey(_SESSION, turn_id)
@@ -168,22 +172,25 @@ async def _run_until_crash(target, *args):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ("tool_completed", "tool_checkpoint", "tool_interrupted", "tool_interrupted_twice"))
+@pytest.mark.parametrize("phase", (
+    "tool_completed", "tool_checkpoint", "tool_interrupted", "tool_interrupted_twice", "tool_interrupted_twice_trace",
+))
 async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_replaying_effect(tmp_path: Path, phase: str):
     await _run_until_crash(_crash_native_process, str(tmp_path), phase)
     interrupted = phase.startswith("tool_interrupted")
-    second_crash = phase == "tool_interrupted_twice"
+    second_crash = phase.startswith("tool_interrupted_twice")
+    traced = phase.endswith("_trace")
     effect_log = tmp_path / "effects.log"
     provider_log = tmp_path / "provider.log"
     [turn_id] = effect_log.read_text().splitlines()
     assert provider_log.read_text().splitlines() == ["initial"]
     key = SessionTurnKey(_SESSION, turn_id)
     if second_crash:
-        await _run_until_crash(_crash_interruption_recovery, str(tmp_path), turn_id)
+        await _run_until_crash(_crash_interruption_recovery, str(tmp_path), turn_id, traced)
     predecessor = 2 if second_crash else 1
     async with (
         Persistence.open(_NAME, storage=PersistenceStorage.from_root(tmp_path / "runtime")) as state,
-        Runtime.open(persistence=state, features=_features(tmp_path, interrupted=interrupted),
+        Runtime.open(persistence=state, features=_features(tmp_path, interrupted=interrupted, traced=traced),
                      authorization=_HostAuthorization()) as runtime,
     ):
         turns = state.session_turns
@@ -217,6 +224,8 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
             [operation] = published["process"]
             assert operation["key"] == "tool:stable-call" and operation["status"] == "SUCCEEDED"
         assert await state.execution.executions.get(turn_id, tenant_id=tenant) is None
+        if traced:
+            assert not await state.execution.executions.list_children(turn_id, tenant_id=tenant)
         assert (await _send(runtime)).key == key
     assert effect_log.read_text().splitlines() == [turn_id]
     assert provider_log.read_text().splitlines() == (

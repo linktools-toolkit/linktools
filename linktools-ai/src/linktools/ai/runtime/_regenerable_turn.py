@@ -14,7 +14,7 @@ from linktools.core import environ
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 from threading import BoundedSemaphore
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar
 
 from sqlalchemy.exc import IntegrityError
 
@@ -1178,21 +1178,10 @@ class _RegenerableTurnRunner:
                             events = await steps.list_events(run_id=key.turn_id)
                             completed_checkpoint = any(event.kind == "run_completed" for event in events)
                         delegate_pending = "delegate_task" in pending.values()
-                        if settle_subagents and canonical_trace and (delegate_pending or not pending):
-                            # A cold Trace continuation can only append the terminal
-                            # marker to an already complete, retained parent run.
-                            if not completed_checkpoint or not continuation or not isinstance(continuation[-1], ModelResponse):
-                                # This recovery acquired the generation but has not started a producer.
-                                await self._store.expire_stopped_lease(key, generation=generation + 1)
-                                self._gap(key)
-                                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                                              safe_details={"reason": "native_subagent_trace_incomplete",
-                                                            "generation": generation + 1})
-                            await self._require_completed_trace(
-                                key, continuation[-1], event_head=trace_event_base,
-                                request_head=trace_interaction_base,
-                            )
-                        elif settle_subagents and not completed_checkpoint and delegate_pending:
+                        traced_subagent_parent = settle_subagents and canonical_trace
+                        if traced_subagent_parent and delegate_pending:
+                            await self._reject_incomplete_subagent_trace(key, generation + 1)
+                        if settle_subagents and not completed_checkpoint and delegate_pending:
                             recover_subagent = self._recover_subagent
                             assert recover_subagent is not None
 
@@ -1220,9 +1209,27 @@ class _RegenerableTurnRunner:
                                     # The SDK skips original tool returns already
                                     # present in the retained last request.
                                     deferred_results = DeferredToolResults()
-                                elif checkpoint.state != "complete":
+                                elif checkpoint.state != "complete" and not traced_subagent_parent:
                                     self._gap(key)
                                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        if traced_subagent_parent:
+                            response = continuation[latest_response] if latest_response >= 0 else None
+                            if (not isinstance(response, ModelResponse)
+                                    or (completed_checkpoint and response is not continuation[-1])
+                                    or (not completed_checkpoint and (deferred_results is None
+                                        or any(isinstance(part, ToolCallPart) and part.tool_name == "delegate_task"
+                                               for part in response.parts)))):
+                                await self._reject_incomplete_subagent_trace(key, generation + 1)
+                            # Cold continuation starts after the exact retained
+                            # response, without dispatching any delegate.
+                            try:
+                                await self._require_retained_trace_response(
+                                    key, response, event_head=trace_event_base, request_head=trace_interaction_base,
+                                )
+                            except AIError as error:
+                                if error.code in {ErrorCode.STORAGE_RECOVERY_REQUIRED, ErrorCode.STORAGE_OWNER_MISMATCH}:
+                                    await self._reject_incomplete_subagent_trace(key, generation + 1)
+                                raise
                     else:
                         if (checkpoint.state != "interrupted"
                                 or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
@@ -1962,10 +1969,18 @@ class _RegenerableTurnRunner:
 
         return _RepositoryInstructionBoundary(check, initial, overlay, approved_frontiers=approved)
 
-    async def _require_completed_trace(
+    async def _reject_incomplete_subagent_trace(self, key: SessionTurnKey, generation: int) -> NoReturn:
+        # The successor acquired the generation but did not start a producer.
+        await self._store.expire_stopped_lease(key, generation=generation)
+        self._gap(key)
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, safe_details={
+            "reason": "native_subagent_trace_incomplete", "generation": generation,
+        })
+
+    async def _require_retained_trace_response(
         self, key: SessionTurnKey, response: ModelResponse, *, event_head: int, request_head: int,
     ) -> None:
-        """Verify the final provider result under the fenced canonical Trace frontier."""
+        """Verify the exact latest provider response under the fenced Trace frontier."""
         from ..persistence.contracts import ModelInteractionRecord
 
         archive = self._trace_archive
