@@ -17,11 +17,11 @@ from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy, ToolOp
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._step_store import RuntimeStepStore
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
-from ._session_tool_test_helpers import _assert_tool_turn_recovers_without_replaying_effect
 
 
 _NAME = "native-session-tool-crash"
@@ -92,6 +92,25 @@ def _crash_native_process(root_path: str, phase: str) -> None:
     root = Path(root_path)
     original_complete = RuntimeToolOperationBridge.complete
     original_step = RuntimeStepStore.commit_step
+    original_boundary = AgentRunRecorder.commit_history_boundary
+    projected = phase == "projected_tool_checkpoint_trace"
+    committed_tool_turn = None
+    live_runtime = None
+
+    async def die_at_projection():
+        if live_runtime is None or committed_tool_turn is None:
+            return
+        trace = await live_runtime.history.turn_trace(
+            _SESSION, committed_tool_turn, principal=live_runtime.default_principal,
+        )
+        if any(item.payload.get("kind") == "TOOL_RESULT"
+               and item.payload.get("tool_call_id") == "stable-call" for item in trace.items):
+            os._exit(91)
+
+    async def history_boundary(recorder):
+        await original_boundary(recorder)
+        if projected:
+            await die_at_projection()
 
     async def complete(bridge, decision, result):
         completed = await original_complete(bridge, decision, result)
@@ -102,14 +121,21 @@ def _crash_native_process(root_path: str, phase: str) -> None:
     async def commit_step(store, **kwargs):
         await original_step(store, **kwargs)
         snapshot = kwargs.get("snapshot")
-        if (phase == "tool_checkpoint" and snapshot is not None and snapshot.messages
+        if (phase in {"tool_checkpoint", "projected_tool_checkpoint_trace"}
+                and snapshot is not None and snapshot.messages
                 and any(isinstance(part, ToolReturnPart) for part in snapshot.messages[-1].parts)):
-            os._exit(91)
+            if not projected:
+                os._exit(91)
+            nonlocal committed_tool_turn
+            committed_tool_turn = snapshot.run_id
+            await die_at_projection()
 
     RuntimeToolOperationBridge.complete = complete
     RuntimeStepStore.commit_step = commit_step
+    AgentRunRecorder.commit_history_boundary = history_boundary
 
     async def run() -> None:
+        nonlocal live_runtime
         async with (
             Persistence.open(_NAME, storage=PersistenceStorage.from_root(root / "runtime")) as state,
             Runtime.open(persistence=state, features=_features(
@@ -118,6 +144,7 @@ def _crash_native_process(root_path: str, phase: str) -> None:
             ),
                          authorization=_HostAuthorization()) as runtime,
         ):
+            live_runtime = runtime
             await runtime.agents.get().create_session(_SESSION)
             turn = await _send(runtime)
             await turn.wait_final(timeout_seconds=15)
@@ -197,7 +224,7 @@ async def _run_until_crash(target, *args):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", (
     "tool_completed", "tool_checkpoint", "tool_interrupted", "tool_interrupted_twice", "tool_interrupted_twice_trace",
-    "tool_interrupted_session_capability",
+    "tool_interrupted_session_capability", "projected_tool_checkpoint_trace",
 ))
 async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_replaying_effect(tmp_path: Path, phase: str):
     await _run_until_crash(_crash_native_process, str(tmp_path), phase)
@@ -228,6 +255,10 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         [receipt] = await tools.list_by_execution(turn_id, tenant_id=tenant)
         assert receipt.tool_call_id == "stable-call"
         assert receipt.status is (ToolOperationStatus.CLAIMED if interrupted else ToolOperationStatus.COMPLETED)
+        if phase == "projected_tool_checkpoint_trace":
+            captured = await runtime.history.turn_trace(_SESSION, turn_id, principal=principal)
+            [projected_result] = [item for item in captured.items if item.payload.get("kind") == "TOOL_RESULT"]
+            assert projected_result.payload["tool_call_id"] == "stable-call"
         repeated = await _send(runtime)
         assert repeated.key == key
         assert await turns.get_turn(key) == before
@@ -253,13 +284,11 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         assert await state.execution.executions.get(turn_id, tenant_id=tenant) is None
         if traced:
             assert not await state.execution.executions.list_children(turn_id, tenant_id=tenant)
+        if phase == "projected_tool_checkpoint_trace":
+            finished = await runtime.history.turn_trace(_SESSION, turn_id, principal=principal)
+            assert projected_result in finished.items
         assert (await _send(runtime)).key == key
     assert effect_log.read_text().splitlines() == [turn_id]
     assert provider_log.read_text().splitlines() == (
         ["initial", "interruption", "continuation"] if interrupted else ["initial", "continuation"]
     )
-
-
-@pytest.mark.asyncio
-async def test_session_tool_turn_recovers_after_projected_tool_checkpoint(tmp_path: Path) -> None:
-    await _assert_tool_turn_recovers_without_replaying_effect(tmp_path, "sqlite", "projected_tool_checkpoint")

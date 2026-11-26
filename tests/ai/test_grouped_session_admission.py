@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
 
-from linktools.ai.capability import ExecutionCapability
+from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -24,10 +24,13 @@ class _HostAuthorization(TenantAuthorizationPolicy):
 
 
 @asynccontextmanager
-async def _native_runtime(path, model):
+async def _native_runtime(path, model, *, tool=None):
     features = RuntimeFeatures("native-admission")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.agent("default", model="default", allow_tools=())
+    if tool is not None:
+        features.capability(StepPersistenceCapability(), scope="runtime")
+        features.tool(tool, effect_policy="non_replay_safe")
+    features.agent("default", model="default", allow_tools=() if tool is None else (tool.__name__,))
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     async with (
         Persistence.open("native-admission", storage=PersistenceStorage.from_root(path)) as state,

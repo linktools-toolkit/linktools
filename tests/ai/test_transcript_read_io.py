@@ -6,27 +6,71 @@ from linktools.ai.persistence import Persistence
 import asyncio
 from contextlib import aclosing
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from linktools.ai.core import agent_conversation_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence import _history, _step_message_content
 from linktools.ai.persistence import NativeMessageRoot
+from linktools.ai.persistence.contracts import ConversationHistoryRecord
+from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.persistence.state import FactQuery, active_state_scope
 
 from .test_history_projection_conformance import _message_content_records
 from .test_incremental_projection_boundaries import _storage
-from .test_runtime_storage_io_session import _listen_sql, _record_selects
-from .test_session_history_projection import _materialize, _session
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _create_history(state: Persistence, history_id: str = "history") -> str:
+    # These low-level transcript budgets are not a SQL Session SDK fixture.
+    await state.conversation.histories.create(ConversationHistoryRecord(history_id, history_id, None, None, 0))
+    return history_id
+
+
+async def _materialize(
+    state: Persistence, history_id: str, run_id: str, prompts: tuple[str, ...],
+    messages: list[ModelMessage] | None = None,
+) -> None:
+    conversation_id = agent_conversation_id(namespace=state.namespace, tenant_id=state.tenant_id, execution_id=run_id)
+    now = datetime.now(timezone.utc)
+    await state.run_store.register_agent_run(AgentRunRecord(
+        agent_run_id=run_id, agent_conversation_id=conversation_id, parent_agent_run_id=None, agent_id="default",
+        metadata={"agent_id": "default", "history_id": history_id}, started_at=now,
+    ))
+    if messages is None:
+        messages = [message for prompt in prompts for message in (
+            ModelRequest(parts=[UserPromptPart(prompt)], conversation_id=conversation_id),
+            ModelResponse(parts=[TextPart(f"answer:{prompt}")], conversation_id=conversation_id),
+        )]
+    await state.run_store.save_checkpoint(AgentRunCheckpoint(
+        agent_run_id=run_id, step_index=len(messages), messages=messages, agent_conversation_id=conversation_id,
+        parent_agent_run_id=None, agent_id="default", timestamp=now, state="complete",
+        transcript_message_count_before=0,
+    ))
+    await state.run_store.materialize_conversation(agent_run_id=run_id)
+
+
+def _listen_sql(engine: AsyncEngine, statements: list[tuple[str, object]]) -> object:
+    def capture(_connection, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, parameters))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    return capture
+
+
+def _record_selects(statements: list[tuple[str, object]]) -> list[tuple[str, object]]:
+    return [(sql, parameters) for sql, parameters in statements
+            if sql.lstrip().upper().startswith("SELECT") and "AI_STATE_RECORDS" in sql.upper()]
 
 
 @pytest.mark.parametrize("reader", ("owner", "session", "raw_context", "spans"))
@@ -38,15 +82,14 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
     state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="transcript-read-io", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
-        await _materialize(state, "run", ("one", "two"))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "run", ("one", "two"))
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         contents = await repository.content_archive()
         domain_partition = archive.state_store.store_key
         archive_partition = contents.store.store_key
-        latest = await repository.latest_chunk(session.history_id)
+        latest = await repository.latest_chunk(history_id)
         assert latest is not None and isinstance(latest.content, NativeMessageRoot)
         native_partition = latest.content.store_key
         body_ids: list[str] = []
@@ -67,21 +110,21 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
         try:
             if reader == "spans":
                 spans = await repository.load_message_spans(
-                    session.history_id, ((0, 1), (1, 4)),
+                    history_id, ((0, 1), (1, 4)),
                 )
                 messages = tuple(message for span in spans for message in span)
             elif reader == "raw_context":
                 context = await repository.load_session_raw_model_context(
-                    session.history_id, tenant_id="tenant", message_count=4,
+                    history_id, tenant_id="tenant", message_count=4,
                 )
                 messages = context.model_messages()
                 assert all(value.source is not None for value in context.messages)
             else:
                 stream = (
-                    repository.iter_message_range(session.history_id, start=0, end=4)
+                    repository.iter_message_range(history_id, start=0, end=4)
                     if reader == "owner"
                     else repository.iter_session_message_range(
-                        session.history_id, tenant_id="tenant", start=0, end=4,
+                        history_id, tenant_id="tenant", start=0, end=4,
                     )
                 )
                 messages = tuple([message async for message in stream])
@@ -136,31 +179,30 @@ async def test_transcript_range_excludes_appends_after_reading_starts(
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-read-cut", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
-        await _materialize(state, "first", ("one", "two"))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "first", ("one", "two"))
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
         stream = (
-            repository.iter_message_range(session.history_id, start=1, end=4)
+            repository.iter_message_range(history_id, start=1, end=4)
             if reader == "owner"
             else repository.iter_session_message_range(
-                session.history_id, tenant_id="tenant", start=1, end=4,
+                history_id, tenant_id="tenant", start=1, end=4,
             )
         )
         first = await anext(stream)
         assert active_state_scope() is None
-        await _materialize(state, "later", ("three",))
+        await _materialize(state, history_id, "later", ("three",))
         messages = [first, *[message async for message in stream]]
         assert [message.parts[0].content for message in messages] == [
             "answer:one", "two", "answer:two",
         ]
         fresh = [message async for message in repository.iter_message_range(
-            session.history_id, start=4, end=6,
+            history_id, start=4, end=6,
         )]
         assert [message.parts[0].content for message in fresh] == ["three", "answer:three"]
         with pytest.raises(AIError) as error:
             _ = [message async for message in repository.iter_message_range(
-                session.history_id, start=0, end=7,
+                history_id, start=0, end=7,
             )]
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
@@ -177,13 +219,12 @@ async def test_transcript_range_checks_all_returned_facts_before_finishing(
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-range-integrity", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        await _materialize(state, "first", ("one",))
-        await _materialize(state, "second", ("two",))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "first", ("one",))
+        await _materialize(state, history_id, "second", ("two",))
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
         store = repository._store
-        assert session.history_id is not None
-        stream = repository.transcript_stream(session.history_id)
+        stream = repository.transcript_stream(history_id)
         facts = await store.read(lambda tx: tx.list_facts(FactQuery(stream)))
         assert len(facts) == 2
 
@@ -202,7 +243,7 @@ async def test_transcript_range_checks_all_returned_facts_before_finishing(
         monkeypatch.setattr(_history, "_TRANSCRIPT_PAGE_SIZE", page_size)
         with pytest.raises(AIError) as error:
             _ = [message async for message in repository.iter_message_range(
-                session.history_id, start=0, end=4,
+                history_id, start=0, end=4,
             )]
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
@@ -220,16 +261,15 @@ async def test_transcript_payload_and_yield_release_state_scope(
     await state.initialize(namespace="transcript-payload-scope", tenant_id="tenant")
     task = None
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
+        history_id = await _create_history(state)
         attachment = BinaryContent(data=b"attachment body", media_type="image/png")
-        await _materialize(state, "first", (), messages=[
+        await _materialize(state, history_id, "first", (), messages=[
             ModelRequest(parts=[UserPromptPart(content=[attachment])]),
             ModelResponse(parts=[TextPart(content="answer")]),
         ])
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
-        latest = await repository.latest_chunk(session.history_id)
+        latest = await repository.latest_chunk(history_id)
         assert latest is not None
         contents = await repository.content_archive()
         records = await _message_content_records(contents, (latest.content,))
@@ -259,10 +299,10 @@ async def test_transcript_payload_and_yield_release_state_scope(
 
         monkeypatch.setattr(objects, "open", checked_open)
         stream = (
-            repository.iter_message_range(session.history_id, start=0, end=2)
+            repository.iter_message_range(history_id, start=0, end=2)
             if reader == "owner"
             else repository.iter_session_message_range(
-                session.history_id, tenant_id="tenant", start=0, end=2,
+                history_id, tenant_id="tenant", start=0, end=2,
             )
         )
         if finish == "close":
@@ -278,7 +318,7 @@ async def test_transcript_payload_and_yield_release_state_scope(
             await asyncio.wait_for(reading.wait(), timeout=2)
             # A paused object body must not retain a state lock or transaction.
             await asyncio.wait_for(
-                state.conversation.sessions.create(_session("during-payload")), timeout=2,
+                _create_history(state, "during-payload"), timeout=2,
             )
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -286,8 +326,8 @@ async def test_transcript_payload_and_yield_release_state_scope(
             await stream.aclose()
         assert closed.is_set()
         assert active_state_scope() is None
-        await state.conversation.sessions.create(_session("after-reader"))
-        assert await repository.get_head(session.history_id) is not None
+        await _create_history(state, "after-reader")
+        assert await repository.get_head(history_id) is not None
     finally:
         if task is not None and not task.done():
             task.cancel()
@@ -304,21 +344,20 @@ async def test_empty_transcript_range_validates_head_without_loading_facts(
     state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="transcript-empty-range", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
-        await _materialize(state, "first", ("one",))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "first", ("one",))
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
 
         async def read(start: int, end: int):
             if reader == "spans":
                 return await repository.load_message_spans(
-                    session.history_id, ((start, start), (end, end)),
+                    history_id, ((start, start), (end, end)),
                 )
             stream = (
-                repository.iter_message_range(session.history_id, start=start, end=end)
+                repository.iter_message_range(history_id, start=start, end=end)
                 if reader == "owner"
                 else repository.iter_session_message_range(
-                    session.history_id, tenant_id="tenant", start=start, end=end,
+                    history_id, tenant_id="tenant", start=start, end=end,
                 )
             )
             return tuple([message async for message in stream])
@@ -349,12 +388,11 @@ async def test_transcript_first_yield_prefetches_only_one_bounded_fact_page(
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-lazy-page", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
+        history_id = await _create_history(state)
         monkeypatch.setattr(_history, "_TRANSCRIPT_CHUNK_MAX_MESSAGES", 1)
-        await _materialize(state, "first", tuple(f"prompt:{index}" for index in range(35)))
+        await _materialize(state, history_id, "first", tuple(f"prompt:{index}" for index in range(35)))
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
-        stream_key = repository.transcript_stream(session.history_id)
+        stream_key = repository.transcript_stream(history_id)
         original = _MemoryTransaction.list_facts
         rows = []
 
@@ -367,10 +405,10 @@ async def test_transcript_first_yield_prefetches_only_one_bounded_fact_page(
 
         monkeypatch.setattr(_MemoryTransaction, "list_facts", capture_facts)
         stream = (
-            repository.iter_message_range(session.history_id, start=0, end=70)
+            repository.iter_message_range(history_id, start=0, end=70)
             if reader == "owner"
             else repository.iter_session_message_range(
-                session.history_id, tenant_id="tenant", start=0, end=70,
+                history_id, tenant_id="tenant", start=0, end=70,
             )
         )
         assert (await anext(stream)).parts[0].content == "prompt:0"
@@ -394,9 +432,8 @@ async def test_session_transcript_store_fallback_enlists_both_read_sources(
     other = InMemoryStateStore(state.conversation.histories.state_store.storage_group)
     await other.initialize()
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
-        await _materialize(state, "first", ("one",))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "first", ("one",))
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         records = await archive.state_store.read(lambda tx: tx.scan_records())
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
@@ -425,7 +462,7 @@ async def test_session_transcript_store_fallback_enlists_both_read_sources(
 
         monkeypatch.setattr(other, "read", read_enlisted)
         messages = [message async for message in repository.iter_session_message_range(
-            session.history_id, tenant_id="tenant", start=0, end=2,
+            history_id, tenant_id="tenant", start=0, end=2,
         )]
         assert [message.parts[0].content for message in messages] == ["one", "answer:one"]
         assert read_separate
@@ -446,9 +483,8 @@ async def test_session_range_retains_custom_history_scalar_contract(
     namespace = "transcript-custom-history"
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
-        await _materialize(state, "first", ("one",))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "first", ("one",))
         original = state.conversation.histories
         calls: list[str] = []
 
@@ -484,7 +520,7 @@ async def test_session_range_retains_custom_history_scalar_contract(
             history_repository=custom,
         )
         stream = repository.iter_session_message_range(
-            session.history_id, tenant_id="tenant", start=0, end=2,
+            history_id, tenant_id="tenant", start=0, end=2,
         )
         if result == "valid":
             messages = [message async for message in stream]
@@ -512,12 +548,10 @@ async def test_batched_history_range_validates_descriptor_and_head(
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-batch-integrity", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
-        await _materialize(state, "first", ("one",))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "first", ("one",))
         histories = state.conversation.histories
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
-        history_id = session.history_id
 
         async def corrupt(transaction):
             kind = "conversation_history" if corruption == "descriptor" else "transcript_head"
@@ -558,13 +592,12 @@ async def test_invalid_seek_hint_falls_back_to_validated_facts(start: int) -> No
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-seek-hint", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
-        await _materialize(state, "first", ("one",))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "first", ("one",))
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
 
         async def corrupt_hint(transaction):
-            key = repository._seek_key(session.history_id, 0)
+            key = repository._seek_key(history_id, 0)
             stored = await transaction.get_record(key)
             assert stored is not None
             assert await transaction.replace_record(
@@ -574,7 +607,7 @@ async def test_invalid_seek_hint_falls_back_to_validated_facts(start: int) -> No
 
         await repository._store.mutate(corrupt_hint)
         messages = [message async for message in repository.iter_session_message_range(
-            session.history_id, tenant_id="tenant", start=start, end=2,
+            history_id, tenant_id="tenant", start=start, end=2,
         )]
         assert [message.parts[0].content for message in messages] == ["one", "answer:one"][start:]
     finally:
@@ -586,8 +619,7 @@ async def test_history_batch_does_not_bypass_transcript_scope(mismatch: str) -> 
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-original", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
+        history_id = await _create_history(state)
         histories = state.conversation.histories
         repository = _history.TranscriptRepository(
             histories.state_store, object_store=None,
@@ -597,7 +629,7 @@ async def test_history_batch_does_not_bypass_transcript_scope(mismatch: str) -> 
         )
         with pytest.raises(AIError) as error:
             _ = [message async for message in repository.iter_session_message_range(
-                session.history_id, tenant_id="tenant", start=0, end=0,
+                history_id, tenant_id="tenant", start=0, end=0,
             )]
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
@@ -608,13 +640,12 @@ async def test_history_batch_preserves_head_decode_error_priority() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="transcript-error-priority", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        assert session.history_id is not None
+        history_id = await _create_history(state)
         histories = state.conversation.histories
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
 
         async def corrupt(transaction):
-            stored = await transaction.get_record(histories._key("transcript_head", (session.history_id,)))
+            stored = await transaction.get_record(histories._key("transcript_head", (history_id,)))
             assert stored is not None
             assert await transaction.delete_record(
                 stored.key, expected_storage_revision=stored.storage_revision,
@@ -626,7 +657,7 @@ async def test_history_batch_preserves_head_decode_error_priority() -> None:
         await histories.state_store.mutate(corrupt)
         with pytest.raises(AIError) as error:
             _ = [message async for message in repository.iter_session_message_range(
-                session.history_id, tenant_id="tenant", start=0, end=0,
+                history_id, tenant_id="tenant", start=0, end=0,
             )]
         assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
     finally:
@@ -654,11 +685,10 @@ async def test_owner_content_read_survives_concurrent_native_collection(
     collected = asyncio.Event()
     task = None
     try:
-        session = await state.conversation.sessions.create(_session())
-        await _materialize(state, "run", ("retained",))
+        history_id = await _create_history(state)
+        await _materialize(state, history_id, "run", ("retained",))
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         history = archive.transcript_repository
-        assert session.history_id is not None
         checkpoint = await archive.checkpoint_at_sequence(agent_run_id="run", checkpoint_sequence=1)
         original_capture = SqlStepStore.capture_message_roots
         paused = False
@@ -682,21 +712,21 @@ async def test_owner_content_read_survives_concurrent_native_collection(
 
         async def read():
             if reader == "spans":
-                return (await history.load_message_spans(session.history_id, ((0, 2),)))[0]
+                return (await history.load_message_spans(history_id, ((0, 2),)))[0]
             if reader == "messages":
-                return await history.load_messages(session.history_id)
+                return await history.load_messages(history_id)
             if reader == "owner_range":
-                return tuple([value async for value in history.iter_message_range(session.history_id, start=0, end=2)])
+                return tuple([value async for value in history.iter_message_range(history_id, start=0, end=2)])
             if reader == "session_range":
                 return tuple([value async for value in history.iter_session_message_range(
-                    session.history_id, tenant_id="tenant", start=0, end=2,
+                    history_id, tenant_id="tenant", start=0, end=2,
                 )])
             if reader == "raw_context":
                 return (await history.load_session_raw_model_context(
-                    session.history_id, tenant_id="tenant", message_count=2,
+                    history_id, tenant_id="tenant", message_count=2,
                 )).model_messages()
             if reader == "context":
-                return (await history.load_model_context(session.history_id)).model_messages()
+                return (await history.load_model_context(history_id)).model_messages()
             if reader == "latest_checkpoint":
                 result = await archive.latest_checkpoint(agent_run_id="run")
                 assert result is not None

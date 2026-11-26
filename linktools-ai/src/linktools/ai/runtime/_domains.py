@@ -292,15 +292,9 @@ class RuntimeSessions(Generic[AppT]):
         self._runtime = runtime
         self._native_turn_read = native_turn_read
         self._require_session_available = require_session_available
-
-    @property
-    def _uses_turn_sessions(self) -> bool:
-        """Built-in clients route by the configured writable Conversation store.
-
-        Missing host authorization disables access, not the storage choice.
-        Step is selected per admitted Agent and must never select a session store.
-        """
-        return self._runtime is not None and self._runtime._state.session_turns is not None
+        # Storage topology is fixed for this facade, even after the Runtime closes.
+        # Authorization and Step admission do not select a different session store.
+        self._uses_turn_sessions = runtime is not None and runtime._state.session_turns is not None
 
     @property
     def supports_turn_sessions(self) -> bool:
