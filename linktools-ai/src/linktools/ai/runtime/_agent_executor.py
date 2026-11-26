@@ -247,6 +247,7 @@ class _AgentRunScope:
     planning: bool = False
     regenerable: bool = False
     previous_turn_interrupted: bool = False
+    before_first_model_dispatch: Callable[[], Awaitable[None]] | None = None
     canonical_step: AtomicStepPersistence | None = None
     thinking: ThinkingValue = None
     parent_agent_run_id: str | None = None
@@ -489,6 +490,7 @@ class AgentExecutor:
         settled_native_subagents: bool = False,
         previous_turn_interrupted: bool = False,
         capture_compacted_context: bool = False,
+        before_first_model_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> AgentExecutionOutcome:
         """Run a plain turn with no durable recorder or execution handoff."""
         if context.session_id is None:
@@ -551,6 +553,7 @@ class AgentExecutor:
                 canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
                 previous_turn_interrupted=previous_turn_interrupted,
                 capture_compacted_context=capture_compacted_context,
+                before_first_model_dispatch=before_first_model_dispatch,
                 output_retries_used=output_retries_used, deferred_approvals=deferred_approvals, budget=budget,
                 stage_session_trace=capture_trace is not None,
                 tool_effects="read_only" if canonical_step is None else "live",
@@ -1515,6 +1518,7 @@ async def _materialize_agent(
         interaction_recorder=run_recorder,
         event_sink=publish_model_request_event,
         model_boundary=commit_model_boundary,
+        before_first_model_dispatch=scope.before_first_model_dispatch,
         budget=scope.budget,
     )
     model_observation = (

@@ -245,11 +245,14 @@ async def test_busy_native_session_rejects_without_admitting_another_turn(tmp_pa
         assert len(calls) == 2
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("checkpointed", (False, True))
-@pytest.mark.parametrize("remote", (False, True))
+@pytest.mark.parametrize(
+    "checkpointed,remote,late",
+    ((False, False, False), (True, False, False), (False, True, False), (True, True, False), (False, True, True)),
+)
 async def test_native_cancel_before_provider_never_dispatches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool, remote: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool, remote: bool, late: bool,
 ) -> None:
+    from linktools.ai.runtime import _agent_executor
     from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
 
     preparing, release = asyncio.Event(), asyncio.Event()
@@ -259,14 +262,16 @@ async def test_native_cancel_before_provider_never_dispatches(
         calls.append(messages)
         return ModelResponse(parts=[TextPart("answer")])
 
-    original = _RegenerableTurnRunner.settle
+    target = _agent_executor if late else _RegenerableTurnRunner
+    name = "_materialize_agent" if late else "settle"
+    original = getattr(target, name)
 
-    async def settle(runner, *args, **kwargs):
+    async def paused(*args, **kwargs):
         preparing.set()
         await release.wait()
-        return await original(runner, *args, **kwargs)
+        return await original(*args, **kwargs)
 
-    monkeypatch.setattr(_RegenerableTurnRunner, "settle", settle)
+    monkeypatch.setattr(target, name, paused)
     features = _session_features(model, checkpointed)
     path = tmp_path / "state.db"
     async with (
@@ -288,10 +293,12 @@ async def test_native_cancel_before_provider_never_dispatches(
                 assert generation["state"] == "cancelling" and generation["generation"] == 1
         finally:
             release.set()
-        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.CANCELLED
+        terminal = await turn.wait_final(timeout_seconds=5)
+        assert terminal.status is ExecutionStatus.CANCELLED
         assert calls == []
-        observed = await second.history.turn_session_state("session", principal=principal)
-        assert observed["active_turn_id"] is None
+        observed = await second.history.turn_session("session", principal=principal)
+        assert observed["session"]["active_turn_id"] is None
+        assert observed["timeline"]["items"] == [terminal.view]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('fault', ('archive', 'context', 'timeout'))

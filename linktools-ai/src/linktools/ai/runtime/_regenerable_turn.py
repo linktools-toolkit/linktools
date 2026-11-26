@@ -2159,12 +2159,16 @@ class _RegenerableTurnRunner:
                                 raise
                             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
                         native_subagent_leaf = None
-                    # Accepted turns can be stopped by another worker before
-                    # the local lease monitor has observed the cancellation.
-                    if turn.native_step is None and not await self._store.can_dispatch(
-                        turn.key, generation=turn.generation,
-                    ):
-                        return False
+                    dispatch_checked = False
+
+                    async def check_dispatch() -> None:
+                        nonlocal dispatch_checked
+                        if not dispatch_checked:
+                            # Agent and compaction requests share this first-dispatch gate.
+                            if not await self._store.can_dispatch(turn.key, generation=turn.generation):
+                                raise asyncio.CancelledError
+                            dispatch_checked = True
+
                     outcome = await self._executor.execute_regenerable(
                         binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
                         event_sink=event_sink, thinking=thinking, streamed_output_bytes=_CONTEXT_BYTES,
@@ -2181,6 +2185,7 @@ class _RegenerableTurnRunner:
                         native_subagent_leaf=native_subagent_leaf,
                         settled_native_subagents=turn.settled_native_subagents, capture_trace=capture_trace,
                         capture_compacted_context=turn.capture_compacted_context,
+                        before_first_model_dispatch=check_dispatch if turn.native_step is None else None,
                     )
                 if isinstance(outcome, DeferredToolRequests):
                     if turn.native_step is None or self._publish_deferred is None:
