@@ -376,8 +376,8 @@ async def test_runtime_uses_its_conversation_route_for_new_turn_storage(tmp_path
     async with Runtime.open("test", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db"),
                             features=RuntimeFeatures("test"), metrics=None,
                             tenant_id="default", authorization=ChatAuthorization()) as runtime:
-        runner = runtime._session_service._regenerable_turns
-        assert runner is not None
+        assert runtime.sessions.supports_turn_sessions
+        assert runtime._session_service is None
         turns = runtime._state.session_turns
         assert turns is not None
         await turns.create("chat", config={})

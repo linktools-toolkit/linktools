@@ -461,13 +461,10 @@ class Persistence:
                         namespace=namespace, tenant_id=tenant_id,
                         read_only=read_only, require_ready=self._require_ready,
                         _coowned=coowned, _runtime_sql=sql_authority,
-                        _native_session_store=materialized.stores[PersistenceDomain.CONVERSATION] if coowned else None,
                     )
                     self._coordination_backend = authority
                     self._pending_turn_coordination = PendingTurnCoordination.for_state(
                         config.pending_cache, authority, namespace=namespace, tenant_id=tenant_id,
-                        strict_session_owner_ready=coowned,
-                        strict_session_repository=materialized.conversation.sessions if coowned else None,
                         _split_session_execution_receipts=split,
                     )
                     self._turn_stream = config.stream

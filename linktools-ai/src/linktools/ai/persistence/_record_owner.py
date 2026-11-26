@@ -5,7 +5,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from ..core import AGENT_RUN_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner
+from ..core import AGENT_RUN_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
@@ -78,6 +78,9 @@ TOOL_OPERATION_KEY_MAX_BYTES = 42 + 2 * 128 + TOOL_OPERATION_ID_MAX_BYTES
 # Six framed components: record, namespace, tenant, domain, agent_run, run ID.
 _RUN_ADMISSION_DOMAINS = frozenset(("trace", "checkpoint", "conversation"))
 RUN_ADMISSION_KEY_MAX_BYTES = 27 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + AGENT_RUN_ID_MAX_BYTES
+# Seven framed components: role, namespace, tenant, domain, agent_run, relation, ID.
+RUN_ADMISSION_SCOPE_MAX_BYTES = 40 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + RESOURCE_ID_MAX_BYTES
+RUN_ADMISSION_PARENT_MAX_BYTES = 35 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + AGENT_RUN_ID_MAX_BYTES
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
 _EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}

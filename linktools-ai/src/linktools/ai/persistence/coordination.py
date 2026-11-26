@@ -27,7 +27,6 @@ from ..execution import ExecutionRecord
 
 if TYPE_CHECKING:
     from ..storage import TurnScope
-    from ._conversation_repositories import SessionRepositoryImpl
     from ._runtime_commands import StateCommands
     from .contracts import ExecutionStartReservation, ExecutionStartReservationResult, IdempotencyRecord, IdempotencyRepository, SessionRecord
 
@@ -46,7 +45,6 @@ class PendingTurnCoordination:
     def __init__(self, cache: CacheBackend | None, backend: TurnCoordinationBackend, *, namespace: str, tenant_id: str) -> None:
         self._state_authority: StateTurnCoordination | None = None
         self._split_session_execution_receipts = False
-        self._strict_session_repository: SessionRepositoryImpl | None = None
         self._cache = cache
         self._backend = backend
         self._namespace = validate_persistence_namespace(namespace)
@@ -68,8 +66,6 @@ class PendingTurnCoordination:
     @classmethod
     def for_state(
         cls, cache: CacheBackend | None, backend: StateTurnCoordination, *, namespace: str, tenant_id: str,
-        strict_session_owner_ready: bool = False,
-        strict_session_repository: SessionRepositoryImpl | None = None,
         _split_session_execution_receipts: bool = False,
     ) -> PendingTurnCoordination:
         bound = cls(cache, backend, namespace=namespace, tenant_id=tenant_id)
@@ -77,18 +73,6 @@ class PendingTurnCoordination:
         if _split_session_execution_receipts and (backend._coowned or backend._sql_source(bound._scope.scope) is None):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         bound._split_session_execution_receipts = _split_session_execution_receipts
-        if strict_session_owner_ready:
-            from ._conversation_repositories import SessionRepositoryImpl
-
-            if type(strict_session_repository) is not SessionRepositoryImpl or not backend._coowned:
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            store = backend._sql_source(bound._scope.scope)
-            if store is None:
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            strict_session_repository.bind_strict_session_creation(store)
-            bound._strict_session_repository = strict_session_repository
-        elif strict_session_repository is not None:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return bound
 
     @property
@@ -178,14 +162,10 @@ class PendingTurnCoordination:
         authority = self._state_authority
         return authority is not None and commands.can_claim_and_reserve_start(authority, reservation, session)
 
-    def select_strict_session_owner(self, commands: StateCommands) -> bool:
-        """Grouped eligibility was already evaluated by can_group_start."""
-        return commands._conversation is self._strict_session_repository
-
     def enter_grouped_start(
         self, commands: StateCommands, reservation: ExecutionStartReservation, session: SessionRecord, *,
         session_key: str, request_key: str, owner_id: str,
-        capture: Callable[[ExecutionStartReservationResult], None], strict_session_owner: bool = False,
+        capture: Callable[[ExecutionStartReservationResult], None],
     ) -> TurnScope:
         authority = self._state_authority
         assert authority is not None
@@ -198,11 +178,8 @@ class PendingTurnCoordination:
             result = await commands.claim_and_reserve_start(
                 authority, self._scope, reservation, expected_session=session, session_key=session_key,
                 request_key=request_key, owner_id=owner_id, lease_seconds=duration,
-                strict_session_owner=strict_session_owner,
             )
             if result is None:
-                if strict_session_owner:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return await authority.claim_turn(self._scope, **claim_identity, lease_seconds=duration)
             coordination, receipt = result
             if receipt is not None:

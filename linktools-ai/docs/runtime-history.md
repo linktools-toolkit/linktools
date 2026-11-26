@@ -778,7 +778,7 @@ the selected reader, so a consumer must not promote a partial view to complete
 history. `runtime.executions.capture_input(...)` captures Agent-owned execution inputs;
 `engine.inputs` is the public capture and replay facade for a `TaskEngine`.
 
-### Dataclass defaults and existing-session compatibility
+### Dataclass defaults
 
 Generic dataclass decoding follows the model's constructor declaration for both
 canonical and persisted wire values. A missing `init=True` field with a declared
@@ -899,17 +899,6 @@ The host reference envelope keeps separate ref/source/revision/provenance
 validation. A malformed or stripped reference descriptor is rejected, not
 promoted from ordinary text or metadata into a fabricated reference.
 
-For an existing `SessionRecord` v1 without `repository_instruction_scopes`, this
-same generic rule uses the field's existing empty-tuple default. The earlier
-writer fixture captured from commit
-`c947aa1393b335ba2e19a973634c2938f06da3e5` is retained in
-`tests/ai/fixtures/persistence/session_record_without_scope_memory_v1.json`.
-An older writer may ignore new fields and omit them on a later rewrite; defaults
-do not reconstruct discarded scope memory. Drain and upgrade writers sharing a
-store/namespace together before using new persistent semantics. Mixed-version
-writers and a write-enabled downgrade are not supported; preserve the store
-rather than deleting sessions or hand-modifying their payloads.
-
 ### Subscribe to local session changes
 
 ```python
@@ -932,7 +921,11 @@ storage's `coordination` backend to reject competing turns without a content
 cache. Hosts with multiple workers can supply their own `TurnCoordinationBackend`;
 the session watch itself is not a distributed notification channel.
 
-### Observe session inactivity without consuming a result
+### Observe non-SQL session inactivity without consuming a result
+
+For SQL sessions, use `runtime.history.turn_session_state(...)` for an authorized
+occupancy snapshot or `runtime.sessions.watch(...)` for local occupancy updates.
+The wait below belongs to the non-SQL session service.
 
 ```python
 view = await runtime.sessions.wait_inactive(
@@ -974,7 +967,7 @@ changes that do not alter the session's public semantic revision. Local pending
 membership is also checked without settling an uncertain commit. Unknown local
 outcomes and backend failures remain errors.
 
-The operation requires native session/execution repositories and the Runtime's
+The operation requires the session and execution repositories and the Runtime's
 local observation wiring. A configured shared turn backend must additionally
 provide the optional `TurnSessionReader` capability: an atomic, token-free lookup
 of the existing live session ownership index. A missing display-cache pointer is
@@ -1058,7 +1051,11 @@ every repository or inline large object results. Existing `inspect_execution`
 remains the metadata-only operation; `result` retains its not-ready and
 recovery-required errors.
 
-### Recover an accepted request after a lost response
+### Recover an accepted non-SQL request after a lost response
+
+For a SQL turn, retry `runtime.sessions.start_turn(...)` with the original input
+and idempotency key, then use `runtime.history.turn_result(...)` with the returned
+turn ID. Do not replace the key after an uncertain response.
 
 When the host builds input from mutable context, rebuilding that input before
 retrying can conflict with the original idempotency key. Read the accepted

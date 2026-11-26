@@ -210,7 +210,7 @@ class StateTurnCoordination:
     def __init__(
         self, store: StateStore, *, namespace: str, tenant_id: str,
         read_only: bool = False, require_ready: Callable[[], None] | None = None,
-        _coowned: bool = False, _native_session_store: SqlStateStore | None = None, _runtime_sql: bool = False,
+        _coowned: bool = False, _runtime_sql: bool = False,
     ) -> None:
         from ._turn_sql_schema import RUNTIME_TURN_SCOPE
 
@@ -221,10 +221,7 @@ class StateTurnCoordination:
                              store.store_key == state_store_key(namespace, tenant_id, "execution"))
         if _coowned and not self._runtime_sql:
             raise ValueError("coowned Runtime receipts require the SQL Execution partition")
-        if _native_session_store is not None and (not _coowned or _native_session_store.storage_group is not store.storage_group):
-            raise ValueError("coowned SESSION receipts require the same SQL transaction group")
         self._execution_row_authority = _coowned
-        self._native_session_store = _native_session_store
         self._native_execution_receipts = _coowned
         self._split_execution_receipts = self._runtime_sql and not _coowned
         if self._runtime_sql:
@@ -286,7 +283,8 @@ class StateTurnCoordination:
             return self.enter(scope, session_key=session_key, request_key=request_key,
                               request_digest=request_digest, execution_id=execution_id, owner_id=owner_id)
         kind, _ = turn_session_address(session_key)
-        session_store = self._native_session_store if kind != STANDALONE else None
+        if kind != STANDALONE and not self._split_execution_receipts:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
         async def claim(seconds: float) -> TurnCoordination | None:
             token = uuid4().hex
@@ -301,7 +299,7 @@ class StateTurnCoordination:
                             execution_id=execution_id, owner_id=owner_id, token=token, duration=_duration(seconds),
                         )
                     return await transaction._regrant_native_execution_receipt(
-                        scope, session_store=session_store, session_key=session_key,
+                        scope, session_store=None, session_key=session_key,
                         execution_id=execution_id, request_key=request_key, request_digest=request_digest,
                         owner_id=owner_id, token=token, duration=_duration(seconds),
                         split=self._split_execution_receipts,
@@ -312,7 +310,7 @@ class StateTurnCoordination:
             return await self._mutation(regrant, lambda: self._confirmed(
                 local_scope, execution_id, receipt=token, kind="claim",
                 expected_claim=(session_key, request_key, request_digest, owner_id),
-            ), session_store=session_store)
+            ))
 
         return RenewingTurnScope(
             self, scope, session_key=session_key, request_key=request_key,
@@ -649,7 +647,7 @@ class StateTurnCoordination:
         return await self._mutation(claim, lambda: self._confirmed(
             local_scope, execution_id, receipt=token, kind="claim",
             expected_claim=(session_key, request_key, request_digest, owner_id),
-        ), session_store=(self._native_session_store if session_key.startswith("session:") else None))
+        ))
 
     async def _claim_in_transaction(
         self, tx: StateTransaction, local_scope: str, *,
@@ -669,13 +667,7 @@ class StateTurnCoordination:
                         session_key=session_key, request_key=request_key, request_digest=request_digest,
                         execution_id=execution_id, owner_id=owner_id, token=token, duration=duration,
                     )
-                if self._native_session_store is None:
-                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                return await source._turn_transaction()._claim_strict_session(
-                    scope, session_store=self._native_session_store, session_key=session_key,
-                    request_key=request_key, request_digest=request_digest, execution_id=execution_id,
-                    owner_id=owner_id, duration=duration, token=token, publish=publish,
-                )
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             if address != turn_hex(request_key, TURN_REQUEST_MAX_BYTES):
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             return await source._turn_transaction()._claim_execution_owned_standalone(

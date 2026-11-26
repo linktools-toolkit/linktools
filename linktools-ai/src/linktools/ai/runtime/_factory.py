@@ -802,7 +802,6 @@ async def _build_local_components(
             run_store,
             executor,
             catalog,
-            canonical_turns=state.session_turns is not None,
             archive_objects=state.archive_object_store(PersistenceDomain.EXECUTION),
             archive_object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
             asset_sources=asset_sources,

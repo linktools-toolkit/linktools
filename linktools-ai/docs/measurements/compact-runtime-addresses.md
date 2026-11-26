@@ -25,10 +25,10 @@ including direct SQL insertion and portable restore.
 | --- | --- | --- | --- |
 | `ai_task_graphs` | 352 bytes: six framed components, namespace and tenant at 128 bytes each and Graph ID at 64 | Removed; graph headers have no scope | Removed; graph headers have no parent |
 | `ai_execution_records` | Keep 768; bounded service form is up to 356 bytes for an execution or 488 for an idempotency record | Keep 768; session and idempotency-resource lookups, service forms up to 442 bytes | Keep 768; subagent parent, service form up to 367 bytes |
-| `ai_step_run_admissions` | 359 bytes: reserved run address with a bounded 64-byte run ID; other key shapes stay in generic State | Keep 768; conversation lookup, typed form up to 436 bytes | Keep 768; parent-run lookup, typed form up to 367 bytes |
+| `ai_step_run_admissions` | 359 bytes: reserved run address with a bounded 64-byte run ID; other key shapes stay in generic State | 436 bytes: full conversation relation | 367 bytes: full parent-run relation |
 | `ai_step_tool_operations` | 362 bytes: exact checkpoint address with a bounded 64-byte operation ID; other key shapes stay in generic State | Keep 768; agent-run lookup, typed form up to 436 bytes | Keep 768; execution lookup, typed form up to 437 bytes |
 
-The three wide dedicated owners still route some non-domain-shaped records
+The two remaining wide dedicated owners still route some non-domain-shaped records
 through the generic State protocol and do not enforce each typed address
 bound. Their service-form maximum is not a storage invariant. Separate
 typed ownership and preserve opaque State records before tightening these

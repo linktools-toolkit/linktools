@@ -306,45 +306,60 @@ async def test_runtime_history_session_reader_pending_overlay_and_canonical_boun
 
 
 @pytest.mark.asyncio
-async def test_runtime_history_session_reader_fork_raw_prefix_and_cold_readonly_open(tmp_path, monkeypatch):
-    from pydantic_ai.messages import UserPromptPart
+async def test_native_history_reader_fork_prefix_and_cold_readonly_open(tmp_path, monkeypatch):
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from linktools.ai.core import TenantAuthorizationPolicy
     from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.storage import InMemoryCacheBackend
+    from linktools.ai.runtime import Runtime
     from linktools.ai.storage._database import SqlStorageContext
-    from .test_pending_session_projection import _runtimes
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
-    cache = InMemoryCacheBackend(max_bytes=2**24)
-    async with _runtimes(tmp_path, cache=cache, shared=False) as (runtimes, _entered, _finish, _block):
-        owner, _ = runtimes[0]
-        principal = owner.default_principal
-        parent = await owner.agents.get().create_session("parent")
-        first = await parent.start("prefix question")
-        await first.wait()
-        child = await parent.fork("child")
-        future = await parent.start("parent suffix")
-        await future.wait()
-        child_turn = await child.start("child suffix")
-        await child_turn.wait()
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Host session access for the live runtime and the offline reader."""
+
+    async def model(messages, _info):
+        return ModelResponse(parts=[TextPart("answer")])
+
+    storage = PersistenceStorage.from_root(tmp_path / "fork-history")
+    authorization = HostAuthorization()
+    async with Runtime.open(
+        "fork-history", storage=storage, authorization=authorization,
+        features=model_features(_Models(_UsageFunctionModel(model))),
+    ) as runtime:
+        agent = runtime.agents.get()
+        principal = runtime.default_principal
+        parent = await agent.create_session("parent")
+        first = await agent.start("prefix question", session_id="parent", idempotency_key="first")
+        await first.wait_final(timeout_seconds=5)
+        parent_state = await parent.inspect()
+        child = await parent.fork("child", expected_revision=parent_state["revision"], idempotency_key="fork")
+        assert child is not None
+        future = await agent.start("parent suffix", session_id="parent", idempotency_key="future")
+        await future.wait_final(timeout_seconds=5)
+        child_turn = await agent.start("child suffix", session_id="child", idempotency_key="child")
+        await child_turn.wait_final(timeout_seconds=5)
 
     async def no_mutation(*args, **kwargs):
-        raise AssertionError("read-only open/list/messages/detail/close must not mutate storage")
+        raise AssertionError("opening, paging, and closing read-only history must not mutate storage")
 
     monkeypatch.setattr(SqlStorageContext, "run_mutation", no_mutation)
-    async with Persistence.open('pending-session-display', storage=PersistenceStorage.sqlite(tmp_path / 'state.db'), tenant_id="default", read_only=True) as history_persistence_327, History.open(persistence=history_persistence_327) as history:
-        page = await history.messages("child", principal=principal, limit=1)
-        messages = list(page.items)
-        while page.next_cursor is not None:
-            page = await history.messages("child", principal=principal, cursor=page.next_cursor, limit=1)
-            messages.extend(page.items)
-        prompts = [part.content for message in messages for part in message.parts
-                   if isinstance(part, UserPromptPart)]
-        assert prompts == ["prefix question", "child suffix"]
-        detail = await history.session_detail("child", principal=principal, limit=1)
-        assert [turn.execution_id for turn in detail.timeline.items] == [child_turn.execution_id]
-        older = await history.session_detail("child", principal=principal, cursor=detail.timeline.next_cursor, limit=1)
-        assert [turn.execution_id for turn in older.timeline.items] == [first.execution_id]
-        assert older.timeline.next_cursor is None
-        assert len((await history.list_sessions(principal=principal)).items) == 2
+    async with (
+        Persistence.open("fork-history", storage=storage, tenant_id=principal.tenant_id, read_only=True) as state,
+        History.open(persistence=state, authorization=authorization) as history,
+    ):
+        recent = (await history.turn_session("child", principal=principal, limit=1))["timeline"]
+        assert [(turn["turn_id"], turn["prompt"]) for turn in recent["items"]] == [
+            (child_turn.key.turn_id, "child suffix"),
+        ]
+        assert recent["next_cursor"] is not None
+        older = (await history.turn_session("child", principal=principal,
+                                            cursor=recent["next_cursor"], limit=1))["timeline"]
+        assert [(turn["turn_id"], turn["prompt"]) for turn in older["items"]] == [
+            (first.key.turn_id, "prefix question"),
+        ]
+        assert older["next_cursor"] is None
+        listed = await history.turn_sessions(principal=principal, session_ids=("parent", "child"))
+        assert {session["session_id"] for session in listed["items"]} == {"parent", "child"}
 
 
 @pytest.mark.asyncio

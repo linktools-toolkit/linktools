@@ -465,31 +465,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
 
 
-        self._strict_session_execution_store: SqlStateStore | None = None
         self._change_observers: dict[bytes, set[Callable[[], None]]] = {}
-
-    def bind_strict_session_creation(self, execution_store: "SqlStateStore") -> None:
-        """Bind the already-selected same-store typed authority for fresh sessions."""
-        from ._sql import SqlStateStore
-
-        if (type(self._store) is not SqlStateStore or type(execution_store) is not SqlStateStore
-                or self._store.storage_group is not execution_store.storage_group):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        if self._strict_session_execution_store not in (None, execution_store):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        self._strict_session_execution_store = execution_store
-
-    async def _insert_new_session(
-        self, transaction: StateTransaction, session_id: str, records: tuple[StoredRecord, ...],
-    ) -> None:
-        if self._strict_session_execution_store is None:
-            await transaction.insert_records(records)
-            return
-        from ._sql import _SqlTransaction
-
-        if not isinstance(transaction, _SqlTransaction):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        await transaction.insert_strict_session_records(records, session_key=self.session_record_key(session_id))
 
     def observe_changes(self, session_id: str, callback: Callable[[], None]) -> Callable[[], None]:
         """Subscribe to local commit hints, not another copy of session state."""
@@ -613,8 +589,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         value = _ensure_session_history(value, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
-            await self._insert_new_session(
-                transaction, value.session_id, (
+            await transaction.insert_records(
+                (
                     self._stored(
                         "session",
                         (value.session_id,),
@@ -655,20 +631,14 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
             _, replayed = await _append_operation(transaction, self, operation)
             if replayed:
-                if self._strict_session_execution_store is not None:
-                    _, current, _ = await self.read_strict_turn_session_in_transaction(
-                        transaction, record.session_id, tenant_id=self._tenant_id,
-                        execution_store=self._strict_session_execution_store,
-                    )
-                    return current, True
                 current = await transaction.get_record(
                     self._key("session", (record.session_id,))
                 )
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return await self._decode(current, SessionRecord), True
-            await self._insert_new_session(
-                transaction, record.session_id, (
+            await transaction.insert_records(
+                (
                     self._stored(
                         "session",
                         (record.session_id,),
@@ -736,16 +706,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     source_session_id=source_session_id,
                     target=target,
                 )
-            if self._strict_session_execution_store is not None:
-                source_stored, source, _ = await self.read_strict_turn_session_in_transaction(
-                    transaction, source_session_id, tenant_id=self._tenant_id,
-                    execution_store=self._strict_session_execution_store,
-                )
-            else:
-                source_stored = await transaction.get_record(self.session_record_key(source_session_id))
-                if source_stored is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                source = await self._decode(source_stored, SessionRecord)
+            source_stored = await transaction.get_record(self.session_record_key(source_session_id))
+            if source_stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            source = await self._decode(source_stored, SessionRecord)
             if source.owner_principal_id != target.owner_principal_id:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if source.revision != expected_source_revision:
@@ -912,7 +876,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             ]
             if child_projection is not None:
                 records.append(child_projection)
-            await self._insert_new_session(transaction, expected_target.session_id, tuple(records))
+            await transaction.insert_records(tuple(records))
             await self._bump_list_generation(
                 transaction,
                 expected_target.owner_principal_id,

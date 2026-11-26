@@ -359,7 +359,6 @@ class LocalExecutionBackend:
         agent_run_lifecycle: _AgentRunLifecycle,
         memory_store_factory: "Callable[[str, str, str], MemoryStore] | None" = None,
         conversation_durable: bool = False,
-        canonical_turns: bool = False,
         input_materializer: ExecutionInputMaterializer | None = None,
         subagent_dispatcher: "_SubagentDispatcher | None" = None,
         live_broker: "LiveExecutionEventBroker | None" = None,
@@ -454,7 +453,6 @@ class LocalExecutionBackend:
         execution_repository: ExecutionRepository = self._execution.executions
         session_repository: SessionRepository = self._conversation.sessions
         self._session_state_store = session_repository.state_store
-        self._canonical_turns = canonical_turns
         self._execution_state_store = execution_repository.state_store
         self._runtime_commands = StateCommands(
             execution_repository,
@@ -1457,7 +1455,6 @@ class LocalExecutionBackend:
         identity = reservation.idempotency
         coordinator = None if graph_claim is not None else self._pending_turns.coordination
         owner: _OwnedExecutionTurn | None = None
-        strict_request_key: str | None = None
 
         def finish_admission() -> None:
             if entered is not None and not entered.done():
@@ -1488,8 +1485,6 @@ class LocalExecutionBackend:
             owned_request_key = (None if coordinator is None else coordinator._native_session_request_key(
                 coordination, execution_id=execution.execution_id, session_id=execution.session_id,
             ))
-            if strict_request_key is not None and owned_request_key != strict_request_key:
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             owner = _OwnedExecutionTurn(reservation, coordination, principal, scope=scope,
                                         lifetime=asyncio.current_task(), admission=admission,
                                         strict_session_request_key=owned_request_key)
@@ -1540,15 +1535,11 @@ class LocalExecutionBackend:
                         execution_id=execution.execution_id, owner_id=owner_id,
                     )
                 else:
-                    if coordinator.select_strict_session_owner(self._runtime_commands):
-                        strict_request_key = request_key
-
                     def capture(receipt: ExecutionStartReservationResult) -> None:
                         grouped.receipt = receipt
                     scope = coordinator.enter_grouped_start(
                         self._runtime_commands, reservation, grouped.session, session_key=session_key,
                         request_key=request_key, owner_id=owner_id, capture=capture,
-                        strict_session_owner=strict_request_key is not None,
                     )
                 # A context may own ContextVars or a TaskGroup. Its task never changes.
                 async with scope as coordination:
@@ -5468,11 +5459,6 @@ class LocalExecutionBackend:
             )
             deferred_capability_refs: dict[str, CapabilityRef] = {}
             try:
-                if self._canonical_turns and current.session_id is not None and (request.planning or request.mode == "plan"):
-                    raise AIError(
-                        ErrorCode.CAPABILITY_POLICY_CONFLICT,
-                        "SQL session planning must use Runtime.sessions.start_turn(planning=True)",
-                    )
                 plan_store = PlanningStore(PlanStateStore(
                     self._session_state_store
                     if current.session_id is not None
