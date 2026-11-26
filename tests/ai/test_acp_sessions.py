@@ -177,6 +177,89 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
 
 
 @pytest.mark.asyncio
+async def test_embedded_sql_acp_replays_default_workspace_tool_with_session_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+
+    from linktools.ai.acp import ACPApplication
+    from linktools.ai.capability import SessionCapability
+    from linktools.ai.core import TenantAuthorizationPolicy
+    from linktools.ai.persistence import PersistenceStorage
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Explicitly authorize the SQL session API on this test host."""
+
+    class RequestError(Exception):
+        @classmethod
+        def invalid_params(cls, detail):
+            return cls(detail)
+
+        internal_error = invalid_params
+
+    class Connection:
+        async def session_update(self, session_id, update):
+            updates.append((session_id, update))
+
+    acp = SimpleNamespace(PROTOCOL_VERSION=1, RequestError=RequestError)
+    schema = SimpleNamespace(**{
+        name: _schema_object
+        for name in (
+            "InitializeResponse", "AgentCapabilities", "SessionCapabilities", "SessionListCapabilities",
+            "Implementation", "NewSessionResponse", "PromptResponse", "LoadSessionResponse",
+            "ToolCallStart", "ToolCallProgress", "TextContentBlock", "AgentMessageChunk", "UserMessageChunk",
+        )
+    })
+    monkeypatch.setattr("linktools.ai.acp._require_acp", lambda: (acp, schema))
+    updates = []
+    calls = 0
+    (tmp_path / "visible-note.txt").write_text("workspace fixture")
+
+    async def model(messages, info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert "list_files" in {tool.name for tool in info.function_tools}
+            return ModelResponse(parts=[ToolCallPart(
+                "list_files", {"path": ".", "include_glob": "visible-note.txt"}, tool_call_id="list",
+            )])
+        assert calls == 2
+        [result] = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
+        assert result.tool_call_id == "list" and result.outcome == "success"
+        assert "visible-note.txt" in result.content
+        return ModelResponse(parts=[TextPart("I found the workspace note.")])
+
+    features = model_features(_Models(_UsageFunctionModel(model)))
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    app = ACPApplication.for_workspace(
+        Workspace.load(tmp_path), features=features,
+        storage=PersistenceStorage.sqlite(tmp_path / "state.db"), authorization=HostAuthorization(),
+    )
+
+    async def serve(agent):
+        agent.on_connect(Connection())
+        await agent.initialize(acp.PROTOCOL_VERSION)
+        session_id = (await agent.new_session(str(tmp_path)))["sessionId"]
+        prompt = "Find the workspace note"
+        assert (await agent.prompt(session_id, [SimpleNamespace(type="text", text=prompt)]))["stopReason"] == "end_turn"
+        assert calls == 2
+        updates.clear()
+        await agent.load_session(str(tmp_path), session_id)
+        assert calls == 2
+        assert [sid for sid, _ in updates] == [session_id] * 3
+        user, tool, assistant = [event for _, event in updates]
+        assert user["sessionUpdate"] == "user_message_chunk" and user["content"]["text"] == prompt
+        assert (tool["sessionUpdate"], tool["title"], tool["status"]) == ("tool_call", "list_files", "completed")
+        assert assistant["sessionUpdate"] == "agent_message_chunk"
+        assert assistant["content"]["text"] == "I found the workspace note."
+
+    monkeypatch.setattr("linktools.ai.acp.serve_stdio", serve)
+    await app.serve()
+
+
+@pytest.mark.asyncio
 async def test_acp_application_can_serve_again_after_transport_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -84,7 +84,7 @@ async def test_existing_session_start_after_same_version_reopen(tmp_path):
         result = await turn.wait_final(timeout_seconds=10)
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.key.session_id == "session"
-        assert await runtime._state.conversation.sessions.get("session", tenant_id=actor.tenant_id) is None
+        assert runtime._state.conversation.sessions is None
 
 
 async def test_existing_session_explicit_output_and_correlation():

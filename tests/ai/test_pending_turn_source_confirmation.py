@@ -40,7 +40,10 @@ async def _source_state(backend, path, *, standalone):
     async with Persistence.open(_NAMESPACE, tenant_id="tenant", storage=_storage(backend, path)) as storage:
         # The standalone builder needs fixture IDs and a clock, not a stored Session.
         session = replace(_session(), agent_id="default", owner_principal_id="principal", history_id="history")
-        yield _TurnState(storage, _runtime_commands(storage, _NAMESPACE), session)
+        state = _TurnState(storage, _runtime_commands(storage, _NAMESPACE), session)
+        # An archive identity bootstrap is not an uncertain promotion or publication.
+        await storage.execution.executions.prepare_content(_standalone(state).reservation.execution)
+        yield state
 
 
 _SOURCE_CASES = (("memory", False), ("memory", True), ("sqlite", True))

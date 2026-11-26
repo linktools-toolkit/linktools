@@ -239,14 +239,28 @@ uses durable admission and recoverable prepared terminal handoffs rather than
 single-transaction deferred turns. Shared SQL engines, caches, and object stores
 remain borrowed resources.
 
-The workspace ACP convenience entry point accepts the same execution declaration:
-`ACPApplication.for_workspace(workspace, features=features, storage=storage,
-execution=ExecutionCapability(retain_history=True))`. Supply coordination through
-`PersistenceStorage(..., coordination=cache)` or its convenience factories. Without
-an explicit execution declaration, ACP defaults to retaining history. An explicit
-declaration controls retention and commit; workspace
-capability remains built in. A cache attached only to storage does not enable
-turn or stream coordination.
+For an embedded ACP workspace using SQL sessions and the default workspace
+tools, explicitly configure Session checkpoints and supply your host's session
+authorization policy. Keep Conversation, Step and tool receipts in the same SQL
+storage group:
+
+```python
+features.capability(SessionCapability(checkpoints=True), scope="runtime")
+application = ACPApplication.for_workspace(
+    workspace,
+    features=features,
+    storage=PersistenceStorage.sqlite(database_path),
+    authorization=host_session_authorization,
+    execution=ExecutionCapability(retain_history=True),
+)
+```
+
+Text-only sessions and supported read-only tool configurations do not require
+checkpoints. The optional Execution declaration controls independent Execution
+retention and commit behavior; by default ACP retains Execution history. To
+supply coordination, use `PersistenceStorage(..., coordination=cache)` or its
+convenience factories. A cache attached only to storage does not enable turn or
+stream coordination.
 
 Hosts can register a synchronous callback with
 `runtime.sessions.observe_turns(handler)` and unsubscribe with the returned

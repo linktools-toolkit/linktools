@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
 from linktools.ai.capability import ExecutionCapability, TraceCapability
@@ -73,8 +73,7 @@ async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
 
     state = root_storage()
     async with Persistence.open('module-routes', storage=state) as persistence_67, Runtime.open(persistence=persistence_67, metrics=Metrics.in_memory(), features=features) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("question")
+        execution = await runtime.agents.get().start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         principal = runtime.default_principal
         execution_id = execution.execution_id
@@ -207,16 +206,25 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
     state = PersistenceStorage(replace(state.plan, conversation=route), coordination=cache)
     features = _features()
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
-    async with Persistence.open('split-conversation', storage=state) as persistence_196, Runtime.open(persistence=persistence_196, features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features)) as runtime:
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
+    async with (
+        Persistence.open("split-conversation", storage=state) as persistence,
+        Runtime.open(persistence=persistence, authorization=HostAuthorization(),
+                     features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features)) as runtime,
+    ):
         session = await runtime.agents.get().create_session("session")
-        execution = await session.start("question", idempotency_key="turn")
+        turn = await runtime.sessions.start(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert record is not None
-            assert record.status is ExecutionStatus.STARTED
+            view = await runtime.history.turn_result(session.session_id, turn.key.turn_id, principal=runtime.default_principal)
+            assert view["status"] == ExecutionStatus.PENDING_START.value
+            assert view["conversation_committed"] is False
         finally:
             release.set()
-        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        replay = await session.start("question", idempotency_key="turn")
-        assert replay.execution_id == execution.execution_id
+        terminal = await turn.wait_final(timeout_seconds=5)
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        assert terminal.view["output"] == {"text": "done"}
+        replay = await runtime.sessions.start(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
+        assert replay.key.turn_id == turn.key.turn_id
