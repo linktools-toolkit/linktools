@@ -358,6 +358,10 @@ if(process.argv[3]==='session-published-turn') {
   assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native preview/s);
   assert.doesNotMatch(node('conversation').textContent,/Stale thought/);
   assert.equal(node('send').disabled,true);
+  const stopResponse=deferred('POST /api/sessions/b/cancel'),stop=node('reader-stop').onclick();
+  await stopResponse.requested;
+  stopResponse({accepted:false});await stop;
+  assert.match(node('notice').textContent,/Stop not confirmed/);
   emitTurn({type:'terminal',turn_id:ordinaryTurn,turn_no:1,revision:2,generation:1,state:'succeeded',
     prompt:'Native question',items:[{item_kind:'thinking',content:'Native thought'}, {item_kind:'assistant',content:'Native finished'}]});
   assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native finished/s);

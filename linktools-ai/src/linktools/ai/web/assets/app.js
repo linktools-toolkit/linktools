@@ -2438,7 +2438,8 @@ async function ordinaryAction(action) {
   state.actionsPending.add(key);setDisabled();
   try {
     const result=await mutate(sessionURL(id,action),{turn_id:turn});
-    if(state.selectedSession===id && !result.accepted)notice(action==='recover'?'Turn still owned or already complete.':'Turn not available to stop.');
+    if(state.selectedSession===id && state.session?.active_turn_id===turn && !result.accepted)
+      notice(action==='recover'?'Turn still owned or already complete.':'Stop not confirmed. Watch the turn for its final status.');
   } finally {state.actionsPending.delete(key);setDisabled();}
 }
 async function sendMessage(event) {
