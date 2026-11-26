@@ -2305,7 +2305,8 @@ class LocalExecutionBackend:
         state = self._execution.executions.state_store
         if (not isinstance(native, SqlStepStore) or native.backup_source is None
                 or execution.native_step_source != native.backup_source
-                or transcript_source is not native
+                or transcript_source.storage_context.engine is not native.storage_context.engine
+                or transcript_source.store_key != native.store_key
                 or store.storage_group is not state.storage_group):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
