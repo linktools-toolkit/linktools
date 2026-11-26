@@ -63,16 +63,15 @@ function showError(error) {
 }
 function connection(label, failed=false) { $('connection').textContent=label==='Read-only'?label:`Observation: ${label}`; $('connection').hidden=!failed && label!=='Read-only'; $('connection').classList.toggle('error', failed); }
 function showInspector(open, focus=false) {
-  const closingMode=!open && state.view==='sessions' && ['activity','turn-models'].includes(state.conversationMode)
-    ? state.conversationMode:null;
-  if(closingMode){state.conversationMode='chat';renderPage();}
+  const closingActivity=!open && state.view==='sessions' && state.conversationMode==='activity';
+  if(closingActivity){state.conversationMode='chat';renderPage();}
   if(open && state.view==='sessions' && state.conversationMode==='original'){state.conversationMode='chat';renderPage();renderConversation();}
   if(state.view==='sessions')state.conversationInspectorOpen=open;
   if(state.view==='executions')open=true;
   if(!open)++state.detailGeneration;
   $('inspector').hidden=!open;$('inspector-toggle').setAttribute('aria-expanded',String(open));
   if(!open)$('run-actions').open=false;
-  if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$(closingMode==='turn-models'?'native-mode':closingMode?'activity-mode':'actions-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
+  if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$(closingActivity?'activity-mode':'actions-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
 }
 function renderCurrentState() {
   const ordinary=state.view==='sessions' && state.config?.turn_sessions;
@@ -177,7 +176,9 @@ function setDisabled() {
   $('export').disabled=!state.execution || !terminal(state.execution.status);
   $('run-recovery').disabled=!state.execution;
   $('detail-view').disabled=!state.execution;
-  $('native-mode').disabled=ordinary?!state.config.turn_model_messages || !defaultOrdinaryTurn():!state.selectedExecution;
+  $('native-mode').hidden=ordinary;
+  $('native-mode').disabled=ordinary || !state.selectedExecution;
+  $('activity-mode').textContent=ordinary?'Trace':'Activity';
   $('activity-mode').disabled=ordinary?!state.config.turn_trace || !defaultOrdinaryTurn():!state.selectedExecution;
   $('detail-turn-picker').hidden=state.view!=='sessions';
   $('detail-view').disabled=ordinary;
@@ -241,10 +242,10 @@ function renderPage() {
   $('page-heading').hidden=sessions && Boolean(state.selectedSession);
   $('conversations-home').hidden=sessions;
   $('conversation-view').hidden=metrics || sessions && !state.selectedSession;
-  const inspectorMode=['activity','turn-models'].includes(state.conversationMode);
+  const inspectorMode=state.conversationMode==='activity';
   $('conversation-column').hidden=!sessions || inspectorMode;
   $('conversation-nav').hidden=!sessions || !state.selectedSession;
-  for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode || id==='native-mode' && state.conversationMode==='turn-models');
+  for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode);
   $('welcome').hidden=!sessions || Boolean(state.selectedSession);
   $('execution-list').hidden=!executions;
   $('browse-panel').hidden=metrics;
@@ -1489,7 +1490,7 @@ function renderConversation({prepend=false}={}) {
   $('turns-more').hidden=!state.turnCursor;
   const live=element('section','turn-live');live.id='live';
   renderTurnPickers();
-  for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode || id==='native-mode' && state.conversationMode==='turn-models');
+  for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode);
   if(state.sessionError){container.append(element('p','empty','This conversation is unavailable in the current Runtime. Refresh to retry, choose another conversation, or create a new one.'));return;}
   if(state.timelineError)container.append(element('p','empty',`${state.timelineError} · Inspect retained executions; loaded turns may be incomplete.`));
   if(original) {
@@ -1978,12 +1979,8 @@ function readerDetail(key,label,className) {
   detail.ontoggle=()=>{if(!detail.isConnected)return;if(detail.open)state.readerExpanded.add(key);else state.readerExpanded.delete(key);};
   detail.append(summary);return detail;
 }
-function renderNativeTimeline(container,{conversation=false,turn=null}={}) {
-  const view=turn?{id:turn.turnId,items:state.details,cursor:turn.cursor}:state.nativeTimeline;
-  const readerHttp=!turn && state.readerHttp;
-  const keyFor=turn?item=>`turn:${item.turn_id}:${item.model_request_seq}`:modelKey;
-  const render=turn?renderDetails:renderNativeViews;
-  const load=turn?(more=false)=>loadOrdinaryInspection(turn.turnId,more,'turn-models'):loadNativeTimeline;
+function renderNativeTimeline(container,{conversation=false}={}) {
+  const view=state.nativeTimeline,readerHttp=state.readerHttp;
   container.classList.add('native-reader');
   const toolbar=element('div','native-toolbar');container.append(toolbar);
   if(conversation){
@@ -1991,36 +1988,36 @@ function renderNativeTimeline(container,{conversation=false,turn=null}={}) {
     const turn=element('select','native-turn');turn.id='request-turn';turn.setAttribute('aria-label','Choose turn for model requests');turn.dataset.requestFocus='reader:turn';
     turn.onchange=()=>selectExecution(turn.value).catch(showError);toolbar.append(turn);
   }
-  if(!view || !turn && view.id!==state.selectedExecution){container.append(element('p','muted','Loading model records…'));return;}
+  if(!view || view.id!==state.selectedExecution){container.append(element('p','muted','Loading model records…'));return;}
   const choices=[];
   for(const item of view.items){
-    if(!readerHttp){choices.push({key:keyFor(item),item,attempt:null,index:0});continue;}
+    if(!readerHttp){choices.push({key:modelKey(item),item,attempt:null,index:0});continue;}
     const attempts=item.client_requests || [];
-    if(!attempts.length)choices.push({key:keyFor(item)+':unavailable',item,attempt:null,index:0});
+    if(!attempts.length)choices.push({key:modelKey(item)+':unavailable',item,attempt:null,index:0});
     else attempts.forEach((attempt,index)=>choices.push({key:clientAttemptKey(item,index),item,attempt,index}));
   }
   let selected=choices.find(choice=>choice.key===state.readerSelection);
-  if(!selected && state.readerSelection?.endsWith(':unavailable'))selected=choices.find(choice=>keyFor(choice.item)+':unavailable'===state.readerSelection);
+  if(!selected && state.readerSelection?.endsWith(':unavailable'))selected=choices.find(choice=>modelKey(choice.item)+':unavailable'===state.readerSelection);
   if(selected)state.readerSelection=selected.key;
   if(!selected){selected=choices[0];state.readerSelection=selected?.key || null;}
   const select=element('select','native-request');select.setAttribute('aria-label','Select model request and attempt');select.dataset.requestFocus='reader:selection';
-  choices.forEach(choice=>{const option=element('option','',`Request ${choice.item.model_request_seq} · ${!readerHttp?'SDK record':choice.attempt?'Attempt '+(choice.index+1):'not captured'}${choice.item.agent_run_seq>1?' · run '+choice.item.agent_run_seq:''}${choice.item.purpose && choice.item.purpose!=='agent'?' · '+choice.item.purpose:''}${!turn && choice.item.execution_id!==view.id?' · '+short(choice.item.execution_id):''}`);option.value=choice.key;select.append(option);});
-  select.value=state.readerSelection || '';select.disabled=!selected;select.onchange=()=>{state.readerExpanded.delete('reader:tools');state.readerSelection=select.value;state.readerCache=null;render();};toolbar.append(select);
+  choices.forEach(choice=>{const option=element('option','',`Request ${choice.item.model_request_seq} · ${!readerHttp?'SDK record':choice.attempt?'Attempt '+(choice.index+1):'not captured'}${choice.item.agent_run_seq>1?' · run '+choice.item.agent_run_seq:''}${choice.item.purpose && choice.item.purpose!=='agent'?' · '+choice.item.purpose:''}${choice.item.execution_id!==view.id?' · '+short(choice.item.execution_id):''}`);option.value=choice.key;select.append(option);});
+  select.value=state.readerSelection || '';select.disabled=!selected;select.onchange=()=>{state.readerExpanded.delete('reader:tools');state.readerSelection=select.value;state.readerCache=null;renderNativeViews();};toolbar.append(select);
   const status=selected?.attempt?.response?.status_code;
   if(status>=400 || selected?.item.status && selected.item.status!=='SUCCEEDED')toolbar.append(element('span','native-status',status>=400?`HTTP ${status}`:selected.item.status));
   const tools=readerDetail('reader:tools','···','native-tools');tools.children[0].setAttribute('aria-label','Request tools');
   const actions=element('div','native-tool-actions');tools.append(actions);toolbar.append(tools);
   const closeTools=()=>{tools.open=false;state.readerExpanded.delete('reader:tools');tools.children[0].focus({preventScroll:true});};
   tools.onkeydown=event=>{if(event.key==='Escape')closeTools();};
-  if(!turn){const source=button(readerHttp?'Read model input':'Original HTTP diagnostics',async()=>{closeTools();state.readerHttp=!readerHttp;state.readerSelection=null;state.readerCache=null;await loadNativeTimeline(false,true);});source.dataset.requestFocus='reader:source';actions.append(source);}
-  const raw=button(state.readerRaw?'Read messages':'View raw',async()=>{closeTools();state.readerRaw=!state.readerRaw;render();});raw.dataset.requestFocus='reader:raw';raw.disabled=!selected?.attempt;if(readerHttp)actions.append(raw);
+  const source=button(readerHttp?'Read model input':'Original HTTP diagnostics',async()=>{closeTools();state.readerHttp=!readerHttp;state.readerSelection=null;state.readerCache=null;await loadNativeTimeline(false,true);});source.dataset.requestFocus='reader:source';actions.append(source);
+  const raw=button(state.readerRaw?'Read messages':'View raw',async()=>{closeTools();state.readerRaw=!state.readerRaw;renderNativeViews();});raw.dataset.requestFocus='reader:raw';raw.disabled=!selected?.attempt;if(readerHttp)actions.append(raw);
   if(readerHttp && selected?.attempt?.body!=null){const download=button('Download bytes',async()=>{downloadClientBody(selected.attempt,`${selected.key}-request.bin`);closeTools();});download.dataset.requestFocus='reader:download';actions.append(download);}
-  if(selected){const info=button('Inspect request',async()=>{const key=keyFor(selected.item)+':metadata';state.readerExpanded.has(key)?state.readerExpanded.delete(key):state.readerExpanded.add(key);closeTools();render();});info.dataset.requestFocus='reader:info';actions.append(info);}
+  if(selected){const info=button('Inspect request',async()=>{const key=modelKey(selected.item)+':metadata';state.readerExpanded.has(key)?state.readerExpanded.delete(key):state.readerExpanded.add(key);closeTools();renderNativeViews();});info.dataset.requestFocus='reader:info';actions.append(info);}
   if(view.error)container.append(element('p','source-warning',view.error));
-  if(!selected)container.append(element('p','empty',view.loading?'Loading model records…':turn?'No model messages were captured for this turn.':'No records for this selection.'));
+  if(!selected)container.append(element('p','empty',view.loading?'Loading model records…':'No records for this selection.'));
   else {
     const {item,attempt}=selected;
-    const metadata=readerDetail(keyFor(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'Retained SDK interaction content, not provider wire bytes.'),element('pre','json',json({...(turn?{turn_id:item.turn_id}:{execution_id:item.execution_id}),agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api,record_http_bodies:attempt?.record_http_bodies,diagnostics:attempt?.diagnostics})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
+    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'Retained SDK interaction content, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api,record_http_bodies:attempt?.record_http_bodies,diagnostics:attempt?.diagnostics})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
     const toggleInfo=metadata.ontoggle;metadata.ontoggle=()=>{toggleInfo();if(!metadata.isConnected)return;metadata.hidden=!metadata.open;if(!metadata.open && metadata.contains(document.activeElement))tools.children[0].focus({preventScroll:true});};
     if(!readerHttp)sdkMessages(container,item,selected.key);
     else if(!attempt)container.append(element('p','muted',!item.client_requests_included?'Original client content was not requested.':item.status==='RUNNING'?'Request running; capture is saved on completion.':item.client_requests===null?'Original client messages were not recorded.':'No supported client dispatch was observed.'));
@@ -2050,10 +2047,10 @@ function renderNativeTimeline(container,{conversation=false,turn=null}={}) {
       const response=readerDetail(selected.key+':response',attempt.response?`Observed response · HTTP ${attempt.response.status_code} · ${completion}`:'No response observed','native-response');
       if(attempt.response)response.append(element('p','muted',`${attempt.response.format} · ${attempt.response.content_encoding || 'identity'} · Separate from this request’s input messages. ${attempt.response.body==null?'Response body not retained; terminal absence is not evidence of a broken stream.':'Only bytes pulled by the SDK were captured; protocol terminal and HTTP EOF are separate observations.'}`),nativeBody(attempt.response,`${selected.key}-response.bin`));container.append(response);
     }
-    if(!turn && item.execution_id!==state.selectedExecution)container.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
+    if(item.execution_id!==state.selectedExecution)container.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
   }
-  const refresh=button('Refresh requests',async()=>load(false,true));refresh.dataset.requestFocus='refresh';refresh.setAttribute('aria-busy',String(view.loading));container.append(refresh);
-  if(view.cursor && !turn){const more=button('Load more requests',async()=>loadNativeTimeline(true));more.dataset.requestFocus='more';more.setAttribute('aria-busy',String(view.loading));container.append(more);}
+  const refresh=button('Refresh requests',async()=>loadNativeTimeline(false,true));refresh.dataset.requestFocus='refresh';refresh.setAttribute('aria-busy',String(view.loading));container.append(refresh);
+  if(view.cursor){const more=button('Load more requests',async()=>loadNativeTimeline(true));more.dataset.requestFocus='more';more.setAttribute('aria-busy',String(view.loading));container.append(more);}
 }
 function renderNativeViews() {
   if(state.view==='sessions' && state.conversationMode==='original')renderConversation();
@@ -2165,7 +2162,7 @@ async function refreshNativeRequests(view,generation) {
 async function loadDetail(more=false, selectors={}, reuseNative=false) {
   if (!state.selectedExecution || $('inspector').hidden || state.view==='metrics') return;
   const generation=++state.detailGeneration, selection=state.generation, id=state.selectedExecution, tab=state.tab;
-  if (!more) { state.details=[]; state.detailCursor=null; $('inspector-content').classList.remove('native-reader');clear('inspector-content'); }
+  if (!more) { state.details=[]; state.detailCursor=null; $('inspector-content').classList.remove('native-reader','turn-trace');clear('inspector-content'); }
   $('detail-more').hidden=true;
   $('detail-view').value=tab;setDisabled();
   if (tab==='overview') { renderOverview(); return; }
@@ -2189,7 +2186,7 @@ async function loadDetail(more=false, selectors={}, reuseNative=false) {
   } catch(error) { if(generation===state.detailGeneration && selection===state.generation && id===state.selectedExecution && tab===state.tab) showError(error); }
 }
 function renderOverview() {
-  $('inspector-content').classList.remove('native-reader');clear('inspector-content'); const info=state.execution; if (!info) return;
+  $('inspector-content').classList.remove('native-reader','turn-trace');clear('inspector-content'); const info=state.execution; if (!info) return;
   $('inspector-content').append(properties({Agent:info.agent_id,Kind:info.binding_kind,Session:info.session_id,Lineage:info.lineage_kind,Created:date(info.created_at),Started:date(info.started_at),Finished:date(info.terminal_at),Error:info.error_code}));
   if(info.usage) { const card=element('div','detail-card'); card.append(element('h3','','Usage'),properties({Requests:info.usage.logical_requests,'Input tokens':info.usage.input_tokens,'Output tokens':info.usage.output_tokens,'Unknown usage':info.usage.unknown_usage_requests}),rawDetail(info.usage)); $('inspector-content').append(card); }
   $('inspector-content').append(rawDetail(info,'Execution metadata'));
@@ -2224,7 +2221,7 @@ function traceItem(item) {
   const raw=rawDetail(item,'Original event record');raw.children[0].dataset.requestFocus=`trace:${key}:raw`;detail.append(raw);node.append(detail);return node;
 }
 function renderDetails() {
-  $('inspector-content').classList.remove('native-reader');
+  $('inspector-content').classList.remove('native-reader','turn-trace');
   const requestFocus=requestFocusWithin($('inspector-content'));
   clear('inspector-content');
   if(['history','transcript','sdkmodels'].includes(state.tab)) {
@@ -2238,8 +2235,8 @@ function renderDetails() {
     const resume=button('Resume stopped execution',()=>executionAction('recover'));resume.id='resume-run';
     $('inspector-content').append(element('p','empty','Resume continues the original work and may call models or tools. To end it instead, use End stopped execution.'),resume);setDisabled();
   }
-  if(state.tab==='turn-models'){
-    renderNativeTimeline($('inspector-content'),{turn:ordinaryInspection});
+  if(state.tab==='trace' && nativeTurnInspector()){
+    renderOrdinaryTrace($('inspector-content'));
     restoreRequestFocus($('inspector-content'),requestFocus);return;
   }
   if(state.tab==='models'){renderNativeTimeline($('inspector-content'));restoreRequestFocus($('inspector-content'),requestFocus);return;}
@@ -2888,7 +2885,7 @@ $('sidebar-close').onclick=()=>closeSidebar(true);
 window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open && !$('plan-dialog').open)closeSidebar(true);});
 $('new-title').oninvalid=()=>$('new-options').open=true;
 $('detail-turn').onchange=()=>(
-  nativeTurnInspector()?loadOrdinaryInspection($('detail-turn').value,false,state.tab):selectExecution($('detail-turn').value)
+  nativeTurnInspector()?loadOrdinaryInspection($('detail-turn').value):selectExecution($('detail-turn').value)
 ).catch(showError);
 async function openRecovery(active=false) {
   const id=active?state.session?.active_execution_id:state.selectedExecution;if(!id)return;
@@ -2930,24 +2927,74 @@ function chooseOrdinaryInspectionTurn() {
   select.value=selected || defaultOrdinaryTurn() || '';select.disabled=!options.size;
   return select.value;
 }
-async function loadOrdinaryInspection(turnId,more=false,tab='trace') {
+function renderOrdinaryTrace(container) {
+  const inspection=ordinaryInspection;
+  container.classList.add('turn-trace');
+  const turn=state.turns.find(row=>row.turn_id===inspection.turnId);
+  if(turn?.status)container.append(element('p','source-note',`Turn${turn.turn_no?' '+turn.turn_no:''} · ${turn.status.replaceAll('_',' ').toLowerCase()}`));
+  if(!state.details.length)container.append(element('p','empty','No trace events were captured for this turn.'));
+  const groups=new Map(),rows=[];
+  for(const item of state.details){
+    const {kind,model_request_seq:seq,scope}=item.payload;
+    if((kind==='MODEL_REQUEST' || kind==='MODEL_RESPONSE') && seq!=null && scope==='root'){
+      let row=groups.get(seq);
+      if(!row){row={seq,events:[]};groups.set(seq,row);rows.push(row);}
+      row.events.push(item);
+    } else rows.push(item);
+  }
+  for(const row of rows){
+    if(!row.events){container.append(traceItem(row));continue;}
+    const {seq,events}=row,key=`trace:model:${seq}`,last=events.at(-1).payload;
+    const selected=state.traceSelection===key;
+    const card=element('section','trace-item'),toggle=button('',async()=>{
+      state.traceSelection=selected?null:key;
+      if(!selected && state.config.turn_model_messages && (inspection.model?.seq!==seq || !inspection.model.items)){
+        const read={seq};inspection.model=read;renderDetails();
+        const current=()=>ordinaryInspection===inspection && inspection.model===read
+          && state.traceSelection===key && nativeTurnInspector() && !$('inspector').hidden;
+        try {
+          const page=await api(sessionURL(inspection.session,'',{turn_id:inspection.turnId,models:'true',
+            include_content:'true',model_request_seq:String(seq)}));
+          if(current())read.items=page.items;
+        } catch(error){if(current())read.error=error.message;}
+        if(!current())return;
+      }
+      renderDetails();
+    });
+    toggle.className='trace-row';toggle.dataset.requestFocus=key;toggle.setAttribute('aria-expanded',String(selected));
+    toggle.append(element('span','trace-seq',`#${events[0].step_event_seq}`),element('span','trace-label',`Model request ${seq}`),
+      element('span','trace-status',last.status),element('span','trace-duration',duration(last.duration_ns)));card.append(toggle);
+    if(selected){
+      const detail=element('div','trace-detail');
+      for(const {payload:event} of events)detail.append(element('p','muted',
+        [event.kind==='MODEL_REQUEST'?'Model input':'Model response',event.status,event.purpose,event.occurred_at].filter(Boolean).join(' · ')));
+      const read=inspection.model;
+      if(!state.config.turn_model_messages)detail.append(element('p','muted','Model message capture is not available.'));
+      else if(read?.error)detail.append(element('p','source-warning',read.error));
+      else if(!read?.items)detail.append(element('p','muted','Loading captured model messages…'));
+      else if(!read.items.length)detail.append(element('p','muted','No model messages were captured for this request.'));
+      else for(const item of read.items)sdkMessages(detail,item,`${inspection.turnId}:${seq}`);
+      card.append(detail);
+    }
+    container.append(card);
+  }
+}
+async function loadOrdinaryInspection(turnId,more=false) {
   if(!nativeTurnInspector() || $('inspector').hidden || !turnId || !state.selectedSession)return;
   const session=state.selectedSession,generation=state.generation,detail=++state.detailGeneration;
   const current=()=>detail===state.detailGeneration && generation===state.generation
     && session===state.selectedSession && nativeTurnInspector() && !$('inspector').hidden;
   if(!more || ordinaryInspection?.session!==session || ordinaryInspection.turnId!==turnId){
     ordinaryInspection={session,turnId,cursor:null};
-    state.tab=tab;state.details=[];state.traceSelection=null;
-    if(tab==='turn-models'){state.readerSelection=null;state.readerCache=null;state.readerExpanded.clear();}
-    $('detail-title').textContent=tab==='turn-models'?'Model messages':'Turn trace';$('detail-view').value=tab==='turn-models'?'models':'trace';
+    state.tab='trace';state.details=[];state.traceSelection=null;
+    $('detail-title').textContent='Turn trace';
     $('execution-meta').textContent='Turn '+short(turnId);
-    $('inspector-content').classList.remove('native-reader');clear('inspector-content');
+    $('inspector-content').classList.remove('native-reader','turn-trace');clear('inspector-content');
   }
   $('detail-more').hidden=true;
-  if(!more)$('inspector-content').append(element('p','muted',tab==='turn-models'?'Loading model records…':'Loading turn trace…'));
+  if(!more)$('inspector-content').append(element('p','muted','Loading turn trace…'));
   try {
-    const page=await api(sessionURL(session,'',{turn_id:turnId,limit:tab==='turn-models'?'10':'50',
-      ...(tab==='turn-models'?{models:'true',include_content:'true'}:{trace:'true'}),
+    const page=await api(sessionURL(session,'',{turn_id:turnId,trace:'true',limit:'50',
       ...(ordinaryInspection.cursor?{cursor:ordinaryInspection.cursor}:{})}));
     if(!current())return;
     ordinaryInspection.cursor=page.next_cursor;
@@ -2981,11 +3028,6 @@ $('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showErro
 $('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
 $('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
 $('native-mode').onclick=()=>{
-  if(nativeTurnInspector() && state.config.turn_model_messages){
-    closeRunActions();$('action-menu').open=false;
-    state.conversationMode='turn-models';renderPage();showInspector(true,true);
-    return loadOrdinaryInspection(chooseOrdinaryInspectionTurn(),false,'turn-models').catch(showError);
-  }
   state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;state.conversationMode='original';showInspector(false);renderPage();renderConversation();$('conversation').scrollTop=0;$('native-mode').focus();return loadNativeTimeline().catch(showError);};
 $('chat-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');$('action-menu').open=false;state.conversationMode='chat';showInspector(false);renderPage();renderConversation();($('prompt').disabled?$('chat-mode'):$('prompt')).focus();};
 $('activity-mode').onclick=()=>{
@@ -2995,7 +3037,7 @@ $('activity-mode').onclick=()=>{
 };
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>(
-  nativeTurnInspector()?loadOrdinaryInspection(ordinaryInspection?.turnId,true,state.tab):loadDetail(true,state.detailSelectors)
+  nativeTurnInspector()?loadOrdinaryInspection(ordinaryInspection?.turnId,true):loadDetail(true,state.detailSelectors)
 ).catch(showError);
 $('refresh').onclick=()=>{if(state.config?.turn_sessions && state.view==='sessions'){
     if(sessionWatch?.source.readyState===EventSource.CLOSED)stopSessionWatch();
