@@ -43,7 +43,7 @@ from ._budget import RunBudgetContext
 from ..model.messages import bind_tool_return_attachments
 from ._harness import bind_tool_reference_origins
 from ._tool import (
-    RuntimeToolOperationBridge, TOOL_CAPABILITY_REF_METADATA_KEY, ToolOperationBridge, tool_capability_ref,
+    RuntimeToolOperationBridge, TOOL_CAPABILITY_REF_METADATA_KEY, ToolOperationBridge, ToolOperationDecision, tool_capability_ref,
 )
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
@@ -149,6 +149,12 @@ def require_tool_effects(
         raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "tool contract does not establish read-only effects")
 
 
+_ClaimedLeaf = Callable[
+    [ToolOperationDecision, ToolCallPart, dict[str, Any], PydanticRunContext[AgentContext[object]]],
+    Awaitable[Any],
+]
+
+
 class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     """Apply workspace policy and effect durability at the final leaf call."""
 
@@ -167,6 +173,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         budget: RunBudgetContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
         result_callbacks: RunCallbacks | None = None,
+        claimed_leaves: Mapping[str, _ClaimedLeaf] | None = None,
         prepare_arguments: Callable[
             [str, dict[str, Any], PydanticRunContext[AgentContext[object]], ToolsetTool[AgentContext[object]]],
             Awaitable[dict[str, Any]],
@@ -186,6 +193,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._budget = budget
         self._repository_boundary = repository_boundary
         self._result_callbacks = result_callbacks
+        self._claimed_leaves = {} if claimed_leaves is None else dict(claimed_leaves)
         self._prepare_arguments = prepare_arguments
         self._exit_stack: AsyncExitStack | None = None
 
@@ -401,6 +409,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 capability_ref=descriptor.capability_ref,
             )
 
+        claimed_leaf = self._claimed_leaves.get(name)
         physical_args: dict[str, Any] | None = None
 
         async def prepare() -> None:
@@ -409,7 +418,13 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 physical_args = await self._prepare_arguments(name, final_args, ctx, raw_tool)
 
         async def invoke(args: dict[str, Any]) -> Any:
-            result = await raw_toolset.call_tool(name, args if physical_args is None else physical_args, ctx, raw_tool)
+            if claimed_leaf is None:
+                result = await raw_toolset.call_tool(name, args if physical_args is None else physical_args, ctx, raw_tool)
+            else:
+                # Checked before entering: never invoke a native child for a
+                # cached result, a staged split operation, or an unmanaged leaf.
+                assert decision is not None
+                result = await claimed_leaf(decision, call, args, ctx)
             if processors:
                 if decision is None:
                     # Give projections the existing file occurrence to preserve;
@@ -421,6 +436,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             return bind_tool_reference_origins(ctx, result)
 
         if decision is None:
+            if claimed_leaf is not None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if self._budget is not None:
                 await self._budget.admit_tool(call_id)
             if bridge is not None and descriptor.effect_owner != "none":
@@ -517,6 +534,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
 
         try:
             try:
+                if claimed_leaf is not None and (decision.staged or decision.replay_safe):
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 if self._budget is not None and not decision.budget_admitted:
                     await self._budget.admit_tool(
                         call_id, operation_id=decision.operation_id, fence=decision.fence,

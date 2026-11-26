@@ -11,6 +11,9 @@ from ._message_root import NativeTextReference, NativeMessageRoot, NativeUserInp
 from linktools.core import environ
 from ..core import (
     ExecutionEventType,
+    ExecutionLineageKind,
+    Principal,
+    canonical_sha256,
     ExecutionStatus,
     IdempotencyStatus,
     JsonValue,
@@ -92,6 +95,8 @@ _logger = environ.get_logger("ai.runtime.state.repositories")
 
 if TYPE_CHECKING:
     from ._execution_authority import ExecutionAuthority, InitialExecutionAuthority
+    from ._checkpoint_repositories import ToolRepositoryImpl
+    from ._session_turn_sql import SessionTurnKey, SqlSessionTurns
 
 
 class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
@@ -1178,6 +1183,70 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ExecutionStartReservationResult:
         return await self._reserve_start(reservation, input_context_write=input_context_write, authority=authority)
 
+    async def reserve_native_subagent(
+        self, reservation: ExecutionStartReservation, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
+        tools: "ToolRepositoryImpl", operation_id: str, owner: str, fence: int, invocation_id: str,
+        principal: Principal, input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
+        authority: "ExecutionAuthority | None" = None,
+    ) -> ExecutionStartReservationResult:
+        """Reserve one child under its canonical tool claim without a shadow parent."""
+        child, identity = reservation.execution, reservation.idempotency
+        generation = reservation.parent_producer_generation
+        if (generation is None or child.lineage_kind is not ExecutionLineageKind.SUBAGENT
+                or child.session_id is not None or principal.tenant_id != self._tenant_id
+                or (child.parent_execution_id, child.root_execution_id, child.parent_invocation_id,
+                    child.principal_id, child.principal_kind)
+                != (key.turn_id, key.turn_id, invocation_id, principal.principal_id, principal.kind)
+                or identity.scope != "execution.subagent" or identity.resource_id != child.execution_id
+                or identity.idempotency_key != canonical_sha256({
+                    "kind": "subagent", "parent_execution_id": key.turn_id, "invocation_id": invocation_id,
+                })):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def reserve(write: Callable[[StateTransaction], Awaitable[ExecutionStartReservationResult]]) -> ExecutionStartReservationResult:
+            return await turns.with_claimed_subagent_parent(
+                key, generation=generation, tools=tools, operation_id=operation_id, owner=owner,
+                fence=fence, invocation_id=invocation_id, child_store=self._store,
+                principal=principal, write=write,
+            )
+
+        return await self._reserve_start(
+            reservation, input_context_write=input_context_write, authority=authority, _under_native_parent=reserve,
+        )
+
+    async def require_native_subagent_terminal(
+        self, transaction: StateTransaction, *, parent_id: str, invocation_id: str,
+        principal: Principal, expected: ExecutionRecord,
+    ) -> ExecutionRecord:
+        """Re-read the exact terminal child and its original start receipt in one transaction."""
+        scope = "execution.subagent"
+        request_key = canonical_sha256({
+            "kind": "subagent", "parent_execution_id": parent_id, "invocation_id": invocation_id,
+        })
+        receipt_key = self._idempotency._key("idempotency", self._idempotency._identity_key(scope, request_key))
+        stored = await transaction.get_record(receipt_key)
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        receipt = await self._idempotency._decode(stored, IdempotencyRecord)
+        if receipt.resource_id != expected.execution_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        child = await self.get_in_transaction(transaction, receipt.resource_id, tenant_id=principal.tenant_id)
+        if (child is None or child != expected or child.completed_at is None):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if (child.lineage_kind is not ExecutionLineageKind.SUBAGENT or child.session_id is not None
+                or (child.parent_execution_id, child.root_execution_id, child.parent_invocation_id,
+                    child.principal_id, child.principal_kind)
+                != (parent_id, parent_id, invocation_id, principal.principal_id, principal.kind)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        expected_status = {
+            ExecutionStatus.SUCCEEDED: IdempotencyStatus.COMPLETED,
+            ExecutionStatus.FAILED: IdempotencyStatus.FAILED,
+            ExecutionStatus.CANCELLED: IdempotencyStatus.CANCELLED,
+        }.get(child.status)
+        if expected_status is None or receipt.status is not expected_status:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return child
+
     async def reserve_started(
         self, reservation: ExecutionStartReservation, *,
         authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
@@ -1193,6 +1262,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
         _admitted_input_source: NativeUserInputReference | None = None,
+        _under_native_parent: Callable[
+            [Callable[[StateTransaction], Awaitable[ExecutionStartReservationResult]]],
+            Awaitable[ExecutionStartReservationResult],
+        ] | None = None,
     ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
@@ -1242,7 +1315,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 )
             if execution_key in records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if reservation.execution.parent_execution_id is not None:
+            if reservation.execution.parent_execution_id is not None and _under_native_parent is None:
                 if reservation.parent_producer_generation is None:
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 await self._guard_subagent_parent_in_transaction(
@@ -1299,6 +1372,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             _logger.debug("execution start reserved: execution=%s", execution.execution_id)
             return ExecutionStartReservationResult(execution, idempotency, True)
 
+        if _under_native_parent is not None:
+            return await _under_native_parent(mutate)
         return await self._store.mutate(mutate)
 
     async def _guard_subagent_parent_in_transaction(

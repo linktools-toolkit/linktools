@@ -718,6 +718,28 @@ class ToolRepositoryImpl(_RepositoryBase):
         value = None if record is None else await self._decode(record, ToolOperationRecord)
         return value
 
+    async def settle_recovered_subagent_in_transaction(
+        self, transaction: StateTransaction, original: ToolOperationRecord, *,
+        result_payload: StoredPayload | None, error_code: str | None, error_payload: StoredPayload | None,
+        terminal_at: datetime,
+    ) -> ToolOperationRecord:
+        """Settle an original delegate claim after the caller proves the child outcome."""
+        stored = await transaction.get_record(self._tool_key(original.tool_operation_id))
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(stored, ToolOperationRecord)
+        target = ToolOperationStatus.COMPLETED if result_payload is not None else ToolOperationStatus.FAILED
+        updated = replace(
+            original, status=target, error_code=error_code, error_payload=error_payload,
+            result_payload=result_payload, effect_ended_at=terminal_at, updated_at=max(original.updated_at, terminal_at),
+        )
+        if current == updated:
+            return current
+        if current != original:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        await self._replace_tool_in_transaction(transaction, stored, updated)
+        return updated
+
     async def resolve_effect_in_transaction(
         self,
         transaction: StateTransaction,

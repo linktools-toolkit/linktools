@@ -3,13 +3,13 @@
 """Vendor-neutral Subagent discovery and delegation capability."""
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
 
 from pydantic import JsonValue as PydanticJsonValue
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
 from ..core import JsonValue, validate_user_prompt
 from ..errors import AIError, ErrorCode
@@ -42,6 +42,10 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
         refs: "Sequence[SubagentRef]",
         delegate: SubagentDelegate,
         descriptions: "Mapping[str, str | None] | None" = None,
+        *,
+        _wrap_toolset: Callable[
+            ["SubagentCapability", FunctionToolset[AgentContext[object]]], AbstractToolset[AgentContext[object]],
+        ] | None = None,
     ) -> None:
         self.id = SUBAGENT_CAPABILITY_ID
         ordered = tuple(sorted(refs, key=lambda item: item.id))
@@ -60,8 +64,9 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
         self._by_id = {item.id: item for item in ordered}
         self._descriptions = metadata
         self._delegate = delegate
+        self._wrap_toolset = _wrap_toolset
 
-    def get_toolset(self) -> FunctionToolset[AgentContext[object]]:
+    def get_toolset(self) -> AbstractToolset[AgentContext[object]]:
         toolset = FunctionToolset[AgentContext[object]](id=self.id)
 
         @toolset.tool(
@@ -88,49 +93,58 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
             """Delegate one task and an explicit file subset to a selected subagent."""
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            try:
-                return await self.delegate_task(
-                    subagent_id,
-                    task,
-                    files=files,
-                    invocation_id=ctx.tool_call_id,
-                )
-            except _DelegatedTaskPromptError as error:
-                raise ToolCallRetry(
-                    "The delegated task exceeds the allowed prompt size. Shorten the "
-                    "task and retry."
-                ) from error
-            except AIError as error:
-                if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
-                    raise ToolCallFailed(self._failure_message(error, subagent_id=subagent_id)) from error
-                if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
-                    raise ToolCallRetry(
-                        "The requested subagent id is not available. Call "
-                        "list_subagents and retry with one of the returned ids."
-                    ) from error
-                if error.code is ErrorCode.REQUEST_FIELD_INVALID:
-                    field = error.safe_details.get("field")
-                    if field == "subagent_id":
-                        message = (
-                            "The subagent id is invalid. Call list_subagents and retry "
-                            "with one of the returned ids."
-                        )
-                    elif field == "task":
-                        message = (
-                            "The delegated task is invalid. Provide a non-empty task "
-                            "and retry."
-                        )
-                    elif field == "files":
-                        message = (
-                            "The delegated files are invalid. Provide non-empty "
-                            "workspace file paths or omit files and retry."
-                        )
-                    else:
-                        raise ToolCallFailed(self._failure_message(error, subagent_id=subagent_id)) from error
-                    raise ToolCallRetry(message) from error
-                raise
+            return await self.invoke_delegate_tool(
+                subagent_id, task, files=files, invocation_id=ctx.tool_call_id,
+            )
 
-        return toolset
+        return toolset if self._wrap_toolset is None else self._wrap_toolset(self, toolset)
+
+    async def invoke_delegate_tool(
+        self, subagent_id: str, task: str, *, files: Sequence[str],
+        invocation_id: str, delegate: SubagentDelegate | None = None,
+    ) -> dict[str, PydanticJsonValue]:
+        try:
+            return await self.delegate_task(
+                subagent_id,
+                task,
+                files=files,
+                invocation_id=invocation_id,
+                _delegate=delegate,
+            )
+        except _DelegatedTaskPromptError as error:
+            raise ToolCallRetry(
+                "The delegated task exceeds the allowed prompt size. Shorten the "
+                "task and retry."
+            ) from error
+        except AIError as error:
+            if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
+                raise ToolCallFailed(self.format_failure(error, subagent_id=subagent_id)) from error
+            if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
+                raise ToolCallRetry(
+                    "The requested subagent id is not available. Call "
+                    "list_subagents and retry with one of the returned ids."
+                ) from error
+            if error.code is ErrorCode.REQUEST_FIELD_INVALID:
+                field = error.safe_details.get("field")
+                if field == "subagent_id":
+                    message = (
+                        "The subagent id is invalid. Call list_subagents and retry "
+                        "with one of the returned ids."
+                    )
+                elif field == "task":
+                    message = (
+                        "The delegated task is invalid. Provide a non-empty task "
+                        "and retry."
+                    )
+                elif field == "files":
+                    message = (
+                        "The delegated files are invalid. Provide non-empty "
+                        "workspace file paths or omit files and retry."
+                    )
+                else:
+                    raise ToolCallFailed(self.format_failure(error, subagent_id=subagent_id)) from error
+                raise ToolCallRetry(message) from error
+            raise
 
     @classmethod
     def get_serialization_name(cls) -> str | None:
@@ -173,6 +187,7 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
         *,
         files: Sequence[str] = (),
         invocation_id: str,
+        _delegate: SubagentDelegate | None = None,
     ) -> "dict[str, JsonValue]":
         if not isinstance(subagent_id, str) or not subagent_id.strip():
             raise AIError(
@@ -212,7 +227,7 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                 safe_details={"subagent_id": subagent_id},
             )
-        result = await self._delegate(
+        result = await (self._delegate if _delegate is None else _delegate)(
             ref,
             task.strip(),
             files=paths,
@@ -224,7 +239,7 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
 
 
     @classmethod
-    def _failure_message(cls, error: AIError, *, subagent_id: str) -> str:
+    def format_failure(cls, error: AIError, *, subagent_id: str) -> str:
         def diagnostic_value(value: object) -> str | None:
             if not isinstance(value, str) or not value:
                 return None

@@ -148,6 +148,7 @@ from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
     BoundaryToolset,
+    _ClaimedLeaf,
     managed_tool_descriptor_from_metadata,
     tool_capability_ref,
 )
@@ -199,6 +200,13 @@ class AgentExecutionResult:
 AgentExecutionOutcome = AgentExecutionResult | DeferredToolRequests
 
 
+_NativeSubagentLeaf = Callable[[SubagentCapability], _ClaimedLeaf]
+
+
+async def _require_claimed_subagent(*_args, **_kwargs):
+    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
 @dataclass(frozen=True, slots=True)
 class _AgentRunScope:
     binding: AgentBinding
@@ -241,6 +249,7 @@ class _AgentRunScope:
     subagent_available: bool = False
     subagent_descriptions: Mapping[str, str | None] = field(default_factory=dict)
     subagent_delegate: SubagentDelegate | None = None
+    native_subagent_leaf: _NativeSubagentLeaf | None = None
     event_sink: EventSink | None = None
     streamed_output_bytes: int | None = None
     usage_sink: UsageSink | None = None
@@ -398,7 +407,7 @@ class AgentExecutor:
 
     def require_regenerable(
         self, binding: AgentBinding, *, canonical_step: bool = False, canonical_trace: bool = False,
-        split_step: bool = False,
+        split_step: bool = False, native_subagents: bool = False,
     ) -> None:
         compiled = binding.compiled_agent
         policy = _runtime_feature_policy(compiled.runtime_contributions)
@@ -408,7 +417,9 @@ class AgentExecutor:
             ("agent_capabilities", compiled.selected_capabilities),
             ("skills", compiled.skill_definitions and (not canonical_step or split_step)),
             ("mcp", compiled.mcp_servers and (not canonical_step or split_step)),
-            ("subagents", compiled.selected_subagents),
+            ("subagents", compiled.selected_subagents and (
+                not native_subagents or not canonical_step or split_step or canonical_trace
+            )),
             ("checkpoints", policy.restart_checkpoints != canonical_step),
             ("trace", policy.durable_trace != canonical_trace),
             ("tool_response_fixture", policy.tool_responses is not None),
@@ -469,6 +480,8 @@ class AgentExecutor:
         plan_store: PlanningStore | None = None,
         preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = (),
         split_step: bool = False,
+        native_subagent_leaf: _NativeSubagentLeaf | None = None,
+        settled_native_subagents: bool = False,
     ) -> AgentExecutionOutcome:
         """Run a plain turn with no durable recorder or execution handoff."""
         if context.session_id is None:
@@ -477,8 +490,16 @@ class AgentExecutor:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, "No output capacity remains for this turn")
         if (canonical_step is None) != (tool_operations is None):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if settled_native_subagents and (
+            native_subagent_leaf is not None or generation < 2 or continuation is None or deferred_tool_results is None
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         self.require_regenerable(
-            binding, canonical_step=canonical_step is not None, canonical_trace=trace_boundary is not None, split_step=split_step,
+            binding, canonical_step=canonical_step is not None, canonical_trace=trace_boundary is not None,
+            split_step=split_step, native_subagents=(
+                (native_subagent_leaf is not None or settled_native_subagents)
+                and mode == "run" and not planning and budget is None
+            ),
         )
         if planning and plan_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -530,6 +551,8 @@ class AgentExecutor:
                 mode=mode, planning=planning, preload_skill_inputs=preload_skill_inputs,
                 plan_store_resolver=None if plan_store is None else lambda _ctx: plan_store,
                 memory_store=memory_store, memory_tool_names=memory_names if memory_store is not None else (),
+                subagent_available=native_subagent_leaf is not None,
+                native_subagent_leaf=native_subagent_leaf,
             ))
             if isinstance(outcome, DeferredToolRequests) and canonical_step is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")
@@ -1268,15 +1291,6 @@ async def _materialize_agent(
             )
         )
 
-    if scope.subagent_available and scope.binding.binding_contract.subagents:
-        if scope.subagent_delegate is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        subagent_capability = SubagentCapability(
-            scope.binding.binding_contract.subagents,
-            scope.subagent_delegate,
-            scope.subagent_descriptions,
-        )
-        capabilities.append(subagent_capability)
     prepare_tools = _plan_mode_prepare(
         plan_mode=scope.mode == "plan",
         compaction_policy=compaction_policy,
@@ -1342,6 +1356,29 @@ async def _materialize_agent(
         capabilities.append(ToolMetricsCapability(tool_metrics))
     if scope.budget is not None:
         capabilities.append(RunBudgetCapability(scope.budget))
+
+    if scope.subagent_available and scope.binding.binding_contract.subagents:
+        native_leaf = scope.native_subagent_leaf
+        delegate = scope.subagent_delegate
+        wrap = None
+        if native_leaf is not None:
+            delegate = _require_claimed_subagent
+
+            def wrap(capability, toolset):
+                return BoundaryToolset(
+                    (toolset,), {
+                        "list_subagents": ManagedToolDescriptor("none", "none", "business"),
+                        "delegate_task": ManagedToolDescriptor("tool_operation", "non_replay_safe", "business"),
+                    }, id=capability.id, tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
+                    tool_effects=scope.tool_effects, budget=scope.budget, result_callbacks=callbacks,
+                    claimed_leaves={"delegate_task": native_leaf(capability)},
+                )
+
+        if delegate is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        capabilities.append(SubagentCapability(
+            scope.binding.binding_contract.subagents, delegate, scope.subagent_descriptions, _wrap_toolset=wrap,
+        ))
 
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
     def wrap_workspace_toolset(

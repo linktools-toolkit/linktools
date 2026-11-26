@@ -5,6 +5,7 @@
 import asyncio
 import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from copy import copy
 from pathlib import Path
@@ -110,7 +111,7 @@ from ..session import SessionHistoryReader
 from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
 from ..persistence.commands import graph_task_repository
-from ..persistence.repositories import BudgetRepositoryImpl, ExecutionRepositoryImpl
+from ..persistence.repositories import BudgetRepositoryImpl, ExecutionRepositoryImpl, ToolRepositoryImpl
 from ..persistence.runs import RuntimeAgentRunStore
 from ..persistence.runs import StagingAgentRunStore, StateStepArchive
 
@@ -1008,6 +1009,47 @@ async def _build_local_components(
                 ),
             )
 
+        async def cancel_native_subagents(key, admitted: Principal, actor: Principal) -> None:
+            repository = state.execution.executions
+            if type(repository) is not ExecutionRepositoryImpl:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            await dispatcher.cancel_native_children(repository, key, admitted, actor)
+
+        native_subagent_topology = (
+            type(state.checkpoint.tools) is ToolRepositoryImpl
+            and type(state.execution.executions) is ExecutionRepositoryImpl
+            and state.checkpoint.tools.state_store.storage_group is turn_state.storage_group
+            and state.execution.executions.state_store.storage_group is turn_state.storage_group
+        )
+
+        @asynccontextmanager
+        async def prepare_native_subagents(turn, binding: AgentBinding, principal: Principal):
+            turns = state.session_turns
+            tools = state.checkpoint.tools
+            executions = state.execution.executions
+            if (turns is None or turn.native_step is None or turn.split_source is not None
+                    or type(tools) is not ToolRepositoryImpl or turn.native_step[1]._repository is not tools
+                    or type(executions) is not ExecutionRepositoryImpl
+                    or tools.state_store.storage_group is not turn_state.storage_group
+                    or executions.state_store.storage_group is not turn_state.storage_group):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            async with backend.canonical_subagent_parent(turn.key, turn.generation, principal):
+                yield lambda capability: dispatcher.claimed_native_leaf(
+                    turns=turns, key=turn.key, generation=turn.generation, tools=tools, principal=principal,
+                    binding=binding.binding_contract, capability=capability, mode=turn.mode,
+                )
+
+        async def recover_native_subagent(key, generation, principal, binding, mode, tools, original, args, timeout):
+            child, result = await dispatcher.recover_native_result(
+                key=key, original=original, args=args, principal=principal,
+                binding=binding.binding_contract, mode=mode, timeout_seconds=timeout,
+            )
+            result_payload, error_code, error_payload = await tools.native_delegate_payload(original, child, result)
+            return await backend._runtime_commands.settle_native_subagent_result(
+                state.session_turns, key, generation=generation, principal=principal, original=original,
+                child=child, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+            )
+
         turn_runner = (
             None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(
                 state.session_turns, executor, workspace=workspace,
@@ -1020,6 +1062,9 @@ async def _build_local_components(
                 ),
                 instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
                 prepare_step=prepare_canonical_step, prepare_plan=prepare_canonical_plan,
+                cancel_subagents=cancel_native_subagents,
+                prepare_subagents=prepare_native_subagents if native_subagent_topology else None,
+                recover_subagent=recover_native_subagent,
                 prepare_budget=(prepare_canonical_budget
                                 if type(budget_repository) is BudgetRepositoryImpl
                                 and budget_repository.state_store.storage_group is turn_state.storage_group else None),

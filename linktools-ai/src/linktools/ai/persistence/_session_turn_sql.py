@@ -58,6 +58,8 @@ if TYPE_CHECKING:
     from ..model import StoredUserInput
     from ..storage import ObjectRef
     from .contracts import BudgetRepository
+    from ._checkpoint_repositories import ToolRepositoryImpl
+    from ..core import Principal
     from ._archive import ContentArchive
     from ..execution import PendingToolContinuation
     from ..model import StoredUserInput
@@ -1553,7 +1555,10 @@ class SqlSessionTurns(SqlSessionTurnReader):
         members = (turn_store,) if receipt_store is turn_store else (turn_store, receipt_store)
         return await group.mutate(members, mutate)
 
-    async def guard_step_in_transaction(self, transaction, key: SessionTurnKey, *, generation: int) -> None:
+    async def guard_step_in_transaction(
+        self, transaction, key: SessionTurnKey, *, generation: int,
+        principal: Principal | None = None,
+    ) -> None:
         """Fence Step publication in its existing same-group transaction.
 
         Like terminal publication, this uses the database statement clock.
@@ -1571,15 +1576,59 @@ class SqlSessionTurns(SqlSessionTurnReader):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
         async def guard(session: AsyncSession) -> None:
-            changed = await session.execute(self._turns.update().filter_by(
+            statement = self._turns.update().filter_by(
                 **self._turn_values(key), generation=generation, state="accepted",
-            ).where(self._turns.c.lease_until > self._now).values(
-                generation=self._turns.c.generation,
-            ))
+            ).where(self._turns.c.lease_until > self._now)
+            if principal is not None:
+                actor = self._turns.c.request_json["principal"]
+                statement = statement.where(
+                    actor["principal_id"].as_string() == principal.principal_id,
+                    actor["kind"].as_string() == principal.kind,
+                )
+            changed = await session.execute(statement.values(generation=self._turns.c.generation))
             if changed.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
         await transaction.run_sql(self._context, guard)
+
+    @property
+    def transcript_state_store(self) -> StateStore | None:
+        return None if self._transcript_write_binding is None else self._transcript_write_binding[0]
+
+    async def with_claimed_subagent_parent(
+        self, key: SessionTurnKey, *, generation: int, tools: ToolRepositoryImpl,
+        operation_id: str, owner: str, fence: int, invocation_id: str,
+        child_store: StateStore, principal: Principal,
+        write: Callable[[StateTransaction], Awaitable[_Receipt]],
+    ) -> _Receipt:
+        """Run one child transition under the exact current parent and delegated tool claim."""
+        from ..core import ToolOperationStatus
+
+        if self._transcript_write_binding is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        store, _, _ = self._transcript_write_binding
+        tool_store = tools.state_store
+        group = store.storage_group
+        if tool_store.storage_group is not group or child_store.storage_group is not group:
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        if principal.tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def guarded(group_transaction: StateGroupTransaction) -> _Receipt:
+            await self.guard_step_in_transaction(
+                group_transaction.transaction(store), key, generation=generation, principal=principal,
+            )
+            receipt = await tools.get_operation_in_transaction(
+                group_transaction.transaction(tool_store), operation_id, tenant_id=self._tenant_id,
+            )
+            if (receipt is None or receipt.status is not ToolOperationStatus.CLAIMED
+                    or (receipt.execution_id, receipt.agent_run_id, receipt.producer_generation,
+                        receipt.tool_name, receipt.tool_call_id, receipt.owner, receipt.fence)
+                    != (key.turn_id, key.turn_id, generation, "delegate_task", invocation_id, owner, fence)):
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+            return await write(group_transaction.transaction(child_store))
+
+        return await group.mutate(tuple(dict.fromkeys((store, tool_store, child_store))), guarded)
 
     async def append_instruction_frontier(
         self, key: SessionTurnKey, *, generation: int, frontier: SessionInstructionFrontier, max_bytes: int,

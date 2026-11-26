@@ -152,8 +152,10 @@ from ..execution import (
 from ..persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository, ExecutionTerminalPublication
 
 if TYPE_CHECKING:
-    from ..persistence.turns import ExecutionAuthority
+    from ..persistence.contracts import ToolOperationRecord
+    from ..persistence.turns import ExecutionAuthority, SessionTurnKey
     from ..persistence.state import StateTransaction
+    from ._native_subagent import NativeSubagentAdmission
     from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
     from ..session import SessionRecord
     from ..spec import RepositoryInstructionResolver
@@ -240,6 +242,9 @@ class ExecutionBackend(Protocol):
     ) -> AIError | None: ...
     def worker_installed(self, execution_id: str) -> bool: ...
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool: ...
+    def owns_native_child(
+        self, execution_id: str, *, key: "SessionTurnKey", principal: Principal, original: "ToolOperationRecord",
+    ) -> bool: ...
     async def wait_terminal(self, execution_id: str, *, tenant_id: str) -> None: ...
     async def recovery_effects(
         self, execution_id: str, *, tenant_id: str
@@ -324,7 +329,8 @@ class _RunTurn(Protocol):
     async def __call__(
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
-        grouped: _GroupedTurnStart | None = None,
+        grouped: _GroupedTurnStart | None = None, *,
+        _native_parent: "NativeSubagentAdmission | None" = None,
     ) -> ExecutionHandle: ...
 
 
@@ -999,6 +1005,7 @@ class DefaultExecutionService(TaskExecutionService):
         parent_invocation_id: str,
         binding_contract: "AgentBindingContract | None" = None,
         resolved_binding: AgentBinding | None = None,
+        _native_parent: "NativeSubagentAdmission | None" = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1010,8 +1017,43 @@ class DefaultExecutionService(TaskExecutionService):
             lineage_kind=ExecutionLineageKind.SUBAGENT,
             scope="execution.subagent",
             binding_contract=binding_contract,
-            resolved_binding=resolved_binding,
+            resolved_binding=resolved_binding, _native_parent=_native_parent,
         )
+
+    async def _load_native_child(self, *, key: str, principal: Principal) -> ExecutionRecord:
+        """Read the original reservation identity without starting or joining a producer."""
+        existing = await self._state.idempotency.get("execution.subagent", key, tenant_id=principal.tenant_id)
+        if existing is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return await self.load_authorized(existing.resource_id, principal, AuthorizationAction.EXECUTION_READ)
+
+    async def _wait_native_child_result(
+        self, child: ExecutionRecord, *, key: "SessionTurnKey", principal: Principal,
+        original: "ToolOperationRecord", timeout_seconds: float,
+    ) -> tuple[ExecutionRecord, ExecutionResult]:
+        """Observe only an exact local native child or an existing durable terminal."""
+        terminal = {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+        backend = self._backend
+        if child.status not in terminal:
+            if (timeout_seconds <= 0 or child.status not in {
+                    ExecutionStatus.PENDING_START, ExecutionStatus.STARTED,
+                    ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
+                    or backend is None
+                    or not backend.owns_native_child(child.execution_id, key=key, principal=principal, original=original)):
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            try:
+                await asyncio.wait_for(
+                    backend.wait_terminal(child.execution_id, tenant_id=principal.tenant_id), timeout_seconds,
+                )
+            except asyncio.TimeoutError as error:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            child = await self.load_authorized(child.execution_id, principal, AuthorizationAction.EXECUTION_READ)
+            if child.status not in terminal:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        result = await self.consume_result_from_execution(child, tenant_id=principal.tenant_id)
+        if (result.execution_id, result.status) != (child.execution_id, child.status):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return child, result
 
     async def replay_subagent(
         self,
@@ -1157,6 +1199,7 @@ class DefaultExecutionService(TaskExecutionService):
         budget_scope_id: str | None = None,
         start_read: _SessionStartRead | None = None,
         graph_task: "tuple[str, Mapping[str, object], TaskGraphAdmission, TaskNodeInvocation] | None" = None,
+        _native_parent: "NativeSubagentAdmission | None" = None,
     ) -> ExecutionHandle:
         metric_delivery: _TerminalMetricDelivery | None = None
 
@@ -1191,8 +1234,10 @@ class DefaultExecutionService(TaskExecutionService):
                     binding_contract=binding_contract,
                     resolved_binding=resolved_binding,
                     capture_metric=capture_metric,
-                    start_read=start_read, graph_task=graph_task,
+                    start_read=start_read, graph_task=graph_task, _native_parent=_native_parent,
                 )
+            if _native_parent is not None:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             async with self._session_guard(request.principal.tenant_id, session_id):
                 return await self._start_unlocked(
                     binding_digest,
@@ -1250,6 +1295,7 @@ class DefaultExecutionService(TaskExecutionService):
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
         start_read: _SessionStartRead | None = None,
         graph_task: "tuple[str, Mapping[str, object], TaskGraphAdmission, TaskNodeInvocation] | None" = None,
+        _native_parent: "NativeSubagentAdmission | None" = None,
     ) -> ExecutionHandle:
         if budget_scope_id is not None and (
             not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
@@ -1274,7 +1320,16 @@ class DefaultExecutionService(TaskExecutionService):
         request = replace(request, resolved_binding=binding)
         context = replace(context, request=request)
         parent: ExecutionRecord | None = None
-        if lineage_kind is ExecutionLineageKind.SUBAGENT:
+        if _native_parent is not None:
+            if (lineage_kind is not ExecutionLineageKind.SUBAGENT or scope != "execution.subagent"
+                    or session_id is not None or graph_task is not None or request.budget is not None
+                    or budget_scope_id is not None or request.input_context is not None
+                    or request.tool_response_ref is not None
+                    or (parent_execution_id, root_execution_id, parent_producer_generation, parent_invocation_id, request.principal)
+                    != (_native_parent.key.turn_id, _native_parent.key.turn_id, _native_parent.generation,
+                        _native_parent.invocation_id, _native_parent.principal)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        elif lineage_kind is ExecutionLineageKind.SUBAGENT:
             if parent_execution_id is None or not parent_invocation_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if self._runtime_bridge.pending_promote is not None:
@@ -1388,6 +1443,8 @@ class DefaultExecutionService(TaskExecutionService):
                     tenant_id=request.principal.tenant_id,
                 )
         if existing is not None:
+            if _native_parent is not None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if existing.status is IdempotencyStatus.START_UNKNOWN:
@@ -1655,7 +1712,7 @@ class DefaultExecutionService(TaskExecutionService):
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
-            capture_metric=capture_metric,
+            capture_metric=capture_metric, _native_parent=_native_parent,
         )
 
     async def _replay_terminal_start(
@@ -1696,6 +1753,7 @@ class DefaultExecutionService(TaskExecutionService):
         requires_task_invocation_capture: bool,
         budget_scope_id: str | None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
+        _native_parent: "NativeSubagentAdmission | None" = None,
     ) -> ExecutionHandle:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1715,6 +1773,8 @@ class DefaultExecutionService(TaskExecutionService):
             if not self._accepting:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if coordination is not None and coordination.lease is None and (grouped is None or grouped.receipt is None):
+                if _native_parent is not None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                 if coordinator is None:
                     raise RuntimeError("duplicate turn admission requires coordination")
                 return await self._join_coordinated_start(
@@ -1722,7 +1782,7 @@ class DefaultExecutionService(TaskExecutionService):
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
                 )
-            if (policy.execution.commit.mode == "terminal" and execution.conversation
+            if (_native_parent is None and policy.execution.commit.mode == "terminal" and execution.conversation
                     and dependency_hold_id is None
                     and self._runtime_bridge.pending_start is not None):
                 pending_id = await ConversationService.prepare_turn(
@@ -1752,14 +1812,20 @@ class DefaultExecutionService(TaskExecutionService):
                 capture_metric=capture_metric,
                 coordinated_receipt=None if grouped is None else grouped.receipt,
                 authority=None if coordinator is None else coordinator._execution_reservation_authority(coordination),
+                _native_parent=_native_parent,
             )
 
         if run_turn is None:
+            if _native_parent is not None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if coordinator is not None:
                 raise RuntimeError("coordinated admission requires a turn lifecycle owner")
             return await admit(None)
-        turn = (run_turn(proposed_reservation, request.principal, admit) if grouped is None else
-                run_turn(proposed_reservation, request.principal, admit, grouped))
+        if _native_parent is not None:
+            turn = run_turn(proposed_reservation, request.principal, admit, _native_parent=_native_parent)
+        else:
+            turn = (run_turn(proposed_reservation, request.principal, admit) if grouped is None else
+                    run_turn(proposed_reservation, request.principal, admit, grouped))
         task = asyncio.create_task(
             turn,
             name=f"execution-admission-{execution.execution_id}",
@@ -1867,6 +1933,7 @@ class DefaultExecutionService(TaskExecutionService):
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
         coordinated_receipt: ExecutionStartReservationResult | None = None,
         authority: "ExecutionAuthority | None" = None,
+        _native_parent: "NativeSubagentAdmission | None" = None,
     ) -> ExecutionHandle:
         proposed_reservation, prepared_context = await self._prepare_execution_start_reservation(
             request, proposed_reservation, already_materialized=coordinated_receipt is not None,
@@ -1882,6 +1949,12 @@ class DefaultExecutionService(TaskExecutionService):
             else None
         )
         try:
+            if _native_parent is not None:
+                if reservation is not None or prepared_context is not None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                reservation = await _native_parent.reserve(self._state.executions, proposed_reservation, authority=authority)
+                if not reservation.created:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             if reservation is None and prepared_context is None and self._runtime_bridge.prepare_reserved_start is not None:
                 reservation = await self._runtime_bridge.prepare_reserved_start(request, proposed_reservation, session, authority)
             if reservation is None:

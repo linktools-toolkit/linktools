@@ -23,6 +23,7 @@ from ..core import (
     IdempotencyStatus,
     OperationLedgerInput,
     OperationLedgerRecord,
+    Principal,
     SessionStatus,
     ToolOperationStatus,
     canonical_sha256,
@@ -2743,6 +2744,72 @@ class StateCommands:
                     raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False) from error
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             return await stores[0].storage_group.mutate(stores, callback)
+
+    async def commit_native_subagent_start(
+        self, claim: ExecutionStartClaim, *, turns: "SqlSessionTurns", key: "SessionTurnKey", generation: int,
+        tools: ToolRepositoryImpl, operation_id: str, owner: str, fence: int, invocation_id: str,
+        principal: Principal,
+    ) -> ExecutionRecord:
+        """Fence the child start CAS with the same native owner that reserved it."""
+        if (tools is not self._tools or claim.scope != "execution.subagent"
+                or claim.idempotency_key != canonical_sha256({
+                    "kind": "subagent", "parent_execution_id": key.turn_id, "invocation_id": invocation_id,
+                })):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        repository = self._execution
+
+        async def start(transaction: StateTransaction) -> ExecutionRecord:
+            child = await repository.claim_start_in_transaction(transaction, claim)
+            if (child.lineage_kind is not ExecutionLineageKind.SUBAGENT or child.session_id is not None
+                    or (child.parent_execution_id, child.root_execution_id, child.parent_invocation_id,
+                        child.principal_id, child.principal_kind)
+                    != (key.turn_id, key.turn_id, invocation_id, principal.principal_id, principal.kind)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            return child
+
+        return await turns.with_claimed_subagent_parent(
+            key, generation=generation, tools=tools, operation_id=operation_id, owner=owner, fence=fence,
+            invocation_id=invocation_id, child_store=repository.state_store, principal=principal, write=start,
+        )
+
+    async def settle_native_subagent_result(
+        self, turns: "SqlSessionTurns", key: "SessionTurnKey", *, generation: int, principal: Principal,
+        original: ToolOperationRecord, child: ExecutionRecord, result_payload: StoredPayload | None,
+        error_code: str | None, error_payload: StoredPayload | None,
+    ) -> ToolOperationRecord:
+        """Settle the original native tool receipt from exact durable child evidence."""
+        tools = self._tools
+        execution_store = self._execution.state_store
+        store = turns.transcript_state_store
+        if tools is None or store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if (principal.tenant_id != self._tenant_id or original.execution_id != key.turn_id
+                or original.agent_run_id != key.turn_id or original.tool_name != "delegate_task"
+                or original.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}
+                or original.owner is None or original.producer_generation is None
+                or original.producer_generation >= generation):
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        members = _dedupe_stores((store, tools.state_store, execution_store))
+        if not _same_group(members):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        async def settle(group: StateGroupTransaction) -> ToolOperationRecord:
+            await turns.guard_step_in_transaction(
+                group.transaction(store), key, generation=generation, principal=principal,
+            )
+            verified = await self._execution.require_native_subagent_terminal(
+                group.transaction(execution_store), parent_id=key.turn_id,
+                invocation_id=original.tool_call_id, principal=principal, expected=child,
+            )
+            terminal_at = verified.completed_at
+            if terminal_at is None or (verified.status is ExecutionStatus.SUCCEEDED) != (result_payload is not None):
+                raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
+            return await tools.settle_recovered_subagent_in_transaction(
+                group.transaction(tools.state_store), original, result_payload=result_payload,
+                error_code=error_code, error_payload=error_payload, terminal_at=terminal_at,
+            )
+
+        return await store.storage_group.mutate(members, settle)
 
     async def commit_start_attempt_checkpoint(
         self,

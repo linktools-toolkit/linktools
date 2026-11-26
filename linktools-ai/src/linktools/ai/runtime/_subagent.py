@@ -3,14 +3,15 @@
 """Runtime-owned one-level subagent dispatch and cancellation."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol, cast
 
 from linktools.core import environ
 
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler
-from ..capability import SubagentDelegate
+from ..capability import SubagentCapability, SubagentDelegate
 from ..core import (
+    ExecutionLineageKind,
     ExecutionMode,
     ExecutionStatus,
     JsonValue,
@@ -18,10 +19,17 @@ from ..core import (
     canonical_sha256,
 )
 from ..errors import AIError, ErrorCode
+from ..inputs import stored_user_input_view
+from ..model import normalize_input_files
+from ..persistence.contracts import ToolOperationRecord
+from ..persistence.turns import SessionTurnKey, SqlSessionTurns
+from ..persistence.repositories import ExecutionRepositoryImpl, ToolRepositoryImpl
 from ..spec import SubagentRef
 from ._execution import DefaultExecutionService
 from ._handoff import execution_handoff_scope
-from ..execution import CancelExecutionRequest, ExecutionRequest, ExecutionResult
+from ._native_subagent import NativeSubagentAdmission
+from ._tool_boundary import _ClaimedLeaf
+from ..execution import CancelExecutionRequest, ExecutionRecord, ExecutionRequest, ExecutionResult
 
 _logger = environ.get_logger("ai.runtime.subagent")
 
@@ -134,6 +142,81 @@ class SubagentDispatcher:
 
         return dispatch
 
+    async def recover_native_result(
+        self, *, key: SessionTurnKey, original: ToolOperationRecord, args: Mapping[str, JsonValue],
+        principal: Principal, binding: AgentBindingContract, mode: ExecutionMode, timeout_seconds: float,
+    ) -> tuple[ExecutionRecord, dict[str, JsonValue] | str]:
+        """Project a previously established terminal child into its original tool result."""
+        agent_id = args.get("subagent_id")
+        task = args.get("task")
+        if not isinstance(agent_id, str) or not isinstance(task, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        frozen = binding.subagent_binding_map.get(agent_id)
+        if frozen is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        files = normalize_input_files(args.get("files", ()))
+        invocation_id = original.tool_call_id
+        child = await self._execution._load_native_child(
+            key=_child_request_key(key.turn_id, invocation_id), principal=principal,
+        )
+        view = stored_user_input_view(child.stored_user_input)
+        captured_files = view.get("files")
+        if (child.lineage_kind is not ExecutionLineageKind.SUBAGENT
+                or (child.parent_execution_id, child.root_execution_id, child.parent_invocation_id)
+                   != (key.turn_id, key.turn_id, invocation_id)
+                or (child.principal_id, child.principal_kind) != (principal.principal_id, principal.kind)
+                or child.binding_digest != frozen.binding_digest
+                or child.mode != ("plan" if mode == "plan" else "run")
+                or view.get("prompt") != task.strip()
+                or not isinstance(captured_files, list)
+                or any(not isinstance(item, Mapping) for item in captured_files)
+                or tuple(item.get("path") for item in captured_files) != files):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        child, result = await self._execution._wait_native_child_result(
+            child, key=key, principal=principal, original=original, timeout_seconds=timeout_seconds,
+        )
+        try:
+            return child, self._format_child_result(result, agent_id)
+        except AIError as error:
+            if error.code is not ErrorCode.TOOL_EXECUTION_FAILED:
+                raise
+            return child, SubagentCapability.format_failure(error, subagent_id=agent_id)
+
+    def claimed_native_leaf(
+        self, *, turns: SqlSessionTurns, key: SessionTurnKey, generation: int,
+        tools: ToolRepositoryImpl, principal: Principal, binding: AgentBindingContract,
+        capability: SubagentCapability, mode: ExecutionMode,
+    ) -> _ClaimedLeaf:
+        """Bind only the configured native delegate to fresh leaf authority."""
+        frozen = binding.subagent_binding_map
+
+        async def invoke(decision, call, args, context):
+            if (call.tool_name != "delegate_task" or call.tool_call_id != context.tool_call_id
+                    or context.deps.execution_id != key.turn_id or context.deps.principal != principal):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            proof = NativeSubagentAdmission(
+                turns, key, generation, tools, decision, call.tool_call_id, principal,
+            )
+
+            async def launch(ref: SubagentRef, task: str, *, files: tuple[str, ...], invocation_id: str):
+                child_binding = frozen.get(ref.id)
+                if child_binding is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return await self.dispatch(
+                    parent_execution_id=key.turn_id, parent_producer_generation=generation,
+                    root_execution_id=key.turn_id, memory_scope=context.deps.memory_scope,
+                    principal=principal, ref=ref, frozen_binding=child_binding,
+                    mode=mode, user_prompt=task, files=files, invocation_id=invocation_id,
+                    _native_parent=proof,
+                )
+
+            return await capability.invoke_delegate_tool(
+                args["subagent_id"], args["task"], files=args.get("files", ()),
+                invocation_id=call.tool_call_id, delegate=launch,
+            )
+
+        return invoke
+
     async def dispatch(
         self,
         *,
@@ -148,6 +231,7 @@ class SubagentDispatcher:
         user_prompt: str,
         files: Sequence[str] = (),
         invocation_id: str,
+        _native_parent: NativeSubagentAdmission | None = None,
     ) -> "dict[str, JsonValue]":
         if not isinstance(ref, SubagentRef):
             raise TypeError("ref must be SubagentRef")
@@ -164,13 +248,7 @@ class SubagentDispatcher:
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         child_mode: ExecutionMode = "plan" if mode == "plan" else "run"
-        idempotency_key = canonical_sha256(
-            {
-                "kind": "subagent",
-                "parent_execution_id": parent_execution_id,
-                "invocation_id": invocation_id,
-            }
-        )
+        idempotency_key = _child_request_key(parent_execution_id, invocation_id)
         child = await self._dispatch(
             parent_execution_id=parent_execution_id,
             parent_producer_generation=parent_producer_generation,
@@ -184,6 +262,7 @@ class SubagentDispatcher:
             files=files,
             idempotency_key=idempotency_key,
             invocation_id=invocation_id,
+            _native_parent=_native_parent,
         )
         if self._child_observer is not None:
             self._child_observer.publish(parent_execution_id, child.execution_id)
@@ -192,6 +271,7 @@ class SubagentDispatcher:
             parent_execution_id=parent_execution_id,
             principal=principal,
             ref=ref,
+            native=_native_parent is not None,
         )
 
     async def _dispatch(
@@ -209,22 +289,24 @@ class SubagentDispatcher:
         files: tuple[str, ...],
         idempotency_key: str,
         invocation_id: str,
+        _native_parent: NativeSubagentAdmission | None = None,
     ):
-        child = await self._execution.replay_subagent(
-            agent_id=ref.id,
-            user_prompt=user_prompt,
-            files=files,
-            principal=principal,
-            idempotency_key=idempotency_key,
-            memory_scope=memory_scope,
-            mode=child_mode,
-            parent_execution_id=parent_execution_id,
-            parent_producer_generation=parent_producer_generation,
-            root_execution_id=root_execution_id,
-            parent_invocation_id=invocation_id,
-        )
-        if child is not None:
-            return child
+        if _native_parent is None:
+            child = await self._execution.replay_subagent(
+                agent_id=ref.id,
+                user_prompt=user_prompt,
+                files=files,
+                principal=principal,
+                idempotency_key=idempotency_key,
+                memory_scope=memory_scope,
+                mode=child_mode,
+                parent_execution_id=parent_execution_id,
+                parent_producer_generation=parent_producer_generation,
+                root_execution_id=root_execution_id,
+                parent_invocation_id=invocation_id,
+            )
+            if child is not None:
+                return child
         if frozen_binding is None:
             compiled_agent = self._catalog.root_agent(ref.id)
             child_binding = self._compiler.bind_subagent(compiled_agent)
@@ -259,9 +341,10 @@ class SubagentDispatcher:
                 parent_invocation_id=invocation_id,
                 binding_contract=child_binding.binding_contract,
                 resolved_binding=child_binding,
+                _native_parent=_native_parent,
             )
         except AIError as error:
-            if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
+            if _native_parent is not None or error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
                 raise
         replay = await self._execution.replay_subagent(
             agent_id=ref.id,
@@ -287,6 +370,7 @@ class SubagentDispatcher:
         parent_execution_id: str,
         principal: Principal,
         ref: SubagentRef,
+        native: bool = False,
     ) -> "dict[str, JsonValue]":
         scope = execution_handoff_scope.get()
         waiter = asyncio.current_task()
@@ -298,6 +382,10 @@ class SubagentDispatcher:
                 principal=principal,
             )
         except BaseException as primary:  # noqa: BLE001
+            if native:
+                # The native lifecycle handles explicit parent cancellation.
+                # Dropping a wait (including during handoff) cannot cancel a child.
+                raise
             if (isinstance(primary, AIError)
                     and primary.safe_details.get("phase") == "turn_owner_lost"):
                 # Losing an observer/worker is not authorization to cancel the
@@ -344,12 +432,16 @@ class SubagentDispatcher:
             if scope is not None and waiter is not None:
                 scope.unregister_child_wait(waiter)
         self._background_failures.pop(execution_id, None)
+        return self._format_child_result(result, ref.id)
+
+    @staticmethod
+    def _format_child_result(result: ExecutionResult, agent_id: str) -> dict[str, JsonValue]:
         if result.status is ExecutionStatus.SUCCEEDED:
             return _subagent_result(result)
         if result.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             details: dict[str, JsonValue] = {
                 "phase": "subagent_execution",
-                "subagent_id": ref.id,
+                "subagent_id": agent_id,
                 "execution_id": result.execution_id,
                 "status": result.status.value,
                 "safe_error_details": dict(result.safe_error_details),
@@ -361,6 +453,28 @@ class SubagentDispatcher:
                 safe_details=details,
             )
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def cancel_native_children(
+        self, repository: ExecutionRepositoryImpl, key: SessionTurnKey, admitted: Principal, actor: Principal,
+    ) -> None:
+        """Drain durable children after the authorized native turn enters cancelling."""
+        if admitted.tenant_id != actor.tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        children = await repository.list_children(key.turn_id, tenant_id=admitted.tenant_id)
+        if any(
+            child.lineage_kind is not ExecutionLineageKind.SUBAGENT
+            or child.parent_execution_id != key.turn_id
+            or child.root_execution_id != key.turn_id
+            or child.principal_id != admitted.principal_id
+            or child.principal_kind != admitted.kind
+            for child in children
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        for child in sorted(children, key=lambda value: value.execution_id):
+            if child.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                self._background_failures.pop(child.execution_id, None)
+            else:
+                await self.cancel_child(child.execution_id, parent_execution_id=key.turn_id, principal=actor)
 
     async def cancel_children(
         self,
@@ -557,6 +671,12 @@ class SubagentDispatcher:
             pass
         except BaseException:  # noqa: BLE001
             _logger.exception("detached %s failed", label)
+
+
+def _child_request_key(parent_execution_id: str, invocation_id: str) -> str:
+    return canonical_sha256({
+        "kind": "subagent", "parent_execution_id": parent_execution_id, "invocation_id": invocation_id,
+    })
 
 
 def _subagent_result(result: ExecutionResult) -> "dict[str, JsonValue]":

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import asdict, dataclass, replace
 
 from linktools.core import environ
@@ -24,10 +25,11 @@ from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
+from ..persistence.contracts import ToolOperationRecord
 from ..persistence.turns import CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
 from ..session import SessionContext, SessionTurnAdmission, project_tool_process_event
 from ..spec import RepositoryInstructions
-from ._agent_executor import DurableBoundary, LiveDelta
+from ._agent_executor import DurableBoundary, LiveDelta, _NativeSubagentLeaf
 from .agent_execution import resolve_execution_policy
 from ._regenerable_transcript import prepare_native_turn_transcript, reply_from_turn, restore_turn_prompt
 from ._step_store import RuntimeStepStore
@@ -92,6 +94,8 @@ class _AdmittedTurn:
     continuation: tuple[ModelMessage, ...] | None = None
     deferred_results: DeferredToolResults | None = None
     deferred_approvals: tuple[PendingDeferredCall, ...] = ()
+    native_subagents: bool = False
+    settled_native_subagents: bool = False
     instruction_frontier: SessionInstructionFrontier | None = None
     completed_checkpoint: bool = False
     output_retries_used: int = 0
@@ -141,6 +145,14 @@ class _RegenerableTurnRunner:
         instruction_resolver_for: Callable[[RepositoryInstructions], RepositoryInstructionResolver],
         prepare_step: Callable[[AgentBinding, SessionTurnKey, int], Awaitable[
             tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None]] | None = None,
+        cancel_subagents: Callable[[SessionTurnKey, Principal, Principal], Awaitable[None]] | None = None,
+        prepare_subagents: Callable[
+            [_AdmittedTurn, AgentBinding, Principal], AbstractAsyncContextManager[_NativeSubagentLeaf],
+        ] | None = None,
+        recover_subagent: Callable[
+            [SessionTurnKey, int, Principal, AgentBinding, ExecutionMode, RuntimeToolOperationBridge,
+             ToolOperationRecord, Mapping[str, JsonValue], float], Awaitable[ToolOperationRecord],
+        ] | None = None,
         prepare_plan: Callable[[SessionTurnKey, int], PlanningStore] | None = None,
         prepare_budget: Callable[[SessionTurnKey, int], RunBudgetContext] | None = None,
     ) -> None:
@@ -152,6 +164,9 @@ class _RegenerableTurnRunner:
         self._instruction_resolver = instruction_resolver
         self._instruction_resolver_for = instruction_resolver_for
         self._prepare_step = prepare_step
+        self._cancel_subagents = cancel_subagents
+        self._prepare_subagents = prepare_subagents
+        self._recover_subagent = recover_subagent
         self._prepare_plan = prepare_plan
         self._prepare_budget = prepare_budget
         self._publish_deferred = None
@@ -653,7 +668,7 @@ class _RegenerableTurnRunner:
         result = turn["result_json"]
         if (not split and turn["state"] == "cancelling" and isinstance(result, Mapping)
                 and result.get("cancel_effects_unresolved") is True):
-            await self._finish_cold_cancellation(key, turn, session["revision"])
+            await self._finish_cold_cancellation(key, turn, session["revision"], actor=principal)
             return True
         if not split and turn["state"] in ("waiting", "ready"):
             if self._stop_deferred is None:
@@ -667,7 +682,7 @@ class _RegenerableTurnRunner:
             self._gap(key, cancelling=True)
             self._notice_lifecycle(key, "cancelling", session["revision"])
             if stopped == "ready":
-                await self._finish_cold_cancellation(key, turn, session["revision"])
+                await self._finish_cold_cancellation(key, turn, session["revision"], actor=principal)
             return True
         changed = (
             await self._store.request_split_wait_cancel(key, generation=turn["generation"])
@@ -698,8 +713,20 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return True
 
-    async def _finish_cold_cancellation(self, key, row, revision) -> bool:
+    async def _finish_cold_cancellation(
+        self, key: SessionTurnKey, row: Mapping[str, object], revision: int, *, actor: Principal,
+        authorization: AuthorizationPolicy | None = None,
+    ) -> bool:
         request, generation = row["request_json"], row["generation"]
+        frozen = row["binding_json"]
+        contract = None if frozen is None else AgentBindingContract.from_payload(frozen)
+        has_subagents = contract is not None and bool(contract.subagents)
+        admitted = Principal(**request["principal"])
+        if has_subagents and authorization is not None:
+            await authorization.authorize(
+                actor, AuthorizationAction.EXECUTION_CANCEL,
+                ResourceRef(ResourceKind.EXECUTION, key.turn_id, admitted.tenant_id, admitted.principal_id),
+            )
         result = row["result_json"]
         if isinstance(result, Mapping) and result.get("cancel_effects_unresolved") is True:
             if self._stop_deferred is None:
@@ -715,9 +742,9 @@ class _RegenerableTurnRunner:
         trace_event_base = 0
         trace_agent_id = None
         if trace_enabled:
-            if trace_archive is None or row["binding_json"] is None:
+            if trace_archive is None or contract is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            trace_agent_id = AgentBindingContract.from_payload(row["binding_json"]).agent_spec.id
+            trace_agent_id = contract.agent_spec.id
 
             async def capture_trace_frontier(transaction):
                 nonlocal trace_event_base
@@ -728,6 +755,10 @@ class _RegenerableTurnRunner:
             key, generation=generation, lease_seconds=_LEASE_SECONDS, cancelling=True, **trace_recovery,
         ):
             return False
+        if has_subagents:
+            if self._cancel_subagents is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            await self._cancel_subagents(key, admitted, actor)
         stored = self._stored_input(request)
         turn = _AdmittedTurn(
             key, row["turn_no"], request["prompt"], [], 0, revision, None, generation + 1,
@@ -860,7 +891,9 @@ class _RegenerableTurnRunner:
                         self._notice_lifecycle(key, "terminal", session["revision"] + 1)
                     return recovered
             if row["state"] == "cancelling":
-                return await self._finish_cold_cancellation(key, row, session["revision"])
+                return await self._finish_cold_cancellation(
+                    key, row, session["revision"], actor=principal, authorization=authorization,
+                )
 
             lineage = decode_session_lineage(session["lineage_json"])
             await self._authorize_lineage(
@@ -915,8 +948,17 @@ class _RegenerableTurnRunner:
             canonical_trace = self._require_turn_trace(binding, canonical_step=native_step is not None)
             if canonical_trace != request.get("trace", False):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            subagent_topology = self._allows_native_subagents(
+                binding, native_step, mode=mode, planning=planning, budgeted=budget is not None,
+                trace=canonical_trace, split=split is not None,
+            )
+            # Cold recovery may settle proven history, but only an exact approval
+            # frontier grants a live subagent toolset to a resumed producer.
+            native_subagents = ready is not None and subagent_topology
+            settle_subagents = ready is None and subagent_topology and self._recover_subagent is not None
             self._executor.require_regenerable(
-                binding, canonical_step=native_step is not None, canonical_trace=canonical_trace, split_step=split is not None,
+                binding, canonical_step=native_step is not None, canonical_trace=canonical_trace,
+                split_step=split is not None, native_subagents=native_subagents or settle_subagents,
             )
             if "repository_instructions" not in request or "cwd" not in request:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "Turn has no admitted workspace evidence")
@@ -1035,7 +1077,24 @@ class _RegenerableTurnRunner:
                         self._gap(key)
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     if ready is None:
-                        deferred_results = await tools.resume_canonical_effects(pending)
+                        if not pending and checkpoint.state == "complete":
+                            events = await steps.list_events(run_id=key.turn_id)
+                            completed_checkpoint = any(event.kind == "run_completed" for event in events)
+                        recover_delegate = None
+                        if settle_subagents and not completed_checkpoint:
+                            if "delegate_task" not in pending.values():
+                                self._gap(key)
+                                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                            recover_subagent = self._recover_subagent
+                            assert recover_subagent is not None
+
+                            async def recover_delegate(original, args):
+                                # A cold parent cannot wait for or restart a nonterminal child.
+                                return await recover_subagent(key, generation + 1, admitted, binding,
+                                                              mode, tools, original, args, 0.0)
+                        deferred_results = await tools.resume_canonical_effects(
+                            pending, recover_delegate=recover_delegate,
+                        )
                     else:
                         if (checkpoint.state != "interrupted"
                                 or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
@@ -1046,9 +1105,6 @@ class _RegenerableTurnRunner:
                             if pending.get(operation.tool_call_id) != operation.tool_name:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         deferred_results = settled_results
-                    if not pending and checkpoint.state == "complete":
-                        events = await steps.list_events(run_id=key.turn_id)
-                        completed_checkpoint = any(event.kind == "run_completed" for event in events)
             turn = _AdmittedTurn(
                 key, row["turn_no"], model_prompt if isinstance(model_prompt, str) else prompt, history,
                 _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding})),
@@ -1058,6 +1114,8 @@ class _RegenerableTurnRunner:
                 stored_input=request.get("input"), native_step=native_step,
                 continuation=continuation, deferred_results=deferred_results,
                 deferred_approvals=() if settled_continuation is None else settled_continuation.approvals,
+                native_subagents=native_subagents,
+                settled_native_subagents=settle_subagents and not completed_checkpoint,
                 instruction_frontier=instruction_frontier,
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
                 mode=mode, planning=planning, plan_store=plan_store, budget=budget,
@@ -1302,6 +1360,12 @@ class _RegenerableTurnRunner:
                 result = row["result_json"]
                 if isinstance(result, Mapping) and result.get("cancel_effects_unresolved") is True:
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                # A worker handoff only drains local tasks. Durable child
+                # cancellation is authorized by this committed parent state.
+                if binding.binding_contract.subagents:
+                    if self._cancel_subagents is None:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    await self._cancel_subagents(turn.key, context.principal, context.principal)
                 code = ErrorCode.EXECUTION_CANCELLED.value
                 if await self._finish_retained_turn(
                     turn, state="cancelled",
@@ -1439,6 +1503,19 @@ class _RegenerableTurnRunner:
             attachments=stored_input_attachment_views(captured),
         )
 
+    def _allows_native_subagents(
+        self, binding: AgentBinding, native_step: tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None,
+        *, mode: ExecutionMode, planning: bool, budgeted: bool, trace: bool, split: bool,
+    ) -> bool:
+        contract = binding.binding_contract
+        return (
+            bool(contract.subagents)
+            and self._prepare_subagents is not None and self._cancel_subagents is not None
+            and native_step is not None and native_step[0].capture_frontier
+            and mode == "run" and not planning and not budgeted and not trace and not split
+            and set(contract.subagent_binding_map) == set(contract.subagent_ids)
+        )
+
     async def admit(
         self, key: SessionTurnKey, *, revision: int, through: int, request_key: str,
         prompt: CanonicalUserInput, binding: AgentBinding, context: AgentContext[object], thinking: ThinkingValue,
@@ -1458,8 +1535,13 @@ class _RegenerableTurnRunner:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         plan_store = self._prepare_plan(key, 1) if planning else None
         trace_enabled = self._require_turn_trace(binding, canonical_step=native_step is not None)
+        native_subagents = self._allows_native_subagents(
+            binding, native_step, mode=mode, planning=planning, budgeted=budget is not None,
+            trace=trace_enabled, split=split is not None,
+        )
         self._executor.require_regenerable(
-            binding, canonical_step=native_step is not None, canonical_trace=trace_enabled, split_step=split is not None,
+            binding, canonical_step=native_step is not None, canonical_trace=trace_enabled,
+            split_step=split is not None, native_subagents=native_subagents,
         )
         if await self.canonicalize_cwd(cwd) != cwd:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd"})
@@ -1581,6 +1663,7 @@ class _RegenerableTurnRunner:
             stored_input=request.get("input"),
             native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
             budget=run_budget, split_source=split, preload_skill_inputs=preload_skill_inputs,
+            native_subagents=native_subagents,
         )
 
     async def _admission_history(
@@ -1832,19 +1915,27 @@ class _RegenerableTurnRunner:
                 binding.output_binding.validate_payload(output)
             else:
                 repository_boundary = self._step_instruction_boundary(turn, binding)
-                outcome = await self._executor.execute_regenerable(
-                    binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
-                    event_sink=event_sink, thinking=thinking, streamed_output_bytes=_CONTEXT_BYTES,
-                    workspace=self._workspace, repository_instructions=turn.repository_instructions,
-                    repository_instruction_boundary=repository_boundary,
-                    canonical_step=None if turn.native_step is None else turn.native_step[0],
-                    tool_operations=None if turn.native_step is None else turn.native_step[1],
-                    generation=turn.generation, continuation=turn.continuation,
-                    deferred_tool_results=turn.deferred_results, deferred_approvals=turn.deferred_approvals,
-                    output_retries_used=turn.output_retries_used, mode=turn.mode, planning=turn.planning,
-                    plan_store=turn.plan_store, budget=turn.budget,
-                    preload_skill_inputs=turn.preload_skill_inputs, split_step=turn.split_source is not None, **trace_opts,
-                )
+                native_subagents = nullcontext()
+                if turn.native_subagents:
+                    if self._prepare_subagents is None:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                    native_subagents = self._prepare_subagents(turn, binding, context.principal)
+                async with native_subagents as native_subagent_leaf:
+                    outcome = await self._executor.execute_regenerable(
+                        binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
+                        event_sink=event_sink, thinking=thinking, streamed_output_bytes=_CONTEXT_BYTES,
+                        workspace=self._workspace, repository_instructions=turn.repository_instructions,
+                        repository_instruction_boundary=repository_boundary,
+                        canonical_step=None if turn.native_step is None else turn.native_step[0],
+                        tool_operations=None if turn.native_step is None else turn.native_step[1],
+                        generation=turn.generation, continuation=turn.continuation,
+                        deferred_tool_results=turn.deferred_results, deferred_approvals=turn.deferred_approvals,
+                        output_retries_used=turn.output_retries_used, mode=turn.mode, planning=turn.planning,
+                        plan_store=turn.plan_store, budget=turn.budget,
+                        preload_skill_inputs=turn.preload_skill_inputs, split_step=turn.split_source is not None,
+                        native_subagent_leaf=native_subagent_leaf,
+                        settled_native_subagents=turn.settled_native_subagents, **trace_opts,
+                    )
                 if isinstance(outcome, DeferredToolRequests):
                     if turn.native_step is None or self._publish_deferred is None:
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)

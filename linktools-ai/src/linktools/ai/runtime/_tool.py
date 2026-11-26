@@ -3,6 +3,7 @@
 """Runtime-owned tool authorization and durable operation contracts."""
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -1121,7 +1122,14 @@ class RuntimeToolOperationBridge:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return values
 
-    async def resume_canonical_effects(self, pending_calls: Mapping[str, str]):
+    async def resume_canonical_effects(
+        self,
+        pending_calls: Mapping[str, str],
+        *,
+        recover_delegate: Callable[
+            [ToolOperationRecord, Mapping[str, JsonValue]], Awaitable[ToolOperationRecord],
+        ] | None = None,
+    ):
         """Return only confirmed outcomes for exact tool calls from retained model input."""
         from pydantic_ai.tools import DeferredToolResults
 
@@ -1131,21 +1139,60 @@ class RuntimeToolOperationBridge:
             self._agent_run_id, tenant_id=self._tenant_id, execution_id=self._execution_id,
         )
         receipts = {}
+        pending_recovery = []
         for value in values:
             if (value.execution_id != self._execution_id or value.agent_run_id != self._agent_run_id
                     or value.tool_call_id in receipts):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if value.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                if (recover_delegate is None or value.tool_name != "delegate_task" or value.replay_safe
+                        or value.binding_digest != self._binding_digest
+                        or pending_calls.get(value.tool_call_id) != value.tool_name
+                        or value.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                pending_recovery.append(value)
             receipts[value.tool_call_id] = value
         results = DeferredToolResults()
-        for call_id, tool_name in pending_calls.items():
-            value = receipts.get(call_id)
-            if value is None or value.tool_name != tool_name:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if any(call_id not in receipts or receipts[call_id].tool_name != tool_name
+               for call_id, tool_name in pending_calls.items()):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        for value in pending_recovery:
+            assert recover_delegate is not None
+            if value.arguments_payload is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            payload = await self._payload_bytes(value.arguments_payload)
+            try:
+                args = normalize_json_value(json.loads(payload))
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if not isinstance(args, dict) or canonical_sha256(args) != value.arguments_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            terminal = await recover_delegate(value, args)
+            if ((terminal.tool_operation_id, terminal.execution_id, terminal.agent_run_id, terminal.tool_call_id,
+                 terminal.tool_name, terminal.binding_digest, terminal.arguments_digest)
+                    != (value.tool_operation_id, value.execution_id, value.agent_run_id, value.tool_call_id,
+                        value.tool_name, value.binding_digest, value.arguments_digest)
+                    or terminal.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            receipts[value.tool_call_id] = terminal
+        for call_id in pending_calls:
+            value = receipts[call_id]
             self._operation_ids[call_id] = value.tool_operation_id
             results.calls[call_id] = await self._canonical_effect_result(value)
         return results if pending_calls else None
+
+    async def native_delegate_payload(
+        self, original: ToolOperationRecord, child: "ExecutionRecord", result: dict[str, JsonValue] | str,
+    ) -> tuple[StoredPayload | None, str | None, StoredPayload | None]:
+        if isinstance(result, str):
+            code, payload = _encode_tool_failure(ToolCallFailed(result))
+            return None, code, payload
+        if child.completed_at is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        message = ModelRequest(parts=[
+            ToolReturnPart("runtime", result, tool_call_id=original.tool_operation_id, timestamp=child.completed_at),
+        ], timestamp=child.completed_at)
+        return await self._payload(encode_model_messages((message,))), None, None
 
     async def _canonical_effect_result(self, value: ToolOperationRecord):
         if value.execution_id != self._execution_id or value.agent_run_id != self._agent_run_id:

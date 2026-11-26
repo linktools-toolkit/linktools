@@ -7,7 +7,8 @@ import asyncio
 from ._handoff import ExecutionHandoffScope, execution_handoff_scope
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from time import monotonic_ns
@@ -250,6 +251,7 @@ if TYPE_CHECKING:
     from ..task import TaskGraphAdmission, TaskLease, TaskNodeInvocation
     from ._regenerable_turn import _RegenerableTurnRunner
     from ._regenerable_turn import _AttachedGraphTurn
+    from ._native_subagent import NativeSubagentAdmission
 
 
 _logger = environ.get_logger("ai.runtime.local")
@@ -287,12 +289,28 @@ class _InitialAttemptCapture:
     session: SessionRecord | None = None
 
 
+@dataclass(slots=True, kw_only=True)
+class _ChildWorkerScope:
+    stopping: bool = False
+    children: dict[str, "_OwnedExecutionTurn"] = field(default_factory=dict)
+    delegated_children: set[str] = field(default_factory=set)
+    admissions: set[asyncio.Future[None]] = field(default_factory=set)
+
+
 @dataclass(slots=True)
-class _OwnedExecutionTurn:
+class _OwnedNativeParent(_ChildWorkerScope):
+    key: "SessionTurnKey"
+    generation: int
+    principal: Principal
+
+
+@dataclass(slots=True)
+class _OwnedExecutionTurn(_ChildWorkerScope):
     reservation: ExecutionStartReservation
     coordination: TurnCoordination | None
     principal: Principal
     scope: TurnScope | None = None
+    native_parent: "NativeSubagentAdmission | None" = None
     admitting: bool = True
     notice_admitted: bool = False
     notice_recovery_terminal: bool = False
@@ -304,13 +322,9 @@ class _OwnedExecutionTurn:
     tool_admission: Callable[..., Awaitable[object]] | None = None
     tool_terminal: Callable[..., Awaitable[object]] | None = None
     tool_unknown: Callable[..., Awaitable[object]] | None = None
-    stopping: bool = False
     cancel_requested: bool = False
     lifetime: asyncio.Task[object] | None = None
     closed: asyncio.Event = field(default_factory=asyncio.Event)
-    children: dict[str, "_OwnedExecutionTurn"] = field(default_factory=dict)
-    delegated_children: set[str] = field(default_factory=set)
-    admissions: set[asyncio.Future[None]] = field(default_factory=set)
     admission: asyncio.Future[ExecutionHandle] | None = None
     graph_turn: "_AttachedGraphTurn | None" = None
     graph_turns: "SqlSessionTurns | None" = None
@@ -388,6 +402,7 @@ class LocalExecutionBackend:
             [ExecutionRecord, Principal | None], Awaitable[tuple["SqlSessionTurns", "SessionTurnKey", int] | None]
         ] | None = None
         self._turn_owners: dict[str, _OwnedExecutionTurn] = {}
+        self._native_parents: dict[str, _OwnedNativeParent] = {}
         self._conversation = conversation
         self._execution = execution_state
         self._checkpoint = checkpoint
@@ -1274,8 +1289,42 @@ class LocalExecutionBackend:
                                     or turn.execution.status is ExecutionStatus.CANCELLING):
             raise asyncio.CancelledError
 
-    def _parent_turn(self, reservation: ExecutionStartReservation) -> _OwnedExecutionTurn | None:
-        return self._parent_execution_turn(reservation.execution, reservation.parent_producer_generation)
+    @asynccontextmanager
+    async def canonical_subagent_parent(
+        self, key: "SessionTurnKey", generation: int, principal: Principal,
+    ) -> AsyncIterator[None]:
+        """Drain only local child workers for this exact native generation."""
+        identity = key.turn_id
+        if principal.tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if identity in self._native_parents or identity in self._turn_owners:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        parent = _OwnedNativeParent(key, generation, principal)
+        self._native_parents[identity] = parent
+        try:
+            yield
+        finally:
+            parent.stopping = True
+            self._stop_child_workers(parent)
+            drain = asyncio.create_task(self._drain_child_workers(parent), name=f"ai-native-child-drain-{identity}")
+            try:
+                _, interrupted = await self._await_checkpoint_task(drain, label="native child drain")
+            finally:
+                self._native_parents.pop(identity)
+            if interrupted is not None:
+                raise interrupted
+
+    def _parent_turn(
+        self, reservation: ExecutionStartReservation, native: "NativeSubagentAdmission | None" = None,
+    ) -> "_OwnedExecutionTurn | _OwnedNativeParent | None":
+        if native is None:
+            return self._parent_execution_turn(reservation.execution, reservation.parent_producer_generation)
+        native.require_child(reservation.execution, native.principal, reservation.parent_producer_generation)
+        parent = self._native_parents.get(native.key.turn_id)
+        if (parent is None or parent.stopping or
+                (parent.key, parent.generation, parent.principal) != (native.key, native.generation, native.principal)):
+            raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "subagent_parent_unavailable"})
+        return parent
 
     def _parent_execution_turn(
         self, execution: ExecutionRecord, parent_generation: int | None,
@@ -1290,7 +1339,11 @@ class LocalExecutionBackend:
         self._require_turn_dispatch(parent)
         return parent
 
-    def _require_turn_dispatch(self, owner: _OwnedExecutionTurn) -> None:
+    def _require_turn_dispatch(self, owner: "_OwnedExecutionTurn | _OwnedNativeParent") -> None:
+        if isinstance(owner, _OwnedNativeParent):
+            if owner.stopping or self._native_parents.get(owner.key.turn_id) is not owner:
+                raise asyncio.CancelledError
+            return
         if (owner.stopping
                 or self._turn_owners.get(owner.reservation.execution.execution_id) is not owner):
             raise asyncio.CancelledError
@@ -1305,15 +1358,18 @@ class LocalExecutionBackend:
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
         grouped: _GroupedTurnStart | None = None, *, _existing_owner: bool = False,
+        _native_parent: "NativeSubagentAdmission | None" = None,
         _graph_claim: "tuple[_AttachedGraphTurn, SqlSessionTurns, Observed[ExecutionRecord], Callable[..., None], Callable[[_AttachedGraphTurn], None], TaskRepository, TaskLease] | None" = None,
     ) -> ExecutionHandle:
-        parent = self._parent_turn(reservation)
+        if _native_parent is not None:
+            _native_parent.require_child(reservation.execution, principal, reservation.parent_producer_generation)
+        parent = self._parent_turn(reservation, _native_parent)
         admission = asyncio.get_running_loop().create_future()
         entered = asyncio.get_running_loop().create_future() if parent is not None else None
         if parent is not None:
             parent.admissions.add(entered)
         task = asyncio.create_task(
-            self._turn_lifetime(reservation, principal, admit, admission, parent, entered, grouped, existing_owner=_existing_owner, graph_claim=_graph_claim),
+            self._turn_lifetime(reservation, principal, admit, admission, parent, entered, grouped, existing_owner=_existing_owner, graph_claim=_graph_claim, native_parent=_native_parent),
             name=f"ai-turn-owner-{reservation.execution.execution_id}",
         )
         self._track_checkpoint_task(task, "turn_lifetime")
@@ -1344,14 +1400,14 @@ class LocalExecutionBackend:
         owner = self._turn_owners.get(execution.execution_id)
         if owner is not None:
             if owner.lifetime is asyncio.current_task():
-                self._parent_turn(owner.reservation)
+                self._parent_turn(owner.reservation, owner.native_parent)
                 self._require_turn_dispatch(owner)
                 await action()
                 return
             if (owner.stopping
                     or owner.reservation.parent_producer_generation != parent_producer_generation):
                 raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "turn_recovery_busy"})
-            self._parent_turn(owner.reservation)
+            self._parent_turn(owner.reservation, owner.native_parent)
             self._require_turn_dispatch(owner)
             entered = asyncio.get_running_loop().create_future()
             owner.admissions.add(entered)
@@ -1439,9 +1495,10 @@ class LocalExecutionBackend:
     async def _turn_lifetime(
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
-        admission: asyncio.Future[ExecutionHandle], parent: _OwnedExecutionTurn | None,
+        admission: asyncio.Future[ExecutionHandle], parent: "_OwnedExecutionTurn | _OwnedNativeParent | None",
         entered: asyncio.Future[None] | None, grouped: _GroupedTurnStart | None,
         *, existing_owner: bool = False,
+        native_parent: "NativeSubagentAdmission | None" = None,
         graph_claim: "tuple[_AttachedGraphTurn, SqlSessionTurns, Observed[ExecutionRecord], Callable[..., None], Callable[[_AttachedGraphTurn], None], TaskRepository, TaskLease] | None" = None,
     ) -> None:
         execution = reservation.execution
@@ -1473,10 +1530,10 @@ class LocalExecutionBackend:
                 return
             if scope is not None:
                 scope.require_active()
-            if execution.execution_id in self._turn_owners:
+            if execution.execution_id in self._turn_owners or execution.execution_id in self._native_parents:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             owner = _OwnedExecutionTurn(reservation, coordination, principal, scope=scope,
-                                        lifetime=asyncio.current_task(), admission=admission)
+                                        lifetime=asyncio.current_task(), admission=admission, native_parent=native_parent)
             if graph_claim is not None:
                 (owner.graph_turn, owner.graph_turns, owner.observed, owner.graph_terminal_notice,
                  owner.graph_producer_stopped, graph_task_repository, graph_task_lease) = graph_claim
@@ -1548,6 +1605,17 @@ class LocalExecutionBackend:
                 if parent is not None and parent.children.get(execution.execution_id) is owner:
                     parent.children.pop(execution.execution_id)
 
+    def _stop_child_workers(self, owner: _ChildWorkerScope) -> None:
+        for child in tuple(owner.children.values()):
+            self._stop_owned_turn(child)
+
+    async def _drain_child_workers(self, owner: _ChildWorkerScope) -> None:
+        while owner.admissions:
+            await asyncio.wait(tuple(owner.admissions))
+        children = tuple(owner.children.values())
+        if children:
+            await asyncio.gather(*(child.closed.wait() for child in children))
+
     def _stop_owned_turn(self, owner: _OwnedExecutionTurn) -> None:
         if owner.stopping:
             return
@@ -1558,8 +1626,7 @@ class LocalExecutionBackend:
         scope = self._handoff_scopes.get(execution_id)
         if scope is not None:
             scope.stop()
-        for child in tuple(owner.children.values()):
-            self._stop_owned_turn(child)
+        self._stop_child_workers(owner)
         worker = self._tasks.get(execution_id)
         if worker is not None and worker is not asyncio.current_task():
             self._request_worker_shutdown(execution_id, worker)
@@ -1570,11 +1637,7 @@ class LocalExecutionBackend:
         if worker is not None:
             await self._drain_worker_task(execution_id, worker)
         self._stop_owned_turn(owner)
-        while owner.admissions:
-            await asyncio.wait(tuple(owner.admissions))
-        children = tuple(owner.children.values())
-        if children:
-            await asyncio.gather(*(child.closed.wait() for child in children))
+        await self._drain_child_workers(owner)
         while True:
             recovery = self._recovery_reconcile_tasks.get(execution_id)
             pending = tuple(task for task in (*self._execution_task_map().get(execution_id, ()), recovery)
@@ -1949,25 +2012,26 @@ class LocalExecutionBackend:
         if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._execution_binding(execution, request.resolved_binding)
-        now = datetime.now(timezone.utc)
-        expected = (
-            await self._expected_session_cursor(execution)
-            if execution.session_id is not None
-            else None
+        claim = ExecutionStartClaim(
+            execution.execution_id, execution.revision, execution.event_seq,
+            identity.scope, identity.idempotency_key, identity.request_digest, datetime.now(timezone.utc),
         )
-        started = await self._runtime_commands.commit_start_attempt_checkpoint(
-            ExecutionStartClaim(
-                execution.execution_id,
-                execution.revision,
-                execution.event_seq,
-                identity.scope,
-                identity.idempotency_key,
-                identity.request_digest,
-                now,
-            ),
-            session_id=execution.session_id,
-            expected_cursor=expected, expected_session=identity.expected_session,
-        )
+        owner = self._turn_owners.get(execution.execution_id)
+        if owner is not None and owner.native_parent is not None:
+            self._require_turn_dispatch(owner)
+            native = owner.native_parent
+            native.require_child(execution, request.principal, owner.reservation.parent_producer_generation)
+            self._parent_turn(owner.reservation, native)
+            started = await native.commit_start(self._runtime_commands, claim)
+            self._require_turn_dispatch(owner)
+            self._parent_turn(owner.reservation, native)
+        else:
+            started = await self._runtime_commands.commit_start_attempt_checkpoint(
+                claim, session_id=execution.session_id,
+                expected_cursor=(await self._expected_session_cursor(execution)
+                                 if execution.session_id is not None else None),
+                expected_session=identity.expected_session,
+            )
         _logger.info(
             "execution start checkpoint committed: execution=%s", execution.execution_id
         )
@@ -2845,6 +2909,19 @@ class LocalExecutionBackend:
     def worker_installed(self, execution_id: str) -> bool:
         task = self._tasks.get(execution_id)
         return task is not None and not task.done()
+
+    def owns_native_child(
+        self, execution_id: str, *, key: "SessionTurnKey", principal: Principal, original: ToolOperationRecord,
+    ) -> bool:
+        owner = self._turn_owners.get(execution_id)
+        native = None if owner is None else owner.native_parent
+        return (
+            native is not None and native.key == key and native.principal == principal
+            and native.generation == original.producer_generation and native.invocation_id == original.tool_call_id
+            and native.decision.operation_id == original.tool_operation_id and native.decision.fence == original.fence
+            and (original.owner is None or original.owner == native.decision.owner)
+            and self.worker_installed(execution_id)
+        )
 
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
         return tenant_id == self._tenant_id and self.worker_installed(execution_id)
