@@ -147,13 +147,16 @@ async def _measure(
                             http_counts["message_post"] += 1
                         elif endpoint == ("GET", "/api/session") and b"turn_id=" in scope["query_string"]:
                             http_counts["terminal_get"] += 1
+                        elif scope["path"].startswith("/api/"):
+                            http_counts[" ".join(endpoint)] += 1
                 await app(scope, receive, send)
 
             yield observed_app, runner
 
     async def drain_producer(runner):
         async with asyncio.timeout(8):
-            await asyncio.gather(*tuple(runner._tasks))
+            while runner._tasks:
+                await asyncio.gather(*tuple(runner._tasks))
 
     async def create_session(http):
         assert (await http.get("/api/config")).json()["turn_sessions"]
@@ -215,7 +218,18 @@ async def _measure(
                         return payload
 
             async with asyncio.timeout(8):
-                return await asyncio.gather(*(next_frame(queue) for queue in frames))
+                readers = asyncio.gather(*(next_frame(queue) for queue in frames))
+                try:
+                    done, _ = await asyncio.wait((readers, *streams), return_when=asyncio.FIRST_COMPLETED)
+                    for stream in streams:
+                        if stream in done:
+                            stream.result()
+                            raise AssertionError(f"session SSE disconnected before all observers received {kind}")
+                    return readers.result()
+                finally:
+                    if not readers.done():
+                        readers.cancel()
+                    await asyncio.gather(readers, return_exceptions=True)
 
         async with client(app) as http:
             if not cold_reopen:
@@ -237,6 +251,7 @@ async def _measure(
                     event.listen(observation_target, name, callback)
                 measure_requests = True
                 started = perf_counter()
+                measured = False
                 try:
                     turn_id = await submit(http, "measure")
                     await next_frames("admitted", turn_id)
@@ -251,13 +266,15 @@ async def _measure(
                     drained_seconds = perf_counter() - started
                     if not publication:
                         assert answer(await read_turn(http, turn_id)) == answer(terminals[0])
+                    measured = True
                 finally:
                     measure_requests = False
                     for name, callback in reversed(listeners):
                         event.remove(observation_target, name, callback)
                     disconnect.set()
                     release.set()
-                    await asyncio.wait_for(asyncio.gather(*streams), 8)
+                    if measured:
+                        await asyncio.wait_for(asyncio.gather(*streams), 8)
             finally:
                 for stream in streams:
                     if not stream.done():

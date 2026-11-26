@@ -571,17 +571,25 @@ class RuntimeSessions(Generic[AppT]):
         if await self._has_native_session(session_id):
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT, "Use start_turn for an existing native SQL session")
 
+    async def _lookup_native_session(
+        self, session_id: str, principal: Principal | None,
+    ) -> "tuple[Principal, dict[str, JsonValue]] | None":
+        if not self.supports_turn_sessions:
+            return None
+        _, runtime = self._require_turn_sessions()
+        history = runtime.history
+        if history is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        actor = runtime._resolve_principal(principal)
+        snapshot = await history._lookup_runtime_turn_session(session_id, principal=actor)
+        return None if snapshot is None else (actor, snapshot)
+
     async def get(
         self, session_id: str, *, principal: Principal | None = None,
     ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
-        if self.supports_turn_sessions:
-            _, runtime = self._require_turn_sessions()
-            history = runtime.history
-            if history is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            actor = runtime._resolve_principal(principal)
-            if await history._lookup_runtime_turn_session(session_id, principal=actor) is not None:
-                return self._bind_native_session(session_id, principal=actor, local_workspace=False)
+        native = await self._lookup_native_session(session_id, principal)
+        if native is not None:
+            return self._bind_native_session(session_id, principal=native[0], local_workspace=False)
         return await self._get_session(session_id, principal)
 
     async def start(
@@ -596,8 +604,15 @@ class RuntimeSessions(Generic[AppT]):
             idempotency_key=idempotency_key, output=output, correlation=correlation,
             files=files, planning=planning, thinking=thinking)
 
-    async def inspect(self, session_id: str, *, principal: Principal) -> SessionView:
-        """Read current session state without constructing a bound handle."""
+    async def inspect(
+        self, session_id: str, *, principal: Principal,
+    ) -> "SessionView | dict[str, JsonValue]":
+        """Read the owning session's current state without constructing a handle."""
+        self._ensure_open()
+        native = await self._lookup_native_session(session_id, principal)
+        return native[1] if native is not None else await self._inspect_agent_session(session_id, principal=principal)
+
+    async def _inspect_agent_session(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()
         return await self._service.get(session_id, principal=principal)
 

@@ -42,7 +42,7 @@ class Session(Generic[AppT]):
         return self._runtime.default_principal if self._principal is None else self._principal
 
     async def inspect(self, *, principal: Principal | None = None) -> SessionView:
-        return await self._runtime.sessions.inspect(
+        return await self._runtime.sessions._inspect_agent_session(
             self.session_id, principal=self.principal if principal is None else principal,
         )
 

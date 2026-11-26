@@ -742,15 +742,11 @@ class TaskNodeExecutor(Generic[AppT]):
     async def get_prepared_agent_input(
         self,
         invocation: TaskNodeInvocation,
+        *,
+        admission: TaskGraphAdmission,
     ) -> TaskPreparedInputRecord | None:
         task_ref = invocation.node.task
         if task_ref is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        admission = await self._task_admissions.get(
-            invocation.graph_id,
-            tenant_id=invocation.principal.tenant_id,
-        )
-        if admission is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         record = await self._task_state.get_prepared_input(
             invocation.graph_id,
@@ -774,6 +770,7 @@ class TaskNodeExecutor(Generic[AppT]):
         self,
         invocation: TaskNodeInvocation,
         *,
+        admission: TaskGraphAdmission,
         input_identity: str,
         source_refs: tuple[tuple[str, TaskResultRef], ...],
         stored_user_input: StoredUserInput,
@@ -784,12 +781,6 @@ class TaskNodeExecutor(Generic[AppT]):
         task_ref = invocation.node.task
         if lease is None or task_ref is None:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
-        admission = await self._task_admissions.get(
-            invocation.graph_id,
-            tenant_id=invocation.principal.tenant_id,
-        )
-        if admission is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         candidate = TaskPreparedInputRecord(
             invocation.graph_id,
             invocation.node.node_id,
