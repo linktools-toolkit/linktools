@@ -538,7 +538,7 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
                 "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
             }[dialect_name]
     for name in state_raw:
-        assert metadata.tables[name].c.store_key.type.length == 128
+        assert metadata.tables[name].c.store_key.type.length == 64
     for table in metadata.tables.values():
         for column in table.c:
             if column.name.endswith("_locator"):

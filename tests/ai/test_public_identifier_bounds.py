@@ -44,13 +44,11 @@ def test_logical_identity_limit_remains_64_characters(validate: Callable[[str], 
         validate(value + "界")
 
 
-def test_lease_owner_retains_compound_identity_budget() -> None:
-    owner = "task-engine:" + "界" * 42 + "ab:" + "f" * 32
-    assert len(owner.encode("utf-8")) == 173
+@pytest.mark.parametrize("owner", ("x" * 64, "界" * 21 + "a"))
+def test_lease_owner_rejects_values_over_64_bytes(owner: str) -> None:
     assert validate_lease_owner(owner) == owner
-    assert validate_lease_owner("x" * 256) == "x" * 256
     with pytest.raises(AIError):
-        validate_lease_owner("x" * 257)
+        validate_lease_owner(owner + "x")
 
 
 def test_metrics_namespace_matches_atomic_input_and_all_sql_dialects() -> None:

@@ -173,7 +173,7 @@ class TaskEngine(Generic[AppT]):
         )
         self._launcher = LocalTaskGraphLauncher(
             persistence.task.tasks, self._task_node_runtime,
-            owner=f"task-engine:{self.tenant_id}:{uuid.uuid4().hex}",
+            owner=f"task-engine:{uuid.uuid4().hex}",
             acquire_execution_hold=self._execution_reads.acquire_dependency_hold,
             release_execution_hold=self._execution_reads.release_dependency_hold,
         )

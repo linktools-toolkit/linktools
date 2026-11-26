@@ -15,6 +15,8 @@ from ..storage import (
     sql_unique,
 )
 
+from .state import STORE_KEY_MAX_BYTES
+
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
@@ -33,7 +35,7 @@ def build_trace_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
 
     events = Table(
         "ai_trace_events", metadata, sql_id_column(),
-        Column("store_key", binary(128), nullable=False,
+        Column("store_key", binary(STORE_KEY_MAX_BYTES), nullable=False,
                comment="Exact Trace store partition identity."),
         Column("run_id", binary(128), nullable=False,
                comment="Original UTF-8 agent run identifier."),

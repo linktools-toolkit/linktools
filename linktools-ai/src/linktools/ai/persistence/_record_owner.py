@@ -5,6 +5,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from ..core import validate_lease_owner
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
@@ -70,7 +71,6 @@ def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) ->
 
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
 EXECUTION_SORT_KEY_MAX_BYTES = 8 + RECORD_KEY_MAX_BYTES
-EXECUTION_LEASE_OWNER_MAX_BYTES = 256
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
 _EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}
@@ -183,11 +183,9 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
             type(values["sort_key"]) is not bytes or not 1 <= len(values["sort_key"]) <= EXECUTION_SORT_KEY_MAX_BYTES
         ):
             raise ValueError("execution sort key exceeds its bounded record ordering size")
-        lease_owner = values.get("lease_owner")
-        if lease_owner is not None and (
-            not isinstance(lease_owner, str) or len(lease_owner.encode("utf-8")) > EXECUTION_LEASE_OWNER_MAX_BYTES
-        ):
-            raise ValueError("execution lease owner exceeds its bounded UTF-8 size")
+    lease_owner = values.get("lease_owner")
+    if lease_owner is not None:
+        validate_lease_owner(lease_owner)
     for key, value in _CONSTANTS.get(name, {}).items():
         if key in values and values[key] != value:
             raise ValueError(f"{name} requires {key}={value!r}")

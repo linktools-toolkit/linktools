@@ -51,6 +51,7 @@ from ._redaction import (
 )
 from ._usage import UsageMetrics
 from ._validation import (
+    LEASE_OWNER_MAX_BYTES,
     RESOURCE_ID_MAX_BYTES,
     SESSION_ID_MAX_BYTES,
     SESSION_REQUEST_KEY_MAX_BYTES,
@@ -119,6 +120,7 @@ from ._domain import PersistenceDomain
 from ._token_seed import token_seed
 
 __all__ = [
+    "LEASE_OWNER_MAX_BYTES",
     "RESOURCE_ID_MAX_BYTES",
     "SESSION_ID_MAX_BYTES",
     "SESSION_REQUEST_KEY_MAX_BYTES",

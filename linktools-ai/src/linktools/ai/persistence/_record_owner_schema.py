@@ -4,7 +4,7 @@
 
 from typing import TYPE_CHECKING
 
-from ..core import RESOURCE_ID_MAX_BYTES
+from ..core import LEASE_OWNER_MAX_BYTES, RESOURCE_ID_MAX_BYTES
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
@@ -25,13 +25,13 @@ if TYPE_CHECKING:
 
 
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
-from ._record_owner import EXECUTION_LEASE_OWNER_MAX_BYTES, EXECUTION_SORT_KEY_MAX_BYTES, SCAN_KIND_OWNERS
+from ._record_owner import EXECUTION_SORT_KEY_MAX_BYTES, SCAN_KIND_OWNERS
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 
 
 def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -> None:
     """Build one physical owner with the common optimistic record contract."""
-    from sqlalchemy import TIMESTAMP, BigInteger, SmallInteger, JSON, Column, LargeBinary, String, Table, Text, text
+    from sqlalchemy import TIMESTAMP, BigInteger, SmallInteger, JSON, Column, LargeBinary, String, Table, text
     from sqlalchemy.dialects import mysql
 
     if name in metadata.tables:
@@ -94,7 +94,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         ),
         Column(
             "lease_owner",
-            sql_text_key(EXECUTION_LEASE_OWNER_MAX_BYTES) if name == "ai_execution_records" else Text,
+            sql_text_key(LEASE_OWNER_MAX_BYTES),
             nullable=True,
             comment="Current durable lease owner for record kinds using claim and fencing semantics.",
         ),

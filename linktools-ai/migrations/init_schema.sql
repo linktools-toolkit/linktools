@@ -5,7 +5,7 @@
 
 CREATE TABLE ai_state_records (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
 	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
@@ -14,7 +14,7 @@ CREATE TABLE ai_state_records (
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
-	lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
+	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
 	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
 	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
 	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON object.',
@@ -40,7 +40,7 @@ CREATE TABLE ai_state_records (
 
 CREATE TABLE ai_execution_records (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
 	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
@@ -49,7 +49,7 @@ CREATE TABLE ai_execution_records (
 	sort_key VARBINARY(776) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
-	lease_owner VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
+	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
 	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
 	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
 	payload_json JSON NOT NULL COMMENT 'Domain JSON object; execution reference digests are stored in typed columns.',
@@ -92,7 +92,7 @@ CREATE TABLE ai_execution_records (
 
 CREATE TABLE ai_task_graphs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
 	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
@@ -100,7 +100,7 @@ CREATE TABLE ai_task_graphs (
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
-	lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
+	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
 	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
 	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
 	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON object.',
@@ -120,7 +120,7 @@ CREATE TABLE ai_task_graphs (
 
 CREATE TABLE ai_state_facts (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the append-only fact stream.',
 	sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the fact within its stream.',
 	owner_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record that owns this fact.',
@@ -142,7 +142,7 @@ CREATE TABLE ai_state_facts (
 
 CREATE TABLE ai_state_counters (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the monotonic sequence counter.',
 	value BIGINT NOT NULL COMMENT 'Last committed value allocated by the sequence.',
 	stream_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete stream_key; raw identity must also match.',
@@ -156,7 +156,7 @@ CREATE TABLE ai_state_counters (
 
 CREATE TABLE ai_state_operations (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	operation_key VARBINARY(768) NOT NULL COMMENT 'Binary operation address, at most 768 bytes.',
 	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the ordered operation stream.',
 	sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
@@ -205,7 +205,7 @@ CREATE TABLE ai_step_runs (
 
 CREATE TABLE ai_step_run_admissions (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact namespace, tenant and domain partition admitting this run.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact namespace, tenant and domain partition admitting this run.',
 	`key` VARBINARY(768) NOT NULL COMMENT 'Canonical local run admission identity, independent of the registration owner.',
 	scope_key VARBINARY(768) COMMENT 'Conversation lookup identity derived from the validated domain projection.',
 	parent_key VARBINARY(768) COMMENT 'Parent-run lookup identity derived from the validated domain projection.',
@@ -229,7 +229,7 @@ CREATE TABLE ai_step_run_admissions (
 
 CREATE TABLE ai_step_tool_operations (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
 	scope_key VARBINARY(768) COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
@@ -237,7 +237,7 @@ CREATE TABLE ai_step_tool_operations (
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
-	lease_owner TEXT COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
+	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
 	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
 	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
 	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON object.',
@@ -444,7 +444,7 @@ CREATE TABLE ai_object_chunks (
 
 CREATE TABLE ai_trace_events (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact Trace store partition identity.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact Trace store partition identity.',
 	run_id VARBINARY(128) NOT NULL COMMENT 'Original UTF-8 agent run identifier.',
 	agent_conversation_id VARBINARY(128) NULL COMMENT 'Inline event conversation identity; Native references retain source ownership.',
 	parent_agent_run_id VARBINARY(128) NULL COMMENT 'Inline event parent run identity; Native references retain source ownership.',

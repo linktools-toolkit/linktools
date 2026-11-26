@@ -9,6 +9,7 @@ from ..errors import AIError, ErrorCode
 from ._json import JsonValue, canonical_json_bytes, normalize_json_value
 
 
+LEASE_OWNER_MAX_BYTES = 64
 RESOURCE_ID_MAX_BYTES = 128
 SESSION_ID_MAX_BYTES = 64
 SESSION_REQUEST_KEY_MAX_BYTES = 64
@@ -74,7 +75,7 @@ def validate_principal_kind(value: str) -> str:
 
 
 def validate_lease_owner(value: str) -> str:
-    return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
+    return _text(value, LEASE_OWNER_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_lease_seconds(value: int) -> int:
@@ -199,6 +200,7 @@ def _text(value: str, maximum: int, code: ErrorCode) -> str:
 
 
 __all__ = [
+    "LEASE_OWNER_MAX_BYTES",
     "RESOURCE_ID_MAX_BYTES",
     "SESSION_ID_MAX_BYTES",
     "SESSION_REQUEST_KEY_MAX_BYTES",

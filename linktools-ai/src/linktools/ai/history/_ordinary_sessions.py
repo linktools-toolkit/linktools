@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelResponse
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, CursorSigner, ExecutionStatus, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
     ResourceRef, TenantAuthorizationPolicy, UsageMetrics, canonical_sha256, decode_cursor, encode_cursor,
-    principal_identity_payload, validate_page_limit, validate_session_id,
+    principal_identity_payload, validate_page_limit, validate_resource_id, validate_session_id,
 )
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
