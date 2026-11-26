@@ -1039,10 +1039,22 @@ async def _build_local_components(
                     binding=binding.binding_contract, capability=capability, mode=turn.mode,
                 )
 
-        async def recover_native_subagent(key, generation, principal, binding, mode, tools, original, args, timeout):
+        async def recover_native_subagent(key, generation, principal, binding, mode, tools, original, args, start_reserved):
+            reserved = None
+            if start_reserved:
+                from ._native_subagent import NativeSubagentAdmission
+                from ._tool import ToolOperationDecision
+
+                if original.owner is None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                reserved = NativeSubagentAdmission(
+                    state.session_turns, key, generation, state.checkpoint.tools,
+                    ToolOperationDecision(original.tool_operation_id, original.owner, original.fence, False),
+                    original.tool_call_id, principal, original=original,
+                )
             child, result = await dispatcher.recover_native_result(
                 key=key, original=original, args=args, principal=principal,
-                binding=binding.binding_contract, mode=mode, timeout_seconds=timeout,
+                binding=binding.binding_contract, mode=mode, timeout_seconds=0.0, reserved=reserved,
             )
             result_payload, error_code, error_payload = await tools.native_delegate_payload(original, child, result)
             return await backend._runtime_commands.settle_native_subagent_result(

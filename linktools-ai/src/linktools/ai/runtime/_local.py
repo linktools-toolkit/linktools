@@ -2006,6 +2006,36 @@ class LocalExecutionBackend:
             self._capture_reserved_start(owner, result)
         return result
 
+    async def start_recovered_native_child(
+        self, execution: ExecutionRecord, proof: "NativeSubagentAdmission",
+    ) -> None:
+        """Install only the producer for an unchanged, already-reserved child."""
+        if (proof.original is None or execution.status is not ExecutionStatus.PENDING_START
+                or execution.session_id is not None or execution.stored_user_input is None
+                or execution.requires_task_invocation_capture):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+        async def start() -> None:
+            owner = self._turn_owners.get(execution.execution_id)
+            if owner is None or owner.native_parent is not proof:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            identity = owner.reservation.idempotency
+            if identity.scope != "execution.subagent" or identity.status is not IdempotencyStatus.RESERVED:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            request = ExecutionRequest(
+                user_prompt=await self.restore_user_input(execution), principal=proof.principal,
+                idempotency_key=identity.idempotency_key, memory_scope=execution.memory_scope,
+                mode=execution.mode, planning=execution.planning, thinking=execution.thinking,
+                correlation=execution.correlation, tool_response_ref=execution.tool_response_ref,
+                tool_effects=execution.tool_effects, session_context=execution.session_context,
+            )
+            started = await self.prepare_start(
+                request, execution, ExecutionStartIdentity(identity.scope, identity.idempotency_key, identity.request_digest),
+            )
+            await self.launch(request, started)
+
+        await self._run_owned_action(execution, proof.generation, start, native_parent=proof)
+
     async def prepare_start(
         self,
         request: ExecutionRequest,

@@ -96,6 +96,7 @@ class _AdmittedTurn:
     deferred_approvals: tuple[PendingDeferredCall, ...] = ()
     native_subagents: bool = False
     settled_native_subagents: bool = False
+    recover_native_results: Callable[[], Awaitable[DeferredToolResults | None]] | None = None
     instruction_frontier: SessionInstructionFrontier | None = None
     completed_checkpoint: bool = False
     output_retries_used: int = 0
@@ -151,7 +152,7 @@ class _RegenerableTurnRunner:
         ] | None = None,
         recover_subagent: Callable[
             [SessionTurnKey, int, Principal, AgentBinding, ExecutionMode, RuntimeToolOperationBridge,
-             ToolOperationRecord, Mapping[str, JsonValue], float], Awaitable[ToolOperationRecord],
+             ToolOperationRecord, Mapping[str, JsonValue], bool], Awaitable[ToolOperationRecord],
         ] | None = None,
         prepare_plan: Callable[[SessionTurnKey, int], PlanningStore] | None = None,
         prepare_budget: Callable[[SessionTurnKey, int], RunBudgetContext] | None = None,
@@ -981,7 +982,7 @@ class _RegenerableTurnRunner:
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             model_prompt = await self._restore_prompt(prompt, stored)
-            continuation = deferred_results = None
+            continuation = deferred_results = recover_native_results = None
             completed_checkpoint = False
             output_retries_used = 0
             instruction_frontier = None
@@ -1081,7 +1082,6 @@ class _RegenerableTurnRunner:
                         if not pending and checkpoint.state == "complete":
                             events = await steps.list_events(run_id=key.turn_id)
                             completed_checkpoint = any(event.kind == "run_completed" for event in events)
-                        recover_delegate = None
                         if settle_subagents and canonical_trace:
                             # A cold Trace continuation can only append the terminal
                             # marker to an already complete, retained parent run.
@@ -1099,13 +1099,16 @@ class _RegenerableTurnRunner:
                             recover_subagent = self._recover_subagent
                             assert recover_subagent is not None
 
+                            start_reserved = len(pending) == 1
+
                             async def recover_delegate(original, args):
-                                # A cold parent cannot wait for or restart a nonterminal child.
                                 return await recover_subagent(key, generation + 1, admitted, binding,
-                                                              mode, tools, original, args, 0.0)
-                        deferred_results = await tools.resume_canonical_effects(
-                            pending, recover_delegate=recover_delegate,
-                        )
+                                                              mode, tools, original, args, start_reserved)
+
+                            async def recover_native_results():
+                                return await tools.resume_canonical_effects(pending, recover_delegate=recover_delegate)
+                        if recover_native_results is None:
+                            deferred_results = await tools.resume_canonical_effects(pending)
                     else:
                         if (checkpoint.state != "interrupted"
                                 or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
@@ -1127,6 +1130,7 @@ class _RegenerableTurnRunner:
                 deferred_approvals=() if settled_continuation is None else settled_continuation.approvals,
                 native_subagents=native_subagents,
                 settled_native_subagents=settle_subagents and not completed_checkpoint,
+                recover_native_results=recover_native_results,
                 instruction_frontier=instruction_frontier,
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
                 mode=mode, planning=planning, plan_store=plan_store, budget=budget,
@@ -1962,11 +1966,22 @@ class _RegenerableTurnRunner:
             else:
                 repository_boundary = self._step_instruction_boundary(turn, binding)
                 native_subagents = nullcontext()
-                if turn.native_subagents:
+                if turn.native_subagents or turn.recover_native_results is not None:
                     if self._prepare_subagents is None:
                         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                     native_subagents = self._prepare_subagents(turn, binding, context.principal)
                 async with native_subagents as native_subagent_leaf:
+                    deferred_results = turn.deferred_results
+                    if turn.recover_native_results is not None:
+                        # The live parent owner and renewal loop now fence any
+                        # original child first-start. No new delegation is exposed.
+                        try:
+                            deferred_results = await turn.recover_native_results()
+                        except Exception as error:
+                            # The child may have crossed its first-start fence.
+                            # Missing proof cannot be projected as parent failure.
+                            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                        native_subagent_leaf = None
                     outcome = await self._executor.execute_regenerable(
                         binding=binding, context=context, prompt=model_prompt, history=turn.history, limits=limits,
                         event_sink=event_sink, thinking=thinking, streamed_output_bytes=_CONTEXT_BYTES,
@@ -1975,7 +1990,7 @@ class _RegenerableTurnRunner:
                         canonical_step=None if turn.native_step is None else turn.native_step[0],
                         tool_operations=None if turn.native_step is None else turn.native_step[1],
                         generation=turn.generation, continuation=turn.continuation,
-                        deferred_tool_results=turn.deferred_results, deferred_approvals=turn.deferred_approvals,
+                        deferred_tool_results=deferred_results, deferred_approvals=turn.deferred_approvals,
                         output_retries_used=turn.output_retries_used, mode=turn.mode, planning=turn.planning,
                         plan_store=turn.plan_store, budget=turn.budget,
                         preload_skill_inputs=turn.preload_skill_inputs, split_step=turn.split_source is not None,

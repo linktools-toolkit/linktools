@@ -245,6 +245,9 @@ class ExecutionBackend(Protocol):
     def owns_native_child(
         self, execution_id: str, *, key: "SessionTurnKey", principal: Principal, original: "ToolOperationRecord",
     ) -> bool: ...
+    async def start_recovered_native_child(
+        self, execution: ExecutionRecord, proof: "NativeSubagentAdmission",
+    ) -> None: ...
     async def wait_terminal(self, execution_id: str, *, tenant_id: str) -> None: ...
     async def recovery_effects(
         self, execution_id: str, *, tenant_id: str
@@ -1030,10 +1033,23 @@ class DefaultExecutionService(TaskExecutionService):
     async def _wait_native_child_result(
         self, child: ExecutionRecord, *, key: "SessionTurnKey", principal: Principal,
         original: "ToolOperationRecord", timeout_seconds: float,
+        reserved: "NativeSubagentAdmission | None" = None,
     ) -> tuple[ExecutionRecord, ExecutionResult]:
         """Observe only an exact local native child or an existing durable terminal."""
         terminal = {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
         backend = self._backend
+        if child.status is ExecutionStatus.PENDING_START and reserved is not None:
+            if backend is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            try:
+                await backend.start_recovered_native_child(child, reserved)
+                await backend.wait_terminal(child.execution_id, tenant_id=principal.tenant_id)
+                child = await self.load_authorized(child.execution_id, principal, AuthorizationAction.EXECUTION_READ)
+            except Exception as error:
+                # An unconfirmed start or wait never authorizes retry or failure settlement.
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            if child.status not in terminal:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         if child.status not in terminal:
             if (timeout_seconds <= 0 or child.status not in {
                     ExecutionStatus.PENDING_START, ExecutionStatus.STARTED,

@@ -1559,7 +1559,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
     async def guard_step_in_transaction(
         self, transaction, key: SessionTurnKey, *, generation: int,
-        principal: Principal | None = None,
+        principal: Principal | None = None, _ordinary_only: bool = False,
     ) -> None:
         """Fence Step publication in its existing same-group transaction.
 
@@ -1581,6 +1581,15 @@ class SqlSessionTurns(SqlSessionTurnReader):
             statement = self._turns.update().filter_by(
                 **self._turn_values(key), generation=generation, state="accepted",
             ).where(self._turns.c.lease_until > self._now)
+            if _ordinary_only:
+                from sqlalchemy import func
+
+                columns = self._turns.c
+                statement = statement.where(
+                    columns.split_source_receipt.is_(None),
+                    columns.request_json["graph_execution"].as_string().is_(None),
+                    func.coalesce(columns.request_json["split_step"].as_boolean(), False).is_(False),
+                )
             if principal is not None:
                 actor = self._turns.c.request_json["principal"]
                 statement = statement.where(

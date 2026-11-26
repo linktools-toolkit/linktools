@@ -718,6 +718,17 @@ class ToolRepositoryImpl(_RepositoryBase):
         value = None if record is None else await self._decode(record, ToolOperationRecord)
         return value
 
+    async def guard_recovered_subagent_start_in_transaction(
+        self, transaction: StateTransaction, original: ToolOperationRecord,
+    ) -> None:
+        """Keep the exact retained delegate receipt stable through child first-start."""
+        key = self._tool_key(original.tool_operation_id)
+        record = await transaction.get_record(key)
+        if record is None or await self._decode(record, ToolOperationRecord) != original:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        if await transaction.guard_record_revision(key, expected_storage_revision=record.storage_revision) is None:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+
     async def settle_recovered_subagent_in_transaction(
         self, transaction: StateTransaction, original: ToolOperationRecord, *,
         result_payload: StoredPayload | None, error_code: str | None, error_payload: StoredPayload | None,

@@ -1406,10 +1406,18 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             lambda transaction: self.claim_start_in_transaction(transaction, claim)
         )
 
+    async def claim_existing_native_subagent_in_transaction(
+        self, transaction: StateTransaction, claim: ExecutionStartClaim, *,
+        parent_id: str, invocation_id: str, principal: Principal,
+    ) -> ExecutionRecord:
+        return await self.claim_start_in_transaction(
+            transaction, claim, _reserved_child=(parent_id, invocation_id, principal),
+        )
+
     async def claim_start_in_transaction(
         self,
         transaction: StateTransaction,
-        claim: ExecutionStartClaim,
+        claim: ExecutionStartClaim, *, _reserved_child: tuple[str, str, Principal] | None = None,
     ) -> ExecutionRecord:
         execution_key = self._key("execution", (claim.execution_id,))
         identity = self._idempotency._identity_key(
@@ -1429,6 +1437,19 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         idempotency_record = stored.get(idempotency_key)
+        if _reserved_child is not None:
+            parent_id, invocation_id, principal = _reserved_child
+            if (principal.tenant_id != self._tenant_id
+                    or current.lineage_kind is not ExecutionLineageKind.SUBAGENT or current.session_id is not None
+                    or (current.parent_execution_id, current.root_execution_id, current.parent_invocation_id,
+                        current.principal_id, current.principal_kind)
+                    != (parent_id, parent_id, invocation_id, principal.principal_id, principal.kind)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if (idempotency_record is None or current.started_at is not None or current.completed_at is not None
+                    or current.revision != 0 or current.event_seq != 0 or current.agent_run_seq != 0
+                    or current.producer_generation != 0 or current.producer_claim_id is not None
+                    or current.recovery is not None):
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         idempotency_created = idempotency_record is None
         if idempotency_record is None:
             idempotency = IdempotencyRecord(

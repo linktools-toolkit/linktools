@@ -2790,6 +2790,43 @@ class StateCommands:
             invocation_id=invocation_id, child_store=repository.state_store, principal=principal, write=start,
         )
 
+    async def commit_recovered_native_subagent_start(
+        self, turns: "SqlSessionTurns", key: "SessionTurnKey", *, generation: int, principal: Principal,
+        original: ToolOperationRecord, claim: ExecutionStartClaim,
+    ) -> ExecutionRecord:
+        """First-start an existing child only under its successor's retained exact claim."""
+        tools = self._tools
+        repository = self._execution
+        store = turns.transcript_state_store
+        if type(tools) is not ToolRepositoryImpl or type(repository) is not ExecutionRepositoryImpl or store is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if (principal.tenant_id != self._tenant_id or original.execution_id != key.turn_id
+                or original.agent_run_id != key.turn_id or original.tool_name != "delegate_task"
+                or original.replay_safe or original.owner is None or original.fence < 1
+                or original.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}
+                or original.producer_generation is None or original.producer_generation >= generation
+                or claim.scope != "execution.subagent" or claim.idempotency_key != canonical_sha256({
+                    "kind": "subagent", "parent_execution_id": key.turn_id, "invocation_id": original.tool_call_id,
+                })):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        members = _dedupe_stores((store, tools.state_store, repository.state_store))
+        if not _same_group(members):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        async def start(group: StateGroupTransaction) -> ExecutionRecord:
+            await turns.guard_step_in_transaction(
+                group.transaction(store), key, generation=generation, principal=principal, _ordinary_only=True,
+            )
+            await tools.guard_recovered_subagent_start_in_transaction(group.transaction(tools.state_store), original)
+            return await repository.claim_existing_native_subagent_in_transaction(
+                group.transaction(repository.state_store), claim, parent_id=key.turn_id,
+                invocation_id=original.tool_call_id, principal=principal,
+            )
+
+        # Unlike generic recovery, every exception (including an unknown ACK)
+        # leaves the caller without launch authority. Never issue a second CAS.
+        return await store.storage_group.mutate(members, start)
+
     async def settle_native_subagent_result(
         self, turns: "SqlSessionTurns", key: "SessionTurnKey", *, generation: int, principal: Principal,
         original: ToolOperationRecord, child: ExecutionRecord, result_payload: StoredPayload | None,

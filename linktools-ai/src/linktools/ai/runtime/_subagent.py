@@ -146,6 +146,7 @@ class SubagentDispatcher:
     async def recover_native_result(
         self, *, key: SessionTurnKey, original: ToolOperationRecord, args: Mapping[str, JsonValue],
         principal: Principal, binding: AgentBindingContract, mode: ExecutionMode, timeout_seconds: float,
+        reserved: NativeSubagentAdmission | None = None,
     ) -> tuple[ExecutionRecord, dict[str, JsonValue] | str]:
         """Project a previously established terminal child into its original tool result."""
         agent_id = args.get("subagent_id")
@@ -174,7 +175,7 @@ class SubagentDispatcher:
                 or tuple(item.get("path") for item in captured_files) != files):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         child, result = await self._execution._wait_native_child_result(
-            child, key=key, principal=principal, original=original, timeout_seconds=timeout_seconds,
+            child, key=key, principal=principal, original=original, timeout_seconds=timeout_seconds, reserved=reserved,
         )
         try:
             return child, self._format_child_result(result, agent_id)
