@@ -33,7 +33,10 @@ async def test_graph_step_reopens_exact_session_result_without_trace(tmp_path: P
 
     namespace = "graph-step-no-trace"
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
-    authorization = TenantAuthorizationPolicy()
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
+    authorization = HostAuthorization()
     async with AsyncExitStack() as stack:
         state = await stack.enter_async_context(Persistence.open(namespace, storage=storage))
         native = await state.create_step_store()
