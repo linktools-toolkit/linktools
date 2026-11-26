@@ -317,6 +317,7 @@ class SqlSessionTurnReader:
     async def _read_transcripts(self, statement, *, display: bool, body_limit: int | None = None,
                                 compacted_context: bool | str = False,
                                 reset_window: tuple[int, int, ErrorCode] | None = None,
+                                expected_turns: range | None = None,
                                 ) -> tuple[Mapping[str, object], ...]:
         if self._transcript_source is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -333,6 +334,10 @@ class SqlSessionTurnReader:
             if not isinstance(owner, SqlStateRowReader):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             rows = await owner.read_sql_rows(self._context, statement)
+            if expected_turns is not None and (
+                    len(rows) != len(expected_turns)
+                    or any(row["turn_no"] != number for row, number in zip(rows, expected_turns))):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The finalized session history page is incomplete")
             if reset_window is not None:
                 after, through, missing = reset_window
                 if (len(rows) != through - after
@@ -805,7 +810,10 @@ class SqlSessionTurnReader:
                               after=0, through=through),
             columns.state.in_(("succeeded", "failed", "cancelled")),
         ).order_by(columns.turn_no.desc()).limit(limit)
-        return await self._read_transcripts(statement, display=True, body_limit=body_limit)
+        return await self._read_transcripts(
+            statement, display=True, body_limit=body_limit,
+            expected_turns=range(through, max(0, through - limit), -1),
+        )
 
     async def recent_context(
         self, session_id: str, *, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
