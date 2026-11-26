@@ -903,9 +903,19 @@ def _encode_datetime(value: datetime | None) -> JsonValue:
 
 
 def tool_error_message(part: ToolReturnPart) -> str | None:
-    """Read the SDK's plain-text feedback for a failed call, not diagnostics or result data."""
+    """Project model-visible tool feedback, without echoing structured validation inputs."""
     if part.outcome in {"failed", "denied", "retried"} and isinstance(part.content, str) and part.content:
         return part.content
+    retry = getattr(part, "retry", None)
+    if part.outcome == "retried" and retry is not None and retry.cause == "validation_error" and isinstance(part.content, list):
+        lines = []
+        for error in part.content[:5]:
+            if not isinstance(error, Mapping) or not isinstance(message := error.get("msg"), str) or not message:
+                continue
+            loc = error.get("loc")
+            field = ".".join(str(item) for item in loc if isinstance(item, (str, int))) if isinstance(loc, (list, tuple)) else ""
+            lines.append(f"{field}: {message}" if field else message)
+        return "\n".join(lines)[:2048] or None
     return None
 
 

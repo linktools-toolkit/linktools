@@ -1771,9 +1771,9 @@ async def test_workspace_tool_title_requires_native_registration(tmp_path: Path,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("retry", [False, True, "validation"])
 async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit_copy(
-    tmp_path: Path, retry: bool,
+    tmp_path: Path, retry: bool | str,
 ) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
@@ -1788,10 +1788,12 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
     from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
     failure = "Use the original filename.\n  The second line is also model-visible."
+    invalid_value = "input not meant for the Web tool card"
     release = asyncio.Event()
     received = []
 
-    async def lookup(context: AgentContext[None]) -> str:
+    async def lookup(context: AgentContext[None], value: int = 0) -> str:
+        assert retry != "validation", "invalid arguments must not reach the tool"
         await release.wait()
         raise (ToolCallRetry if retry else ToolCallFailed)(failure)
 
@@ -1800,7 +1802,8 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
             if isinstance(part, ToolReturnPart):
                 received.append(part.content)
                 return ModelResponse(parts=[TextPart("adapted")])
-        return ModelResponse(parts=[ToolCallPart("lookup", {}, tool_call_id="failed-lookup")])
+        args = {"value": invalid_value} if retry == "validation" else {}
+        return ModelResponse(parts=[ToolCallPart("lookup", args, tool_call_id="failed-lookup")])
 
     features = _persistence_capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
@@ -1839,7 +1842,13 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
             finally:
                 release.set()
                 unsubscribe()
-        assert received == [failure]
+        if retry == "validation":
+            [errors] = received
+            [error] = errors
+            assert error["input"] == invalid_value
+            failure = f"value: {error['msg']}"
+        else:
+            assert received == [failure]
         assert len(seen) == 1 and seen[0]
         local_failed, = [frame for frame in local_frames if frame["type"] == "tool"
                          and frame["item"]["status"] == "FAILED"]
@@ -1855,6 +1864,8 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
         assert replay.status_code == 200, replay.text
         item, = replay.json()["process"]
         assert item["status"] == "FAILED" and item["error_message"] == failure
+        if retry == "validation":
+            assert invalid_value not in item["error_message"]
         shared = await runtime.history.turn_result(
             "failures", turn_id, principal=runtime.default_principal, local_workspace=False,
         )
