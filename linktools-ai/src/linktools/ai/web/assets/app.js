@@ -97,14 +97,27 @@ async function api(path, {body, signal}={}) {
   const response = await fetch(path, {method:body ? 'POST':'GET', signal, cache:'no-store',
     headers:body ? {'Content-Type':'application/json', 'X-LinkTools-Console':'1'} : {},
     body:body ? JSON.stringify(body) : undefined});
-  const payload = await response.json();
+  const raw=await response.text();
+  let payload;
+  try {payload=JSON.parse(raw);}
+  catch {
+    const reset=/^(?:(?:write|read) )?ECONNRESET\b/.test(raw.trimStart());
+    const message=reset?'Connection reset (ECONNRESET)':'Server returned a non-JSON response';
+    const error=new Error(`${message} (HTTP ${response.status})`);
+    error.code=reset?'CONNECTION_RESET':'INVALID_RESPONSE';
+    throw error;
+  }
   if (!response.ok) {
-    const code = payload.error_code || payload.code || 'REQUEST_FAILED';
-    const error = new Error(`${code}${payload.message ? ': '+payload.message : ''}`);
-    error.code=code; error.path=path; error.details=payload; error.context=`${body ? 'POST':'GET'} ${path.split('?')[0]}`; throw error;
+    const code = payload?.error_code || payload?.code || 'REQUEST_FAILED';
+    const error = new Error(`${code}${payload?.message ? ': '+payload.message : ''}`);
+    error.code=code;error.details=payload;throw error;
   }
   return payload;
-  } catch(error) {error.path=path;error.context ||= `${body ? 'POST':'GET'} ${path.split('?')[0]}`;throw error;}
+  } catch(error) {
+    error.path=path;error.context ||= `${body ? 'POST':'GET'} ${path.split('?')[0]}`;
+    if(!error.details && body?.request_id)error.details={operation_id:body.request_id};
+    throw error;
+  }
 }
 // Nine random bytes encode to twelve unpadded URL-safe ASCII characters.
 function shortAttemptId() {
