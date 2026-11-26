@@ -102,6 +102,7 @@ def project_ordinary_multipart_prompt(value: StoredUserInput) -> dict[str, JsonV
 
 def project_ordinary_turn_activity(
     messages: tuple[ModelMessage, ...], *, output: JsonValue, output_ref: Sequence[int] | None,
+    local_tool_feedback: bool = False,
 ) -> dict[str, list[JsonValue]]:
     """Project the retained public timeline identically for SSE and history."""
     items: list[JsonValue] = []
@@ -132,7 +133,7 @@ def project_ordinary_turn_activity(
             items.append(asdict(item))
     process = [
         asdict(replace(
-            item, error_message=None,
+            item, error_message=item.error_message if local_tool_feedback else None,
             error_code=(item.error_code or ErrorCode.TOOL_EXECUTION_FAILED)
             if item.status == "FAILED" else item.error_code,
         ))
@@ -142,7 +143,7 @@ def project_ordinary_turn_activity(
 
 
 async def _turn_view(
-    row: RowMapping, read_scalar_input: Callable[[StoredUserInput], Awaitable[str]],
+    row: RowMapping, read_scalar_input: Callable[[StoredUserInput], Awaitable[str]], *, local_tool_feedback: bool,
 ) -> dict[str, JsonValue]:
     state = row["state"]
     result = row["result_json"]
@@ -157,7 +158,9 @@ async def _turn_view(
             if not messages or not isinstance(messages[-1], ModelResponse) or messages[-1].text is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             output = {"text": messages[-1].text}
-        activity = project_ordinary_turn_activity(messages, output=output, output_ref=output_ref)
+        activity = project_ordinary_turn_activity(
+            messages, output=output, output_ref=output_ref, local_tool_feedback=local_tool_feedback,
+        )
     prompt = row["prompt"]
     attachments = []
     if row["stored_input"] is not None:
@@ -306,7 +309,10 @@ class _OrdinarySessionHistory:
         next_cursor = self._next_cursor(turns[limit - 1]["turn_no"], kind, digest) if len(turns) > limit else None
         return {
             "session": _session_view(row),
-            "timeline": {"items": [await _turn_view(turn, self._store.read_scalar_input) for turn in reversed(turns[:limit])],
+            "timeline": {"items": [
+                await _turn_view(turn, self._store.read_scalar_input, local_tool_feedback=local_workspace)
+                for turn in reversed(turns[:limit])
+            ],
                          "next_cursor": next_cursor},
         }
 
@@ -397,5 +403,5 @@ class _OrdinarySessionHistory:
                 ResourceRef(ResourceKind.EXECUTION, key.turn_id, self._tenant_id, owner),
             )
             usage = row.get("usage")
-        view = await _turn_view(row, self._store.read_scalar_input)
+        view = await _turn_view(row, self._store.read_scalar_input, local_tool_feedback=local_workspace)
         return _ObservedTurnResult(key, row["generation"], ExecutionStatus(view["status"]), usage, view)

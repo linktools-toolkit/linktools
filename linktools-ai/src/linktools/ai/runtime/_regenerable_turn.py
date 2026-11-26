@@ -289,13 +289,22 @@ class _RegenerableTurnRunner:
             except (Exception, asyncio.CancelledError) as error:
                 _logger.warning("Session lifecycle observer failed: %s", type(error).__name__)
 
-    def observe(self, session_id: str, callback: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
+    def observe(
+        self, session_id: str, callback: Callable[[dict[str, JsonValue]], None], *, local_tool_feedback: bool = False,
+    ) -> Callable[[], None]:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         if not _OBSERVER_SLOTS.acquire(blocking=False):
             raise AIError(ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED)
 
         def listener(frame: dict[str, JsonValue]) -> None:
+            if not local_tool_feedback:
+                if frame.get("type") == "tool" and isinstance(item := frame.get("item"), dict):
+                    frame = {**frame, "item": {**item, "error_message": None}}
+                elif frame.get("type") == "terminal" and isinstance(process := frame.get("process"), list):
+                    frame = {**frame, "process": [
+                        {**item, "error_message": None} if isinstance(item, dict) else item for item in process
+                    ]}
             callback(frame)
 
         listeners = self._observers.setdefault(session_id, set())
@@ -366,7 +375,7 @@ class _RegenerableTurnRunner:
         if succeeded:
             from ..history import project_ordinary_turn_activity
 
-            activity = project_ordinary_turn_activity(messages, output=output, output_ref=output_ref)
+            activity = project_ordinary_turn_activity(messages, output=output, output_ref=output_ref, local_tool_feedback=True)
         self._store.note_terminal_context(
             turn.key, turn_no=turn.number, prompt=(
                 "" if succeeded and turn.stored_input is not None
@@ -1438,12 +1447,11 @@ class _RegenerableTurnRunner:
             elif isinstance(emission, DurableBoundary):
                 item = project_tool_process_event(emission.event_type.value, emission.payload)
                 if item is not None:
-                    # Model-facing tool feedback can contain private result data.
-                    # Keep the typed public status/reason and never forward that text.
+                    # Host subscribers get only a code unless explicitly opted in.
                     error_code = item.error_code
                     if item.status == "FAILED" and error_code is None:
                         error_code = ErrorCode.TOOL_EXECUTION_FAILED
-                    item = replace(item, error_code=error_code, error_message=None)
+                    item = replace(item, error_code=error_code, error_message=emission.live_error_message)
                     self._publish(turn.key.session_id, {
                         **fields, "type": "tool", "item": asdict(item),
                     })

@@ -1780,6 +1780,7 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
     from linktools.ai.capability import AgentContext, ToolCallFailed, ToolCallRetry
     from linktools.ai.core import TenantAuthorizationPolicy
     from linktools.ai.runtime.turn_clients import TurnObserver
+    from linktools.ai.web._app import _native_turn_event_wire
 
     class Policy(TenantAuthorizationPolicy):
         pass
@@ -1814,6 +1815,10 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("failures", principal=principal)
         seen = []
+        local_frames = []
+        unsubscribe = runtime.sessions.observe_turn_session(
+            "failures", local_frames.append, local_tool_feedback=True,
+        )
         with TurnObserver(runtime, "failures", principal, local_workspace=True) as observer:
             turn_id = await runtime.sessions.start_turn(
                 "failures", "lookup", principal=principal, agent="default", idempotency_key="turn",
@@ -1833,8 +1838,15 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
                             seen.append(item["error_code"])
             finally:
                 release.set()
+                unsubscribe()
         assert received == [failure]
         assert len(seen) == 1 and seen[0]
+        local_failed, = [frame for frame in local_frames if frame["type"] == "tool"
+                         and frame["item"]["status"] == "FAILED"]
+        assert _native_turn_event_wire(local_failed, local_tool_feedback=True)["item"]["error_message"] == failure
+        assert "error_message" not in _native_turn_event_wire(local_failed)["item"]
+        terminal, = [frame for frame in local_frames if frame["type"] == "terminal"]
+        assert terminal["process"][0]["error_message"] == failure
 
     async with Persistence.open("chat-tool-failure", storage=storage) as reopened, Runtime.open(
         persistence=reopened, features=features, authorization=Policy(),
@@ -1842,5 +1854,8 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
         replay = await http.get("/api/session", params={"session_id": "failures", "turn_id": turn_id})
         assert replay.status_code == 200, replay.text
         item, = replay.json()["process"]
-        assert item["status"] == "FAILED" and item.get("error_message") is None
-        assert failure not in replay.text
+        assert item["status"] == "FAILED" and item["error_message"] == failure
+        shared = await runtime.history.turn_result(
+            "failures", turn_id, principal=runtime.default_principal, local_workspace=False,
+        )
+        assert shared["process"][0].get("error_message") is None

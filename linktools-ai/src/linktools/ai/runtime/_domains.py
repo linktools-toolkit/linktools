@@ -542,12 +542,12 @@ class RuntimeSessions(Generic[AppT]):
         )
 
     def observe_turn_session(
-        self, session_id: str, callback: Callable[[dict[str, JsonValue]], None],
+        self, session_id: str, callback: Callable[[dict[str, JsonValue]], None], *, local_tool_feedback: bool = False,
     ) -> Callable[[], None]:
         """Register a trusted host callback. Authorize before forwarding any frame."""
         runner, _ = self._require_turn_sessions()
         validate_session_id(session_id)
-        return runner.observe(session_id, callback)
+        return runner.observe(session_id, callback, local_tool_feedback=local_tool_feedback)
 
     def observe_turn_lifecycle(
         self, callback: Callable[[dict[str, JsonValue]], None],

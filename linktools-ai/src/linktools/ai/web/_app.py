@@ -264,7 +264,9 @@ def _ordinary_turn_wire(turn: Mapping[str, object]) -> Mapping[str, object]:
     return turn
 
 
-def _native_turn_event_wire(value: Mapping[str, object]) -> Mapping[str, object] | None:
+def _native_turn_event_wire(
+    value: Mapping[str, object], *, local_tool_feedback: bool = False,
+) -> Mapping[str, object] | None:
     """Project native preview events to fields used by the browser."""
     event_type = value.get("type")
     if event_type in _NATIVE_TURN_PREVIEWS:
@@ -279,6 +281,8 @@ def _native_turn_event_wire(value: Mapping[str, object]) -> Mapping[str, object]
                 fields = ("kind", "key", "status")
             else:
                 fields = ("kind", "key", "tool_name", "status", "argument_preview", "elapsed_ms", "error_code")
+                if local_tool_feedback:
+                    fields += ("error_message",)
             frame["item"] = {key: item[key] for key in fields if item.get(key) is not None}
         return frame
     attachments = value.get("attachments")
@@ -732,7 +736,7 @@ class _Console:
                 nonlocal buffered, overflow
                 if overflow:
                     return
-                wire = _native_turn_event_wire(value)
+                wire = _native_turn_event_wire(value, local_tool_feedback=self.local_turn_workspace)
                 if wire is None:
                     return
                 revision = wire.get("revision")
@@ -751,7 +755,9 @@ class _Console:
             try:
                 # Subscribe before taking the authorized snapshot so an
                 # admission/commit racing the initial read cannot disappear.
-                unsubscribe = runtime.sessions.observe_turn_session(identity, receive)
+                unsubscribe = runtime.sessions.observe_turn_session(
+                    identity, receive, local_tool_feedback=self.local_turn_workspace,
+                )
                 snapshot = await self.require_history().turn_session_state(
                     identity, principal=self.principal, local_workspace=self.local_turn_workspace,
                 )
