@@ -763,15 +763,18 @@ class RuntimeSessions(Generic[AppT]):
 
     async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> "Session[AppT]":
         self._ensure_open()
+        self._require_agent_session()
         view = await self._service.fork(agent_id, session_id, request)
         return self._bind_session(view, request.principal)
 
     async def update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         self._ensure_open()
+        self._require_agent_session()
         return await self._service.update(agent_id, session_id, request)
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
         self._ensure_open()
+        self._require_agent_session()
         return await self._service.close(session_id, request)
 
 
