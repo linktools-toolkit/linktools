@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..core import JsonValue, OperationLedgerRecord, Page, Principal, validate_idempotency_key
+from ..core import JsonValue, Page, Principal, validate_idempotency_key
 from ._submission import (
     TaskGraphSubmission,
     TaskSubmissionCancellation,
@@ -243,7 +243,6 @@ class TaskGraphLauncher(Protocol):
         execution_id: str,
         *,
         invoke_effects: bool = True,
-        cancel_authority: tuple[OperationLedgerRecord, Principal] | None = None,
     ) -> TaskGraphView: ...
 
     async def settle_cancel(
@@ -251,7 +250,6 @@ class TaskGraphLauncher(Protocol):
         launch: TaskGraphLaunch,
         *,
         invoke_effects: bool,
-        cancel_authority: tuple[OperationLedgerRecord, Principal] | None = None,
     ) -> TaskGraphView: ...
 
     async def supply_input(

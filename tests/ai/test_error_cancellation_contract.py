@@ -5,6 +5,7 @@
 from linktools.ai.persistence import Persistence
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import get_args, get_origin, get_type_hints
 from unittest.mock import AsyncMock
@@ -39,8 +40,9 @@ from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskGraphLaunch,
     TaskGraphLimits,
+    TaskLease,
 )
-from linktools.ai.task._local import LocalTaskGraphLauncher
+from linktools.ai.task._local import LocalTaskGraphLauncher, _LeaseState
 from linktools.ai.core import Principal, PrincipalKind
 from linktools.ai.workspace import LocalWorkspaceBackend
 
@@ -521,15 +523,15 @@ async def test_task_heartbeat_loss_waits_for_cancellation_resistant_runner(
         closed=False,
     )
     node = SimpleNamespace(node_id="node", dependencies=(), task=None)
-    lease_state = SimpleNamespace(
-        lease=SimpleNamespace(
-            graph_id="graph",
-            node_id="node",
-            execution_id="execution",
-            fence=1,
-        ),
-        lock=asyncio.Lock(),
-    )
+    lease_state = _LeaseState(TaskLease(
+        graph_id="graph",
+        node_id="node",
+        tenant_id="tenant",
+        owner="test-owner",
+        fence=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        execution_id="execution",
+    ))
 
     task = asyncio.create_task(launcher._run_node(run, node, lease_state))
     await asyncio.wait_for(runner.started.wait(), 1)

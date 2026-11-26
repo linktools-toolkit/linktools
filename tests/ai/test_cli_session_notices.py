@@ -232,7 +232,9 @@ def test_local_session_feed_decodes_existing_tool_shape_without_forwarding_inval
     from linktools.commands.ai._common import _LocalSessionFeed
 
     invalidations = []
-    feed = _LocalSessionFeed(SimpleNamespace(sessions=SimpleNamespace(invalidate=invalidations.append)))
+    feed = _LocalSessionFeed(SimpleNamespace(sessions=SimpleNamespace(
+        supports_turn_sessions=False, invalidate=invalidations.append,
+    )))
     received = []
     unsubscribe = feed.subscribe("session", lambda execution, item: received.append((execution, item)))
     notice = {

@@ -54,6 +54,7 @@ from ._submission import (
     TaskSubmissionRef,
     TaskSubmissionResult,
 )
+from ._local import LocalTaskGraphLauncher
 from ._metrics import _TaskMetricProjector
 from ._service import (
     TaskBoundExecutionRecovery,
@@ -892,17 +893,16 @@ class DefaultTaskGraphService(TaskGraphService):
                     )
                     if admission is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    await self._launcher.cancel_node(
-                        admission.launch(),
-                        node_state.node_id,
-                        execution_id,
-                        invoke_effects=True,
-                        cancel_authority=(
-                            (cancel_operation, request.principal)
-                            if cancel_operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}
-                            else None
-                        ),
-                    )
+                    if (isinstance(self._launcher, LocalTaskGraphLauncher)
+                            and cancel_operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}):
+                        await self._launcher.cancel_node(
+                            admission.launch(), node_state.node_id, execution_id, invoke_effects=True,
+                            cancel_authority=(cancel_operation, request.principal),
+                        )
+                    else:
+                        await self._launcher.cancel_node(
+                            admission.launch(), node_state.node_id, execution_id, invoke_effects=True,
+                        )
                     graph_state = await self._persistence.tasks.graph_state(
                         graph_id,
                         tenant_id=tenant_id,
@@ -2539,11 +2539,12 @@ class DefaultTaskGraphService(TaskGraphService):
             launch = admission.launch()
             if launch.principal.tenant_id != tenant_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._launcher.settle_cancel(
-                launch,
-                invoke_effects=invoke_effects,
-                cancel_authority=cancel_authority,
-            )
+            if cancel_authority is not None and isinstance(self._launcher, LocalTaskGraphLauncher):
+                await self._launcher.settle_cancel(
+                    launch, invoke_effects=invoke_effects, cancel_authority=cancel_authority,
+                )
+            else:
+                await self._launcher.settle_cancel(launch, invoke_effects=invoke_effects)
         except asyncio.CancelledError:
             raise
         except AIError:
