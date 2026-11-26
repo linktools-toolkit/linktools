@@ -16,7 +16,7 @@ from .turn_clients import TurnObserver, _END_STATES, _SessionOccupancy, _watch_t
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
-    from ..core import ExecutionMode, ExecutionStatus, JsonValue, Principal, RunBudget
+    from ..core import ExecutionMode, ExecutionStatus, JsonValue, Principal, RunBudget, UsageMetrics
     from ..history import History
     from ..model import UserPromptInput
     from ..session import SessionContext
@@ -28,6 +28,12 @@ AppT = TypeVar("AppT")
 
 
 class _NativeTurnResult(Protocol):
+    @property
+    def key(self) -> SessionTurnKey: ...
+
+    @property
+    def usage(self) -> UsageMetrics | None: ...
+
     @property
     def status(self) -> ExecutionStatus: ...
 
@@ -128,11 +134,11 @@ class _NativeSession(Generic[AppT, ResultT]):
         files: Sequence[str] = (), session_context: SessionContext = "all",
         thinking: JsonValue = None, budget: RunBudget | None = None,
         output: type[BaseModel] | None = None, correlation: Mapping[str, object] | None = None,
-        preview: bool = True,
+        preview: bool = True, principal: Principal | None = None,
     ) -> AbstractAsyncContextManager[tuple[_NativeSessionTurn[AppT, ResultT], AsyncIterator[dict[str, JsonValue]]]]:
         return self.start(
             prompt, agent=agent, idempotency_key=idempotency_key, files=files, session_context=session_context,
-            mode="plan", thinking=thinking, budget=budget, output=output, correlation=correlation, preview=preview,
+            mode="plan", thinking=thinking, budget=budget, output=output, correlation=correlation, preview=preview, principal=principal,
         )
 
     @asynccontextmanager
@@ -141,19 +147,20 @@ class _NativeSession(Generic[AppT, ResultT]):
         files: Sequence[str] = (), session_context: SessionContext = "all", mode: ExecutionMode = "run",
         planning: bool = False, thinking: JsonValue = None, budget: RunBudget | None = None,
         output: type[BaseModel] | None = None, correlation: Mapping[str, object] | None = None,
-        preview: bool = True,
+        preview: bool = True, principal: Principal | None = None,
     ) -> AsyncIterator[tuple[_NativeSessionTurn[AppT, ResultT], AsyncIterator[dict[str, JsonValue]]]]:
+        actor = self.principal if principal is None else principal
         # Subscribe before admission so an immediate result cannot outrun an observer.
         with TurnObserver(
-            self._runtime, self.session_id, self.principal, local_workspace=self._local_workspace, preview=preview,
+            self._runtime, self.session_id, actor, local_workspace=self._local_workspace, preview=preview,
         ) as observer:
             receipt = await self._sessions._start_turn_receipt(
-                self.session_id, prompt, agent=agent, principal=self.principal, idempotency_key=idempotency_key,
+                self.session_id, prompt, agent=agent, principal=actor, idempotency_key=idempotency_key,
                 files=files, session_context=session_context, mode=mode, planning=planning, thinking=thinking,
                 budget=budget, output=output, correlation=correlation,
             )
             turn = _NativeSessionTurn(
-                SessionTurnKey(self.session_id, receipt.turn_id), self.principal, self._sessions, self._read_result,
+                SessionTurnKey(self.session_id, receipt.turn_id), actor, self._sessions, self._read_result,
             )
             events = turn._replay_events() if receipt.replayed else observer.events(receipt.turn_id)
             try:
