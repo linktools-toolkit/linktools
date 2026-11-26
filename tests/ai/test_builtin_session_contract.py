@@ -1,399 +1,342 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-from linktools.ai.persistence import Persistence
-
-from linktools.ai.core import ExecutionContext
-"""Built-in sessions keep authority independent of optional context retention."""
-from ._runtime_test_helpers import model_features
+"""Built-in sessions keep authority independent of optional execution retention."""
 
 import asyncio
-from copy import deepcopy
 from contextlib import asynccontextmanager
+from copy import deepcopy
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import Principal, SessionStatus
+from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.session import ListSessionRequest
-from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage, PersistencePlan
-from linktools.ai.storage import StorageRoute
-from linktools.ai.storage import InMemoryCacheBackend
-from linktools.ai.core import CommitPolicy
+from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.storage import InMemoryCacheBackend, StorageRoute
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 
-_OWNER = Principal('owner', 'tenant')
+_OWNER = Principal("owner", "tenant")
+_NAMESPACE = "builtin-session"
 
 
-def _features(*, retain=False):
-    features = RuntimeFeatures('builtin-session')
-    features.agent('default', model='default', allow_tools=())
-    if retain:
-        features.capability(ExecutionCapability(retain_history=True), scope='runtime')
-    return features
+class _Authority(TenantAuthorizationPolicy):
+    """Explicit host policy for this isolated native Session test."""
 
 
-def _storage(path, backend='sqlite', cache=None):
-    if backend == 'split_sqlite':
+def _storage(path, backend="sqlite", cache=None):
+    if backend == "split_sqlite":
         return PersistenceStorage.from_plan(PersistencePlan(
-            conversation=StorageRoute.sqlite(path / 'conversation.db', cache=cache),
-            execution=StorageRoute.sqlite(path / 'execution.db', cache=cache),
+            conversation=StorageRoute.sqlite(path / "conversation.db", cache=cache),
+            execution=StorageRoute.sqlite(path / "execution.db", cache=cache),
         ), coordination=cache)
-    return (PersistenceStorage.sqlite(path / 'state.db', cache=cache, coordination=cache) if backend == 'sqlite'
-            else PersistenceStorage.from_root(path / 'state', exclusive_writer=True, cache=cache, coordination=cache))
+    if backend == "local_sqlite":
+        return PersistenceStorage.from_root(path / "state", exclusive_writer=True, cache=cache, coordination=cache)
+    return PersistenceStorage.sqlite(path / "state.db", cache=cache, coordination=cache)
 
 
 @asynccontextmanager
-async def _open(path, model, *, retain=False, backend='sqlite', cache=None):
-    async with Persistence.open('builtin-session', storage=_storage(path, backend, cache), tenant_id='tenant') as persistence:
-        async with Runtime.open(persistence=persistence,
-                                features=model_features(_Models(_UsageFunctionModel(model)), _features(retain=retain)),
-                                context=ExecutionContext(None)) as runtime:
-            yield runtime
+async def _open(path, model, *, retain=False, backend="sqlite", cache=None, commit=None):
+    features = RuntimeFeatures(_NAMESPACE)
+    features.agent("default", model="default", allow_tools=())
+    if retain:
+        features.capability(ExecutionCapability(retain_history=True, commit=commit or CommitPolicy.sync()), scope="runtime")
+    async with Runtime.open(
+        _NAMESPACE, storage=_storage(path, backend, cache), tenant_id="tenant",
+        features=model_features(_Models(_UsageFunctionModel(model)), features),
+        authorization=_Authority(),
+    ) as runtime:
+        yield runtime
+
+
+async def _start(runtime, prompt, key, *, session_id="session"):
+    return await runtime.sessions.start(
+        session_id, prompt, principal=_OWNER, agent=runtime.agents.get(), idempotency_key=key,
+    )
+
+
+async def _wait(turn, status=ExecutionStatus.SUCCEEDED):
+    result = await turn.wait_final(timeout_seconds=5)
+    assert result.status is status
+    return result
+
+
+async def _create(runtime, session_id="session", **kwargs):
+    return await runtime.agents.get().create_session(session_id, principal=_OWNER, **kwargs)
+
+
+async def _view(runtime, session_id="session"):
+    return await (await runtime.sessions.get(session_id, principal=_OWNER)).inspect()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('backend', ['sqlite', 'local_sqlite'])
+@pytest.mark.parametrize("backend", ["sqlite", "local_sqlite"])
 async def test_builtin_metadata_lifecycle_survives_feature_and_cache_changes(tmp_path, backend):
     async def model(messages, info):
-        raise AssertionError('metadata operations must not execute a model')
+        pytest.fail("metadata operations must not execute a model")
 
     async with _open(tmp_path, model, backend=backend) as runtime:
-        session = await runtime.agents.get().create_session('session', principal=_OWNER,
-                                                          metadata={'title': 'first'}, idempotency_key='create')
-        replay = await runtime.agents.get().create_session('session', principal=_OWNER,
-                                                         metadata={'title': 'first'}, idempotency_key='create')
+        session = await _create(runtime, metadata={"title": "first"}, idempotency_key="create")
+        replay = await _create(runtime, metadata={"title": "first"}, idempotency_key="create")
         assert replay.session_id == session.session_id
-        view = await runtime.sessions.reconcile('session', principal=_OWNER)
-        updated = await session.update(expected_revision=view.revision, metadata={'title': 'second'},
-                                       idempotency_key='update')
-        with pytest.raises(AIError) as stale:
-            await session.update(expected_revision=view.revision, metadata={'title': 'stale'},
-                                 idempotency_key='stale')
-        assert stale.value.code is ErrorCode.SESSION_REVISION_CONFLICT
-        assert updated.metadata['title'] == 'second'
+        view = await _view(runtime)
+        assert await session.update(expected_revision=view["revision"], metadata={"title": "second"})
+        assert not await session.update(expected_revision=view["revision"], metadata={"title": "stale"})
+        assert (await _view(runtime))["metadata"]["title"] == "second"
         with pytest.raises(AIError) as foreign:
-            await runtime.sessions.get('session', principal=Principal('owner', 'other-tenant'))
+            await runtime.sessions.get("session", principal=Principal("owner", "other-tenant"))
         assert foreign.value.code is ErrorCode.AUTHORIZATION_DENIED
 
     async with _open(tmp_path, model, backend=backend, retain=True,
                      cache=InMemoryCacheBackend(max_bytes=1_000_000)) as runtime:
-        page = await runtime.sessions.list(ListSessionRequest(principal=_OWNER))
-        assert [(item.session_id, item.metadata['title']) for item in page.items] == [('session', 'second')]
-        session = await runtime.sessions.get('session', principal=_OWNER)
-        assert (await session.close(idempotency_key='close')).status is SessionStatus.CLOSED
+        page = await runtime.history.turn_sessions(principal=_OWNER, session_ids=["session"])
+        assert [(item["session_id"], item["metadata"]["title"]) for item in page["items"]] == [("session", "second")]
+        session = await runtime.sessions.get("session", principal=_OWNER)
+        assert await session.close(expected_revision=(await _view(runtime))["revision"])
 
     async with _open(tmp_path, model, backend=backend) as runtime:
-        assert (await runtime.sessions.reconcile('session', principal=_OWNER)).status is SessionStatus.CLOSED
+        assert (await _view(runtime))["status"] == "CLOSED"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('backend', ['sqlite', 'local_sqlite', 'split_sqlite'])
-async def test_unretained_first_turn_releases_session_but_cannot_resume_after_reopen(tmp_path, backend):
+@pytest.mark.parametrize("backend", ["sqlite", "local_sqlite", "split_sqlite"])
+async def test_default_turn_retains_session_context_without_execution_retention(tmp_path, backend):
     calls = []
 
     async def model(messages, info):
         calls.append(deepcopy(messages))
-        return ModelResponse(parts=[TextPart('unretained answer')])
+        return ModelResponse(parts=[TextPart("answer")])
 
     async with _open(tmp_path, model, backend=backend) as runtime:
-        session = await runtime.agents.get().create_session('session', principal=_OWNER)
-        execution = await session.start('first', idempotency_key='first')
-        assert (await execution.wait(timeout_seconds=5)).result.status.value == 'SUCCEEDED'
-        view = await runtime.sessions.reconcile('session', principal=_OWNER)
-        assert view.active_execution_id is None
-        assert view.history_quality == 'unavailable'
+        await _create(runtime)
+        turn = await _start(runtime, "first", "first")
+        await _wait(turn)
+        assert (await _view(runtime))["active_turn_id"] is None
+        assert await runtime._state.execution.executions.get(turn.key.turn_id, tenant_id="tenant") is None
 
     async with _open(tmp_path, model, backend=backend, retain=True) as runtime:
-        session = await runtime.sessions.get('session', principal=_OWNER)
-        assert (await runtime.sessions.reconcile('session', principal=_OWNER)).history_quality == 'unavailable'
-        for operation in (lambda: session.start('must not forget', idempotency_key='second'),
-                          lambda: session.fork('fork', idempotency_key='fork')):
-            with pytest.raises(AIError) as missing:
-                await operation()
-            assert missing.value.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE
-        assert len(calls) == 1
-        assert (await session.close()).status is SessionStatus.CLOSED
+        assert (await _view(runtime))["active_turn_id"] is None
+        await _wait(await _start(runtime, "second", "second"))
+        assert len(calls) == 2
+        assert "first" in repr(calls[-1])
+        session = await runtime.sessions.get("session", principal=_OWNER)
+        assert await session.close(expected_revision=(await _view(runtime))["revision"])
 
 
 @pytest.mark.asyncio
-async def test_new_unretained_turn_invalidates_older_retained_cursor(tmp_path):
+async def test_turn_advances_retained_context_through_feature_toggles(tmp_path):
     calls = []
 
     async def model(messages, info):
         calls.append(deepcopy(messages))
-        return ModelResponse(parts=[TextPart('answer')])
+        return ModelResponse(parts=[TextPart("answer")])
 
-    async with _open(tmp_path, model, retain=True) as runtime:
-        session = await runtime.agents.get().create_session('session', principal=_OWNER)
-        first = await session.start('retained question')
-        await first.wait(timeout_seconds=5)
-        assert (await session.history()).items
-
-    async with _open(tmp_path, model) as runtime:
-        session = await runtime.sessions.get('session', principal=_OWNER)
-        assert (await session.history()).items
-        second = await session.start('unretained question')
-        assert (await second.wait(timeout_seconds=5)).result.status.value == 'SUCCEEDED'
-        assert len(calls[1]) > len(calls[0])
-        assert (await runtime.sessions.reconcile('session', principal=_OWNER)).history_quality == 'unavailable'
-
-    async with _open(tmp_path, model, retain=True) as runtime:
-        session = await runtime.sessions.get('session', principal=_OWNER)
-        assert (await session.history()).items
-        historical = await runtime.executions.get(first.execution_id, principal=_OWNER)
-        for operation in (lambda: session.start('do not reuse old cursor'), lambda: session.fork('fork'),
-                          lambda: historical.fork('do not bypass unavailable session')):
-            with pytest.raises(AIError) as missing:
-                await operation()
-            assert missing.value.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE
-        assert len(calls) == 2
-
-
-class _ClaimCache(InMemoryCacheBackend):
-    def __init__(self):
-        super().__init__(max_bytes=4_000_000)
-        self.claims = 0
-
-    async def claim_turn(self, *args, **kwargs):
-        self.claims += 1
-        return await super().claim_turn(*args, **kwargs)
+    for index, retain in enumerate((True, False, True)):
+        async with _open(tmp_path, model, retain=retain) as runtime:
+            if index == 0:
+                await _create(runtime)
+            await _wait(await _start(runtime, f"question-{index}", f"request-{index}"))
+            session = await runtime.sessions.get("session", principal=_OWNER)
+            assert len((await session.history())["timeline"]["items"]) == index + 1
+    assert "question-0" in repr(calls[2]) and "question-1" in repr(calls[2])
 
 
 @pytest.mark.asyncio
-async def test_coordination_does_not_opt_default_execution_into_terminal_admission(tmp_path):
-    cache = _ClaimCache()
-    features = _features()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    storage = _storage(tmp_path, cache=cache)
+@pytest.mark.parametrize("outcome", [ExecutionStatus.FAILED, ExecutionStatus.CANCELLED])
+async def test_interrupted_turn_preserves_prior_context_without_execution_retention(tmp_path, outcome):
+    calls = []
+    entered = asyncio.Event()
+    phase = "seed"
+
+    async def model(messages, info):
+        calls.append((deepcopy(messages), info.instructions))
+        if phase == "interrupt":
+            entered.set()
+            if outcome is ExecutionStatus.FAILED:
+                raise RuntimeError("model failed before response")
+            await asyncio.Event().wait()
+        return ModelResponse(parts=[TextPart("retained answer")])
+
+    async with _open(tmp_path, model, retain=True) as runtime:
+        await _create(runtime)
+        await _wait(await _start(runtime, "retained question", "seed"))
+
+    phase = "interrupt"
+    async with _open(tmp_path, model) as runtime:
+        turn = await _start(runtime, "aborted question", "interrupt")
+        await asyncio.wait_for(entered.wait(), 5)
+        if outcome is ExecutionStatus.CANCELLED:
+            assert await turn.cancel()
+        await _wait(turn, outcome)
+        assert (await _view(runtime))["active_turn_id"] is None
+
+    phase = "continue"
+    async with _open(tmp_path, model, retain=True) as runtime:
+        await _wait(await _start(runtime, "continue question", "continue"))
+    messages, instructions = calls[-1]
+    assert "retained question" in repr(messages)
+    assert "aborted question" in repr(messages)
+    assert "The previous turn was interrupted. Its results were not confirmed." in instructions
+
+
+@pytest.mark.asyncio
+async def test_history_and_fork_do_not_depend_on_standalone_execution_headers(tmp_path, monkeypatch):
+    calls = []
+
+    async def model(messages, info):
+        calls.append(deepcopy(messages))
+        return ModelResponse(parts=[TextPart("answer")])
+
+    async with _open(tmp_path, model, retain=True) as runtime:
+        await _create(runtime, "source")
+        await _wait(await _start(runtime, "retained source question", "seed", session_id="source"))
+
+    async with _open(tmp_path, model) as runtime:
+        async def no_execution_evidence(*args, **kwargs):
+            pytest.fail("canonical Session authority must not require standalone Execution evidence")
+
+        monkeypatch.setattr(runtime._state.execution.executions, "get", no_execution_evidence)
+        source = await runtime.sessions.get("source", principal=_OWNER)
+        fork = await source.fork("fork", expected_revision=(await _view(runtime, "source"))["revision"],
+                                 idempotency_key="fork")
+        assert fork is not None
+        assert len((await fork.history())["timeline"]["items"]) == 1
+        await _wait(await _start(runtime, "fork question", "child", session_id="fork"))
+        assert len((await fork.history())["timeline"]["items"]) == 2
+        assert len((await source.history())["timeline"]["items"]) == 1
+    assert "retained source question" in repr(calls[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["running", "before_publish"])
+async def test_pending_turn_keeps_durable_owner_and_publishes_once_across_execution_policies(
+    tmp_path, monkeypatch, phase,
+):
+    held, finish = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def model(messages, info):
+        calls.append(messages)
+        if phase == "running":
+            held.set()
+            await finish.wait()
+        return ModelResponse(parts=[TextPart("answer")])
+
+    cache = InMemoryCacheBackend(max_bytes=4_000_000)
+    async with (
+        _open(tmp_path, model, retain=True, commit=CommitPolicy.terminal(), cache=cache,
+              backend="split_sqlite") as owner,
+        _open(tmp_path, model, retain=True, cache=cache, backend="split_sqlite") as peer,
+    ):
+        session = await _create(owner)
+        store = owner._state.session_turns
+        write_terminal = store.finish
+
+        async def hold_publication(*args, **kwargs):
+            if phase == "before_publish":
+                held.set()
+                await finish.wait()
+            return await write_terminal(*args, **kwargs)
+
+        monkeypatch.setattr(store, "finish", hold_publication)
+        turn = await _start(owner, "question", "request")
+        try:
+            await asyncio.wait_for(held.wait(), 5)
+            assert (await _view(peer))["active_turn_id"] == turn.key.turn_id
+            assert (await session.history())["timeline"]["items"] == []
+            assert await owner._state.execution.executions.get(turn.key.turn_id, tenant_id="tenant") is None
+            same = await _start(peer, "question", "request")
+            assert same.key == turn.key
+            with pytest.raises(AIError) as conflict:
+                await _start(peer, "different", "request")
+            assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+            with pytest.raises(AIError) as busy:
+                await _start(peer, "next", "next")
+            assert busy.value.code is ErrorCode.SESSION_BUSY
+            assert len(calls) == 1
+        finally:
+            finish.set()
+        assert (await _wait(turn)).view["output"] == {"text": "answer"}
+        assert (await _wait(same)).view["output"] == {"text": "answer"}
+        assert (await _view(peer))["active_turn_id"] is None
+        assert len((await session.history())["timeline"]["items"]) == 1
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_unretained_context_unavailable_even_after_execution_header_pruning(monkeypatch):
+    calls = []
+
+    async def model(messages, info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart("unretained answer")])
+
+    features = RuntimeFeatures(_NAMESPACE)
+    features.agent("default", model="default", allow_tools=())
+    models = _Models(_UsageFunctionModel(model))
+    storage = PersistenceStorage.in_memory()
+    async with Persistence.open(_NAMESPACE, storage=storage, tenant_id="tenant") as persistence:
+        async with Runtime.open(persistence=persistence, features=model_features(models, features)) as runtime:
+            session = await _create(runtime)
+            result = await (await session.start("first", idempotency_key="first")).wait(timeout_seconds=5)
+            assert result.result.status is ExecutionStatus.SUCCEEDED
+            idle = await runtime.sessions.wait_inactive("session", principal=_OWNER, timeout_seconds=5)
+            assert idle.active_execution_id is None and idle.history_quality == "unavailable"
+
+        retained = RuntimeFeatures(_NAMESPACE)
+        retained.agent("default", model="default", allow_tools=())
+        retained.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        async with Runtime.open(persistence=persistence, features=model_features(models, retained)) as runtime:
+            session = await runtime.sessions.get("session", principal=_OWNER)
+            assert (await runtime.sessions.reconcile("session", principal=_OWNER)).history_quality == "unavailable"
+
+            async def no_execution_evidence(*args, **kwargs):
+                pytest.fail("missing-context authority must survive execution pruning")
+
+            monkeypatch.setattr(runtime._state.execution.executions, "get", no_execution_evidence)
+            for operation in (lambda: session.start("must not forget", idempotency_key="second"),
+                              lambda: session.fork("fork", idempotency_key="fork")):
+                with pytest.raises(AIError) as missing:
+                    await operation()
+                assert missing.value.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE
+            assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_coordination_does_not_opt_default_execution_into_terminal_admission():
+    class ClaimCache(InMemoryCacheBackend):
+        claims = 0
+
+        async def claim_turn(self, *args, **kwargs):
+            self.claims += 1
+            return await super().claim_turn(*args, **kwargs)
+
+    cache = ClaimCache(max_bytes=4_000_000)
     entered, finish = asyncio.Event(), asyncio.Event()
 
     async def model(messages, info):
         entered.set()
         await finish.wait()
-        return ModelResponse(parts=[TextPart('answer')])
+        return ModelResponse(parts=[TextPart("answer")])
 
-    async with Persistence.open('builtin-session', storage=storage, tenant_id='tenant') as persistence_174, Runtime.open(persistence=persistence_174, features=model_features(_Models(_UsageFunctionModel(model)), features), context=ExecutionContext(None)) as runtime:
-        session = await runtime.agents.get().create_session('session', principal=_OWNER)
-        execution = await session.start('question')
+    features = RuntimeFeatures(_NAMESPACE)
+    features.agent("default", model="default", allow_tools=())
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    async with Runtime.open(
+        _NAMESPACE, storage=PersistenceStorage.in_memory(cache=cache, coordination=cache), tenant_id="tenant",
+        features=model_features(_Models(_UsageFunctionModel(model)), features),
+    ) as runtime:
+        session = await _create(runtime)
+        execution = await session.start("question")
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id='tenant')
-            assert record is not None and record.status.value == 'STARTED'
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id="tenant")
+            assert record is not None and record.status is ExecutionStatus.STARTED
         finally:
             finish.set()
-        assert (await execution.wait(timeout_seconds=5)).result.status.value == 'SUCCEEDED'
+        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert (await session.history()).items
     assert cache.claims >= 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('outcome', ['failed', 'cancelled'])
-async def test_unretained_no_response_failure_preserves_prior_context(tmp_path, outcome):
-    calls = []
-    entered = asyncio.Event()
-    phase = 'seed'
-
-    async def model(messages, info):
-        calls.append(deepcopy(messages))
-        if phase == 'interrupt':
-            entered.set()
-            if outcome == 'failed':
-                raise RuntimeError('model failed before response')
-            await asyncio.Event().wait()
-        return ModelResponse(parts=[TextPart('retained answer')])
-
-    async with _open(tmp_path, model, retain=True) as runtime:
-        session = await runtime.agents.get().create_session('session', principal=_OWNER)
-        first = await session.start('retained question')
-        await first.wait(timeout_seconds=5)
-
-    phase = 'interrupt'
-    async with _open(tmp_path, model) as runtime:
-        session = await runtime.sessions.get('session', principal=_OWNER)
-        interrupted = await session.start('aborted question')
-        await asyncio.wait_for(entered.wait(), 5)
-        if outcome == 'cancelled':
-            await interrupted.cancel(idempotency_key='cancel')
-        result = (await interrupted.wait(timeout_seconds=5)).result
-        assert result.status.value == outcome.upper()
-        view = await runtime.sessions.reconcile('session', principal=_OWNER)
-        assert view.active_execution_id is None
-        assert view.history_quality != 'unavailable'
-
-    phase = 'continue'
-    async with _open(tmp_path, model, retain=True) as runtime:
-        session = await runtime.sessions.get('session', principal=_OWNER)
-        final = await session.start('continue question')
-        assert (await final.wait(timeout_seconds=5)).result.status.value == 'SUCCEEDED'
-    assert 'retained question' in repr(calls[-1])
-    assert 'aborted question' not in repr(calls[-1])
-
-
-@pytest.mark.asyncio
-async def test_unavailable_guard_does_not_depend_on_retained_execution_header(tmp_path, monkeypatch):
-    async def model(messages, info):
-        return ModelResponse(parts=[TextPart('answer')])
-
-    async with _open(tmp_path, model) as runtime:
-        session = await runtime.agents.get().create_session('session', principal=_OWNER)
-        execution = await session.start('first')
-        await execution.wait(timeout_seconds=5)
-
-    storage = _storage(tmp_path)
-    async with Persistence.open('builtin-session', storage=storage, tenant_id='tenant') as persistence_244, Runtime.open(persistence=persistence_244, features=model_features(_Models(_UsageFunctionModel(model)), _features(retain=True)), context=ExecutionContext(None)) as runtime:
-        session = await runtime.sessions.get('session', principal=_OWNER)
-
-        async def no_execution_evidence(*args, **kwargs):
-            raise AssertionError('missing-context authority must survive execution pruning')
-
-        monkeypatch.setattr(runtime._state.execution.executions, 'get', no_execution_evidence)
-        for operation in (lambda: session.start('second'), lambda: session.fork('fork')):
-            with pytest.raises(AIError) as missing:
-                await operation()
-            assert missing.value.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE
-
-
-@pytest.mark.asyncio
-async def test_retained_history_can_fork_without_current_capture_feature(tmp_path):
-    calls = []
-
-    async def model(messages, info):
-        calls.append(deepcopy(messages))
-        return ModelResponse(parts=[TextPart('answer')])
-
-    async with _open(tmp_path, model, retain=True) as runtime:
-        source = await runtime.agents.get().create_session('source', principal=_OWNER)
-        await (await source.start('retained source question')).wait(timeout_seconds=5)
-
-    async with _open(tmp_path, model) as runtime:
-        source = await runtime.sessions.get('source', principal=_OWNER)
-        fork = await source.fork('fork', idempotency_key='fork')
-        assert (await fork.history()).items
-        await (await fork.start('fork question')).wait(timeout_seconds=5)
-        assert (await runtime.sessions.reconcile('fork', principal=_OWNER)).history_quality == 'unavailable'
-        assert (await runtime.sessions.reconcile('source', principal=_OWNER)).history_quality != 'unavailable'
-    assert 'retained source question' in repr(calls[-1])
-
-
-@pytest.mark.asyncio
-async def test_reconcile_terminal_before_split_session_release_preserves_unavailable(tmp_path, monkeypatch):
-    finish_model = asyncio.Event()
-    release_entered = asyncio.Event()
-    allow_release = asyncio.Event()
-    calls = 0
-
-    async def model(messages, info):
-        nonlocal calls
-        calls += 1
-        await finish_model.wait()
-        return ModelResponse(parts=[TextPart('unretained answer')])
-
-    storage = _storage(tmp_path, 'split_sqlite')
-    async with Persistence.open('builtin-session', storage=storage, tenant_id='tenant') as persistence_295, Runtime.open(persistence=persistence_295, features=model_features(_Models(_UsageFunctionModel(model)), _features()), context=ExecutionContext(None)) as runtime:
-        session = await runtime.agents.get().create_session('session', principal=_OWNER)
-        mutate = runtime._state.conversation.sessions.state_store.mutate
-        held = False
-        execution = None
-
-        async def hold_first_release(callback):
-            nonlocal held
-            if execution is not None and not held:
-                terminal = await runtime._state.execution.executions.get(execution.execution_id, tenant_id='tenant')
-                if terminal.status.value == 'SUCCEEDED':
-                    held = True
-                    release_entered.set()
-                    await allow_release.wait()
-            return await mutate(callback)
-
-        monkeypatch.setattr(runtime._state.conversation.sessions.state_store, 'mutate', hold_first_release)
-        execution = await session.start('first')
-        finish_model.set()
-        try:
-            await asyncio.wait_for(release_entered.wait(), 5)
-            terminal = await runtime._state.execution.executions.get(execution.execution_id, tenant_id='tenant')
-            assert terminal.status.value == 'SUCCEEDED'
-            before = await runtime._state.conversation.sessions.get('session', tenant_id='tenant')
-            assert before.active_execution_id == execution.execution_id
-            reconciled = await runtime.sessions.reconcile('session', principal=_OWNER)
-            assert reconciled.active_execution_id is None
-            assert reconciled.history_quality == 'unavailable'
-            with pytest.raises(AIError) as missing:
-                await session.start('must not race past release')
-            assert missing.value.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE
-            assert calls == 1
-        finally:
-            allow_release.set()
-        assert (await execution.wait(timeout_seconds=5)).result.status.value == 'SUCCEEDED'
-        assert (await runtime.sessions.reconcile('session', principal=_OWNER)).history_quality == 'unavailable'
-
-
-@pytest.mark.asyncio
-async def test_sync_peer_coordinates_with_terminal_owner_before_pending_publication(tmp_path):
-    claimed, allow_owner, entered, finish = (asyncio.Event() for _ in range(4))
-
-    class HeldClaimCache(InMemoryCacheBackend):
-        held = False
-
-        async def claim_turn(self, *args, **kwargs):
-            result = await super().claim_turn(*args, **kwargs)
-            if not self.held:
-                self.held = True
-                claimed.set()
-                await allow_owner.wait()
-            return result
-
-    cache = HeldClaimCache(max_bytes=4_000_000)
-    calls = []
-
-    async def model(messages, info):
-        calls.append(messages)
-        entered.set()
-        await finish.wait()
-        return ModelResponse(parts=[TextPart('answer')])
-
-    terminal = RuntimeFeatures('builtin-session')
-    terminal.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
-    terminal.agent('default', model='default', allow_tools=())
-    sync = _features()
-    sync.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    models = _Models(_UsageFunctionModel(model))
-    storage = _storage(tmp_path, cache=cache)
-    async with Persistence.open('builtin-session', storage=storage) as persistence_366, Runtime.open(persistence=persistence_366, features=model_features(models, terminal)) as owner, Persistence.open('builtin-session', storage=_storage(tmp_path, cache=cache)) as persistence_367, Runtime.open(persistence=persistence_367, features=model_features(models, sync)) as peer:
-        session = await owner.agents.get().create_session('session')
-        remote = peer.agents.get().session('session')
-        first = asyncio.create_task(session.start('question', idempotency_key='request'))
-        await asyncio.wait_for(claimed.wait(), 5)
-        duplicate = asyncio.create_task(remote.start('question', idempotency_key='request'))
-        try:
-            # A claimed but unpublished owner must prevent a sync peer from
-            # entering its model through an independent durable admission.
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(entered.wait(), .15)
-            allow_owner.set()
-            execution = await asyncio.wait_for(first, 5)
-            same = await asyncio.wait_for(duplicate, 5)
-            await asyncio.wait_for(entered.wait(), 5)
-            assert same.execution_id == execution.execution_id
-            assert len(calls) == 1
-            assert await owner._state.execution.executions.get(
-                execution.execution_id, tenant_id=owner.tenant_id) is None
-            with pytest.raises(AIError) as conflict:
-                await remote.start('different', idempotency_key='request')
-            assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-            with pytest.raises(AIError) as busy:
-                await remote.start('next', idempotency_key='next')
-            assert busy.value.code is ErrorCode.SESSION_BUSY
-        finally:
-            allow_owner.set()
-            finish.set()
-            await asyncio.gather(first, duplicate, return_exceptions=True)
-        assert (await execution.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
-        assert (await same.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
-        assert len(calls) == 1

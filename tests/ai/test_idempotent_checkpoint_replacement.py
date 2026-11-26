@@ -75,8 +75,7 @@ def checkpoint_recovery_sources(tmp_path_factory: pytest.TempPathFactory) -> tup
                     auto_recover=False, metrics=None,
                 ) as runtime:
                     if mode == "create":
-                        session = await runtime.agents.get().create_session("session")
-                        handle = await session.start("original", idempotency_key="one",
+                        handle = await runtime.agents.get().start("original", idempotency_key="one",
                             budget=RunBudget(tool_calls=2) if crash_stage == "budget" else None)
                         await asyncio.wait_for(entered.wait(), 5)
                         record = await state.execution.executions.get(handle.execution_id, tenant_id=runtime.tenant_id)
@@ -351,8 +350,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
     )) as state, Runtime.open(
         persistence=state, features=features, auto_recover=False, metrics=None,
     ) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        handle = await session.start("save", idempotency_key="one")
+        handle = await runtime.agents.get().start("save", idempotency_key="one")
 
         async def read_source_execution():
             repository = state.execution.executions
@@ -410,7 +408,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
     ) as runtime:
         reopened = assert_results(await state.checkpoint.tools.list_by_execution(original_id, tenant_id=runtime.tenant_id))
         assert reopened == completed
-        replay = await runtime.agents.get().session("session").start("save", idempotency_key="one")
+        replay = await runtime.agents.get().start("save", idempotency_key="one")
         assert replay.execution_id == original_id
         assert (await replay.wait()).result.output == {"text": "complete"}
         assert sorted(effects) == ["first", "second"]
