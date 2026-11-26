@@ -133,6 +133,17 @@ def _require_turn_snapshot_partition(store: SqlStateStore, *, namespace: str, te
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
 
+def _require_current_conversation_layout(
+    store: StateStore | None, records: Sequence[StoredRecord], *, namespace: str, tenant_id: str,
+) -> None:
+    if (
+        isinstance(store, SqlStateStore)
+        and store.store_key == state_store_key(namespace, tenant_id, PersistenceDomain.CONVERSATION.value)
+        and any(record.kind in {"session", "session_turn_commit"} for record in records)
+    ):
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Pre-release SQL session storage layout")
+
+
 class _SnapshotReader(Protocol):
     async def validate_trace_prefix(self, records: Sequence[StoredRecord], facts: Sequence[StoredFact]) -> None: ...
 
@@ -765,6 +776,11 @@ class RuntimeSnapshotOperations:
                         turn_scope=((self._resources.namespace, self._resources.tenant_id)
                                     if domain is PersistenceDomain.EXECUTION else None))
                     captured = await _capture_snapshot_reader(reader, budget=capture_budget)
+                    if domain is PersistenceDomain.CONVERSATION:
+                        _require_current_conversation_layout(
+                            store, captured.records,
+                            namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+                        )
                     readers[domain] = captured
                     for value in (*captured.records, *captured.facts, *captured.operations):
                         projected = (capture_retention_value(value) if isinstance(value, StoredRecord)
@@ -1870,13 +1886,10 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         execution_store = resources.stores.get(PersistenceDomain.EXECUTION)
         conversation_store = resources.stores.get(PersistenceDomain.CONVERSATION)
-        if (
-            isinstance(conversation_store, SqlStateStore)
-            and conversation_store.store_key == state_store_key(namespace, tenant_id, PersistenceDomain.CONVERSATION.value)
-            and any(record.kind in {"session", "session_turn_commit"}
-                    for record in semantic_domains.get(PersistenceDomain.CONVERSATION, ()))
-        ):
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Pre-release SQL session storage layout")
+        _require_current_conversation_layout(
+            conversation_store, semantic_domains.get(PersistenceDomain.CONVERSATION, ()),
+            namespace=namespace, tenant_id=tenant_id,
+        )
         if waiting_checkpoint_group is not None:
             checkpoint_store = resources.stores.get(PersistenceDomain.CHECKPOINT)
             if (not isinstance(checkpoint_store, SqlStateStore)

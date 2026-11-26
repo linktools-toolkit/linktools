@@ -8,7 +8,7 @@ import asyncio
 import secrets
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 
 from linktools.core import environ
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
@@ -20,7 +20,6 @@ from sqlalchemy.exc import IntegrityError
 
 from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
-from ..capability import SUBAGENT_CAPABILITY_ID
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
@@ -113,6 +112,7 @@ class _AdmittedTurn:
     trace_event_base: int = 0
     trace_interaction_base: int = 0
     preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = ()
+    native_stopped_delegates: set[tuple[str, str, int, str]] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1538,10 +1538,9 @@ class _RegenerableTurnRunner:
                         operation.status is not ToolOperationStatus.EFFECT_UNKNOWN
                         or operation.producer_generation != turn.generation
                         or operation.tool_name != "delegate_task"
-                        or operation.capability_ref is None
-                        or operation.capability_ref.kind != "capability"
-                        or operation.capability_ref.id != SUBAGENT_CAPABILITY_ID
                         or operation.tool_call_id not in terminal_children
+                        or (operation.tool_operation_id, operation.owner, operation.fence, operation.tool_call_id)
+                           not in turn.native_stopped_delegates
                         for operation in unsettled
                     ):
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)

@@ -73,10 +73,14 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
         async def start(prompt: str, key: str):
             return await runtime.sessions.start(session.session_id, prompt, principal=peer, agent=agent,
                                                 idempotency_key=key)
+        pristine = await runtime.history.turn_session(session.session_id, principal=owner)
+        assert pristine["session"]["active_turn_id"] is None
+        assert pristine["timeline"]["items"] == []
         policy.deny_new = True
         with pytest.raises(AIError) as denied:
             await start("denied fresh", "denied-fresh")
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert await runtime.history.turn_session(session.session_id, principal=owner) == pristine
         assert calls == 0
         policy.deny_new = False
         policy.execution_resources.clear()
@@ -87,16 +91,24 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
             replay = await start("peer turn", "peer-turn")
             assert replay.key.turn_id == execution.key.turn_id
             policy.denied.add(execution.key.turn_id)
+            active = await runtime.history.turn_session(session.session_id, principal=owner)
+            assert active["session"]["active_turn_id"] == execution.key.turn_id
+            assert active["timeline"]["items"] == []
             with pytest.raises(AIError) as denied:
                 await start("peer turn", "peer-turn")
             assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            assert await runtime.history.turn_session(session.session_id, principal=owner) == active
             assert calls == 1
         finally:
             finish.set()
         assert (await execution.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        committed = await runtime.history.turn_session(session.session_id, principal=owner)
+        assert committed["session"]["active_turn_id"] is None
+        assert [turn["turn_id"] for turn in committed["timeline"]["items"]] == [execution.key.turn_id]
         with pytest.raises(AIError) as denied:
             await start("peer turn", "peer-turn")
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert await runtime.history.turn_session(session.session_id, principal=owner) == committed
         policy.denied.clear()
         replay = await start("peer turn", "peer-turn")
         assert replay.key.turn_id == execution.key.turn_id
@@ -104,7 +116,6 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
         assert policy.execution_resources
         assert policy.execution_resources[-1] == execution.key.turn_id
         assert "shared" not in policy.execution_resources
-        assert await state.conversation.sessions.get("shared", tenant_id="default") is None
         assert await state.execution.executions.get(execution.key.turn_id, tenant_id="default") is None
         row = await state.session_turns.get_turn(execution.key)
         assert row["request_json"]["principal"]["principal_id"] == "peer"

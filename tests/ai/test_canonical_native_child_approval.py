@@ -25,7 +25,7 @@ from .test_canonical_turn_subagents import _HostAuthorization, _model
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ("approved", "unconfirmed-child-resume", "parent-stop"))
 async def test_native_parent_approves_exact_child_without_shadow_execution(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, outcome: str,
 ) -> None:
     child_entries, child_models, parent_models, child_effects, returned_ids = [], [], [], [], []
 
@@ -144,7 +144,13 @@ async def test_native_parent_approves_exact_child_without_shadow_execution(
                 current = await child_parked()
                 parent_status = None if parent is None else (parent["state"], parent["generation"])
                 child_status = None if current is None else (current.status.value, current.producer_generation)
-                raise AssertionError(f"{phase}: {detail} (parent={parent_status}, child={child_status})") from error
+                receipts = await state.checkpoint.tools.list_by_execution(turn.key.turn_id, tenant_id=runtime.tenant_id)
+                effects = [(item.tool_name, item.status.value, item.producer_generation) for item in receipts]
+                producer = next((message for message in reversed(caplog.messages)
+                                 if message.startswith(f"Regenerable turn producer stopped: turn={turn.key.turn_id} ")), None)
+                raise AssertionError(
+                    f"{phase}: {detail} (parent={parent_status}, child={child_status}, effects={effects}, producer={producer})",
+                ) from error
             finally:
                 continue_resume.set()
                 [decided] = await asyncio.gather(approval_task, return_exceptions=True)

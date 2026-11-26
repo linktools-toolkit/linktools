@@ -1056,11 +1056,19 @@ async def _build_local_components(
                     return None
                 # Handoff also cancels the coroutine, but only a committed
                 # Stop authorizes durable child cancellation.
-                return await dispatcher.cancel_native_children(executions, turn.key, principal, principal)
+                children = await dispatcher.cancel_native_children(executions, turn.key, principal, principal)
+                # The child drain verifies native lineage and durable terminal
+                # status. Match it to the original claimed parent receipt.
+                turn.native_stopped_delegates.update(
+                    (proof.decision.operation_id, proof.decision.owner, proof.decision.fence, proof.invocation_id)
+                    for proof in parent.child_approvals.values()
+                    if proof.invocation_id in children
+                )
+                return children
 
             async with backend.canonical_subagent_parent(
                 turn.key, turn.generation, principal, stop_children=stop_children,
-            ):
+            ) as parent:
                 yield lambda capability: dispatcher.claimed_native_leaf(
                     turns=turns, key=turn.key, generation=turn.generation, tools=tools, principal=principal,
                     binding=binding.binding_contract, capability=capability, mode=turn.mode,

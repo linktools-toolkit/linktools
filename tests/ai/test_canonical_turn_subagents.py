@@ -309,6 +309,9 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
         if wrapped_cancel:
             [original] = await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=runtime.tenant_id)
             assert original.tool_call_id == _DELEGATE_CALL and original.status.value == "EFFECT_UNKNOWN"
+            # It is an intrinsic native delegate, not an externally registered
+            # capability. Stop relies on the original claimed child proof.
+            assert original.capability_ref is None
 
         assert await state.execution.executions.get(turn_id, tenant_id=runtime.tenant_id) is None
         assert state.conversation.sessions is None

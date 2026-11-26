@@ -58,6 +58,8 @@ Checkpoint tool receipts in one SQL storage group (for example, use one
 `PersistenceStorage.sqlite(path)` or one `PersistenceStorage.sql(engine)`).
 Enable this only for session turns with
 `features.capability(SessionCapability(checkpoints=True), scope="runtime")`.
+The host still supplies its explicit session authorization policy; this flag
+does not grant access to sessions.
 This selects the Runtime-owned Step adapter for ordinary sessions. An explicit
 `StepPersistenceCapability` remains available to independent Execution and Task;
 its optional custom store and hook settings are not used by these session turns.

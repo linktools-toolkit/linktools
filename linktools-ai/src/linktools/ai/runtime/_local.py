@@ -1323,7 +1323,7 @@ class LocalExecutionBackend:
     async def canonical_subagent_parent(
         self, key: "SessionTurnKey", generation: int, principal: Principal,
         *, stop_children: Callable[[], Awaitable[frozenset[str] | None]],
-    ) -> AsyncIterator[None]:
+    ) -> AsyncIterator[_OwnedNativeParent]:
         """Stop durable children before abandoning their local owners on explicit cancellation."""
         identity = key.turn_id
         if principal.tenant_id != self._tenant_id:
@@ -1334,7 +1334,7 @@ class LocalExecutionBackend:
         self._native_parents[identity] = parent
         waiting_for_stop = False
         try:
-            yield
+            yield parent
         except (_NativeDelegateInterruption, asyncio.CancelledError) as error:
             self.begin_native_child_stop(key, generation)
             assert parent.child_stop is not None
