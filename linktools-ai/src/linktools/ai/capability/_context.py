@@ -18,6 +18,7 @@ from ..core import (
 )
 if TYPE_CHECKING:
     from ..execution import ExecutionInputContext
+    from ..spec import CapabilityRef
     from ._tool_identity import ToolCallIdentity
     from ._persistence import TraceCapability
 
@@ -31,7 +32,9 @@ class AgentContext(Generic[AppT]):
     ``input_context`` and ``original_input`` come from the execution's existing
     context and user-input owners. They do not track live session updates and
     are not authorization grants. ``None`` means no captured view was supplied,
-    as with a caller-created context outside Runtime.
+    as with a caller-created context outside Runtime. The selected_capabilities
+    field identifies the Agent capabilities in the verified admitted binding,
+    not the current catalog. Membership is informational, not an authorization grant.
     """
 
     app: AppT
@@ -51,6 +54,7 @@ class AgentContext(Generic[AppT]):
     trace: "TraceCapability[AppT] | None" = field(default=None, repr=False, compare=False)
     input_context: "ExecutionInputContext | None" = field(default=None, repr=False)
     original_input: Mapping[str, JsonValue] | None = field(default=None, repr=False)
+    selected_capabilities: "tuple[CapabilityRef, ...]" = ()
 
     def __post_init__(self) -> None:
         if self.deadline_at is not None and (
@@ -87,6 +91,7 @@ class AgentContext(Generic[AppT]):
             "correlation",
             normalize_correlation(self.correlation),
         )
+        object.__setattr__(self, "selected_capabilities", tuple(self.selected_capabilities))
         if self.original_input is not None and not isinstance(self.original_input, ImmutableJsonMapping):
             object.__setattr__(
                 self,

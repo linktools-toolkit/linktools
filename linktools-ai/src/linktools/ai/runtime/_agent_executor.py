@@ -418,7 +418,10 @@ class AgentExecutor:
         if policy.memory_scope is not None and (not canonical_step or self._canonical_memory_store is None):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical memory requires a coowned Step store")
         unsupported = [name for name, selected in (
-            ("agent_capabilities", compiled.selected_capabilities),
+            ("agent_capabilities", any(
+                not canonical_step or split_step or type(item.value) is not ReferencedInputsCapability
+                for item in compiled.selected_capabilities
+            )),
             ("skills", compiled.skill_definitions and (not canonical_step or split_step)),
             ("mcp", compiled.mcp_servers and (not canonical_step or split_step)),
             ("subagents", compiled.selected_subagents and (
@@ -568,6 +571,9 @@ class AgentExecutor:
 
     async def execute(self, scope: _AgentRunScope) -> AgentExecutionOutcome:
         binding = scope.binding
+        selected = binding.binding_contract.selected
+        if scope.context.selected_capabilities != selected:
+            scope = replace(scope, context=replace(scope.context, selected_capabilities=selected))
         compiled_agent = binding.compiled_agent
         run_usage = RunUsage()
         configured_limits = compiled_agent.spec.usage_limits
