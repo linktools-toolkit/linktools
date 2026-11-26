@@ -8,7 +8,7 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse
+from pydantic_ai.messages import ModelResponse, UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -90,7 +90,10 @@ async def test_native_next_turn_uses_canonical_continuation_across_runtimes(tmp_
     model_histories = []
 
     async def model(messages, _info):
-        model_histories.append([message.text for message in messages if isinstance(message, ModelResponse)])
+        model_histories.append((
+            [part.content for message in messages for part in message.parts if isinstance(part, UserPromptPart)],
+            [message.text for message in messages if isinstance(message, ModelResponse)],
+        ))
         if len(model_histories) == 1:
             entered.set()
             await release.wait()
@@ -138,7 +141,10 @@ async def test_native_next_turn_uses_canonical_continuation_across_runtimes(tmp_
             assert [(item["turn_id"], item["status"]) for item in turns] == [
                 (first.key.turn_id, expected.value), (second.key.turn_id, "SUCCEEDED"),
             ]
-            assert model_histories == [[], [] if cancel else ["first output"]]
+            previous_response = (
+                "[Runtime: This turn was interrupted before a final answer.]" if cancel else "first output"
+            )
+            assert model_histories == [(["first"], []), (["first", "second"], [previous_response])]
         finally:
             release.set()
 
