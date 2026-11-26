@@ -9,13 +9,13 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..core import Principal, RUNTIME_OBJECT_STORE_ID, canonical_json_bytes, validate_resource_id
+from ..core import Principal, RUNTIME_OBJECT_STORE_ID, SESSION_REQUEST_KEY_MAX_BYTES, canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ._ordinary_lineage import decode_session_lineage, fork_segments
 from ._session_turn_sql import (
     SESSION_TABLE, SESSION_TURN_TABLE, CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey,
 )
-from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
+from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
 from ..steps import NATIVE_STORE_KEY_MAX_BYTES, encode_native_replay_key
 from ._message_root import NativeMessageRoot
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 _AUDIT = ("created_at", "updated_at")
 _SESSION_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "active_turn_id": TURN_EXECUTION_MAX_BYTES}
 _TURN_BINARY = {"session_key": TURN_SESSION_MAX_BYTES, "turn_id": TURN_EXECUTION_MAX_BYTES,
-                "request_key": TURN_REQUEST_MAX_BYTES}
+                "request_key": SESSION_REQUEST_KEY_MAX_BYTES}
 _SESSION_FIELDS = (*_SESSION_BINARY, "status", "revision", "last_turn_no", "config_json", "lineage_json", *_AUDIT)
 _TURN_FIELDS = (*_TURN_BINARY, "binding_key", "turn_no", "context_from", "context_through", "state", "generation",
                 "request_json", "result_json", *_AUDIT)

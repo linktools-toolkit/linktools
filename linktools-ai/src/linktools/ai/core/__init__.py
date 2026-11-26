@@ -52,6 +52,8 @@ from ._redaction import (
 from ._usage import UsageMetrics
 from ._validation import (
     RESOURCE_ID_MAX_BYTES,
+    SESSION_ID_MAX_BYTES,
+    SESSION_REQUEST_KEY_MAX_BYTES,
     validate_agent_id,
     validate_asset_kind,
     validate_asset_namespace,
@@ -71,6 +73,8 @@ from ._validation import (
     validate_principal_id,
     validate_principal_kind,
     validate_resource_id,
+    validate_session_id,
+    validate_session_request_key,
     validate_shell_timeout,
     validate_tenant_id,
     validate_tool_arguments,
@@ -116,6 +120,8 @@ from ._token_seed import token_seed
 
 __all__ = [
     "RESOURCE_ID_MAX_BYTES",
+    "SESSION_ID_MAX_BYTES",
+    "SESSION_REQUEST_KEY_MAX_BYTES",
     "token_seed",
     "ExecutionContext",
     "PersistenceDomain",
@@ -213,6 +219,8 @@ __all__ = [
     "validate_principal_id",
     "validate_principal_kind",
     "validate_resource_id",
+    "validate_session_id",
+    "validate_session_request_key",
     "validate_shell_timeout",
     "validate_tenant_id",
     "validate_tool_arguments",

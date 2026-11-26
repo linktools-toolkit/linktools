@@ -10,6 +10,7 @@ from pydantic_ai.usage import RequestUsage
 
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import AuthorizationAction, ExecutionStatus, TenantAuthorizationPolicy, UsageMetrics
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.session import CreateSessionRequest
@@ -41,6 +42,14 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         Runtime.open(persistence=state, features=features, authorization=Authorization()) as runtime,
     ):
         principal = runtime.default_principal
+        exactly_64 = "案" * 21 + "a"
+        assert CreateSessionRequest(principal, exactly_64, "create").session_id == exactly_64
+        with pytest.raises(AIError) as too_long:
+            CreateSessionRequest(principal, exactly_64 + "x", "create")
+        assert too_long.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        with pytest.raises(AIError) as idempotency:
+            await runtime.sessions.create_turn_session("missing", principal=principal, idempotency_key=exactly_64 + "x")
+        assert idempotency.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
         created = await runtime.sessions.create(CreateSessionRequest(principal, "chat", "create-chat"))
         opened = await runtime.sessions.get(created.session_id, principal=principal)
         snapshot = await opened.inspect()

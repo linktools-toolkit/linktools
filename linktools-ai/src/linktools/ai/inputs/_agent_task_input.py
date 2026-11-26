@@ -14,6 +14,7 @@ from ..core import (
     canonical_sha256,
     normalize_json_value,
     normalize_thinking,
+    validate_session_id,
 )
 from ..errors import AIError, ErrorCode
 from ..task import TaskDependencyState, TaskNodeInvocation, TaskResultRef
@@ -71,10 +72,11 @@ class AgentTaskInput(Mapping[str, JsonValue]):
             not isinstance(parameter_values, dict)
             or any(not isinstance(key, str) or not key for key in parameter_values)
             or any(not isinstance(path, str) or not path for path in normalized_files)
-            or (session_id is not None and (not isinstance(session_id, str) or not session_id))
             or (planning is not None and not isinstance(planning, bool))
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if session_id is not None:
+            validate_session_id(session_id)
         values: dict[str, JsonValue] = {
             "kind": "agent-task-input",
             "version": 1,

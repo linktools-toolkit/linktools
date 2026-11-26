@@ -10,6 +10,8 @@ from ._json import JsonValue, canonical_json_bytes, normalize_json_value
 
 
 RESOURCE_ID_MAX_BYTES = 128
+SESSION_ID_MAX_BYTES = 64
+SESSION_REQUEST_KEY_MAX_BYTES = 64
 
 
 def validate_tenant_id(value: str) -> str:
@@ -88,6 +90,16 @@ def validate_principal_id(value: str) -> str:
 def validate_resource_id(value: str) -> str:
     """Validate an exact resource identity of at most 128 UTF-8 bytes."""
     return _text(value, RESOURCE_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_session_id(value: str) -> str:
+    """Validate a session identifier within the SQL address budget."""
+    return _text(value, SESSION_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_session_request_key(value: str) -> str:
+    """Validate a caller-supplied key scoped to one native session."""
+    return _text(value, SESSION_REQUEST_KEY_MAX_BYTES, ErrorCode.IDEMPOTENCY_KEY_INVALID)
 
 
 def validate_idempotency_key(value: str) -> str:
@@ -188,6 +200,8 @@ def _text(value: str, maximum: int, code: ErrorCode) -> str:
 
 __all__ = [
     "RESOURCE_ID_MAX_BYTES",
+    "SESSION_ID_MAX_BYTES",
+    "SESSION_REQUEST_KEY_MAX_BYTES",
     "validate_agent_id",
     "validate_logical_id",
     "validate_asset_kind",
@@ -208,6 +222,8 @@ __all__ = [
     "validate_principal_id",
     "validate_principal_kind",
     "validate_resource_id",
+    "validate_session_id",
+    "validate_session_request_key",
     "validate_shell_timeout",
     "validate_tenant_id",
     "validate_tool_arguments",

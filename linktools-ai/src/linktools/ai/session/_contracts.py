@@ -30,6 +30,7 @@ from ..core import (
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
+    validate_session_id,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
@@ -251,6 +252,7 @@ class CreateSessionRequest:
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        validate_session_id(self.session_id)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -304,6 +306,7 @@ class ForkSessionRequest:
     cwd: "str | None" = None
 
     def __post_init__(self) -> None:
+        validate_session_id(self.new_session_id)
         validate_idempotency_key(self.idempotency_key)
 
 

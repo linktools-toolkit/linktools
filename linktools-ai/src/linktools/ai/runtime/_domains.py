@@ -10,7 +10,7 @@ from ..session import SessionTurnNotice, SessionAdmission, PublishedSessionTurn,
 from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, normalize_thinking, overlay_correlation,
-    validate_agent_id, validate_idempotency_key, validate_resource_id,
+    validate_agent_id, validate_resource_id, validate_session_id, validate_session_request_key,
 )
 from ..errors import AIError, ErrorCode
 from ..persistence.turns import SessionTurnKey
@@ -319,7 +319,7 @@ class RuntimeSessions(Generic[AppT]):
         from ._native_session import _NativeSession
 
         _, runtime = self._require_turn_sessions()
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         read = self._native_turn_read
         if read is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -335,9 +335,9 @@ class RuntimeSessions(Generic[AppT]):
         cwd: str | None = None,
     ) -> dict[str, JsonValue]:
         runner, runtime = self._require_turn_sessions()
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         if idempotency_key is not None:
-            validate_idempotency_key(idempotency_key)
+            validate_session_request_key(idempotency_key)
         await self._service.require_available()
         return await runner.create_session(
             session_id, principal=principal, tenant_id=runtime.tenant_id,
@@ -351,9 +351,9 @@ class RuntimeSessions(Generic[AppT]):
     ) -> bool:
         """Create a session referencing the source's authorized committed prefix."""
         runner, runtime = self._require_turn_sessions()
-        validate_resource_id(source_id)
-        validate_resource_id(target_id)
-        validate_idempotency_key(idempotency_key)
+        validate_session_id(source_id)
+        validate_session_id(target_id)
+        validate_session_request_key(idempotency_key)
         if source_id == target_id or type(expected_revision) is not int or expected_revision < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         await self._service.require_available()
@@ -385,7 +385,7 @@ class RuntimeSessions(Generic[AppT]):
         cwd: str | None = None, replace_cwd: bool = False,
     ) -> bool:
         runner, runtime = self._require_turn_sessions()
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         if type(expected_revision) is not int or expected_revision < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if principal.tenant_id != runtime.tenant_id:
@@ -459,9 +459,9 @@ class RuntimeSessions(Generic[AppT]):
         resolver = runtime._binding_resolver
         if resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         validate_agent_id(agent_id)
-        validate_idempotency_key(idempotency_key)
+        validate_session_request_key(idempotency_key)
         if isinstance(prompt, str) and not prompt.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A nonempty prompt is required")
         prompt = validate_user_input(prompt)
@@ -479,7 +479,7 @@ class RuntimeSessions(Generic[AppT]):
     async def budget_usage(self, session_id: str, turn_id: str, *, principal: Principal) -> BudgetUsage | None:
         """Read the admitted budget and current accounting for one native turn."""
         runner, runtime = self._require_turn_sessions()
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         validate_resource_id(turn_id)
         return await runner.read_budget_usage(
             SessionTurnKey(session_id, turn_id), principal=principal,
@@ -488,7 +488,7 @@ class RuntimeSessions(Generic[AppT]):
 
     async def cancel_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
         runner, runtime = self._require_turn_sessions()
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         validate_resource_id(turn_id)
         return await runner.cancel_session_turn(
             SessionTurnKey(session_id, turn_id), principal=principal,
@@ -500,7 +500,7 @@ class RuntimeSessions(Generic[AppT]):
         resolver = runtime._binding_resolver
         if resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         validate_resource_id(turn_id)
         return await runner.recover_session_turn(
             SessionTurnKey(session_id, turn_id), principal=principal, namespace=runtime.namespace,
@@ -513,7 +513,7 @@ class RuntimeSessions(Generic[AppT]):
     ) -> Callable[[], None]:
         """Register a trusted host callback. Authorize before forwarding any frame."""
         runner, _ = self._require_turn_sessions()
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         return runner.observe(session_id, callback)
 
     def observe_turn_lifecycle(
@@ -528,7 +528,7 @@ class RuntimeSessions(Generic[AppT]):
     ) -> None:
         """Notify any local observers to re-read the authoritative session."""
         runner, _ = self._require_turn_sessions()
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         validate_resource_id(turn_id)
         if type(revision) is not int or revision < 1 or phase not in ("admitted", "terminal", "cancelling", "waiting"):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -563,7 +563,7 @@ class RuntimeSessions(Generic[AppT]):
     async def _has_native_session(self, session_id: str) -> bool:
         if not self.supports_turn_sessions:
             return False
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         runner, _ = self._require_turn_sessions()
         return await runner._store.get_session(session_id) is not None
 

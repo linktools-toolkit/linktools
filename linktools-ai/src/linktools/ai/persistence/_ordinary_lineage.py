@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..core import validate_idempotency_key, validate_resource_id
+from ..core import validate_idempotency_key, validate_session_id
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
@@ -37,14 +37,14 @@ def decode_session_lineage(raw: object) -> tuple[SessionTurnSegment, ...]:
     if not isinstance(segments, list) or len(segments) > _MAX_SEGMENTS:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        validate_resource_id(raw["source"])
+        validate_session_id(raw["source"])
         validate_idempotency_key(raw["request_id"])
         result: list[SessionTurnSegment] = []
         positions = 0
         owners: set[str] = set()
         for value in segments:
             session_id, after, through = value
-            validate_resource_id(session_id)
+            validate_session_id(session_id)
             if (session_id in owners or type(after) is not int or type(through) is not int
                     or positions != after or not after < through < 2**63):
                 raise ValueError("invalid ordinary session lineage")

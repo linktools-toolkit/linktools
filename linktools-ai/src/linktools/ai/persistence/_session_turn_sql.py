@@ -14,7 +14,10 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 from weakref import finalize
 
 from ..agent import AgentBindingContract
-from ..core import ImmutableJsonMapping, canonical_json_bytes, canonical_sha256, deterministic_id, validate_idempotency_key
+from ..core import (
+    SESSION_REQUEST_KEY_MAX_BYTES, ImmutableJsonMapping, canonical_json_bytes, canonical_sha256,
+    deterministic_id, validate_session_request_key,
+)
 from ..errors import AIError, ErrorCode
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart, UserPromptPart
 
@@ -34,7 +37,6 @@ from .codec import decode_agent_binding_content, encode_agent_binding_content, r
 from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage, fork_segments, lineage_predicate
 from ._turn_sql_schema import (
     TURN_EXECUTION_MAX_BYTES,
-    TURN_REQUEST_MAX_BYTES,
     TURN_SESSION_MAX_BYTES,
 )
 from ._message_root import NativeMessageRoot
@@ -129,7 +131,7 @@ def build_session_turn_sql_metadata(metadata: MetaData) -> None:
         key("scope_key", 32, "Partition of one tenant in the configured session store."),
         key("session_key", TURN_SESSION_MAX_BYTES, "Session owning the turn."),
         key("turn_id", TURN_EXECUTION_MAX_BYTES, "Exact public turn identity."),
-        key("request_key", TURN_REQUEST_MAX_BYTES, "Idempotency key scoped to the session."),
+        key("request_key", SESSION_REQUEST_KEY_MAX_BYTES, "Idempotency key scoped to the session."),
         Column("turn_no", BigInteger, nullable=False, comment="Sequential turn position within the session."),
         Column("context_from", BigInteger, nullable=False, comment="First selected context position, inclusive."),
         Column("context_through", BigInteger, nullable=False, comment="Finalized context boundary at admission."),
@@ -603,7 +605,7 @@ class SqlSessionTurnReader:
         row = await self._read_bound_turn(statement.where(
             columns.scope_key == self._scope,
             columns.session_key == self._key(session_id, TURN_SESSION_MAX_BYTES),
-            columns.request_key == self._key(request_key, TURN_REQUEST_MAX_BYTES),
+            columns.request_key == self._key(request_key, SESSION_REQUEST_KEY_MAX_BYTES),
         ))
         if row is None:
             return None
@@ -864,7 +866,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         self, source_id: str, target_id: str, *, expected_revision: int, config: JsonValue, request_id: str,
     ) -> bool:
         """Freeze the source head with a CAS and insert one child session; never copy turns."""
-        validate_idempotency_key(request_id)
+        validate_session_request_key(request_id)
         if source_id == target_id:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source = self._session_values(source_id)
@@ -957,7 +959,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
             raise ValueError("invalid admitted session context range")
         session_key = self._session_values(key.session_id)
         turn_key = self._turn_values(key)
-        encoded_request_key = self._key(request_key, TURN_REQUEST_MAX_BYTES)
+        encoded_request_key = self._key(request_key, SESSION_REQUEST_KEY_MAX_BYTES)
         content = ArchiveContentInput(
             "execution-binding", encode_agent_binding_content(AgentBindingContract.from_payload(binding)),
         )

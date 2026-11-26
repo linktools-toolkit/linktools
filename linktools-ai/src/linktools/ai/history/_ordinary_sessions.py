@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelResponse
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, CursorSigner, ExecutionStatus, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
     ResourceRef, TenantAuthorizationPolicy, UsageMetrics, canonical_sha256, decode_cursor, encode_cursor,
-    principal_identity_payload, validate_page_limit, validate_resource_id,
+    principal_identity_payload, validate_page_limit, validate_session_id,
 )
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
@@ -178,7 +178,7 @@ class _OrdinarySessionHistory:
 
     async def _session(self, session_id: str, principal: Principal, *, local_workspace: bool) -> RowMapping:
         self._require_access(principal, local_workspace=local_workspace)
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         await self._authorize_session(session_id, principal)
         row = await self._store.get_session(session_id)
         if row is None:
@@ -189,7 +189,7 @@ class _OrdinarySessionHistory:
         self, session_id: str, *, principal: Principal,
     ) -> dict[str, JsonValue] | None:
         """Route the SDK to a native owner without applying its policy to a legacy ID."""
-        validate_resource_id(session_id)
+        validate_session_id(session_id)
         row = await self._store.get_session(session_id)
         if row is None:
             return None
@@ -234,7 +234,7 @@ class _OrdinarySessionHistory:
         else:
             if isinstance(session_ids, (str, bytes)) or len(session_ids) > 1000:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            selected = tuple(sorted({validate_resource_id(session_id) for session_id in session_ids}))
+            selected = tuple(sorted({validate_session_id(session_id) for session_id in session_ids}))
         kind = "ORDINARY_SESSIONS"
         digest = canonical_sha256({
             "principal": principal_identity_payload(principal), "local_workspace": local_workspace,

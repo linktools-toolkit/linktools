@@ -636,7 +636,8 @@ def test_strict_turn_sql_uses_only_exact_native_owner_routes() -> None:
     source = SqlTurnRows(metadata, store, scope, coowned=True)
     control = metadata.tables["ai_execution_records"]
     owner = metadata.tables["ai_state_records"]
-    assert owner.c.strict_turn_execution_id.type.length == control.c.turn_occupied_route.type.length == 128
+    assert owner.c.strict_turn_execution_id.type.length == 128
+    assert control.c.turn_slot_key.type.length == control.c.turn_occupied_route.type.length == 64
     assert owner.c.strict_turn_fence.nullable and control.c.turn_session_owner_id.nullable
     assert control.c.turn_request_route.type.length == 64
     assert not control.c.turn_occupied_route.nullable and not control.c.turn_request_route.nullable

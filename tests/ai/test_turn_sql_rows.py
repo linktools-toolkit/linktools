@@ -240,9 +240,9 @@ async def test_live_replay_and_busy_do_not_write_or_consume_the_new_request(tmp_
 def test_compact_addresses_preserve_raw_width_and_separate_slot_families() -> None:
     from linktools.ai.persistence._turn_sql import turn_session_address, turn_session_identity
 
-    maximum = "案" * 42 + ":x"
+    maximum = "案" * 21 + "x"
     raw = maximum.encode("utf-8")
-    assert len(raw) == 128
+    assert len(raw) == 64
     assert turn_session_address("session:" + maximum) == (1, raw)
     assert turn_session_identity(1, raw) == "session:" + maximum
     with pytest.raises(ValueError):

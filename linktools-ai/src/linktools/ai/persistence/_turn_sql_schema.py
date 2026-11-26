@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 """Logical addresses for persisted source turn coordination."""
 
+from ..core import SESSION_ID_MAX_BYTES
+
+
 RUNTIME_TURN_SCOPE = "runtime-pending-turn"
-TURN_SESSION_MAX_BYTES = 128
+TURN_SESSION_MAX_BYTES = SESSION_ID_MAX_BYTES
 TURN_REQUEST_MAX_BYTES = 64
 TURN_EXECUTION_MAX_BYTES = 128
 
