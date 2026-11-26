@@ -24,6 +24,7 @@ from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
+from ..model.messages import binary_content_usage, encode_model_messages
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.contracts import ToolOperationRecord
@@ -148,6 +149,7 @@ class _AdmittedTurn:
     plan_store: PlanningStore | None = None
     budget: RunBudgetContext | None = None
     trace_enabled: bool = False
+    capture_compacted_context: bool = False
     split_source: _CanonicalSplitStep | None = None
     preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = ()
     native_stopped_delegates: set[tuple[str, str, int, str]] = field(default_factory=set)
@@ -401,6 +403,7 @@ class _RegenerableTurnRunner:
         self, turn: _AdmittedTurn | _AttachedGraphTurn, state: str, *, output: JsonValue = None,
         messages: tuple[ModelMessage, ...] = (), error_code: str | None = None,
         output_ref: Sequence[int] | None = None,
+        compacted_context: tuple[ModelMessage, ...] = (),
     ) -> None:
         succeeded = state == "succeeded"
         activity = {}
@@ -414,7 +417,7 @@ class _RegenerableTurnRunner:
                 and decode_domain(turn.stored_input, StoredUserInput).codec == "text" else turn.prompt
             ),
             stored_input=turn.stored_input, messages=messages, succeeded=succeeded,
-            reset_context=turn.session_context == "current_turn",
+            reset_context=turn.session_context == "current_turn", compacted_context=compacted_context,
         )
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
@@ -1028,7 +1031,7 @@ class _RegenerableTurnRunner:
             history = await self._read_admitted_history(
                 key, context_from=row["context_from"], context_through=row["context_through"],
                 lineage=lineage, session_context=session_context,
-                prompt=prompt, stored=stored,
+                prompt=prompt, stored=stored, compacted_context_turn=request.get("compacted_context_turn"),
             )
             frozen_binding = row["binding_json"]
             if frozen_binding is None:
@@ -1258,6 +1261,7 @@ class _RegenerableTurnRunner:
                     None if instruction_frontier is None else instruction_frontier.overlay,
                 ),
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
+                capture_compacted_context=not completed_checkpoint and split is None and not lineage,
                 mode=mode, planning=planning, plan_store=plan_store, budget=budget,
                 split_source=split,
                 preload_skill_inputs=tuple(request.get("preload_skills", ())),
@@ -1556,7 +1560,7 @@ class _RegenerableTurnRunner:
     async def _read_admitted_history(
         self, key: SessionTurnKey, *, context_from: int, context_through: int,
         lineage: tuple[SessionTurnSegment, ...], session_context: SessionContext,
-        prompt: str, stored: StoredUserInput | None,
+        prompt: str, stored: StoredUserInput | None, compacted_context_turn: str | None = None,
     ) -> tuple[ModelMessage, ...]:
         input_bytes, media_bytes = self._input_usage(prompt, stored)
         remaining = _CONTEXT_BYTES - input_bytes
@@ -1568,10 +1572,27 @@ class _RegenerableTurnRunner:
         if remaining < 0 or remaining_media < 0:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         history: list[ModelMessage] = []
+        if compacted_context_turn is not None and (
+            not isinstance(compacted_context_turn, str) or not compacted_context_turn
+            or lineage or session_context == "current_turn"
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         positions = await self._store.read_context_range(
             key.session_id, through=context_through, after=after, lineage=lineage,
-            missing=ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            missing=ErrorCode.STORAGE_RECOVERY_REQUIRED, compacted_context=compacted_context_turn or False,
         )
+        if compacted_context_turn is not None:
+            if (not positions or positions[0].turn_id != compacted_context_turn
+                    or not positions[0].compacted_context):
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted compaction context is missing")
+            projected = positions[0].compacted_context
+            if binary_content_usage(projected)[0]:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted compaction context contains media")
+            remaining -= len(encode_model_messages(projected))
+            if remaining < 0:
+                raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+            history.extend(projected)
+            positions = positions[1:]
         for position in positions:
             prior = position.request
             prior_input = self._stored_input(prior)
@@ -1658,7 +1679,7 @@ class _RegenerableTurnRunner:
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
         input_bytes, media_bytes = self._input_usage(text, captured if stored_input is not None else None)
-        context_from, history, _, _ = await self._admission_history(
+        context_from, history, _, _, _ = await self._admission_history(
             key, through=through, lineage=lineage, session_context=execution.session_context,
             remaining=_CONTEXT_BYTES - input_bytes,
             remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
@@ -1831,13 +1852,17 @@ class _RegenerableTurnRunner:
 
         checkpoint = (None if native_step is None or split is not None
                       else native_step[0].store.canonical_context_checkpoint())
-        context_from, history, interrupted, baseline = await self._admission_history(
+        compact = split is None and not lineage
+        context_from, history, interrupted, baseline, projection = await self._admission_history(
             key, through=through, lineage=lineage, session_context=session_context,
             remaining=_CONTEXT_BYTES - input_size, checkpoint=checkpoint,
-            remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
+            remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes, allow_compaction=compact,
         )
         if interrupted:
             request["previous_turn_interrupted"] = True
+        if projection is not None:
+            request["compacted_context_turn"] = projection
+        if interrupted or projection is not None:
             terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding}))
             if terminal_bytes < _TERMINAL_RESERVE:
                 raise AIError(ErrorCode.PROMPT_TOO_LARGE)
@@ -1857,7 +1882,7 @@ class _RegenerableTurnRunner:
             key, through + 1, text,
             history, terminal_bytes, revision + 1,
             repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
-            stored_input=request.get("input"), instruction_scopes=scopes,
+            stored_input=request.get("input"), instruction_scopes=scopes, capture_compacted_context=compact,
             native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
             budget=run_budget, split_source=split, preload_skill_inputs=preload_skill_inputs,
             native_subagents=native_subagents, previous_turn_interrupted=interrupted,
@@ -1866,14 +1891,24 @@ class _RegenerableTurnRunner:
     async def _admission_history(
         self, key: SessionTurnKey, *, through: int, lineage: tuple[SessionTurnSegment, ...],
         session_context: SessionContext, remaining: int, remaining_media: int, checkpoint: SqlStepStore | None = None,
-    ) -> tuple[int, list[ModelMessage], bool, tuple[str, Callable[[str, Sequence[ModelMessage]], bool] | None] | None]:
+        allow_compaction: bool = False,
+    ) -> tuple[
+        int, list[ModelMessage], bool, tuple[str, Callable[[str, Sequence[ModelMessage]], bool] | None] | None, str | None,
+    ]:
         history: list[tuple[ModelMessage, ...]] = []
         baseline = None
+        projection = None
         context_from = through + 1
         candidates = (() if session_context == "current_turn"
                       else await self._store.recent_context(key.session_id, through=through, lineage=lineage, checkpoint=checkpoint))
         interrupted = bool(candidates and candidates[-1].turn_no == through and candidates[-1].interrupted)
         for candidate in reversed(candidates):
+            if allow_compaction and candidate.compacted_context:
+                projected = candidate.compacted_context
+                if not binary_content_usage(projected)[0] and len(encode_model_messages(projected)) <= remaining:
+                    history.append(projected)
+                    context_from, projection, baseline = candidate.turn_no, candidate.turn_id, None
+                    break
             if not isinstance(candidate.request, dict) or not isinstance(candidate.request.get("prompt"), str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Missing admitted session input")
             candidate_prompt = candidate.request["prompt"]
@@ -1889,7 +1924,7 @@ class _RegenerableTurnRunner:
             remaining -= size
             remaining_media -= media_bytes
             context_from = candidate.turn_no
-        return context_from, [message for messages in reversed(history) for message in messages], interrupted, baseline
+        return context_from, [message for messages in reversed(history) for message in messages], interrupted, baseline, projection
 
     @staticmethod
     def _context_messages(
@@ -1985,10 +2020,12 @@ class _RegenerableTurnRunner:
     async def _finish_retained_turn(
         self, turn: _AdmittedTurn, *, state, result=None, transcript=None,
         binding_refs=(), output_ref=None, usage: UsageMetrics | None = None,
+        compacted_context: tuple[ModelMessage, ...] | None = None,
     ) -> bool:
         split = turn.split_source
         if split is None:
-            options = ({"transcript": transcript, "binding_refs": binding_refs, "output_ref": output_ref, "usage": usage}
+            options = ({"transcript": transcript, "binding_refs": binding_refs, "output_ref": output_ref,
+                        "usage": usage, "compacted_context": compacted_context}
                        if state == "succeeded" else {"result": result})
             return await self._store.finish(
                 turn.key, generation=turn.generation, turn_no=turn.number, state=state, **options,
@@ -2003,7 +2040,7 @@ class _RegenerableTurnRunner:
         limits: PromptLimits, event_sink: EventSink, thinking: ThinkingValue,
     ) -> bool:
         """Execute after durable admission and publish only if this producer still owns the turn."""
-        from ..model.messages import canonical_structured_output_reference, encode_model_messages
+        from ..model.messages import canonical_structured_output_reference
 
         captured: _CapturedTurnInteractions | None = None
         capture_trace = None
@@ -2027,6 +2064,7 @@ class _RegenerableTurnRunner:
         structured = binding.output_binding.mode == "structured"
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
         usage = None
+        compacted_context = None
         try:
             if turn.completed_checkpoint:
                 if turn.continuation is None:
@@ -2078,6 +2116,7 @@ class _RegenerableTurnRunner:
                         previous_turn_interrupted=turn.previous_turn_interrupted,
                         native_subagent_leaf=native_subagent_leaf,
                         settled_native_subagents=turn.settled_native_subagents, capture_trace=capture_trace,
+                        capture_compacted_context=turn.capture_compacted_context,
                     )
                 if isinstance(outcome, DeferredToolRequests):
                     if turn.native_step is None or self._publish_deferred is None:
@@ -2104,6 +2143,10 @@ class _RegenerableTurnRunner:
                         self._notice_lifecycle(turn.key, "waiting", turn.revision)
                     return committed
                 messages, output = outcome.messages, outcome.output
+                candidate = outcome.compacted_context
+                if (candidate is not None and not binary_content_usage(candidate)[0]
+                        and len(encode_model_messages(candidate)) <= _CONTEXT_BYTES):
+                    compacted_context = candidate
                 # Resumed checkpoints do not retain accounting for prior attempts.
                 if turn.split_source is None and turn.generation == 1 and turn.continuation is None:
                     usage = outcome.usage
@@ -2156,10 +2199,12 @@ class _RegenerableTurnRunner:
         committed = await self._finish_retained_turn(
             turn, state="succeeded",
             transcript=transcript, binding_refs=binding_refs, output_ref=output_ref, usage=usage,
+            compacted_context=compacted_context,
         )
         if committed:
             offer_trace("succeeded")
             self._terminal(
                 turn, "succeeded", output=output, messages=context_messages, output_ref=output_ref,
+                compacted_context=compacted_context or (),
             )
         return committed

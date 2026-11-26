@@ -20,7 +20,10 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart, UserPromptPart
 
-from ..model.messages import decode_model_messages, encode_model_messages, project_transient_binary_content
+from ..model.messages import (
+    binary_content_usage, decode_model_messages, encode_model_messages, project_transient_binary_content,
+    session_compaction_summaries,
+)
 from ..spec import RepositoryInstructions
 from ..workspace import validate_workspace_path
 from ..storage import (
@@ -44,6 +47,7 @@ from ._turn_sql_schema import (
 from ._message_root import NativeMessageRoot
 from ._session_transcript import (
     SESSION_TURN_TABLE,
+    decode_session_compacted_context,
     decode_session_input_reference,
     decode_session_turn_usage,
     decode_session_transcript_root,
@@ -102,6 +106,7 @@ class SessionContextTurn:
     reset_context: bool = False
     interrupted: bool = False
     seed_checkpoint_prefix: Callable[[str, Sequence[ModelMessage]], bool] | None = None
+    compacted_context: tuple[ModelMessage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,7 +314,8 @@ class SqlSessionTurnReader:
     def _bind_split_transcript_reader(self, resolve) -> None:
         self._split_transcript_source = resolve
 
-    async def _read_transcripts(self, statement, *, display: bool, body_limit: int | None = None) -> tuple[Mapping[str, object], ...]:
+    async def _read_transcripts(self, statement, *, display: bool, body_limit: int | None = None,
+                                compacted_context: bool | str = False) -> tuple[Mapping[str, object], ...]:
         if self._transcript_source is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         turn_store, archive_provider, capture = self._transcript_source
@@ -348,10 +354,25 @@ class SqlSessionTurnReader:
                 (index, row, manifests[index][0]) for index, row in enumerate(successes)
                 if row["split_source_receipt"] is not None
             ]
+            latest_context = None
+            if compacted_context:
+                for index, row in reversed(tuple(enumerate(selected))):
+                    if row["reset_context"] and row["state"] == "succeeded" and "compacted_context" not in row["result_json"]:
+                        break
+                    if row["state"] != "succeeded" or (isinstance(compacted_context, str)
+                            and row["turn_id"].decode("utf-8") != compacted_context):
+                        continue
+                    context_root = decode_session_compacted_context(row["result_json"])
+                    if context_root is not None:
+                        if row["split_source_receipt"] is not None or row["graph_execution"] is not None:
+                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                        latest_context = index, context_root
+                        break
             load = None
             roots = tuple(dict.fromkeys((
                 *(manifests[index][0] for index in local_positions),
                 *(reference.root for reference in prompts.values()),
+                *(() if latest_context is None else (latest_context[1],)),
             )))
             if roots:
                 if archive_store is None:
@@ -367,10 +388,10 @@ class SqlSessionTurnReader:
             if binding_keys and content_archive is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             bindings = await self._read_binding_payloads(content_archive, binding_keys)
-            return rows, manifests, local_positions, foreign, load, bindings, roots, prompts
+            return rows, manifests, local_positions, foreign, load, bindings, roots, prompts, latest_context
 
         members = (turn_store, archive_store) if archive_store not in (None, turn_store) else (turn_store,)
-        rows, manifests, local_positions, foreign, load, bindings, roots, prompts = await group.read_many(members, read)
+        rows, manifests, local_positions, foreign, load, bindings, roots, prompts, latest_context = await group.read_many(members, read)
         bodies = dict(zip(roots, () if load is None else await load(), strict=True))
         encoded_by_position = {index: bodies[manifests[index][0]] for index in local_positions}
         if foreign:
@@ -457,7 +478,17 @@ class SqlSessionTurnReader:
             if not display and refs:
                 spec = bindings[row["binding_key"]]["agent_spec"]
                 self._restore_binding_refs(messages, refs, spec["instructions"], spec["system_prompt"])
-            projected.append({**row, "messages": tuple(messages)})
+            context = ()
+            if latest_context is not None and latest_context[0] == position:
+                context_root = latest_context[1]
+                context_messages = [decode_model_messages(body) for body in bodies[context_root]]
+                if len(context_messages) != context_root.count or any(len(part) != 1 for part in context_messages):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid Session compaction messages")
+                context = tuple(singleton[0] for singleton in context_messages)
+                if (not session_compaction_summaries(context) or context[-1] != messages[-1]
+                        or binary_content_usage(context)[0]):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Session compaction does not match its turn")
+            projected.append({**row, "messages": tuple(messages), "compacted_context": context})
         try:
             next(loaded, None)
         except ValueError as error:
@@ -765,6 +796,7 @@ class SqlSessionTurnReader:
         turns += await self.read_context_range(
             session_id, after=after, through=through, lineage=lineage,
             checkpoint=checkpoint if cached is None and not lineage else None,
+            compacted_context=not lineage,
         )
         for index in range(len(turns) - 1, -1, -1):
             if turns[index].reset_context:
@@ -779,6 +811,7 @@ class SqlSessionTurnReader:
     async def read_context_range(
         self, session_id: str, *, after: int, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
         missing: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR, checkpoint: SqlStepStore | None = None,
+        compacted_context: bool | str = False,
     ) -> tuple[SessionContextTurn, ...]:
         """Read finalized input and only the confirmed conversation transcripts."""
         from sqlalchemy import case, select, type_coerce
@@ -813,7 +846,7 @@ class SqlSessionTurnReader:
                 )
             else:
                 checkpoint = None
-        rows = await self._read_transcripts(statement, display=False)
+        rows = await self._read_transcripts(statement, display=False, compacted_context=compacted_context)
         if len(rows) != through - after:
             raise AIError(missing, "The finalized session context range is incomplete")
         return tuple(
@@ -823,6 +856,7 @@ class SqlSessionTurnReader:
                 reset_context=row["state"] == "succeeded" and row["reset_context"] is True,
                 interrupted=row["state"] != "succeeded",
                 seed_checkpoint_prefix=None if checkpoint is None else checkpoint._retained_checkpoint_seed(row),
+                compacted_context=row.get("compacted_context", ()),
             )
             for row in rows
         )
@@ -832,11 +866,15 @@ class SqlSessionTurnReader:
         turn_id: str, turn_no: int, prompt: str, stored_input: JsonValue, messages: Sequence[ModelMessage], *,
         reset_context: bool = False, interrupted: bool = False,
         seed_checkpoint_prefix: Callable[[str, Sequence[ModelMessage]], bool] | None = None,
+        compacted_context: tuple[ModelMessage, ...] = (),
     ) -> SessionContextTurn:
         request = {"prompt": prompt, **({"input": stored_input} if stored_input is not None else {})}
         transcript_bytes = len(encode_model_messages(messages))
         size = max(1024, len(canonical_json_bytes(request)) + transcript_bytes)
-        return SessionContextTurn(turn_id, turn_no, request, tuple(messages), size, transcript_bytes, reset_context, interrupted, seed_checkpoint_prefix)
+        if compacted_context:
+            size += len(encode_model_messages(compacted_context))
+        return SessionContextTurn(turn_id, turn_no, request, tuple(messages), size, transcript_bytes, reset_context, interrupted,
+                                  seed_checkpoint_prefix, compacted_context)
 
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],
@@ -962,6 +1000,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
     def note_terminal_context(
         self, key: SessionTurnKey, *, turn_no: int, prompt: str | None, stored_input: JsonValue,
         messages: Sequence[ModelMessage], succeeded: bool, reset_context: bool = False,
+        compacted_context: tuple[ModelMessage, ...] = (),
     ) -> None:
         """Advance coverage only over a known committed adjacent position."""
         cached = self._recent.get(key.session_id)
@@ -980,7 +1019,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
             return
         turns += (self._context_turn(
             key.turn_id, turn_no, prompt, stored_input, messages if succeeded else (),
-            reset_context=succeeded and reset_context, interrupted=not succeeded,
+            reset_context=succeeded and reset_context, interrupted=not succeeded, compacted_context=compacted_context,
         ),)
         self._remember_context(key.session_id, after=after, through=turn_no, turns=turns)
 
@@ -1171,6 +1210,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         binding_refs: tuple[tuple[int, int | None], ...] = (),
         output_ref: tuple[int, int] | None = None,
         usage: UsageMetrics | None = None,
+        compacted_context: Sequence[ModelMessage] | None = None,
         _abandon_expired: bool = False,
         _guard_abandon: tuple[StateStore, Callable[[StateTransaction], Awaitable[None]]] | None = None,
     ) -> bool:
@@ -1188,6 +1228,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         prepared = await self._prepare_finish(
             key, generation=generation, turn_no=turn_no, state=state, result=result,
             transcript=transcript, binding_refs=binding_refs, output_ref=output_ref, usage=usage,
+            compacted_context=compacted_context,
             _expired=_abandon_expired,
         )
         try:
@@ -1217,6 +1258,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         result: JsonValue, transcript: Sequence[ModelMessage] | None,
         binding_refs: tuple[tuple[int, int | None], ...], output_ref: tuple[int, int] | None,
         usage: UsageMetrics | None = None,
+        compacted_context: Sequence[ModelMessage] | None = None,
         _graph_trace_suffix: tuple[ContentArchive, PreparedArchive, NativeMessageRoot] | None = None,
         _graph_step_source: bool = False,
         _expired: bool = False,
@@ -1228,6 +1270,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         binding = self._transcript_write_binding
         store = None if binding is None else binding[0]
         body = None
+        context_root = None
         if state == "succeeded":
             if result is not None or bool(transcript) == (_graph_trace_suffix is not None):
                 raise ValueError("a successful session turn requires one transcript source")
@@ -1248,6 +1291,11 @@ class SqlSessionTurns(SqlSessionTurnReader):
                 native._message_content.validate_root(root)
             body = (archive, content, root)
             result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
+            if compacted_context is not None:
+                if _graph_trace_suffix is not None or not compacted_context:
+                    raise ValueError("compaction requires an ordinary local terminal")
+                context_root = await native.prepare_archived_messages(compacted_context, content)
+                result["compacted_context"] = context_root.to_json()
             if _graph_trace_suffix is not None:
                 result["graph_trace_suffix"] = True
                 if _graph_step_source:
@@ -1256,7 +1304,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
                 result["output_ref"] = list(output_ref)
             if usage is not None:
                 result["usage"] = asdict(usage)
-        elif transcript is not None or binding_refs or output_ref is not None or usage is not None or _graph_trace_suffix is not None:
+        elif transcript is not None or binding_refs or output_ref is not None or usage is not None or _graph_trace_suffix is not None or compacted_context is not None:
             raise ValueError("an unsuccessful session turn cannot publish a transcript")
 
         async def write(connection: AsyncSession) -> bool:
@@ -1267,9 +1315,14 @@ class SqlSessionTurns(SqlSessionTurnReader):
             if body is not None:
                 from ._native_content_index import stage_owner
 
+                roots = body[2]
+                if context_root is not None:
+                    from .contracts import LoadedModelContext
+                    roots = (LoadedModelContext((), archive_root=body[2]),
+                             LoadedModelContext((), archive_root=context_root))
                 stage_owner(
                     connection, SESSION_TURN_TABLE, self._scope,
-                    (turn_key["session_key"], turn_key["turn_id"]), body[2],
+                    (turn_key["session_key"], turn_key["turn_id"]), roots,
                 )
             return True
 

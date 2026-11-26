@@ -184,6 +184,10 @@ class RunContextProjection:
         self._projection_source_count = len(tuple(source))
         self._projection_messages = freeze_model_messages(projected)
 
+    @property
+    def projected_messages(self) -> tuple[ModelMessage, ...]:
+        return self._projection_messages or ()
+
     def checkpoint_context(
         self,
         messages: Sequence[ModelMessage],

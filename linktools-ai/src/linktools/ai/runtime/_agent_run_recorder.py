@@ -688,6 +688,10 @@ class AgentRunRecorder:
     ) -> None:
         self.context_projection.remember_context_projection(source, projected)
 
+    @property
+    def projected_context_messages(self) -> tuple[ModelMessage, ...]:
+        return self.context_projection.projected_messages
+
     def checkpoint_context(
         self,
         messages: Sequence[ModelMessage],

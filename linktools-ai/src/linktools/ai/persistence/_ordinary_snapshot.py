@@ -19,7 +19,9 @@ from ._turn_sql_schema import NATIVE_TURN_ID_MAX_BYTES, TURN_SESSION_MAX_BYTES
 from ..model import StoredUserInput
 from ..steps import NATIVE_STORE_KEY_MAX_BYTES, encode_native_replay_key
 from ._message_root import NativeMessageRoot
-from ._session_transcript import decode_session_input_reference, decode_session_transcript_root
+from ._session_transcript import (
+    decode_session_compacted_context, decode_session_input_reference, decode_session_transcript_root,
+)
 from ..storage import ObjectRef
 from .codec import decode_domain
 from .objects import ObjectKeyFactory
@@ -113,7 +115,13 @@ def ordinary_message_roots(
         if reference is not None:
             yield reference.root
         if row["state"] == "succeeded":
-            yield decode_session_transcript_root(row["result_json"])
+            result = row["result_json"]
+            yield decode_session_transcript_root(result)
+            compacted = decode_session_compacted_context(result)
+            if compacted is not None:
+                if row.get("split_source_receipt") is not None or row["request_json"].get("graph_execution") is not None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                yield compacted
 
 
 def rekey_ordinary_messages(
@@ -137,8 +145,10 @@ def rekey_ordinary_messages(
         if row["state"] != "succeeded":
             return row
         result = row["result_json"]
+        compacted = decode_session_compacted_context(result)
         return {**row, "result_json": {
             **result, "transcript": rekey(decode_session_transcript_root(result)).to_json(),
+            **({} if compacted is None else {"compacted_context": rekey(compacted).to_json()}),
         }}
     return {**rows, "turns": [move(row) for row in rows["turns"]]}
 

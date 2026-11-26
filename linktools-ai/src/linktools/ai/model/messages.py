@@ -17,7 +17,7 @@ from pydantic_ai import RequestUsage
 from pydantic_ai.settings import ThinkingEffort
 from typing import get_args
 from pydantic_ai.messages import (
-    BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
+    BinaryContent, CompactionPart, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
     ModelRequestAttempt, ModelResponse, NativeToolReturnPart,
     SpeechPart, SystemPromptPart, TextContent, ToolCallPart, ToolReturn, ToolReturnPart, UserContent, UserPromptPart,
@@ -106,6 +106,17 @@ _CORRELATED_PARTS = frozenset({
 @dataclass
 class SummaryPromptPart(SystemPromptPart):
     """Runtime-owned compaction provenance, serialized outside the SDK union."""
+
+
+def session_compaction_summaries(messages: Sequence[ModelMessage]) -> tuple[SummaryPromptPart | CompactionPart, ...]:
+    """Identify trusted Runtime and Harness summaries in the retained context."""
+    return tuple(
+        part for message in messages if isinstance(message, ModelRequest) for part in message.parts
+        if isinstance(part, SummaryPromptPart)
+        or (isinstance(part, CompactionPart) and isinstance(part.content, str)
+            and (part.metadata or {}).get("pydantic-ai-harness.compaction.summary.v1") is True
+            and part.provider_name is None and part.id is None and part.provider_details is None)
+    )
 
 
 def without_history_system_prompts(
@@ -919,7 +930,7 @@ def tool_error_message(part: ToolReturnPart) -> str | None:
     return None
 
 
-__all__ = ['CANONICAL_OUTPUT_TOOL_NAME', 'canonical_structured_output', 'canonical_structured_output_reference', 'THINKING_ELAPSED_MS_METADATA_KEY', 'TOOL_ARGUMENT_PREVIEWS_METADATA_KEY', 'TOOL_ELAPSED_MS_METADATA_KEY', 'bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_error_message', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
+__all__ = ['CANONICAL_OUTPUT_TOOL_NAME', 'canonical_structured_output', 'canonical_structured_output_reference', 'THINKING_ELAPSED_MS_METADATA_KEY', 'TOOL_ARGUMENT_PREVIEWS_METADATA_KEY', 'TOOL_ELAPSED_MS_METADATA_KEY', 'bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'session_compaction_summaries', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_error_message', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 

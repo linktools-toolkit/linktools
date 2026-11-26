@@ -31,6 +31,18 @@ def decode_session_turn_usage(value: object) -> UsageMetrics:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session turn usage") from error
 
 
+def decode_session_compacted_context(result: Mapping[str, object]) -> NativeMessageRoot | None:
+    if "compacted_context" not in result:
+        return None
+    try:
+        root = NativeMessageRoot.from_json(result["compacted_context"])
+        if not root.count or result.get("graph_trace_suffix") is True:
+            raise ValueError("Invalid Session compaction owner")
+        return root
+    except (TypeError, ValueError, AIError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid Session compaction root") from error
+
+
 def decode_session_transcript_root(result: object) -> NativeMessageRoot:
     if not isinstance(result, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session transcript reference")
@@ -45,7 +57,7 @@ def decode_session_transcript_root(result: object) -> NativeMessageRoot:
             fields.add("graph_step_source")
             if result["graph_step_source"] is not True:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid Graph Step transcript reference")
-    if not fields <= result.keys() <= fields | {"usage"}:
+    if not fields <= result.keys() <= fields | {"usage", "compacted_context"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session transcript reference")
     if "usage" in result:
         decode_session_turn_usage(result["usage"])
@@ -53,6 +65,9 @@ def decode_session_transcript_root(result: object) -> NativeMessageRoot:
         root = NativeMessageRoot.from_json(result["transcript"])
     except (TypeError, ValueError, AIError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Invalid session transcript reference") from error
+    compacted = decode_session_compacted_context(result)
+    if compacted is not None and (compacted.group_id, compacted.store_key) != (root.group_id, root.store_key):
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     if "output_ref" in result:
         ref = result["output_ref"]
         if (not isinstance(ref, list) or len(ref) != 2
@@ -103,6 +118,7 @@ async def scan_ordinary_message_roots(group: SqlStateStorageGroup) -> AsyncItera
         while True:
             rows = (await group.context.run_statement(session.execute(select(
                 table.c.id, table.c.scope_key, table.c.state, table.c.turn_id, table.c.result_json,
+                table.c.split_source_receipt,
                 table.c.request_json["graph_execution"].as_string().label("graph_execution"),
                 table.c.request_json["prompt"].as_string().label("prompt"),
                 table.c.request_json["input"].label("input"),
@@ -112,6 +128,11 @@ async def scan_ordinary_message_roots(group: SqlStateStorageGroup) -> AsyncItera
                 roots = () if reference is None else (reference.root,)
                 if row["state"] == "succeeded":
                     roots = (*roots, decode_session_transcript_root(row["result_json"]))
+                    compacted = decode_session_compacted_context(row["result_json"])
+                    if compacted is not None:
+                        if row["split_source_receipt"] is not None:
+                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                        roots = (*roots, compacted)
                 for root in roots:
                     _, namespace, tenant_id = decode_key_components(root.store_key, NATIVE_STORE_KEY_MAX_BYTES)
                     if (root.store_key != native_store_key(namespace, tenant_id)

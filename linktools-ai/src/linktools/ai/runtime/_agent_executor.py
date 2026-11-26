@@ -44,6 +44,7 @@ from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
+    ModelRequest,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
@@ -141,7 +142,7 @@ from ._harness import (
 )
 from ..capability.steps import AtomicStepPersistence, StepBoundaryCapabilities
 from ..persistence.capabilities import CapabilityPersistence
-from ..model.messages import without_history_system_prompts
+from ..model.messages import session_compaction_summaries, without_history_system_prompts
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ..capability import ToolResponseFixture
@@ -197,6 +198,7 @@ class AgentExecutionResult:
     output: JsonValue
     messages: list[ModelMessage]
     usage: UsageMetrics
+    compacted_context: tuple[ModelMessage, ...] | None = None
 
 
 AgentExecutionOutcome = AgentExecutionResult | DeferredToolRequests
@@ -266,6 +268,7 @@ class _AgentRunScope:
     deferred_tool_results: DeferredToolResults | None = None
     deferred_approvals: tuple[PendingDeferredCall, ...] = ()
     deferred_capability_refs: dict[str, CapabilityRef] = field(default_factory=dict)
+    capture_compacted_context: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in {"run", "plan"} or not isinstance(self.planning, bool):
@@ -480,6 +483,7 @@ class AgentExecutor:
         native_subagent_leaf: _NativeSubagentLeaf | None = None,
         settled_native_subagents: bool = False,
         previous_turn_interrupted: bool = False,
+        capture_compacted_context: bool = False,
     ) -> AgentExecutionOutcome:
         """Run a plain turn with no durable recorder or execution handoff."""
         if context.session_id is None:
@@ -541,6 +545,7 @@ class AgentExecutor:
                 repository_instruction_boundary=repository_instruction_boundary,
                 canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
                 previous_turn_interrupted=previous_turn_interrupted,
+                capture_compacted_context=capture_compacted_context,
                 output_retries_used=output_retries_used, deferred_approvals=deferred_approvals, budget=budget,
                 stage_session_trace=capture_trace is not None,
                 tool_effects="read_only" if canonical_step is None else "live",
@@ -935,8 +940,15 @@ class AgentExecutor:
                     else:
                         runtime_capabilities = (self._runtime_capabilities if self._prepare_runtime_capabilities is None
                                                 else await self._prepare_runtime_capabilities(compiled_agent))
+                    recorder = None
+
+                    def register_compaction_recorder(value: AgentRunRecorder) -> None:
+                        nonlocal recorder
+                        recorder = value
+
                     agent, capabilities = await _materialize_agent(
                         scope,
+                        collect_compaction=register_compaction_recorder if scope.capture_compacted_context else None,
                         model=model,
                         skill_sources=skill_sources,
                         current_agent=None if scope.regenerable or scope.canonical_step is not None else self._current_agent,
@@ -1046,9 +1058,22 @@ class AgentExecutor:
                             ) from error
                         binding.output_binding.validate_payload(payload)
                         usage = _usage_metrics(run_usage)
-                        return AgentExecutionResult(
-                            scope.agent_run_id, payload, final_result.all_messages(), usage
-                        )
+                        messages = final_result.all_messages()
+                        compacted = None
+                        if recorder is not None and recorder.projected_context_messages:
+                            summaries = session_compaction_summaries(recorder.projected_context_messages)
+                            prior = session_compaction_summaries(scope.history) if summaries else ()
+                            if any(part not in prior for part in summaries):
+                                projected, _ = recorder.checkpoint_context(messages)
+                                # Harness emits the summary as an adjacent request; the
+                                # model runner already normalizes it into the next request.
+                                # Store that same canonical boundary for exact-prefix checks.
+                                if (len(projected) >= 2 and isinstance(first := projected[0], ModelRequest)
+                                        and isinstance(second := projected[1], ModelRequest)
+                                        and tuple(first.parts) == session_compaction_summaries((first,))):
+                                    projected = [replace(second, parts=[*first.parts, *second.parts]), *projected[2:]]
+                                compacted = tuple(projected)
+                        return AgentExecutionResult(scope.agent_run_id, payload, messages, usage, compacted)
                     except BaseException as error:
                         primary_error = error
                         raise
@@ -1213,6 +1238,7 @@ async def _materialize_agent(
     model_journal: ModelRequestJournal,
     current_agent: Callable[[CompiledAgent], Awaitable[CompiledAgent]] | None = None,
     asset_sources: Mapping[str, AssetStoreReader] | None = None,
+    collect_compaction: Callable[[AgentRunRecorder], None] | None = None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -1568,6 +1594,8 @@ async def _materialize_agent(
             ),
         )
     )
+    if collect_compaction is not None:
+        collect_compaction(run_recorder)
     return agent, (_RunCapabilities(capabilities),)
 
 
