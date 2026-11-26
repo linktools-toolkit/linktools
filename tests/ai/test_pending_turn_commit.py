@@ -530,6 +530,7 @@ async def test_native_sql_independent_connections_choose_one_turn_winner(tmp_pat
         assert stores[0]._context.engine is not stores[1]._context.engine
         original = type(stores[0]).accept
         arrived = set()
+        winners = []
         both = asyncio.Event()
 
         async def meet(self, *args, **kwargs):
@@ -537,7 +538,10 @@ async def test_native_sql_independent_connections_choose_one_turn_winner(tmp_pat
             if len(arrived) == 2:
                 both.set()
             await asyncio.wait_for(both.wait(), 5)
-            return await original(self, *args, **kwargs)
+            accepted = await original(self, *args, **kwargs)
+            if accepted:
+                winners.append(self)
+            return accepted
 
         try:
             with monkeypatch.context() as patch:
@@ -563,8 +567,15 @@ async def test_native_sql_independent_connections_choose_one_turn_winner(tmp_pat
             assert isinstance(error, AIError)
             assert error.code in ({ErrorCode.IDEMPOTENCY_CONFLICT} if identity == "conflicting_digest"
                                   else {ErrorCode.SESSION_CONFLICT, ErrorCode.SESSION_BUSY, ErrorCode.STORAGE_CONFLICT})
-        terminal = await accepted[0].wait_final(timeout_seconds=10)
+        winner, = winners
+        owner_handle = results[stores.index(winner)]
+        assert owner_handle in accepted
+        # Only the producer's runtime has a local live subscription. The
+        # other connection must still read the same committed result.
+        terminal = await owner_handle.wait_final(timeout_seconds=10)
         assert terminal.status is ExecutionStatus.SUCCEEDED and len(provider_calls) == 1
+        for result in accepted:
+            assert (await result.result()).view == terminal.view
         for host in (first, second):
             history = await host.history.turn_session("chat", principal=principal)
             assert history["session"]["active_turn_id"] is None
