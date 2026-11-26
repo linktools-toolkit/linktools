@@ -429,7 +429,24 @@ if(process.argv[3]==='session-published-turn') {
   const sentNative=calls.filter(call=>call.key==='/api/sessions/b/messages').at(-1);
   assert.match(sentNative.body.request_id,/^[A-Za-z0-9_-]{12}$/);
   nextNative({turn_id:'b-next-turn'});await sendNative;
-  emitTurn({type:'terminal',turn_id:'b-next-turn',turn_no:2,revision:3,generation:1,state:'succeeded',
+  assert.equal(node('recover-turn'),undefined);
+  const stopped={type:'gap',phase:'producer_stopped',turn_id:'b-next-turn',generation:1};
+  const recoverRead=deferred('GET /api/sessions/b');
+  emitTurn(stopped);
+  await recoverRead.requested;
+  recoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,
+    user_input:{prompt:'Next native question',attachments:[]},conversation_committed:false,items:[]});
+  await until('the same button switches to Recover',()=>node('send').textContent==='Recover');
+  const requestCount=calls.length;
+  emitTurn(stopped);
+  assert.equal(calls.length,requestCount,'a duplicate stopped notice does not read again');
+  const recoverResponse=deferred('POST /api/sessions/b/recover'),recover=node('send').click();
+  await recoverResponse.requested;
+  assert.equal(node('send').disabled,true);
+  recoverResponse({accepted:true});await recover;
+  emitTurn({type:'admitted',turn_id:'b-next-turn',turn_no:2,revision:3,generation:2,prompt:'Next native question'});
+  assert.equal(node('send').textContent,'Stop');
+  emitTurn({type:'terminal',turn_id:'b-next-turn',turn_no:2,revision:4,generation:2,state:'succeeded',
     prompt:'Next native question',items:[{item_kind:'structured_output',content:{count:2}}]});
   assert.match(node('conversation').textContent,/Structured output.*"count": 2/s);
   assert.equal(node('conversation').textContent.split('Structured output').length,2);
@@ -437,7 +454,7 @@ if(process.argv[3]==='session-published-turn') {
   emitTurn({type:'gap'});
   await gapRead.requested;
   gapRead({session:{...ordinarySession,metadata:{title:'Gap title'},cwd:'next',
-    active_turn_id:null,last_turn_no:2,revision:4},timeline:{items:[],next_cursor:null}});
+    active_turn_id:null,last_turn_no:2,revision:5},timeline:{items:[],next_cursor:null}});
   await until('gap metadata refreshes the open header',()=>node('conversation-title').textContent==='Gap title');
   assert.equal(node('conversation-meta').textContent,'next');
   assert.equal(calls.slice(beforeNative).filter(call=>call.key.startsWith('/api/executions/')).length,0);

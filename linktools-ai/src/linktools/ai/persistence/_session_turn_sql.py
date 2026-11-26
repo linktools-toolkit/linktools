@@ -606,9 +606,11 @@ class SqlSessionTurnReader:
             columns.request_json["graph_execution"].as_string().label("graph_execution"),
         )
         if observe_lease:
-            statement = statement.add_columns((
-                columns.state.in_(("accepted", "cancelling")) & (columns.lease_until <= sql_epoch_seconds())
-            ).label("needs_recovery"))
+            statement = statement.add_columns(
+                (columns.state.in_(("accepted", "cancelling")) & (columns.lease_until <= sql_epoch_seconds()))
+                .label("needs_recovery"),
+                columns.request_json["split_step"].as_boolean().label("split_step"),
+            )
         return statement
 
     async def get_history_turn(

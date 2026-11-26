@@ -174,6 +174,9 @@ async def _turn_view(
         "turn_id": row["turn_id"].decode("utf-8"),
         "turn_no": row["turn_no"],
         "status": "RECOVERY_REQUIRED" if row.get("needs_recovery") else _STATUS[state],
+        "can_recover": row.get("graph_execution") is None and (
+            bool(row.get("needs_recovery")) or state == "ready" and row.get("split_step") is True
+        ),
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
         "user_input": {"version": 1, "prompt": prompt, "files": [], "attachments": attachments},

@@ -124,6 +124,10 @@ async function mutate(path, payload, {newAttemptOn=[],scope='',shortRequest=fals
   }
   finally { operation.running=null; }
 }
+function activeTurnAction() {
+  const id=state.session?.active_turn_id;
+  return state.turns.find(turn=>turn.turn_id===id)?.can_recover===true?'recover':'cancel';
+}
 function setDisabled() {
   renderCurrentState();
   const readonly=!state.config || state.config.read_only;
@@ -180,17 +184,20 @@ function setDisabled() {
   const stopPending=ordinary?state.actionsPending.has(`turn:${turn}`)
     :Boolean(active && (state.actionsPending.has(`${active.execution_id}:cancel`)
       || state.actionsPending.has(`${active.execution_id}:end-stopped`)));
-  const send=$('send');
+  const send=$('send'), reader=$('reader-stop');
+  const recover=stop && ordinary && activeTurnAction()==='recover';
+  const activeLabel=recover?'Recover':'Stop';
+  const activeAriaLabel=recover?'Recover current turn':'Stop current turn';
   send.type=stop?'button':'submit';
-  const actionLabel=stop?'Stop':'Send ↑';
+  const actionLabel=stop?activeLabel:'Send ↑';
   if(send.textContent!==actionLabel)send.textContent=actionLabel;
-  send.setAttribute('aria-label',stop?'Stop current turn':'Send message');
-  send.classList.toggle('danger',stop);send.classList.toggle('primary',!stop);
+  send.setAttribute('aria-label',stop?activeAriaLabel:'Send message');
+  send.classList.toggle('danger',stop && !recover);send.classList.toggle('primary',!stop || recover);
   send.disabled=stop?stopPending:composerDisabled || sessionSendBlocked();
-  $('reader-stop').hidden=!stop || state.conversationMode==='chat';
-  $('reader-stop').disabled=stopPending;
-  $('recover-turn').hidden=readonly || !turn;
-  $('recover-turn').disabled=Boolean(turn && state.actionsPending.has(`turn:${turn}`));
+  reader.hidden=!stop || state.conversationMode==='chat';
+  reader.disabled=stopPending;
+  if(reader.textContent!==activeLabel)reader.textContent=activeLabel;
+  reader.setAttribute('aria-label',activeAriaLabel);
   if(ordinary){
     $('open-recovery').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
     $('inspector-toggle').hidden=!state.config.turn_trace || (!turn && !state.turns.some(row=>row.turn_id));
@@ -198,8 +205,8 @@ function setDisabled() {
     if(turn && sessionWatch?.ready){
       const status=state.turns.find(row=>row.turn_id===turn)?.status;
       $('current-status').hidden=false;
-      $('current-status').classList.toggle('error',status==='RECOVERY_REQUIRED');
-      $('current-status').textContent=status==='RECOVERY_REQUIRED'?'Recovery required'
+      $('current-status').classList.toggle('error',recover || status==='RECOVERY_REQUIRED');
+      $('current-status').textContent=recover || status==='RECOVERY_REQUIRED'?'Recovery required'
         :status==='WAITING_DEFERRED'?'Waiting for approval or tool results':'Turn in progress';
     }
   } else {$('open-recovery').hidden=false;$('inspector-toggle').hidden=false;$('inspector-toggle').textContent='Run details';}
@@ -512,7 +519,14 @@ function watchOrdinarySession(id) {
   watch.readActive=({refresh=false}={})=>{
     const turnId=activeTurn();
     const prior=state.turns.find(row=>row.turn_id===turnId);
-    if(!turnId || watch.activeRead?.id===turnId || prior?.conversation_committed || (prior && !refresh))return;
+    if(!turnId || prior?.conversation_committed || (prior && !refresh))return;
+    if(watch.activeRead?.id===turnId){
+      if(watch.activeRead.frames!==null){
+        if(refresh)watch.activeRead.refresh=true;
+        return;
+      }
+      if(!refresh)return;
+    }
     const lost=watch.lostRead?.id===turnId ? watch.lostRead : null;
     const read={id:turnId,frames:[],units:0,generation:lost?.generation || prior?.liveGeneration || 0,
       overflow:Boolean(lost),priorGeneration:prior?.liveGeneration,priorStatus:prior?.status};
@@ -531,14 +545,18 @@ function watchOrdinarySession(id) {
         const shown=state.turns.find(item=>item.turn_id===turnId);
         if(waiting && shown && (shown.liveGeneration || 0)<=waiting.generation
           && waiting.revision>=(watch.snapshot?.revision ?? -1)){
-          patchOrdinaryTurn({...shown,status:'WAITING_DEFERRED'});
+          patchOrdinaryTurn({...shown,status:'WAITING_DEFERRED',can_recover:false});
           setDisabled();
         }
       }
     }).catch(error=>{
       if(current() && watch.activeRead===read && activeTurn()===turnId
         && !state.turns.some(row=>row.turn_id===turnId))showError(error);
-    }).finally(()=>{read.frames=null;});
+    }).finally(()=>{
+      read.frames=null;
+      if(read.refresh && current() && watch.activeRead===read && activeTurn()===turnId)
+        watch.readActive({refresh:true});
+    });
   };
   const dirtyParts=new Set();
   function applyPreview(frame) {
@@ -666,6 +684,15 @@ function watchOrdinarySession(id) {
       return;
     }
     if(frame.type==='gap'){
+      if(frame.phase==='producer_stopped' && frame.turn_id && frame.turn_id===activeTurn()){
+        const row=state.turns.find(turn=>turn.turn_id===frame.turn_id);
+        const stopped=`${frame.turn_id}:${frame.generation}`;
+        if((row?.liveGeneration || 0)<=frame.generation && watch.lastStopped!==stopped){
+          watch.lastStopped=stopped;
+          watch.readActive({refresh:true});
+        }
+        return;
+      }
       if(['cancelling','waiting'].includes(frame.phase) && frame.turn_id && frame.turn_id===activeTurn()){
         const turnId=frame.turn_id;
         const before=state.turns.find(row=>row.turn_id===turnId);
@@ -694,12 +721,12 @@ function watchOrdinarySession(id) {
       const missingPreview=bufferedGeneration===frame.generation && watch.activeRead?.overflow;
       const preview=row?.liveGeneration===frame.generation && !missingPreview ? {}
         : {liveGeneration:frame.generation,liveParts:[],previewGap:missingPreview?frame.generation:null};
-      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,...preview});
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',can_recover:false,user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,...preview});
     } else if(frame.type==='waiting'){
       const row=state.turns.find(item=>item.turn_id===frame.turn_id);
       if(activeTurn()!==frame.turn_id || row?.conversation_committed
         || (row?.liveGeneration || 0)>frame.generation || frame.revision<(watch.snapshot?.revision ?? -1))return;
-      if(row)patchOrdinaryTurn({...row,status:'WAITING_DEFERRED'});
+      if(row)patchOrdinaryTurn({...row,status:'WAITING_DEFERRED',can_recover:false});
       else {
         watch.readActive();
         if(watch.activeRead?.id===frame.turn_id)watch.activeRead.waiting=frame;
@@ -2900,11 +2927,10 @@ $('choose-attachments').onclick=()=>$('turn-files').click();
 $('turn-files').onchange=selectAttachments;
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
 $('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
-$('recover-turn').onclick=()=>ordinaryAction('recover').catch(showError);
-const stopConversation=()=> (state.config?.turn_sessions && state.view==='sessions'
-  ? ordinaryAction('cancel') : executionAction('cancel',{active:true})).catch(showError);
-$('reader-stop').onclick=stopConversation;
-$('send').onclick=()=>{if($('send').type==='button')return stopConversation();};
+const activeConversationAction=()=> (state.config?.turn_sessions && state.view==='sessions'
+  ? ordinaryAction(activeTurnAction()) : executionAction('cancel',{active:true})).catch(showError);
+$('reader-stop').onclick=activeConversationAction;
+$('send').onclick=()=>{if($('send').type==='button')return activeConversationAction();};
 $('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
 $('metrics-form').onsubmit=event=>loadMetrics(event).catch(showError);
 document.querySelectorAll('[data-view]').forEach(node=>node.onclick=()=>navigateView(node.dataset.view));

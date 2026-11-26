@@ -58,6 +58,34 @@ async def accept(turns: SqlSessionTurns, turn: str, *, revision: int = 0, throug
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("phase", "lease", "fields", "can_recover"), (
+    ("accepted", None, {}, False),
+    ("accepted", 0, {}, True),
+    ("cancelling", 0, {}, True),
+    ("accepted", 0, {"graph_execution": "turn"}, False),
+    ("ready", None, {"split_step": True}, True),
+    ("ready", None, {}, False),
+))
+async def test_native_turn_exposes_recovery_only_for_the_correct_owner(
+    store, phase: str, lease: int | None, fields: dict[str, object], can_recover: bool,
+):
+    from linktools.ai.history._ordinary_sessions import _turn_view
+
+    engine, metadata, turns = store
+    assert await accept(turns, "turn")
+    table = metadata.tables[SESSION_TURN_TABLE]
+    key = SessionTurnKey("chat", "turn")
+    values = {"state": phase, "request_json": {"prompt": "turn", **fields}}
+    if lease is not None:
+        values["lease_until"] = lease
+    async with engine.begin() as connection:
+        await connection.execute(table.update().values(**values))
+    row = await turns.get_history_turn(key, lineage=())
+    assert row is not None
+    assert (await _turn_view(row, turns.read_scalar_input))["can_recover"] is can_recover
+
+
+@pytest.mark.asyncio
 async def test_native_public_turn_id_validation_precedes_authorization_and_sql(tmp_path):
     from linktools.ai.core import TenantAuthorizationPolicy
     from linktools.ai.errors import AIError, ErrorCode
