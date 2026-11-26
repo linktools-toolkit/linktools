@@ -1433,12 +1433,12 @@ def operation_key(
     runtime_domain: str,
     identity: str,
 ) -> bytes:
-    """Address an ordinary ledger ID independently of StateStore partitioning."""
-    return b"\x01" + _encode_key_components(
-        (validate_persistence_namespace(namespace), validate_tenant_id(tenant_id),
-         runtime_domain, validate_idempotency_key(identity)),
-        OPERATION_KEY_MAX_BYTES - 1,
-    )
+    """Address an ordinary ledger ID within its canonical logical partition."""
+    # SDK repositories may share one physical StateStore. The canonical
+    # partition separates them; the ledger stream retains the exact raw scope.
+    partition = state_store_key(namespace, tenant_id, runtime_domain)
+    identity_bytes = validate_idempotency_key(identity).encode("utf-8")
+    return b"\x01" + partition + len(identity_bytes).to_bytes(2, "big") + identity_bytes
 
 
 def sortable_timestamp(value: datetime, key: bytes) -> bytes:

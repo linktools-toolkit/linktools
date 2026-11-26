@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from ..agent import CompiledAgent, AgentBinding, AgentBindingContract
     from ._runtime_service import Runtime
     from ._native_session import _NativeSession, _NativeSessionTurn, _NativeTurnResult
+    from .turn_clients import _SessionOccupancy
 
 AppT = TypeVar("AppT")
 
@@ -44,15 +45,24 @@ class Session(Generic[AppT]):
     def principal(self) -> Principal:
         return self._runtime.default_principal if self._principal is None else self._principal
 
-    async def inspect(self, *, principal: Principal | None = None) -> SessionView:
-        return await self._runtime.sessions._inspect_agent_session(
+    async def inspect(self, *, principal: Principal | None = None) -> "SessionView | dict[str, JsonValue]":
+        return await self._runtime.sessions.inspect(
             self.session_id, principal=self.principal if principal is None else principal,
         )
 
-    def watch(self, *, principal: Principal | None = None) -> AsyncIterator[SessionView]:
+    def _native_reader(self, principal: Principal) -> "_NativeSession[AppT, _NativeTurnResult] | None":
+        sessions = self._runtime.sessions
+        if not sessions.supports_turn_sessions:
+            return None
+        return sessions._bind_native_session(self.session_id, principal=principal, local_workspace=False)
+
+    def watch(self, *, principal: Principal | None = None) -> "AsyncIterator[SessionView] | AsyncIterator[_SessionOccupancy]":
         """Observe occupancy changes made by this Runtime without polling."""
-        return self._runtime.sessions.watch(self.session_id,
-            principal=self.principal if principal is None else principal)
+        actor = self.principal if principal is None else principal
+        native = self._native_reader(actor)
+        if native is not None:
+            return native.watch()
+        return self._runtime.sessions.watch(self.session_id, principal=actor)
 
     def _definition(self) -> "Agent[AppT]":
         return Agent(self._runtime, self.agent_id, self._agent_revision,
@@ -162,10 +172,14 @@ class Session(Generic[AppT]):
         principal: "Principal | None" = None,
         cursor: "str | None" = None,
         limit: int = 100,
-    ) -> "Page[SessionHistoryItem]":
+    ) -> "Page[SessionHistoryItem] | dict[str, JsonValue]":
+        actor = self._runtime._resolve_principal(principal or self._principal)
+        native = self._native_reader(actor)
+        if native is not None:
+            return await native.history(cursor=cursor, limit=limit)
         return await self._runtime.sessions.history(
             self.session_id,
-            principal=self._runtime._resolve_principal(principal or self._principal),
+            principal=actor,
             cursor=cursor,
             limit=limit,
         )
@@ -176,10 +190,14 @@ class Session(Generic[AppT]):
         principal: "Principal | None" = None,
         cursor: "str | None" = None,
         limit: int = 100,
-    ) -> "Page[SessionTurn]":
+    ) -> "Page[SessionTurn] | dict[str, JsonValue]":
+        actor = self._runtime._resolve_principal(principal or self._principal)
+        native = self._native_reader(actor)
+        if native is not None:
+            return await native.timeline(cursor=cursor, limit=limit)
         return await self._runtime.sessions.timeline(
             self.session_id,
-            principal=self._runtime._resolve_principal(principal or self._principal),
+            principal=actor,
             cursor=cursor,
             limit=limit,
         )

@@ -209,8 +209,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     group.model("default", _FeatureModels())
     capture = group.borrow()
     async with Persistence.open('restore-policy', storage=source_storage()) as persistence_198, Runtime.open(persistence=persistence_198, features=capture, authorization=policy) as runtime:
-        session = await runtime.agents.get().create_session('session')
-        execution = await session.start('question')
+        execution = await runtime.agents.get().start('question')
         await execution.wait(timeout_seconds=5)
         execution_id, principal = execution.execution_id, runtime.default_principal
         expected = (await execution.model_interactions()).items

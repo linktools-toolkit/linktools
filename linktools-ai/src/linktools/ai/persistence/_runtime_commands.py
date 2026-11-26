@@ -4781,7 +4781,7 @@ class StateCommands:
         prepared = await turns._prepare_finish(
             key, generation=generation, turn_no=turn_no, state=state, result=result,
             transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
-            _graph_trace_suffix=raw_source,
+            _graph_trace_suffix=raw_source, _graph_step_source=native_suffix is not None,
         )
         result_source = None
         if prepared.transcript is not None:

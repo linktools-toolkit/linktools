@@ -138,7 +138,6 @@ async def test_retained_context_still_verifies_stored_bytes(tmp_path, retained):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('same_producer', [True, False])
 async def test_runtime_reuses_interactions_only_for_confirmed_producer(tmp_path, monkeypatch, same_producer):
-    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.persistence.runs import RuntimeAgentRunStore
     from linktools.ai.persistence._step_archive import StateStepArchive
     from linktools.ai.workspace import Workspace
@@ -163,8 +162,7 @@ async def test_runtime_reuses_interactions_only_for_confirmed_producer(tmp_path,
     async with _open_local_runtime(Workspace.initialize(tmp_path), model=_Models(_UsageFunctionModel(respond))) as local:
         runtime = local.runtime
         actor = runtime.default_principal
-        await runtime.sessions.create('default', CreateSessionRequest(actor, 'session', 'create'))
-        run = await runtime.sessions.start('session', 'hello', principal=actor, idempotency_key='turn')
+        run = await runtime.agents.get().start('hello', principal=actor, idempotency_key='turn')
         assert (await run.wait(timeout_seconds=20)).result.output == {'text': 'complete'}
     assert hints
     assert any(hints) is same_producer
@@ -172,7 +170,6 @@ async def test_runtime_reuses_interactions_only_for_confirmed_producer(tmp_path,
 @pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['generation', 'execution'])
 async def test_takeover_before_finalize_never_relabels_old_confirmed_interactions(tmp_path, monkeypatch, change):
-    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.persistence.runs import RuntimeAgentRunStore
     from linktools.ai.workspace import Workspace
     from linktools.commands.ai._common import _open_local_runtime
@@ -200,7 +197,6 @@ async def test_takeover_before_finalize_never_relabels_old_confirmed_interaction
     async with _open_local_runtime(Workspace.initialize(tmp_path), model=_Models(_UsageFunctionModel(respond))) as local:
         runtime = local.runtime
         actor = runtime.default_principal
-        await runtime.sessions.create('default', CreateSessionRequest(actor, 'session', 'create'))
-        run = await runtime.sessions.start('session', 'hello', principal=actor, idempotency_key='turn')
+        run = await runtime.agents.get().start('hello', principal=actor, idempotency_key='turn')
         assert (await run.wait(timeout_seconds=20)).result.output == {'text': 'complete'}
     assert inspected and all(value == ((), None) for value in inspected)

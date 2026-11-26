@@ -5,6 +5,8 @@
 import asyncio
 
 import pytest
+from contextlib import aclosing
+
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 
@@ -112,3 +114,9 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         assert run.result.key.session_id == plan_run.result.key.session_id == created.session_id
         assert run.result.status is plan_run.result.status is ExecutionStatus.SUCCEEDED
         assert calls == [True] * 5
+
+        lazy = agent.session(created.session_id, principal=principal)
+        assert (await lazy.inspect())["session_id"] == created.session_id
+        assert (await lazy.history())["timeline"] == await lazy.timeline()
+        async with aclosing(lazy.watch()) as occupancy:
+            assert (await anext(occupancy)).active_turn_id is None

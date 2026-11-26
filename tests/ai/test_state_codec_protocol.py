@@ -36,7 +36,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence.contracts import ContextProjection, ConversationCursor, IdempotencyTerminalUpdate, OperationTerminalUpdate, StoredAgentRunCheckpoint, TranscriptMessageRef, TranscriptHeadRecord, TranscriptOwnerDomain, HistoryQuality
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
-from linktools.ai.persistence.state import RECORD_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, record_key, validate_record_key, operation_key, parent_key, scope_key
+from linktools.ai.persistence.state import RECORD_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, record_key, validate_record_key, operation_key, parent_key, scope_key, state_store_key
 from linktools.ai.task import TaskBindingContract
 from linktools.ai.steps import NativeStepSource
 from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
@@ -477,7 +477,11 @@ def test_record_tuple_is_injective_and_bounds_encoded_bytes() -> None:
         record_key("namespace", "tenant", "checkpoint", "r", (maximum + "x",))
     with pytest.raises(ValueError):
         record_key("namespace", "tenant", "checkpoint", "r", ("x" * 65536,))
-    assert len(operation_key("n" * 128, "t" * 128, "conversation", "o" * 128)) == 405
+    operation_scope = ("n" * 128, "t" * 128, "conversation")
+    operation_identity = "界" * 42 + "ab"
+    address = operation_key(*operation_scope, operation_identity)
+    assert len(address) == 163
+    assert address == b"\x01" + state_store_key(*operation_scope) + b"\x00\x80" + operation_identity.encode("utf-8")
 
 
 @pytest.mark.parametrize("key,kind", (

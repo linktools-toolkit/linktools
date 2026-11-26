@@ -21,7 +21,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart, UserPromptPart
 
-from ..model.messages import decode_model_messages, encode_model_messages
+from ..model.messages import decode_model_messages, encode_model_messages, project_transient_binary_content
 from ..spec import RepositoryInstructions
 from ..storage import (
     sql_audit_columns,
@@ -404,10 +404,22 @@ class SqlSessionTurnReader:
                 if not isinstance(first, ModelRequest):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript has no request")
                 parts = [part for part in first.parts if isinstance(part, UserPromptPart)]
+                expected_prompt = admitted_prompt
+                if (row["result_json"].get("graph_step_source") is True
+                        and admitted_prompt is not None and len(parts) == 1):
+                    supplied = replace(first, parts=[
+                        replace(part, content=admitted_prompt) if part is parts[0] else part
+                        for part in first.parts
+                    ])
+                    projected_first = project_transient_binary_content((supplied, messages[-1]))[0]
+                    expected_parts = [part for part in projected_first.parts if isinstance(part, UserPromptPart)]
+                    expected_prompt = expected_parts[0].content if len(expected_parts) == 1 else None
                 raw_prompt = parts[0].content if len(parts) == 1 else None
                 if isinstance(raw_prompt, tuple):
                     raw_prompt = list(raw_prompt)
-                if admitted_prompt is None or raw_prompt != admitted_prompt:
+                if isinstance(expected_prompt, tuple):
+                    expected_prompt = list(expected_prompt)
+                if expected_prompt is None or raw_prompt != expected_prompt:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Raw Graph transcript differs from its admitted input")
                 messages[0] = replace(first, parts=[
                     replace(part, content="") if part is parts[0] else part for part in first.parts
@@ -1073,6 +1085,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         binding_refs: tuple[tuple[int, int | None], ...], output_ref: tuple[int, int] | None,
         usage: UsageMetrics | None = None,
         _graph_trace_suffix: tuple[ContentArchive, PreparedArchive, NativeMessageRoot] | None = None,
+        _graph_step_source: bool = False,
     ) -> _PreparedSessionTerminal:
         """Prepare the caller's normalized suffix, without starting another mutation."""
         if state not in ("succeeded", "failed", "cancelled"):
@@ -1103,6 +1116,8 @@ class SqlSessionTurns(SqlSessionTurnReader):
             result = {"transcript": root.to_json(), "binding_refs": [list(ref) for ref in binding_refs]}
             if _graph_trace_suffix is not None:
                 result["graph_trace_suffix"] = True
+                if _graph_step_source:
+                    result["graph_step_source"] = True
             if output_ref is not None:
                 result["output_ref"] = list(output_ref)
             if usage is not None:

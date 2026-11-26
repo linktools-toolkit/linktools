@@ -23,10 +23,13 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 class SharedSessionPolicy(TenantAuthorizationPolicy):
     async def authorize(self, principal: Principal, action: AuthorizationAction, resource: ResourceRef) -> None:
-        if (principal.principal_id == "peer" and principal.tenant_id == resource.tenant_id
-                and resource.kind is ResourceKind.SESSION and resource.id == "shared"
-                and action is AuthorizationAction.SESSION_READ):
-            return
+        if resource.kind is ResourceKind.SESSION and resource.id == "shared":
+            if principal.tenant_id != resource.tenant_id or principal.principal_id not in {"owner", "peer"}:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            if action is AuthorizationAction.SESSION_READ:
+                return
+            if principal.principal_id != "owner":
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await super().authorize(principal, action, resource)
 
 
@@ -55,45 +58,39 @@ async def test_shared_session_preserves_actor_in_live_and_portable_history(
         persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
         authorization=policy,
     ) as runtime:
-        session = await runtime.agents.get().create_session("shared", principal=owner)
-        for denied in (Principal("stranger", "default"), Principal("peer", "other")):
+        agent = runtime.agents.get()
+        await agent.create_session("shared", principal=owner)
+        session = agent.session("shared")
+        denied_actors = (Principal("stranger", "default"), Principal("peer", "other"))
+        for denied in denied_actors:
             with pytest.raises(AIError) as error:
                 await session.start("denied", principal=denied)
-            assert error.value.code is (ErrorCode.AUTHORIZATION_DENIED if denied.tenant_id == "default" else ErrorCode.STORAGE_OWNER_MISMATCH)
-        execution = await session.start("peer turn", principal=peer)
+            assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+        turn = await session.start("peer turn", principal=peer, idempotency_key="peer-turn")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             for actor in (owner, peer):
-                assert (await session.inspect(principal=actor)).active_execution_id == execution.execution_id
-                page = await session.timeline(principal=actor)
-                assert [turn.execution_id for turn in page.items] == [execution.execution_id]
-                assert not page.items[0].conversation_committed
-                detail = await runtime.sessions.refresh("shared", principal=actor, max_age=60)
-                assert detail.session.active_execution_id == execution.execution_id
-                assert detail.timeline.items == page.items
-                history = await runtime.history.session_detail("shared", principal=actor, max_age=60)
-                assert history.timeline.items == page.items
+                assert (await session.inspect(principal=actor))["active_turn_id"] == turn.key.turn_id
+                pending = await runtime.history.turn_result("shared", turn.key.turn_id, principal=actor)
+                assert pending["turn_id"] == turn.key.turn_id and not pending["conversation_committed"]
         finally:
             finish.set()
-        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        record = await state.execution.executions.get(execution.execution_id, tenant_id="default")
-        assert record.principal_id == "peer"
-        assert (await state.conversation.sessions.get("shared", tenant_id="default")).owner_principal_id == "owner"
-        for actor in (owner, peer):
-            expected = (await session.timeline(principal=actor)).items
-            assert expected[0].conversation_committed
-            assert expected[0].status is ExecutionStatus.SUCCEEDED
-            cold = await runtime.sessions.refresh("shared", principal=actor, max_age=60)
-            assert cold.timeline.items == expected
+        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        row = await state.session_turns.get_turn(turn.key)
+        assert row["request_json"]["principal"]["principal_id"] == "peer"
+        assert await state.conversation.sessions.get("shared", tenant_id="default") is None
+        assert await state.execution.executions.get(turn.key.turn_id, tenant_id="default") is None
 
-            async def no_transcript(*args, **kwargs):
-                pytest.fail("an authorized cached display must not reload transcript bodies")
-                yield
+        async def no_legacy_read(*args, **kwargs):
+            pytest.fail("native session display must not consult legacy session storage")
 
-            with monkeypatch.context() as patch:
-                patch.setattr(state.run_store.conversation_persistence, "iter_conversation_message_range", no_transcript)
-                assert await runtime.sessions.refresh("shared", principal=actor, max_age=60) == cold
-            for denied in (Principal("stranger", "default"), Principal("peer", "other")):
+        with monkeypatch.context() as patch:
+            patch.setattr(state.conversation.sessions, "get", no_legacy_read)
+            expected = (await session.timeline(principal=owner))["items"]
+            assert len(expected) == 1 and expected[0]["conversation_committed"]
+            assert expected[0]["status"] == ExecutionStatus.SUCCEEDED.value
+            assert (await session.timeline(principal=peer))["items"] == expected
+            for denied in denied_actors:
                 with pytest.raises(AIError) as error:
                     await session.timeline(principal=denied)
                 assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
@@ -103,16 +100,17 @@ async def test_shared_session_preserves_actor_in_live_and_portable_history(
     async with Persistence.open("shared-session", storage=storage, read_only=True) as state:
         async with History.open(persistence=state, authorization=policy) as history:
             for actor in (owner, peer):
-                assert (await history.session_detail("shared", principal=actor)).timeline.items == expected
+                assert (await history.turn_session("shared", principal=actor))["timeline"]["items"] == expected
         reference = await state.export_snapshot(object_store=archive, limits=limits)
     root = tmp_path / "restored"
     await Persistence.restore_snapshot(reference, object_store=archive, root=root, limits=limits)
     async with Persistence.open("shared-session", storage=PersistenceStorage.from_root(root), read_only=True) as state:
-        assert (await state.execution.executions.get(execution.execution_id, tenant_id="default")).principal_id == "peer"
-        assert (await state.conversation.sessions.get("shared", tenant_id="default")).owner_principal_id == "owner"
+        restored_turn = await state.session_turn_reader.get_turn(turn.key)
+        assert restored_turn["request_json"]["principal"]["principal_id"] == "peer"
+        assert await state.conversation.sessions.get("shared", tenant_id="default") is None
         async with History.open(persistence=state, authorization=policy) as history:
             for actor in (owner, peer):
-                assert (await history.session_detail("shared", principal=actor)).timeline.items == expected
+                assert (await history.turn_session("shared", principal=actor))["timeline"]["items"] == expected
         roundtrip = await state.export_snapshot(object_store=archive, limits=limits)
         original_manifest = json.loads(await read_object(archive, reference.key, expected_digest=reference.digest, expected_size=reference.size))
         restored_manifest = json.loads(await read_object(archive, roundtrip.key, expected_digest=roundtrip.digest, expected_size=roundtrip.size))

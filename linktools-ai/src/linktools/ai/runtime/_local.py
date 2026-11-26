@@ -112,7 +112,7 @@ from ..observe.service import (
     record_storage_operation,
     release_metric_execution_context,
 )
-from ..model.messages import encode_model_messages
+from ..model.messages import encode_model_messages, freeze_model_messages, project_transient_binary_content
 from ..execution import ExecutionInputContext
 from pydantic_ai_harness.memory import MemoryStore
 from ..memory import PersistentMemoryStore
@@ -6550,7 +6550,8 @@ class LocalExecutionBackend:
                 assert step_alias is not None
                 step_run, root, recorded = step_alias
                 if (trace_run_id != step_run or trace_messages is None
-                        or tuple(trace_messages) != tuple(recorded) or root.count != len(recorded)):
+                        or freeze_model_messages(project_transient_binary_content(freeze_model_messages(trace_messages)))
+                        != tuple(recorded) or root.count != len(recorded)):
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 prefix = len(turn.history)
                 step_suffix = (root.slice(prefix, root.count), tuple(recorded[prefix:]))

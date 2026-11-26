@@ -101,7 +101,6 @@ async def test_projection_notification_requires_direct_commit_confirmation(
 ) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.persistence import runs
     from linktools.ai.workspace import Workspace
     from linktools.commands.ai._common import _open_local_runtime
@@ -128,7 +127,6 @@ async def test_projection_notification_requires_direct_commit_confirmation(
     async with _open_local_runtime(Workspace.initialize(tmp_path), model=_Models(_UsageFunctionModel(respond))) as local:
         runtime = local.runtime
         actor = runtime.default_principal
-        await runtime.sessions.create("default", CreateSessionRequest(actor, "session", "create"))
-        run = await runtime.sessions.start("session", "hello", principal=actor, idempotency_key="turn")
+        run = await runtime.agents.get().start("hello", principal=actor, idempotency_key="turn")
         assert (await run.wait(timeout_seconds=20)).result.output == {"text": "complete"}
     assert bool(notifications) is not uncertain

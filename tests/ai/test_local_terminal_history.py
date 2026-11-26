@@ -102,16 +102,33 @@ async def test_local_runtime_retains_terminal_model_history(
         agent = runtime.agents.get('default')
         if session_bound:
             session = await agent.create_session('session')
-            execution = await session.start('hello', idempotency_key='turn')
+            turn = await runtime.sessions.start(session.session_id, 'hello', agent=agent,
+                                                principal=runtime.default_principal, idempotency_key='turn')
+            result = await turn.wait_final()
+            assert result.view['output'] == {'text': 'done'}
+            identity = turn.key.turn_id
         else:
             execution = await agent.start('hello', idempotency_key='turn')
-        waited = await execution.wait()
-        assert waited.result.output == {'text': 'done'}
-        identity = execution.execution_id
-        models = await execution.model_interactions(include_content=True)
-        assert models.items
-    async with Persistence.open('default', storage=_local_runtime_storage(workspace), tenant_id="default", read_only=True) as history_persistence_99, History.open(persistence=history_persistence_99) as history:
-        async with client(create_app(history=history)) as http:
+            waited = await execution.wait()
+            assert waited.result.output == {'text': 'done'}
+            identity = execution.execution_id
+            models = await execution.model_interactions(include_content=True)
+            assert models.items
+    from linktools.ai.core import TenantAuthorizationPolicy
+
+    async with (
+        Persistence.open('default', storage=_local_runtime_storage(workspace), tenant_id="default", read_only=True) as persistence,
+        History.open(persistence=persistence, authorization=TenantAuthorizationPolicy("default")) as history,
+        client(create_app(history=history, local_workspace=True)) as http,
+    ):
+        if session_bound:
+            params = {'session_id': 'session', 'turn_id': identity}
+            turn_response = await http.get('/api/session', params=params)
+            assert turn_response.status_code == 200, turn_response.text
+            assert turn_response.json()['output'] == {'text': 'done'}
+            trace = await http.get('/api/session', params={**params, 'trace': 'true'})
+            assert trace.status_code == 200 and trace.json()['items']
+        else:
             response = await http.get(f'/api/executions/{identity}/models?include_content=true')
             assert response.status_code == 200, response.text
             assert response.json()['items']
