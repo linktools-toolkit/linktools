@@ -23,7 +23,7 @@ from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..inputs import stored_input_attachment_views
+from ..inputs import stored_input_attachment_views, stored_user_input_view
 from ..model.messages import binary_content_usage, encode_model_messages
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
@@ -2093,6 +2093,12 @@ class _RegenerableTurnRunner:
 
         structured = binding.output_binding.mode == "structured"
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
+        if turn.native_step is not None and turn.split_source is None and isinstance(model_prompt, str):
+            # Recovery has already resolved this admitted scalar; the tool view
+            # does not need another read or duplicate durable payload.
+            context = replace(
+                context, original_input=stored_user_input_view(self._input_materializer.capture(model_prompt)),
+            )
         usage = None
         compacted_context = None
         try:
