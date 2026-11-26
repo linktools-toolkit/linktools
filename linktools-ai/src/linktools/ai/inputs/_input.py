@@ -208,6 +208,10 @@ class ExecutionInputMaterializer:
     def access(self) -> "InputFileSource | None":
         return self._access
 
+    @property
+    def limits(self) -> PromptLimits:
+        return self._limits
+
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
         raw_files = normalize_input_files(files)
         if raw_files and self._access is None:

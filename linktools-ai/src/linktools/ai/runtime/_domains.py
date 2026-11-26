@@ -307,6 +307,11 @@ class RuntimeSessions(Generic[AppT]):
         """Whether this host composed an authorized native turn runner."""
         return self._turn_runner is not None and self._runtime is not None
 
+    @property
+    def turn_attachment_limits(self) -> PromptLimits | None:
+        """Effective binary limits for clients submitting canonical turns."""
+        return None if self._turn_runner is None else self._turn_runner.attachment_limits
+
     def _require_turn_sessions(self) -> "tuple[_RegenerableTurnRunner, Runtime[AppT]]":
         self._ensure_open()
         runner, runtime = self._turn_runner, self._runtime

@@ -24,7 +24,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route
 
 from linktools.core import environ
-from ..core import Page, Principal, PrincipalKind
+from ..core import Page, Principal, PrincipalKind, PromptLimits
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
@@ -60,8 +60,6 @@ _HEADERS = {
 _JSON_REQUEST_MAX_BYTES = 8 * 1024 * 1024
 # Transport bound, not the Runtime's canonical turn limit. Allow JSON escaping and the HTTP envelope.
 _TURN_JSON_REQUEST_MAX_BYTES = 512 * 1024
-_TURN_UPLOAD_MAX_FILES = 32
-_TURN_UPLOAD_JSON_MAX_BYTES = 2 * 1024 * 1024
 _TURN_SSE_LIMIT = 128
 _TURN_SSE_BUFFER = 256 * 1024
 
@@ -333,17 +331,25 @@ def _content(request: Request, field: str = "include_content") -> bool:
     return value == "true"
 
 
-async def _body(request: Request, *, ordinary_turn: bool = False, upload: bool = False) -> dict[str, object]:
+class _RequestBodyTooLarge(ValueError):
+    pass
+
+
+async def _body(
+    request: Request, *, ordinary_turn: bool = False, upload: PromptLimits | None = None,
+) -> dict[str, object]:
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
         raise ValueError("application/json is required")
-    maximum = (_TURN_UPLOAD_JSON_MAX_BYTES if upload else
-               _TURN_JSON_REQUEST_MAX_BYTES if ordinary_turn else _JSON_REQUEST_MAX_BYTES)
+    maximum = _TURN_JSON_REQUEST_MAX_BYTES if ordinary_turn else _JSON_REQUEST_MAX_BYTES
+    if upload is not None:
+        # Account for base64 expansion, per-file rounding, and the JSON envelope.
+        maximum += 4 * ((upload.max_binary_input_bytes + 2) // 3) + 2048 * upload.max_binary_input_parts
     if ordinary_turn and int(request.headers.get("content-length", "0")) > maximum:
-        raise ValueError("request exceeds JSON body limit")
+        raise _RequestBodyTooLarge
     data = bytearray()
     async for chunk in request.stream():
         if len(chunk) > maximum - len(data):
-            raise ValueError("request exceeds JSON body limit")
+            raise _RequestBodyTooLarge
         data.extend(chunk)
     payload = json.loads(data)
     if not isinstance(payload, dict):
@@ -352,18 +358,19 @@ async def _body(request: Request, *, ordinary_turn: bool = False, upload: bool =
 
 
 def _uploaded_prompt(
-    prompt: str, value: object,
+    prompt: str, value: object, limits: PromptLimits,
 ) -> tuple[str | tuple[str | BinaryContent, ...], tuple[str, ...]]:
     """Convert browser bytes into the Runtime's existing ordered attachment input."""
     def invalid(reason: str) -> AIError:
         return AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "attachments", "reason": reason})
 
-    if not isinstance(value, list) or len(value) > _TURN_UPLOAD_MAX_FILES:
+    if not isinstance(value, list) or len(value) > limits.max_binary_input_parts:
         raise invalid("attachment_count_invalid")
     if not value:
         return prompt, ()
     parts: list[str | BinaryContent] = [prompt]
     names: list[str] = []
+    remaining = limits.max_binary_input_bytes
     for item in value:
         if not isinstance(item, dict):
             raise invalid("attachment_invalid")
@@ -379,6 +386,9 @@ def _uploaded_prompt(
             raise invalid("attachment_encoding_invalid") from error
         if not data:
             raise invalid("attachment_empty")
+        remaining -= len(data)
+        if remaining < 0:
+            raise _RequestBodyTooLarge
         media_type = media_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
         parts.append(BinaryContent(data, media_type=media_type))
         names.append(name)
@@ -488,13 +498,14 @@ class _Console:
         return self._local_workspace and self.principal.kind == PrincipalKind.LOCAL_TRUSTED.value
 
     async def config(self, request: Request) -> Response:
+        upload = self.runtime.sessions.turn_attachment_limits if self.turn_sessions and self.runtime is not None else None
         return _json({
             **self.status,
             "runtime": self.runtime.status() if self.runtime is not None else None,
             "read_only": self.runtime is None,
             "turn_sessions": self.turn_sessions,
-            **({"attachment_upload": {"max_files": _TURN_UPLOAD_MAX_FILES}}
-               if self.turn_sessions and self.runtime is not None else {}),
+            **({"attachment_upload": {"max_files": upload.max_binary_input_parts,
+                                      "max_bytes": upload.max_binary_input_bytes}} if upload is not None else {}),
             **({"turn_trace": True} if self.turn_sessions and self.history is not None
                and self.history.has_turn_trace else {}),
             "capabilities": self.capabilities,
@@ -612,8 +623,8 @@ class _Console:
         runtime = self.require_runtime()
         session_id = _text(request.query_params, "session_id")
         action = request.path_params["action"]
-        payload = await _body(request, ordinary_turn=self.turn_sessions,
-                              upload=self.turn_sessions and action == "messages")
+        upload = runtime.sessions.turn_attachment_limits if self.turn_sessions and action == "messages" else None
+        payload = await _body(request, ordinary_turn=self.turn_sessions, upload=upload)
         request_id = _text(payload, "request_id")
         request.state.operation_id = request_id
         if environ.debug:
@@ -627,7 +638,9 @@ class _Console:
                 planning = payload.get("planning", False)
                 if type(planning) is not bool:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "planning"})
-                prompt, names = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []))
+                if upload is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                prompt, names = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []), upload)
                 turn_id = await runtime.sessions.start_turn(
                     session_id, prompt, agent="default",
                     principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
@@ -1187,6 +1200,8 @@ async def _error(request: Request, error: Exception) -> Response:
             )
         )
         return _json(asdict(error.to_safe_error(operation_id=_operation_id(request, error))), status)
+    if isinstance(error, _RequestBodyTooLarge):
+        return _json({"code": "REQUEST_BODY_TOO_LARGE", "message": "The request exceeds the upload limit"}, 413)
     if isinstance(error, (TypeError, ValueError, KeyError)):
         return _json({"error_code": "REQUEST_FIELD_INVALID", "message": "Check the request fields and paging parameters"}, 400)
     _logger.error("Web request failed: path=%s error_type=%s", request.url.path, type(error).__name__)

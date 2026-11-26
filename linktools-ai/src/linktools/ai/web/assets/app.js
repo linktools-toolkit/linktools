@@ -1169,6 +1169,10 @@ function selectAttachments() {
   if(turnUploads.length+files.length>limit.max_files || files.some(file=>!file.size)){
     notice(`Choose up to ${limit.max_files} nonempty files.`);return;
   }
+  const totalBytes=turnUploads.reduce((total,{file})=>total+file.size,0)+files.reduce((total,file)=>total+file.size,0);
+  if(totalBytes>limit.max_bytes){
+    notice(`Attachments must total at most ${limit.max_bytes.toLocaleString()} bytes.`);return;
+  }
   turnUploads=[...turnUploads,...files.map(file=>({file,id:shortAttemptId()}))];
   saveDraft();renderAttachments();
 }

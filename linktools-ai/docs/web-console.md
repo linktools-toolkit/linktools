@@ -96,6 +96,12 @@ Selected files are sent with the message, not read from the server workspace.
 A message accepts up to 32 nonempty files, subject to the Runtime's input budget.
 The Runtime uses its configured Object Store for attachment bodies;
 conversation history carries attachment summaries, not file bytes.
+The default attachment total is 5 MiB of original file bytes per turn. Embedded
+hosts can set `RuntimeFeatures(..., limits=PromptLimits(max_turn_attachment_bytes=...))`;
+a lower `max_binary_input_bytes` still applies. Web clients read the effective
+limit from `/api/config`. The HTTP JSON allowance includes Base64 expansion.
+Attachment bytes have a separate bound from stored text context; model input
+limits and token accounting still depend on the selected provider.
 The Web composer uses the default Agent.
 
 To allow image attachments for one invocation, use `LINKTOOLS_MODEL_VISION=1 ai-web`.

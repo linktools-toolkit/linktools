@@ -101,7 +101,7 @@ from ._persistence_configuration import validate_persistence_capabilities, capab
 from ..capability import TraceCapability
 from ..history import History
 from ..core import token_seed
-from ._regenerable_turn import _CONTEXT_BYTES, _RegenerableTurnRunner
+from ._regenerable_turn import _RegenerableTurnRunner
 from ._session import RuntimeSessionService
 from ._subagent import SubagentDispatcher
 from ..history import TransientExecutionHistoryStore
@@ -1068,7 +1068,7 @@ async def _build_local_components(
                 # Borrow the existing workspace access; its original materializer owns teardown.
                 input_materializer=ExecutionInputMaterializer(
                     input_materializer.access,
-                    replace(limits, max_binary_input_bytes=min(limits.max_binary_input_bytes, _CONTEXT_BYTES)),
+                    replace(limits, max_binary_input_bytes=min(limits.max_binary_input_bytes, limits.max_turn_attachment_bytes)),
                     object_store=state.object_store(PersistenceDomain.EXECUTION),
                     object_key_factory=object_key_factory,
                 ),

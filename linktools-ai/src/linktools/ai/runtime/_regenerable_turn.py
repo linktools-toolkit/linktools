@@ -11,7 +11,7 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import asdict, dataclass, replace
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -913,10 +913,12 @@ class _RegenerableTurnRunner:
             through = row["context_through"]
             session_context = request.get("session_context", "all")
             stored = self._stored_input(request)
+            input_bytes, media_bytes = self._input_usage(prompt, stored)
             history = await self._read_admitted_history(
                 key, context_from=row["context_from"], context_through=row["context_through"],
                 lineage=lineage, session_context=session_context,
-                remaining=_CONTEXT_BYTES - self._input_bytes(prompt, stored),
+                remaining=_CONTEXT_BYTES - input_bytes,
+                remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
             )
             frozen_binding = row["binding_json"]
             if frozen_binding is None:
@@ -1396,15 +1398,19 @@ class _RegenerableTurnRunner:
                 producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)
 
+    @property
+    def attachment_limits(self) -> PromptLimits:
+        return self._input_materializer.limits
+
     async def _read_admitted_history(
         self, key: SessionTurnKey, *, context_from: int, context_through: int,
-        lineage: tuple[SessionTurnSegment, ...], session_context: SessionContext, remaining: int,
+        lineage: tuple[SessionTurnSegment, ...], session_context: SessionContext, remaining: int, remaining_media: int,
     ) -> tuple[ModelMessage, ...]:
         after = context_from - 1
         if (not 0 <= context_through - after <= 128 or session_context not in ("all", "current_turn")
                 or session_context == "current_turn" and after != context_through):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted context range is invalid")
-        if remaining < 0:
+        if remaining < 0 or remaining_media < 0:
             raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         history: list[ModelMessage] = []
         positions = await self._store.read_context_range(
@@ -1414,8 +1420,10 @@ class _RegenerableTurnRunner:
         for position in positions:
             prior = position.request
             prior_input = self._stored_input(prior)
-            remaining -= self._input_bytes(prior["prompt"], prior_input) + position.transcript_bytes
-            if remaining < 0:
+            input_bytes, media_bytes = self._input_usage(prior["prompt"], prior_input)
+            remaining -= input_bytes + position.transcript_bytes
+            remaining_media -= media_bytes
+            if remaining < 0 or remaining_media < 0:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
             restored = await self._restore_prompt(prior["prompt"], prior_input)
             history.extend(restore_turn_prompt(restored, position.messages))
@@ -1499,9 +1507,11 @@ class _RegenerableTurnRunner:
         }))
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
+        input_bytes, media_bytes = self._input_usage(text, captured if stored_input is not None else None)
         context_from, history = await self._admission_history(
             key, through=through, lineage=lineage, session_context=execution.session_context,
-            remaining=_CONTEXT_BYTES - self._input_bytes(text, captured if stored_input is not None else None),
+            remaining=_CONTEXT_BYTES - input_bytes,
+            remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
         )
         result = await commands._reserve_canonical_graph_start(
             reservation, turns=self._store, key=key, expected_revision=revision,
@@ -1601,6 +1611,7 @@ class _RegenerableTurnRunner:
         model_prompt = None
         attachments = ()
         input_size = len(text.encode("utf-8"))
+        media_bytes = 0
         if not isinstance(prompt, str):
             materialized = await self._input_materializer.materialize(prompt, files)
             validate_model_inputs(binding.compiled_agent.model, materialized)
@@ -1615,13 +1626,14 @@ class _RegenerableTurnRunner:
                     {**item, "display_name": name}
                     for item, name in zip(attachments, attachment_display_names, strict=True)
                 )
-            input_size = captured.payload.size
+            input_size, media_bytes = self._input_usage("", captured, content=model_prompt)
             if input_size > _CONTEXT_BYTES:
                 raise AIError(ErrorCode.PROMPT_TOO_LARGE)
             # The payload already contains the ordered text and native content
             # metadata. Only retain the derived attachment summaries as a view.
             captured = replace(captured, view={"version": 1, "attachments": list(attachments)})
             stored = await self._input_materializer.materialize_payload(captured, tenant_id=context.principal.tenant_id)
+            input_size, media_bytes = self._input_usage("", stored)
             request["input"] = encode_domain(stored)
             request["input_intent"] = self._input_materializer.intent(prompt, files).digest
         elif files:
@@ -1632,7 +1644,7 @@ class _RegenerableTurnRunner:
             model_prompt = tuple(materialized)
             detached = MaterializedUserContent(model_prompt[:-1], {"attachments": materialized.view["attachments"]})
             captured = self._input_materializer.capture(detached)
-            input_size += captured.payload.size
+            input_size, media_bytes = self._input_usage(text, captured, content=model_prompt[:-1])
             if input_size > _CONTEXT_BYTES:
                 raise AIError(ErrorCode.PROMPT_TOO_LARGE)
             stored = await self._input_materializer.materialize_payload(captured, tenant_id=context.principal.tenant_id)
@@ -1663,6 +1675,7 @@ class _RegenerableTurnRunner:
         context_from, history = await self._admission_history(
             key, through=through, lineage=lineage, session_context=session_context,
             remaining=_CONTEXT_BYTES - input_size,
+            remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
         )
 
         if not await self._store.accept(
@@ -1683,7 +1696,7 @@ class _RegenerableTurnRunner:
 
     async def _admission_history(
         self, key: SessionTurnKey, *, through: int, lineage: tuple[SessionTurnSegment, ...],
-        session_context: SessionContext, remaining: int,
+        session_context: SessionContext, remaining: int, remaining_media: int,
     ) -> tuple[int, list[ModelMessage]]:
         history: list[tuple[ModelMessage, ...]] = []
         context_from = through + 1
@@ -1694,12 +1707,14 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Missing admitted session input")
             candidate_prompt = candidate.request["prompt"]
             stored = self._stored_input(candidate.request)
-            size = self._input_bytes(candidate_prompt, stored) + candidate.transcript_bytes
-            if size > remaining:
+            input_bytes, media_bytes = self._input_usage(candidate_prompt, stored)
+            size = input_bytes + candidate.transcript_bytes
+            if size > remaining or media_bytes > remaining_media:
                 break
             restored = await self._restore_prompt(candidate_prompt, stored)
             history.append(restore_turn_prompt(restored, candidate.messages))
             remaining -= size
+            remaining_media -= media_bytes
             context_from = candidate.turn_no
         return context_from, [message for messages in reversed(history) for message in messages]
 
@@ -1708,8 +1723,20 @@ class _RegenerableTurnRunner:
         return decode_domain(request["input"], StoredUserInput) if "input" in request else None
 
     @staticmethod
-    def _input_bytes(prompt: str, stored: StoredUserInput | None) -> int:
-        return len(prompt.encode("utf-8")) + (0 if stored is None else stored.payload.size)
+    def _input_usage(
+        prompt: str, stored: StoredUserInput | None, *, content: Sequence[UserContent] = (),
+    ) -> tuple[int, int]:
+        """Charge text and metadata separately from the binary data carried by the prompt."""
+        text_bytes = len(prompt.encode("utf-8"))
+        if stored is None:
+            return text_bytes, 0
+        payload = stored.payload
+        sizes = ([ref.size for ref in payload.object_refs()] if payload.encoding == "json-attachments"
+                 else [len(item.data) for item in content if isinstance(item, BinaryContent)])
+        # The canonical user-content payload retains the original encoded length
+        # even after attachment bytes move to object storage. Only charge that
+        # base64 body against the separate binary budget.
+        return text_bytes + payload.size - sum(4 * ((size + 2) // 3) for size in sizes), sum(sizes)
 
     async def _restore_prompt(
         self, prompt: str, stored: StoredUserInput | None,
