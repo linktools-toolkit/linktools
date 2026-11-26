@@ -17,7 +17,8 @@ from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy, canonical_json_bytes
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._archive import ContentArchive
-from linktools.ai.persistence.codec import decode_envelope, execution_payload_slots, payload_reference
+from linktools.ai.model import StoredUserInput
+from linktools.ai.persistence.codec import decode_domain, decode_envelope, execution_payload_slots, payload_reference
 from linktools.ai.persistence.contracts import ExecutionRecord, RecoveryHandoffPhase
 from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -213,7 +214,14 @@ async def test_native_session_retains_large_messages_without_execution_control_r
                 try:
                     await asyncio.wait_for(entered.wait(), 5)
                     await runtime.sessions.inspect("session", principal=runtime.default_principal)
-                    assert (await state.session_turns.get_turn(large.key))["result_json"] is None
+                    active = await state.session_turns.get_turn(large.key)
+                    assert active["result_json"] is None
+                    if large_input:
+                        request = active["request_json"]
+                        assert request["prompt"] == "" and _INPUT.encode() not in canonical_json_bytes(request)
+                        payload = decode_domain(request["input"], StoredUserInput)
+                        assert payload.codec == "text" and payload.payload.kind == "object"
+                        assert payload.payload.size == len(_INPUT.encode())
                 finally:
                     release.set()
                 assert (await large.wait_final(timeout_seconds=10)).view["output"] == {"text": _OUTPUT}

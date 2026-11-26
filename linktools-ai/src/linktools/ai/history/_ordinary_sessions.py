@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -97,7 +97,9 @@ def _multipart_prompt(value: StoredUserInput) -> dict[str, JsonValue]:
     return {"kind": "items", "items": text_items}
 
 
-def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
+async def _turn_view(
+    row: RowMapping, read_scalar_input: Callable[[StoredUserInput], Awaitable[str]],
+) -> dict[str, JsonValue]:
     state = row["state"]
     result = row["result_json"]
     output = None
@@ -129,7 +131,8 @@ def _turn_view(row: RowMapping) -> dict[str, JsonValue]:
             for item in stored_input_attachment_views(stored_input)
         ]
         if prompt == "":
-            prompt = _multipart_prompt(stored_input)
+            prompt = (await read_scalar_input(stored_input) if stored_input.codec == "text"
+                      else _multipart_prompt(stored_input))
     return {
         "turn_id": row["turn_id"].decode("utf-8"),
         "turn_no": row["turn_no"],
@@ -263,7 +266,8 @@ class _OrdinarySessionHistory:
         next_cursor = self._next_cursor(turns[limit - 1]["turn_no"], kind, digest) if len(turns) > limit else None
         return {
             "session": _session_view(row),
-            "timeline": {"items": [_turn_view(turn) for turn in reversed(turns[:limit])], "next_cursor": next_cursor},
+            "timeline": {"items": [await _turn_view(turn, self._store.read_scalar_input) for turn in reversed(turns[:limit])],
+                         "next_cursor": next_cursor},
         }
 
     async def turn_trace(
@@ -353,5 +357,5 @@ class _OrdinarySessionHistory:
                 ResourceRef(ResourceKind.EXECUTION, key.turn_id, self._tenant_id, owner),
             )
             usage = row.get("usage")
-        view = _turn_view(row)
+        view = await _turn_view(row, self._store.read_scalar_input)
         return _ObservedTurnResult(key, row["generation"], ExecutionStatus(view["status"]), usage, view)

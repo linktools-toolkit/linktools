@@ -15,7 +15,7 @@ from weakref import finalize
 
 from ..agent import AgentBindingContract
 from ..core import (
-    SESSION_REQUEST_KEY_MAX_BYTES, ImmutableJsonMapping, canonical_json_bytes, canonical_sha256,
+    RUNTIME_OBJECT_STORE_ID, SESSION_REQUEST_KEY_MAX_BYTES, ImmutableJsonMapping, canonical_json_bytes, canonical_sha256,
     deterministic_id, validate_session_request_key,
 )
 from ..errors import AIError, ErrorCode
@@ -33,6 +33,8 @@ from ..storage import (
     sql_unique,
 )
 from ._archive import ArchiveContentInput, PreparedArchive
+from ._object_key import ObjectKeyFactory
+from ._plan import PersistenceDomain
 from .codec import decode_agent_binding_content, encode_agent_binding_content, encode_domain, restore_native_user_input
 from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage, fork_segments, lineage_predicate
 from ._turn_sql_schema import (
@@ -53,6 +55,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from ..core import JsonValue, RunBudget, UsageMetrics
+    from ..model import StoredUserInput
+    from ..storage import ObjectRef
     from .contracts import BudgetRepository
     from ._archive import ContentArchive
     from ..execution import PendingToolContinuation
@@ -272,6 +276,9 @@ class SqlSessionTurnReader:
         self._sessions = metadata.tables[SESSION_TABLE]
         self._turns = metadata.tables[SESSION_TURN_TABLE]
         self._transcript_source = None
+        self._input_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None
+        self._input_object_key = ObjectKeyFactory(namespace)
+        self._input_tenant_id = tenant_id
         self._split_transcript_source = None
         self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
         self._recent_budget = _ContextBudget()
@@ -280,6 +287,25 @@ class SqlSessionTurnReader:
     def bind_transcript_reader(self, conversation_store, archive_provider, capture) -> None:
         """Bind native transcript reads to the same SQL snapshot as turn metadata."""
         self._transcript_source = conversation_store, archive_provider, capture
+
+    def bind_input_reader(self, read: Callable[[ObjectRef], Awaitable[bytes]]) -> None:
+        self._input_reader = read
+
+    async def read_scalar_input(self, value: StoredUserInput) -> str:
+        """Resolve the authorized turn's external scalar, never an attachment body."""
+        ref = value.payload.ref
+        if value.codec != "text" or ref is None or value.view is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if ref.store_id != RUNTIME_OBJECT_STORE_ID or ref.key != self._input_object_key.key(
+            PersistenceDomain.EXECUTION, self._input_tenant_id, ref.digest,
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if self._input_reader is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        try:
+            return (await self._input_reader(ref)).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _bind_split_transcript_reader(self, resolve) -> None:
         self._split_transcript_source = resolve

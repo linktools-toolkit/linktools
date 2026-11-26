@@ -469,7 +469,7 @@ class ExecutionInputMaterializer:
         return await self.materialize_payload(self.capture(value), tenant_id=tenant_id)
 
     async def materialize_payload(
-        self, value: "StoredUserInput", *, tenant_id: str,
+        self, value: "StoredUserInput", *, tenant_id: str, externalize_text: bool = False,
     ) -> "StoredUserInput":
         """Apply source payload placement to an already frozen accepted input."""
         from ..execution import StoredUserInput
@@ -477,8 +477,13 @@ class ExecutionInputMaterializer:
         if not isinstance(value, StoredUserInput):
             raise TypeError("value must be StoredUserInput")
         payload = value.payload
-        if (value.codec != _USER_CONTENT_CODEC or payload.kind != "inline"
-                or payload.encoding != "json" or self._object_store is None):
+        text = externalize_text and value.codec == _TEXT_CODEC and payload.encoding == "utf-8"
+        if payload.kind != "inline" or (not text and (
+                value.codec != _USER_CONTENT_CODEC or payload.encoding != "json")):
+            return value
+        if self._object_store is None:
+            if text:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Large text input requires object storage")
             return value
         from ..persistence.objects import ObjectKeyFactory, put_runtime_object
 
@@ -488,6 +493,9 @@ class ExecutionInputMaterializer:
             return await put_runtime_object(
                 self._object_store, self._object_key_factory, self._object_domain, tenant_id, data,
             )
+
+        if text:
+            return replace(value, payload=StoredPayload.object(await write(payload.decode().encode("utf-8"))))
 
         placed = await store_attachment_payload(
             canonical_json_bytes(payload.value), format="user-content", write_object=write,

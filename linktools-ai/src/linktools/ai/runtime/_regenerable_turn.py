@@ -318,7 +318,10 @@ class _RegenerableTurnRunner:
     ) -> None:
         succeeded = state == "succeeded"
         self._store.note_terminal_context(
-            turn.key, turn_no=turn.number, prompt=turn.prompt if succeeded else None,
+            turn.key, turn_no=turn.number, prompt=(
+                "" if succeeded and turn.stored_input is not None
+                and decode_domain(turn.stored_input, StoredUserInput).codec == "text" else turn.prompt
+            ) if succeeded else None,
             stored_input=turn.stored_input if succeeded else None, messages=messages, succeeded=succeeded,
             reset_context=turn.session_context == "current_turn",
         )
@@ -481,7 +484,11 @@ class _RegenerableTurnRunner:
                 prior_files = () if prior_input is None or "input_intent" in request else tuple(
                     item["path"] for item in stored_input_attachment_views(prior_input)
                 )
-                same_input = request["prompt"] == prompt and prior_files == normalized_files
+                if prior_input is not None and prior_input.codec == "text":
+                    same_input = (not normalized_files and request["prompt"] == ""
+                                  and prior_input.payload.digest == self._input_materializer.capture(prompt).payload.digest)
+                else:
+                    same_input = request["prompt"] == prompt and prior_files == normalized_files
             else:
                 same_input = request.get("input_intent") == self._input_materializer.intent(prompt, normalized_files).digest
             replay_mode, replay_planning, replay_thinking = resolve_execution_policy(
@@ -964,7 +971,7 @@ class _RegenerableTurnRunner:
                         events = await steps.list_events(run_id=key.turn_id)
                         completed_checkpoint = any(event.kind == "run_completed" for event in events)
             turn = _AdmittedTurn(
-                key, row["turn_no"], prompt, history,
+                key, row["turn_no"], model_prompt if isinstance(model_prompt, str) else prompt, history,
                 _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding})),
                 session["revision"], repository_instructions, generation + 1, session_context=session_context,
                 model_prompt=None if isinstance(model_prompt, str) else model_prompt,
@@ -1422,6 +1429,22 @@ class _RegenerableTurnRunner:
             request["input"] = encode_domain(stored)
             attachments = stored_input_attachment_views(stored)
         terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding}))
+        if input_size > _CONTEXT_BYTES:
+            raise AIError(ErrorCode.PROMPT_TOO_LARGE)
+        if terminal_bytes < _TERMINAL_RESERVE and isinstance(prompt, str) and not files:
+            # Leave completed/competing receipts to the same replay path before
+            # placing another body. Inline starts retain the no-extra-read path.
+            if await self._store.find_request(key.session_id, request_key) is not None:
+                return None
+            request["prompt"] = ""
+            if _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding})) < _TERMINAL_RESERVE:
+                raise AIError(ErrorCode.PROMPT_TOO_LARGE)
+            source = self._input_materializer.capture(prompt)
+            placed = await self._input_materializer.materialize_payload(
+                source, tenant_id=context.principal.tenant_id, externalize_text=True,
+            )
+            request["input"] = encode_domain(placed)
+            terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding}))
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
@@ -1480,6 +1503,10 @@ class _RegenerableTurnRunner:
     ) -> str | Sequence[UserContent]:
         if stored is None:
             return prompt
+        if stored.codec == "text":
+            if prompt:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Turn input has two text owners")
+            return await self._store.read_scalar_input(stored)
         detached = await self._input_materializer.restore(stored)
         if isinstance(detached, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Detached turn input is not multipart")
