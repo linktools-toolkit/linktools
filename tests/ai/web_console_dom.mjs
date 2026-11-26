@@ -352,7 +352,7 @@ if(process.argv[3]==='session-published-turn') {
   emitTurn({type:'delta',...live,delta_kind:'thinking',part_index:0,text:'Stale thought'});
   emitTurn({type:'preview_reset',...live});
   await node('chat-mode').click();
-  const nativeThought=()=>descendants(node('conversation')).find(card=>card.tagName==='DETAILS' && card.body?.textContent==='Native thought');
+  const nativeThought=()=>descendants(node('conversation')).find(card=>card.tagName==='DETAILS' && card.body?.textContent.startsWith('Native thought'));
   emitTurn({type:'progress',...live,item:{kind:'model',key:live.model_key,status:'RUNNING'}});
   emitTurn({type:'delta',...live,attempt:2,delta_kind:'thinking',part_index:0,text:'Native thought'});
   assert.doesNotMatch(node('conversation').textContent,/Model request|STARTED/);
@@ -362,10 +362,18 @@ if(process.argv[3]==='session-published-turn') {
   liveThought.open=true;
   emitTurn({type:'thinking_completed',...live,part_index:0,elapsed_ms:421});
   assert.ok(liveThought.className.split(' ').includes('process-running'),'discard timing from a superseded attempt');
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'thinking',part_index:1,text:'Second thought'});
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'thinking',part_index:0,text:' continues'});
+  const thoughtCards=()=>descendants(node('conversation')).filter(card=>card.tagName==='DETAILS' && card.body?.textContent.includes('thought'));
+  await until('interleaved Thinking part updated in place',()=>liveThought.body.textContent==='Native thought continues');
+  assert.deepEqual(thoughtCards().map(card=>card.body.textContent),['Native thought continues','Second thought']);
+  assert.equal(thoughtCards()[0],liveThought);
+  assert.equal(liveThought.open,true);
+  assert.ok(liveThought.className.split(' ').includes('process-running'),'an interleaved part does not complete the first one');
   emitTurn({type:'thinking_completed',...live,attempt:2,part_index:0,elapsed_ms:15});
   assert.equal(liveThought.className.split(' ').includes('process-running'),false);
   assert.equal(liveThought.elapsedNode.textContent,'15 ms');
-  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:1,text:'Native preview'});
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:2,text:'Native preview'});
   assert.equal(nativeThought(),liveThought);
   assert.equal(liveThought.open,true);
   assert.equal(node('composer').hidden,false);
@@ -377,7 +385,7 @@ if(process.argv[3]==='session-published-turn') {
   stopResponse({accepted:false});await stop;
   assert.match(node('notice').textContent,/Stop not confirmed/);
   emitTurn({type:'terminal',turn_id:ordinaryTurn,turn_no:1,revision:2,generation:1,state:'succeeded',
-    prompt:'Native question',items:[{item_kind:'thinking',content:'Native thought',elapsed_ms:15}, {item_kind:'assistant',content:'Native finished'}]});
+    prompt:'Native question',items:[{item_kind:'thinking',content:'Native thought continues',elapsed_ms:15}, {item_kind:'assistant',content:'Native finished'}]});
   assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native finished/s);
   assert.equal(nativeThought().open,true);
   assert.equal(nativeThought().elapsedNode.textContent,'15 ms');

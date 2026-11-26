@@ -364,6 +364,7 @@ function ordinaryTurnNode(turn, previous=null) {
   const node=element('article','turn');node.dataset.turn=turn.turn_id;
   node.toolRows=previous?.toolRows || new Map();
   node.thinkingRows=new Map();
+  node.livePartBodies=new Map();
   const appendThought=(part,text,elapsed,running=false,open=false)=>{
     const card=previous?.thinkingRows?.get(part) || thinkingMessage('Thinking',text);
     if(card.body.textContent!==text)card.body.textContent=text;
@@ -409,10 +410,12 @@ function ordinaryTurnNode(turn, previous=null) {
       ? appendThought(part,part.text,part.elapsedMs,!turn.conversation_committed && !part.done)
       : element('div','message ordinary-live',part.text);
     if(part.kind!=='thinking')answers.append(body);
-    if(!turn.conversation_committed && part===parts.at(-1))node.liveDeltaBody=body;
+    if(!turn.conversation_committed)node.livePartBodies.set(part,body);
   }
   for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
   node.append(answers);
+  if(!turn.conversation_committed && turn.previewGap!=null)
+    node.append(element('p','muted','Live preview is incomplete. The final reply will appear here.'));
   if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
   const heading={RECOVERY_REQUIRED:'Recovery required',WAITING_DEFERRED:'Waiting for approval or tool results',CANCELLING:'Cancelling…'}[turn.status];
   if(heading)node.append(element('div','turn-heading',heading));
@@ -526,6 +529,7 @@ function watchOrdinarySession(id) {
         && !state.turns.some(row=>row.turn_id===turnId))showError(error);
     }).finally(()=>{read.frames=null;});
   };
+  const dirtyParts=new Set();
   function applyPreview(frame) {
     if(activeTurn()!==frame.turn_id)return;
     const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
@@ -578,22 +582,30 @@ function watchOrdinarySession(id) {
     }
     const kind=frame.delta_kind;
     if(typeof frame.text!=='string' || (kind!=='text' && kind!=='thinking') || !frame.text)return;
-    const part=turn.liveParts.at(-1);
-    if(part?.kind!==kind || part.modelKey!==frame.model_key || part.attempt!==frame.attempt || part.index!==frame.part_index){
-      if(part?.kind==='thinking')part.done=true;
+    const tail=turn.liveParts.at(-1);
+    const matches=part=>part?.kind===kind && part.modelKey===frame.model_key
+      && part.attempt===frame.attempt && part.index===frame.part_index;
+    const scoped=typeof frame.model_key==='string' && Number.isSafeInteger(frame.attempt)
+      && Number.isSafeInteger(frame.part_index);
+    const part=matches(tail)?tail:scoped?turn.liveParts.find(matches):null;
+    if(!part){
+      if(!scoped && tail?.kind==='thinking')tail.done=true;
       turn.liveParts.push({kind,text:frame.text,modelKey:frame.model_key,attempt:frame.attempt,index:frame.part_index});
       patchOrdinaryTurn(turn);
       return;
     }
     part.text+=frame.text;
+    dirtyParts.add(part);
     if(!watch.paint)watch.paint=requestAnimationFrame(()=>{
       watch.paint=null;
-      if(!current())return;
-      const active=activeTurn();
-      const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
-      const node=[...$('conversation').children].find(item=>item.dataset.turn===active);
-      const tail=row?.liveParts?.at(-1);
-      if(node?.liveDeltaBody && typeof tail?.text==='string')node.liveDeltaBody.textContent=tail.text;
+      if(current()){
+        const node=[...$('conversation').children].find(item=>item.dataset.turn===activeTurn());
+        for(const part of dirtyParts){
+          const body=node?.livePartBodies?.get(part);
+          if(body)body.textContent=part.text;
+        }
+      }
+      dirtyParts.clear();
     });
   }
   source.addEventListener('session_error',event=>{
