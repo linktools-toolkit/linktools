@@ -138,13 +138,13 @@ function deferred(path){
   resolve.reject=error=>{delays.delete(path);reject(error);};resolve.requested=requested;
   return resolve;
 }
-let forkAttempts=0,cancelAttempts=0,endMode=null,turnSessions=false;
+let forkAttempts=0,cancelAttempts=0,endMode=null,turnSessions=false,turnTrace=false;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
   calls.push({key,method,body,signal:options.signal,query:{...Object.fromEntries(url.searchParams),identities:url.searchParams.getAll('identity')}});
   if(networkFailures.has(method+' '+key))throw new Error('Runtime read unavailable');
   if(delays.has(method+' '+key)){const pending=delays.get(method+' '+key);pending.started();return pending.promise;}
-  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',runtime:{namespace:'actual-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,turn_sessions:turnSessions,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
+  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',runtime:{namespace:'actual-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,turn_sessions:turnSessions,turn_trace:turnTrace,turn_model_messages:turnTrace,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
   if(key==='/api/executions' && endMode?.listError)throw new Error('list unavailable');
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
@@ -275,6 +275,60 @@ if(process.argv[3]==='snapshot-tail') {
   failedStream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(failedSnapshot)+'\n\n'));failedStream.close();
   await until('failed terminal snapshot keeps metadata readback',()=>failureReads()>beforeFinalFailure);
   console.log('Successful SSE tail reuses metadata; transport/reconnect and observation errors reread authority');
+  process.exit(0);
+}
+if(process.argv[3]==='native-model-messages') {
+  turnSessions=true;turnTrace=true;
+  await node('settings').click();node('settings-dialog').close();
+  const id='b-current-turn',last='b-previous-turn',session=sessions.get('b');
+  Object.assign(session,{active_turn_id:id,last_turn_no:1,revision:1});
+  timelineOverrides.set('b',{items:[{turn_id:last,turn_no:1,status:'SUCCEEDED',
+    conversation_committed:true,user_input:{prompt:'Earlier question',attachments:[]},items:[]}],next_cursor:null});
+  await select('#session=b');
+  const queries=()=>calls.filter(call=>call.query.models==='true');
+  const entry=(seq,prompt)=>({turn_id:id,agent_run_seq:1,model_request_seq:seq,purpose:'agent',status:'SUCCEEDED',
+    model:{},content_included:true,request:{messages:[{kind:'request',parts:[{part_kind:'user-prompt',content:prompt}]}]},
+    response:{parts:[{part_kind:'text',content:'Retained model response'}]}});
+  assert.equal(node('native-mode').disabled,false);
+  assert.equal(queries().length,0,'opening Chat does not read diagnostic Trace');
+
+  const first=deferred('GET /api/sessions/b'),open=node('native-mode').click();
+  await first.requested;
+  assert.equal(queries().at(-1).query.turn_id,id);
+  assert.equal(queries().at(-1).query.include_content,'true');
+  first({items:[entry(1,'Retained SDK prompt')],next_cursor:'more-models'});await open;
+  assert.match(node('inspector-content').textContent,/Retained SDK prompt.*Retained model response/s);
+  assert.doesNotMatch(node('inspector-content').textContent,/Original HTTP diagnostics|Open subagent/);
+  const next=deferred('GET /api/sessions/b'),more=node('detail-more').click();
+  await next.requested;
+  assert.equal(queries().at(-1).query.cursor,'more-models');
+  next({items:[entry(2,'Second retained prompt')],next_cursor:null});await more;
+  const choose=descendants(node('inspector-content')).find(node=>node.className==='native-request');
+  choose.value=choose.children[1].value;choose.onchange();
+  assert.match(node('inspector-content').textContent,/Second retained prompt/);
+
+  node('detail-turn').value=last;
+  const previous=deferred('GET /api/sessions/b'),readPrevious=node('detail-turn').onchange();
+  await previous.requested;
+  assert.equal(queries().at(-1).query.turn_id,last);
+  previous({items:[],next_cursor:null});await readPrevious;
+  assert.match(node('inspector-content').textContent,/No model messages were captured for this turn/);
+
+  const slow=deferred('GET /api/sessions/b'),stale=node('native-mode').click();
+  await slow.requested;
+  await node('chat-mode').click();
+  slow({items:[entry(4,'Obsolete prompt')],next_cursor:null});await stale;
+  assert.equal(node('inspector').hidden,true);
+  assert.doesNotMatch(node('inspector-content').textContent,/Obsolete prompt/);
+  const tracePage=deferred('GET /api/sessions/b'),openTrace=node('inspector-toggle').click();
+  await tracePage.requested;
+  const traceCall=calls.at(-1);
+  assert.equal(traceCall.query.trace,'true');assert.equal(traceCall.query.models,undefined);
+  tracePage({items:[{turn_id:last,step_event_seq:1,payload:{kind:'TOOL_CALL',status:'STARTED',tool_name:'trace only tool'}}],next_cursor:null});
+  await openTrace;
+  assert.match(node('inspector-content').textContent,/trace only tool/);
+  assert.equal(calls.filter(call=>call.key.startsWith('/api/executions/')).length,0);
+  console.log('Native Model messages lazily reads authorized paged SDK content and ignores obsolete responses');
   process.exit(0);
 }
 if(process.argv[3]==='native-stop') {

@@ -24,8 +24,10 @@ from ..model.messages import (
     CANONICAL_OUTPUT_TOOL_NAME, THINKING_ELAPSED_MS_METADATA_KEY, canonical_structured_output,
 )
 from ..persistence.codec import decode_domain
+from ..persistence.contracts import ModelInteractionRecord
+from ..persistence.runs import ModelInteractionStateStepArchive
 from ..persistence.turns import SessionTurnKey, SessionTurnSegment, SqlSessionTurnReader, decode_session_lineage
-from ._projection import _trace_payload
+from ._projection import StepExecutionHistoryReader, _trace_payload
 from ..session import SessionTurnItem
 from ._session_timeline import _project_turn_tool_process
 
@@ -316,10 +318,9 @@ class _OrdinarySessionHistory:
                          "next_cursor": next_cursor},
         }
 
-    async def turn_trace(
-        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
-        source: StateStepArchive | None, cursor: str | None, limit: int,
-    ) -> Page[SessionTurnTraceItem]:
+    async def _authorize_turn_trace(
+        self, session_id: str, turn_id: str, principal: Principal, *, local_workspace: bool,
+    ) -> None:
         validate_execution_id(turn_id)
         await self._session(session_id, principal, local_workspace=local_workspace)
         key = SessionTurnKey(session_id, turn_id)
@@ -330,6 +331,12 @@ class _OrdinarySessionHistory:
             principal, AuthorizationAction.EXECUTION_READ,
             ResourceRef(ResourceKind.EXECUTION, turn_id, self._tenant_id, owner["request_json"]["principal"]["principal_id"]),
         )
+
+    async def turn_trace(
+        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
+        source: StateStepArchive | None, cursor: str | None, limit: int,
+    ) -> Page[SessionTurnTraceItem]:
+        await self._authorize_turn_trace(session_id, turn_id, principal, local_workspace=local_workspace)
         if source is None:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         limit = validate_page_limit(limit)
@@ -367,6 +374,51 @@ class _OrdinarySessionHistory:
                 self._signer, tenant_id=self._tenant_id, resource_kind=kind, filter_digest=digest,
                 position=json.dumps((head, last_event.timestamp.isoformat(), last_sequence), separators=(",", ":")),
             )
+        return Page(tuple(items), next_cursor)
+
+    async def turn_model_interactions(
+        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
+        source: StateStepArchive | None, cursor: str | None, limit: int,
+        include_content: bool,
+    ) -> Page[dict[str, JsonValue]]:
+        await self._authorize_turn_trace(session_id, turn_id, principal, local_workspace=local_workspace)
+        if include_content and not local_workspace:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        limit = validate_page_limit(limit)
+        kind = "SESSION_TURN_MODELS"
+        digest = canonical_sha256({
+            "session": session_id, "turn": turn_id, "principal": principal_identity_payload(principal),
+            "include_content": include_content,
+        })
+        after = self._cursor_position(cursor, kind, digest) if cursor is not None else 0
+        if not isinstance(source, ModelInteractionStateStepArchive):
+            return Page((), None)
+        run, rows = await source.read_model_interactions_with_run(
+            agent_run_id=turn_id, after_model_request_seq=after,
+            limit=limit + 1,
+        )
+        if run is None:
+            if rows:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return Page((), None)
+        if run.agent_run_id != turn_id or run.agent_conversation_id != session_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        previous = after
+        for value in rows:
+            if (not isinstance(value, ModelInteractionRecord) or value.agent_run_id != turn_id
+                    or value.model_request_seq <= previous):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous = value.model_request_seq
+        selected = rows[:limit]
+        resolved = (await source.resolve_model_interactions(selected) if include_content else [None] * len(selected))
+        items = []
+        for value, body in zip(selected, resolved, strict=True):
+            projected = asdict(StepExecutionHistoryReader._project_model_interaction(
+                value, turn_id, 1, 0, body, include_content=include_content,
+            ))
+            del projected["execution_id"]
+            items.append({"turn_id": turn_id, **projected})
+        next_cursor = self._next_cursor(selected[-1].model_request_seq, kind, digest) if len(rows) > limit else None
         return Page(tuple(items), next_cursor)
 
     async def turn_result(

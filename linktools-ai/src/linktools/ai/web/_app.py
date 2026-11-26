@@ -510,7 +510,8 @@ class _Console:
             "turn_sessions": self.turn_sessions,
             **({"attachment_upload": {"max_files": upload.max_binary_input_parts,
                                       "max_bytes": upload.max_binary_input_bytes}} if upload is not None else {}),
-            **({"turn_trace": True} if self.turn_sessions and self.history is not None
+            **({"turn_trace": True, "turn_model_messages": self.local_turn_workspace}
+               if self.turn_sessions and self.history is not None
                and self.history.has_turn_trace else {}),
             "capabilities": self.capabilities,
             "metric_names": _SUMMARY_METRICS,
@@ -560,6 +561,16 @@ class _Console:
         include_timeline = request.query_params.get("include_timeline", "true")
         if include_timeline not in {"true", "false"}:
             raise ValueError("include_timeline must be true or false")
+        models = request.query_params.get("models")
+        if models is not None:
+            if (models != "true" or not self.turn_sessions or include_timeline != "true"
+                    or "execution_id" in request.query_params or "trace" in request.query_params):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Model interactions require an exact canonical turn")
+            return _json(await history.turn_model_interactions(
+                identity, _text(request.query_params, "turn_id"), principal=self.principal,
+                local_workspace=self.local_turn_workspace, include_content=_content(request),
+                **_paging(request),
+            ))
         trace = request.query_params.get("trace")
         if trace is not None:
             if (trace != "true" or not self.turn_sessions or include_timeline != "true"

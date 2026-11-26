@@ -428,6 +428,17 @@ class History:
             source=self._session_trace_source, cursor=cursor, limit=limit,
         )
 
+    async def turn_model_interactions(
+        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool = False,
+        cursor: str | None = None, limit: int = 100, include_content: bool = False,
+    ) -> Page[dict[str, JsonValue]]:
+        """Read exact canonical turn Trace model interactions; bodies require the local workspace."""
+        return await self._require_ordinary_sessions().turn_model_interactions(
+            session_id, turn_id, principal=principal, local_workspace=local_workspace,
+            source=self._session_trace_source, cursor=cursor, limit=limit,
+            include_content=include_content,
+        )
+
     async def turn_result(
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool = False,
         producer_stopped_generation: int | None = None,

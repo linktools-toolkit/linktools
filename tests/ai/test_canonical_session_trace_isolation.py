@@ -159,6 +159,34 @@ async def test_session_trace_sink_cannot_hold_or_fail_authoritative_turn(
                 evidence = await history.turn_trace("chat", turn.key.turn_id, principal=principal)
                 by_sequence = {item.step_event_seq: item for item in evidence.items}
                 assert all(by_sequence.get(item.step_event_seq) == item for item in traces.items)
+
+            if sink in ("off", "healthy"):
+                from linktools.ai.web import create_app
+                from .test_web_console import client
+
+                params = {"session_id": "chat", "turn_id": turn.key.turn_id, "models": "true"}
+                async with client(create_app(history=history, local_workspace=True)) as http:
+                    metadata = await http.get("/api/session", params=params)
+                    assert metadata.status_code == 200, metadata.text
+                    exact = await http.get("/api/session", params={
+                        **params, "include_content": "true",
+                    })
+                    assert exact.status_code == 200, exact.text
+                    wrong_session = await http.get("/api/session", params={**params, "session_id": "other"})
+                    assert wrong_session.status_code == 404
+                    if sink == "healthy":
+                        item, = metadata.json()["items"]
+                        assert item["turn_id"] == turn.key.turn_id and "execution_id" not in item
+                        assert item["request"] == {} and item["response"] is None
+                        model_item, = exact.json()["items"]
+                        assert model_item["content_included"] is True
+                        assert "question" in str(model_item["request"]["messages"])
+                        assert "durable answer" in str(model_item["response"])
+                    else:
+                        assert exact.json() == {"items": [], "next_cursor": None}
+                async with client(create_app(history=history, local_workspace=False)) as http:
+                    denied = await http.get("/api/session", params={**params, "include_content": "true"})
+                    assert denied.status_code == 404
         assert calls == 1
     finally:
         await trace_engine.dispose()

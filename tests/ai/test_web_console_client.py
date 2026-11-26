@@ -101,7 +101,7 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     root = Path(__file__).parents[2]
     script = Path(__file__).with_name("web_console_dom.mjs")
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
-    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "tools", "guided", "details", "minimal", "resume", "streaming", "attempts", "unavailable", "session-sync", "session-open-active", "snapshot-tail", "session-published-turn"):
+    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "tools", "guided", "details", "minimal", "resume", "streaming", "attempts", "unavailable", "session-sync", "session-open-active", "snapshot-tail", "session-published-turn", "native-model-messages"):
         result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
         if result.returncode:
             error = re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<web module>", result.stderr)
