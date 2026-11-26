@@ -2,16 +2,17 @@
 # -*- coding: utf-8 -*-
 """Local command composition preserves completed execution observations."""
 
-from linktools.ai.persistence import Persistence
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
+from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import Runtime
 from linktools.ai.web import create_app
 import linktools.commands.ai._common as common_command
-from ._runtime_test_helpers import RuntimeUsageModels
+from ._runtime_test_helpers import RuntimeUsageModels, _wait_for_committed
 from .test_web_console import client, _HEADERS
 
 
@@ -25,6 +26,7 @@ def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
 
     opened = []
     identities = []
+    durable_trace = []
     original_open = Runtime.open
 
     @asynccontextmanager
@@ -60,12 +62,22 @@ def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
                             else:
                                 pytest.fail('Missing terminal turn')
                     identities.append(identity)
+
+                    async def trace_items():
+                        response = await http.get(f'/api/session?session_id=session&turn_id={identity}&trace=true')
+                        assert response.status_code == 200, response.text
+                        return response.json()['items']
+
+                    # Optional Trace publishes independently of the terminal
+                    # response. Observe its commit before testing cold reads.
+                    durable_trace[:] = await _wait_for_committed(trace_items, bool)
+                    assert all(item['turn_id'] == identity for item in durable_trace)
                 identity = identities[0]
                 for _ in range(2):
                     response = await http.get(f'/api/session?session_id=session&turn_id={identity}&trace=true')
                     assert response.status_code == 200, response.text
                     trace = response.json()['items']
-                    assert trace and all(item['turn_id'] == identity for item in trace)
+                    assert trace == durable_trace
                     response = await http.get(f'/api/session?session_id=session&turn_id={identity}')
                     assert response.status_code == 200, response.text
                     turn = response.json()
@@ -107,6 +119,11 @@ async def test_local_runtime_retains_terminal_model_history(
             result = await turn.wait_final()
             assert result.view['output'] == {'text': 'done'}
             identity = turn.key.turn_id
+            trace_before_close = await _wait_for_committed(
+                lambda: runtime.history.turn_trace(session.session_id, identity, principal=runtime.default_principal),
+                lambda page: bool(page.items),
+            )
+            assert all(item.turn_id == identity for item in trace_before_close.items)
             detail = await runtime.sessions.refresh(session.session_id, principal=runtime.default_principal)
             assert detail["timeline"]["items"][0]["turn_id"] == identity
             with pytest.raises(ValueError, match="requires max_age=0"):
@@ -131,10 +148,12 @@ async def test_local_runtime_retains_terminal_model_history(
             assert turn_response.status_code == 200, turn_response.text
             published = turn_response.json()
             assert published['conversation_committed']
+            assert published['user_input']['prompt'] == 'hello'
             assert [item['content'] for item in published['items'] if item['item_kind'] == 'assistant'] == ['done']
             assert 'output' not in published
             trace = await http.get('/api/session', params={**params, 'trace': 'true'})
-            assert trace.status_code == 200 and trace.json()['items']
+            assert trace.status_code == 200, trace.text
+            assert trace.json()['items'] == [asdict(item) for item in trace_before_close.items]
         else:
             response = await http.get(f'/api/executions/{identity}/models?include_content=true')
             assert response.status_code == 200, response.text
@@ -181,6 +200,8 @@ def test_run_command_history_is_readable_after_command_close(
                 trace = await http.get("/api/session", params={**params, "trace": "true"})
                 assert trace.status_code == 200, trace.text
                 items = trace.json()["items"]
-                assert items and all(item["turn_id"] == result["turn_id"] for item in items)
+                # This one-shot command does not wait for optional Trace.
+                # Any already committed observation still belongs to this turn.
+                assert all(item["turn_id"] == result["turn_id"] for item in items)
 
     asyncio.run(inspect())
