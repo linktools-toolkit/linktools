@@ -2293,7 +2293,7 @@ class ArtifactRepository(RuntimeRepository, Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ConversationRepositories:
-    sessions: SessionRepository
+    sessions: SessionRepository | None
     histories: ConversationHistoryRepository
     operations: OperationLedgerRepository
 

@@ -133,9 +133,17 @@ class RuntimeRetentionController:
             ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
         }:
             return False
-        if (retained is not None and not retained.retention_closed and retained.session_id is not None
-                and retained.conversation and not self.terminal_publication_confirmed(retained)):
-            sessions = self._conversation.sessions
+        sessions = self._conversation.sessions
+
+        session_release_confirmed = publication is not None and publication.session_released
+        if (retained is not None and retained.session_id is not None and sessions is None
+                and not session_release_confirmed):
+            # New native Graph executions are sessionless; a historical
+            # session-bound row must carry durable terminal-release proof.
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if (sessions is not None and retained is not None and not retained.retention_closed
+                and retained.session_id is not None and retained.conversation
+                and not self.terminal_publication_confirmed(retained)):
             await sessions.state_store.read(
                 lambda transaction: sessions.pending_turn_commit_in_transaction(
                     transaction, session_id=retained.session_id, execution_id=execution_id,
@@ -180,8 +188,9 @@ class RuntimeRetentionController:
         if not released:
             return False
         if (execution is not None and execution.session_id is not None
-                and not (publication is not None and publication.session_released)):
-            sessions = self._conversation.sessions
+                and not session_release_confirmed):
+            if sessions is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
             async def read_session(_transaction: "StateTransaction"):
                 return await sessions.get(execution.session_id, tenant_id=tenant_id)

@@ -83,6 +83,7 @@ from .state import (
     StateStorageGroup,
     StateStore,
     StateTransaction,
+    state_store_key,
     SqlStateRowReader,
     SqlStateFactReader,
     SqlStateTransaction,
@@ -128,8 +129,6 @@ if TYPE_CHECKING:
 
 
 def _require_turn_snapshot_partition(store: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
-    from .state import state_store_key
-
     if store.store_key != state_store_key(namespace, tenant_id, "execution"):
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
@@ -1871,6 +1870,13 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         execution_store = resources.stores.get(PersistenceDomain.EXECUTION)
         conversation_store = resources.stores.get(PersistenceDomain.CONVERSATION)
+        if (
+            isinstance(conversation_store, SqlStateStore)
+            and conversation_store.store_key == state_store_key(namespace, tenant_id, PersistenceDomain.CONVERSATION.value)
+            and any(record.kind in {"session", "session_turn_commit"}
+                    for record in semantic_domains.get(PersistenceDomain.CONVERSATION, ()))
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Pre-release SQL session storage layout")
         if waiting_checkpoint_group is not None:
             checkpoint_store = resources.stores.get(PersistenceDomain.CHECKPOINT)
             if (not isinstance(checkpoint_store, SqlStateStore)

@@ -464,7 +464,7 @@ class DefaultExecutionService(TaskExecutionService):
         object_store: ObjectStore,
         authorization: AuthorizationPolicy,
         *,
-        sessions: SessionRepository,
+        sessions: SessionRepository | None,
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         restore_binding: Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None = None,
@@ -957,10 +957,15 @@ class DefaultExecutionService(TaskExecutionService):
             return ExecutionHandle(execution.execution_id)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    def _legacy_sessions(self) -> SessionRepository:
+        if self._sessions is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return self._sessions
+
     async def _read_session_start(self, session_id: str, idempotency_key: str, *, tenant_id: str) -> _SessionStartRead:
         from ..persistence.commands import StateCommands
         session, identity = await StateCommands.read_session_start(
-            self._sessions, self._state.idempotency, session_id, idempotency_key, tenant_id=tenant_id,
+            self._legacy_sessions(), self._state.idempotency, session_id, idempotency_key, tenant_id=tenant_id,
         )
         return _SessionStartRead(session, identity)
 
@@ -3184,8 +3189,9 @@ class DefaultExecutionService(TaskExecutionService):
 
 
     async def _load_session(self, session_id: str, *, tenant_id: str) -> "SessionRecord | None":
-        return await self._sessions.state_store.read(
-            lambda _transaction: self._sessions.get(session_id, tenant_id=tenant_id)
+        sessions = self._legacy_sessions()
+        return await sessions.state_store.read(
+            lambda _transaction: sessions.get(session_id, tenant_id=tenant_id)
         )
 
 

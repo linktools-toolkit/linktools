@@ -34,6 +34,7 @@ from ._plan import PersistenceDomain, PersistencePlan
 from .repositories import (
     ExecutionRepositoryImpl,
     OperationLedgerRepositoryImpl,
+    SessionRepositoryImpl,
     ToolRepositoryImpl,
     RepositoryBase,
     build_repository_bundle,
@@ -219,6 +220,10 @@ async def materialize_runtime_storage(
         for domain in PersistenceDomain
         if domain not in {PersistenceDomain.TASK, PersistenceDomain.TRACE}
     }
+    if session_turn_reader is None:
+        bundles[PersistenceDomain.CONVERSATION]["sessions"] = SessionRepositoryImpl(
+            stores[PersistenceDomain.CONVERSATION], namespace=namespace, tenant_id=tenant_id,
+        )
     task_store = stores[PersistenceDomain.TASK]
     bundles[PersistenceDomain.TASK] = {
         "operations": OperationLedgerRepositoryImpl(
@@ -339,7 +344,7 @@ def _repositories(
     try:
         return _RuntimeRepositories(
             conversation=ConversationRepositories(
-                cast("SessionRepository", bundles[PersistenceDomain.CONVERSATION]["sessions"]),
+                cast("SessionRepository | None", bundles[PersistenceDomain.CONVERSATION].get("sessions")),
                 cast("ConversationHistoryRepository", bundles[PersistenceDomain.CONVERSATION]["histories"]),
                 cast("OperationLedgerRepository", bundles[PersistenceDomain.CONVERSATION]["operations"]),
             ),

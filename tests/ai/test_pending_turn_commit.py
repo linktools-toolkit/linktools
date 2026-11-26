@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pending native turns publish one final durable winner atomically."""
+"""Non-SQL pending commands and native SQL terminal publication own distinct facts."""
 
 import asyncio
 
@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
-from sqlalchemy import event
 
 from linktools.ai.core import (
     ExecutionEventType,
@@ -213,11 +212,10 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
         assert sum(item.event_type == expected.event_type and item.payload == expected.payload for item in events) == 1
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_has_one_atomic_write_and_replay_has_no_durable_growth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         assert await state.storage.execution.executions.get("execution", tenant_id="tenant") is None
         group = _stores(state)[0].storage_group
@@ -229,36 +227,14 @@ async def test_pending_turn_has_one_atomic_write_and_replay_has_no_durable_growt
                 writes.append(tuple(stores))
             return await original(self, stores, callback)
 
-        transactions = set()
-        def capture(connection, _cursor, statement, _parameters, _context, _many):
-            if statement.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"}:
-                transactions.add(connection.get_transaction())
-
-        engine = group.context.engine.sync_engine if backend == "sqlite" else None
         with monkeypatch.context() as patch:
             patch.setattr(type(group), "mutate", count_writes)
-            if engine is not None:
-                event.listen(engine, "before_cursor_execute", capture)
-            try:
-                result = await _commit(state, turn)
-            finally:
-                if engine is not None:
-                    event.remove(engine, "before_cursor_execute", capture)
+            result = await _commit(state, turn)
         assert len(writes) == 1
-        if engine is not None:
-            assert len(transactions) == 1 and None not in transactions
         await _assert_committed(state, turn, result)
         before = await _snapshot(state)
-        if engine is not None:
-            event.listen(engine, "before_cursor_execute", capture)
-        try:
-            assert await state.storage.retention.release_execution_handoff("execution", tenant_id="tenant", terminal_commit=True)
-        finally:
-            if engine is not None:
-                event.remove(engine, "before_cursor_execute", capture)
+        assert await state.storage.retention.release_execution_handoff("execution", tenant_id="tenant", terminal_commit=True)
         assert await _snapshot(state) == before
-        if engine is not None:
-            assert len(transactions) == 1
         with pytest.raises(AIError) as closed:
             await state.storage.execution.executions.acquire_dependency_hold(
                 "execution", tenant_id="tenant", hold_id="late-dependency",
@@ -269,11 +245,10 @@ async def test_pending_turn_has_one_atomic_write_and_replay_has_no_durable_growt
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_pending_turn_same_request_returns_first_execution_and_result(tmp_path: Path, backend: str) -> None:
+async def test_pending_turn_same_request_returns_first_execution_and_result(tmp_path: Path) -> None:
     from linktools.ai.persistence.contracts import ExecutionTerminalPublication
 
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         winner = _pending_turn(state)
         committed = await _commit(state, winner, include_publication=True)
         assert isinstance(committed, ExecutionTerminalPublication)
@@ -288,9 +263,8 @@ async def test_pending_turn_same_request_returns_first_execution_and_result(tmp_
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_pending_turn_different_request_cannot_replace_advanced_session(tmp_path: Path, backend: str) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+async def test_pending_turn_different_request_cannot_replace_advanced_session(tmp_path: Path) -> None:
+    async with _turn_state("memory", tmp_path) as state:
         await _commit(state, _pending_turn(state))
         before = await _snapshot(state)
         contender = _pending_turn(state, execution_id="contender", key="c" * 64, request_digest="d" * 64)
@@ -300,7 +274,6 @@ async def test_pending_turn_different_request_cannot_replace_advanced_session(tm
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize(("field", "value"), (
     ("durable_trace", True),
     ("restart_checkpoints", True),
@@ -308,9 +281,9 @@ async def test_pending_turn_different_request_cannot_replace_advanced_session(tm
     ("dependency_hold_ids", ("task-dependency",)),
 ))
 async def test_pending_turn_rejects_admitted_requirements_removed_from_terminal(
-    tmp_path: Path, backend: str, field: str, value: object,
+    tmp_path: Path, field: str, value: object,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         admitted = replace(turn.reservation.execution, **{field: value})
         assert not getattr(turn.commit.execution, field)
@@ -318,7 +291,6 @@ async def test_pending_turn_rejects_admitted_requirements_removed_from_terminal(
         await _assert_rejected_without_writes(state, turn)
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize(("target", "field", "value"), (
     ("run", "metadata", {"history_id": "wrong-history"}),
     ("checkpoint", "state", "interrupted"),
@@ -331,20 +303,19 @@ async def test_pending_turn_rejects_admitted_requirements_removed_from_terminal(
     ("checkpoint", "parent_agent_run_id", "parent-run"),
 ))
 async def test_pending_turn_rejects_inconsistent_conversation_checkpoint(
-    tmp_path: Path, backend: str, target: str, field: str, value: object,
+    tmp_path: Path, target: str, field: str, value: object,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         changed = replace(getattr(turn, target), **{field: value})
         await _assert_rejected_without_writes(state, replace(turn, **{target: changed}))
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("invalid_event", ("terminal_failure", "control_audit"))
 async def test_pending_turn_rejects_events_incompatible_with_effect_free_success(
-    tmp_path: Path, backend: str, invalid_event: str,
+    tmp_path: Path, invalid_event: str,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         if invalid_event == "terminal_failure":
             turn = replace(turn, commit=replace(turn.commit, terminal_event_type=ExecutionEventType.EXECUTION_FAILED))
@@ -355,11 +326,10 @@ async def test_pending_turn_rejects_events_incompatible_with_effect_free_success
         await _assert_rejected_without_writes(state, turn)
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_failure_after_staged_writes_rolls_back_every_domain(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         before = await _snapshot(state)
         group = _stores(state)[0].storage_group
@@ -384,12 +354,11 @@ async def test_pending_turn_failure_after_staged_writes_rolls_back_every_domain(
         await _assert_committed(state, turn, await _commit(state, turn))
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("readback_available", (False, True))
 async def test_pending_turn_lost_ack_needs_committed_readback_before_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, readback_available: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readback_available: bool,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         group = _stores(state)[0].storage_group
         mutate, read_many = type(group).mutate, type(group).read_many
@@ -424,76 +393,11 @@ async def test_pending_turn_lost_ack_needs_committed_readback_before_success(
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("identity", ("different_request", "same_request", "conflicting_digest"))
-async def test_pending_turn_independent_connections_choose_one_session_winner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity: str,
-) -> None:
-    async with _turn_state("sqlite", tmp_path) as first:
-        second_storage = Persistence(_storage("sqlite", tmp_path))
-        await second_storage.initialize(namespace=_NAMESPACE, tenant_id="tenant")
-        try:
-            second = _TurnState(second_storage, _runtime_commands(second_storage, _NAMESPACE), first.session)
-            contenders = (
-                _pending_turn(first, execution_id="first", answer="first answer"),
-                _pending_turn(second, execution_id="second", answer="second answer",
-                              key="c" * 64 if identity == "different_request" else "a" * 64,
-                              request_digest="b" * 64 if identity == "same_request" else "d" * 64),
-            )
-            groups = tuple(_stores(state)[0].storage_group for state in (first, second))
-            assert groups[0] is not groups[1]
-            assert groups[0].context.engine is not groups[1].context.engine
-            original = type(groups[0]).mutate
-            ready = asyncio.Event()
-            entered = set()
-
-            async def simultaneous_mutation(self, stores, callback):
-                if self in groups and self not in entered:
-                    entered.add(self)
-                    if len(entered) == 2:
-                        ready.set()
-                    await asyncio.wait_for(ready.wait(), 5)
-                return await original(self, stores, callback)
-
-            with monkeypatch.context() as patch:
-                patch.setattr(type(groups[0]), "mutate", simultaneous_mutation)
-                results = await asyncio.wait_for(asyncio.gather(
-                    _commit(first, contenders[0]), _commit(second, contenders[1]),
-                    return_exceptions=True,
-                ), 15)
-            assert len(entered) == 2
-            successful = [item for item in results if isinstance(item, ExecutionTerminalCommitResult)]
-            assert len(successful) == (2 if identity == "same_request" else 1), results
-            winner = successful[0]
-            if identity == "same_request":
-                assert successful[0] == successful[1]
-            else:
-                errors = [item for item in results if isinstance(item, BaseException)]
-                assert len(errors) == 1 and isinstance(errors[0], AIError)
-                if identity == "conflicting_digest":
-                    assert errors[0].code is ErrorCode.IDEMPOTENCY_CONFLICT
-                else:
-                    assert errors[0].code in {ErrorCode.SESSION_BUSY, ErrorCode.STORAGE_CONFLICT}
-            committed_turn = next(turn for turn in contenders if turn.reservation.execution.execution_id == winner.execution.execution_id)
-            await _assert_committed(first, committed_turn, winner)
-            losing_id = next(turn.reservation.execution.execution_id for turn in contenders if turn is not committed_turn)
-            assert await first.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
-            archive = first.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
-            losing_run = next(turn.run.agent_run_id for turn in contenders if turn is not committed_turn)
-            assert await archive.get_agent_run(agent_run_id=losing_run) is None
-            assert await archive.checkpoint_count(agent_run_id=losing_run) == 0
-            before = await _snapshot(first)
-            assert await _commit(first, committed_turn) == winner
-            assert await _snapshot(first) == before
-        finally:
-            await second_storage.close()
-
-
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("disabled", ("reservation", "terminal", "both"))
 async def test_pending_turn_requires_opt_in_on_both_records(
-    tmp_path: Path, backend: str, disabled: str,
+    tmp_path: Path, disabled: str,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         if disabled in {"reservation", "both"}:
             turn = replace(turn, reservation=replace(
@@ -506,11 +410,10 @@ async def test_pending_turn_requires_opt_in_on_both_records(
         await _assert_rejected_without_writes(state, turn)
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_pending_turn_persists_readonly_tool_audit_in_order(
-    tmp_path: Path, backend: str,
+    tmp_path: Path,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         turn = replace(turn, audit_events=(
             *turn.audit_events,
@@ -527,3 +430,142 @@ async def test_pending_turn_persists_readonly_tool_audit_in_order(
         before = await _snapshot(state)
         assert await _commit(state, turn) == result
         assert await _snapshot(state) == before
+
+
+@pytest.mark.parametrize("committed", (False, True), ids=("rollback", "lost-ack"))
+async def test_native_sql_terminal_keeps_occupancy_and_body_in_one_commit(tmp_path, monkeypatch, committed):
+    from sqlalchemy import func, select
+
+    from linktools.ai.persistence.turns import SessionTurnKey
+    from .test_session_turn_sql import _TRANSCRIPT, accept
+
+    storage = _storage("sqlite", tmp_path)
+    key = SessionTurnKey("chat", "turn")
+    async with Persistence.open(_NAMESPACE, tenant_id="tenant", storage=storage) as state:
+        turns = state.session_turns
+        assert turns is not None and state.conversation.sessions is None
+        await turns.create("chat", config={})
+        assert await accept(turns, "turn")
+        session_before = await turns.get_session("chat")
+        turn_before = await turns.get_turn(key)
+        engine = turns._context.engine
+        table = turns._turns.metadata.tables["ai_messages"]
+
+        async def count_messages():
+            async with engine.connect() as connection:
+                return (await connection.execute(select(func.count()).select_from(table))).scalar_one()
+
+        original_count = await count_messages()
+        group = turns.transcript_state_store.storage_group
+        original = type(group).mutate
+        fault = ErrorCode.STORAGE_COMMIT_UNKNOWN if committed else ErrorCode.STORAGE_CONFLICT
+
+        async def injected(self, stores, callback):
+            async def rollback_after_real_writes(transaction):
+                assert await callback(transaction)
+                raise AIError(fault)
+
+            if self is not group:
+                return await original(self, stores, callback)
+            if not committed:
+                return await original(self, stores, rollback_after_real_writes)
+            assert await original(self, stores, callback)
+            raise AIError(fault)
+
+        async def finish():
+            return await turns.finish(key, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(type(group), "mutate", injected)
+            with pytest.raises(AIError) as error:
+                await finish()
+        assert error.value.code is fault
+        if not committed:
+            assert await turns.get_session("chat") == session_before
+            assert await turns.get_turn(key) == turn_before
+            assert await count_messages() == original_count
+            assert await finish()
+
+    async with Persistence.open(_NAMESPACE, tenant_id="tenant", storage=storage) as reopened:
+        turns = reopened.session_turns
+        session = await turns.get_session("chat")
+        published = await turns.get_history_turn(key, lineage=())
+        assert session["active_turn_id"] is None and session["last_turn_no"] == 1
+        assert published["state"] == "succeeded"
+        reply, = published["messages"]
+        assert isinstance(reply, ModelResponse) and reply.text == "two"
+        assert not await turns.finish(key, generation=1, turn_no=1, state="succeeded",
+                                      transcript=(ModelResponse(parts=[TextPart("duplicate")]),))
+        assert await turns.get_history_turn(key, lineage=()) == published
+        assert await reopened.execution.executions.get(key.turn_id, tenant_id="tenant") is None
+
+
+@pytest.mark.parametrize("identity", ("different_request", "same_request", "conflicting_digest"))
+async def test_native_sql_independent_connections_choose_one_turn_winner(tmp_path, monkeypatch, identity):
+    from linktools.ai.core import TenantAuthorizationPolicy
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    class HostPolicy(TenantAuthorizationPolicy):
+        """Authorize normal canonical admission across both hosts."""
+
+    provider_calls = []
+    release = asyncio.Event()
+
+    async def model(messages, _info):
+        provider_calls.append(messages[-1].parts[-1].content)
+        await release.wait()
+        return ModelResponse(parts=[TextPart("one committed answer")])
+
+    features = model_features(_Models(_UsageFunctionModel(model)), RuntimeFeatures(_NAMESPACE))
+    features.agent("default", model="default", allow_tools=())
+    storage = _storage("sqlite", tmp_path)
+    async with (
+        Runtime.open(_NAMESPACE, storage=storage, features=features, authorization=HostPolicy()) as first,
+        Runtime.open(_NAMESPACE, storage=storage, features=features, authorization=HostPolicy()) as second,
+    ):
+        principal = first.default_principal
+        await first.sessions.create_turn_session("chat", principal=principal)
+        stores = (first._state.session_turns, second._state.session_turns)
+        assert stores[0]._context.engine is not stores[1]._context.engine
+        original = type(stores[0]).accept
+        arrived = set()
+        both = asyncio.Event()
+
+        async def meet(self, *args, **kwargs):
+            arrived.add(self)
+            if len(arrived) == 2:
+                both.set()
+            await asyncio.wait_for(both.wait(), 5)
+            return await original(self, *args, **kwargs)
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(type(stores[0]), "accept", meet)
+                results = await asyncio.wait_for(asyncio.gather(
+                    first.sessions.start("chat", "first", agent="default", principal=principal, idempotency_key="request"),
+                    second.sessions.start(
+                        "chat", "second" if identity == "conflicting_digest" else "first",
+                        agent="default", principal=principal,
+                        idempotency_key="different" if identity == "different_request" else "request",
+                    ),
+                    return_exceptions=True,
+                ), 10)
+        finally:
+            release.set()
+        assert arrived == set(stores)
+        accepted = [item for item in results if not isinstance(item, BaseException)]
+        assert len(accepted) == (2 if identity == "same_request" else 1), results
+        if identity == "same_request":
+            assert accepted[0].key == accepted[1].key
+        else:
+            error, = [item for item in results if isinstance(item, BaseException)]
+            assert isinstance(error, AIError)
+            assert error.code in ({ErrorCode.IDEMPOTENCY_CONFLICT} if identity == "conflicting_digest"
+                                  else {ErrorCode.SESSION_CONFLICT, ErrorCode.SESSION_BUSY, ErrorCode.STORAGE_CONFLICT})
+        terminal = await accepted[0].wait_final(timeout_seconds=10)
+        assert terminal.status is ExecutionStatus.SUCCEEDED and len(provider_calls) == 1
+        for host in (first, second):
+            history = await host.history.turn_session("chat", principal=principal)
+            assert history["session"]["active_turn_id"] is None
+            assert [item["turn_id"] for item in history["timeline"]["items"]] == [accepted[0].key.turn_id]

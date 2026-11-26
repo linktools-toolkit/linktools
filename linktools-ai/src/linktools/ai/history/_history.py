@@ -354,7 +354,7 @@ class History:
         self._task_objects = task_objects
         self._object_reader = object_reader
         self._artifacts = artifacts
-        self._conversation = conversation
+        self._conversation = conversation if conversation is not None and conversation.sessions is not None else None
         self._session_transcript_store = session_transcript_store
         self._session_trace_source = session_trace_source
         self._pending_session_execution = pending_session_execution
@@ -368,8 +368,8 @@ class History:
         if _bind_runtime_turn_read is not None and self._ordinary_sessions is not None:
             _bind_runtime_turn_read(self._read_runtime_turn)
         self._display_cache = (
-            None if conversation is None or executions is None or self._session_cursor_signer is None
-            else SessionDisplayCache(conversation, executions, session_transcript_store,
+            None if self._conversation is None or executions is None or self._session_cursor_signer is None
+            else SessionDisplayCache(self._conversation, executions, session_transcript_store,
                                      self._session_cursor_signer, cache, now=lambda: time.time())
         )
 

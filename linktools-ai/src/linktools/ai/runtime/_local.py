@@ -470,8 +470,8 @@ class LocalExecutionBackend:
         execution_run_store = self._run_stores[PersistenceDomain.TRACE]
         conversation_run_store = self._run_stores[PersistenceDomain.CONVERSATION]
         execution_repository: ExecutionRepository = self._execution.executions
-        session_repository: SessionRepository = self._conversation.sessions
-        self._session_state_store = session_repository.state_store
+        session_repository = self._conversation.sessions
+        self._session_state_store = self._conversation.histories.state_store
         self._execution_state_store = execution_repository.state_store
         self._runtime_commands = StateCommands(
             execution_repository,
@@ -541,8 +541,14 @@ class LocalExecutionBackend:
             lambda _transaction: repository.get(execution_id, tenant_id=tenant_id)
         )
 
+    def _legacy_sessions(self) -> SessionRepository:
+        sessions = self._conversation.sessions
+        if sessions is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return sessions
+
     async def _load_session(self, session_id: str, *, tenant_id: str) -> SessionRecord | None:
-        repository = self._conversation.sessions
+        repository = self._legacy_sessions()
         return await repository.state_store.read(
             lambda _transaction: repository.get(session_id, tenant_id=tenant_id)
         )
@@ -582,7 +588,7 @@ class LocalExecutionBackend:
             result = await self._execution.executions.get_result(execution.execution_id, tenant_id=self._tenant_id)
             await self._runtime_commands.finish_conversation_turn(execution, result)
             return
-        await self._conversation.sessions.release_execution(
+        await self._legacy_sessions().release_execution(
             execution.session_id,
             tenant_id=self._tenant_id,
             execution_id=execution.execution_id,
@@ -1140,7 +1146,7 @@ class LocalExecutionBackend:
                 or type(self._conversation.sessions) is not SessionRepositoryImpl):
             return False
         stores = (self._execution.executions.state_store,
-                  self._conversation.sessions.state_store, self._execution.executions.state_store)
+                  self._session_state_store, self._execution.executions.state_store)
         if any(store.storage_group is not stores[0].storage_group for store in stores):
             return False
         binding = await self._execution_binding(execution, binding)
@@ -2158,7 +2164,7 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.SESSION_BUSY)
                 if released_stale_owner:
                     raise AIError(ErrorCode.SESSION_BUSY)
-                await self._conversation.sessions.release_execution(
+                await self._legacy_sessions().release_execution(
                     execution.session_id,
                     tenant_id=self._tenant_id,
                     execution_id=owner_id,
@@ -2174,7 +2180,7 @@ class LocalExecutionBackend:
                 continue
             if session.continuation != expected:
                 raise AIError(ErrorCode.SESSION_BUSY)
-            await self._conversation.sessions.admit_execution(
+            await self._legacy_sessions().admit_execution(
                 execution.session_id,
                 tenant_id=self._tenant_id,
                 execution_id=execution.execution_id,
@@ -2794,7 +2800,7 @@ class LocalExecutionBackend:
             await self._reconcile_handoff(current)
             return
         if current.session_id is not None:
-            released = await self._conversation.sessions.release_execution(
+            released = await self._legacy_sessions().release_execution(
                 current.session_id,
                 tenant_id=self._tenant_id,
                 execution_id=current.execution_id,
@@ -3903,7 +3909,7 @@ class LocalExecutionBackend:
                         if execution.conversation and execution.status is not ExecutionStatus.SUCCEEDED:
                             await self._runtime_commands.finish_conversation_turn(execution, execution.result)
                         else:
-                            await self._conversation.sessions.release_execution(
+                            await self._legacy_sessions().release_execution(
                                 execution.session_id,
                                 tenant_id=self._tenant_id,
                                 execution_id=execution.execution_id,
@@ -4069,7 +4075,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def commit_conversation(transaction) -> None:
-            current = await self._conversation.sessions.get_in_transaction(
+            current = await self._legacy_sessions().get_in_transaction(
                 transaction,
                 intent.session_id,
                 tenant_id=self._tenant_id,
@@ -4083,7 +4089,7 @@ class LocalExecutionBackend:
                 or current.continuation != intent.expected_cursor
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._conversation.sessions.advance_continuation_in_transaction(
+            await self._legacy_sessions().advance_continuation_in_transaction(
                 transaction,
                 intent.session_id,
                 tenant_id=self._tenant_id,
@@ -4097,7 +4103,7 @@ class LocalExecutionBackend:
 
         try:
             if session.continuation != effective_next_cursor:
-                await self._conversation.sessions.state_store.mutate(commit_conversation)
+                await self._legacy_sessions().state_store.mutate(commit_conversation)
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
@@ -5157,7 +5163,7 @@ class LocalExecutionBackend:
                 # Keep scope knowledge outside admission CAS: concurrent starts
                 # must still converge through the existing idempotency owner.
                 await self.promote_pending_execution(execution_id)
-                sessions = self._conversation.sessions
+                sessions = self._legacy_sessions()
                 session = await sessions.state_store.mutate(
                     lambda transaction: sessions.remember_repository_instruction_scopes_in_transaction(
                         transaction, session.session_id, tenant_id=self._tenant_id,
@@ -8095,7 +8101,7 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return current
         if execution.session_id is not None:
-            sessions = self._conversation.sessions
+            sessions = self._legacy_sessions()
             # Discovery knowledge can outlive a failed barrier. Persist it first
             # so a committed execution pin never loses its Session scope memory,
             # including when conversation and recovery use different stores.
@@ -8868,7 +8874,7 @@ class LocalExecutionBackend:
             self._execution.executions.state_store,
         ]
         if execution.session_id is not None:
-            stores.append(self._conversation.sessions.state_store)
+            stores.append(self._legacy_sessions().state_store)
         if agent_run_id is not None:
             if execution.durable_trace:
                 archive = self._run_stores[PersistenceDomain.TRACE]

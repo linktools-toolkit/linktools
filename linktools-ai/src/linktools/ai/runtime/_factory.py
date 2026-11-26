@@ -107,7 +107,6 @@ from ._subagent import SubagentDispatcher
 from ..history import TransientExecutionHistoryStore
 from ..capability import ToolResponseFixture
 from ..execution import CancelExecutionRequest, ExecutionHistoryReader
-from ..session import SessionHistoryReader
 from ..storage import StorageRetentionMode
 from ..persistence import PersistenceDomain, Persistence
 from ..persistence.commands import graph_task_repository
@@ -416,11 +415,6 @@ async def compose_runtime_components(
             runtime_token_seed,
             run_store,
         )
-        session_history_reader = StepSessionHistoryReader(
-            store=run_store.read_store(PersistenceDomain.CONVERSATION),
-            cursor_signer=HmacCursorSigner("session-history", runtime_token_seed),
-            sessions=selected_state.conversation.sessions,
-        )
         memory_store_factory = _memory_store_factory(
             resolved_namespace,
             selected_state,
@@ -447,7 +441,6 @@ async def compose_runtime_components(
             execution_cwd=execution_cwd,
             app=app,
             history_reader=history_reader,
-            session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
             current_agent=current_agent,
@@ -614,7 +607,6 @@ async def _build_local_components(
     execution_cwd: "str | None",
     app: AppT,
     history_reader: ExecutionHistoryReader,
-    session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
     current_agent: Callable[[CompiledAgent], Awaitable[CompiledAgent]],
@@ -760,14 +752,15 @@ async def _build_local_components(
             child_observer=execution_tree_broker,
             restore_binding=binding_resolver.restore,
         )
-        memory_group = state.conversation.sessions.state_store.storage_group
+        turn_state = state.conversation.histories.state_store
+        conversation_group = turn_state.storage_group
         canonical_memory_store = (
             build_memory_store
             if state.session_turns is not None
             and memory_store_factory is not None
             and state.plan.route(PersistenceDomain.MEMORY).retention is StorageRetentionMode.DURABLE
-            and state.memory.records.state_store.storage_group is memory_group
-            and state.memory.operations.state_store.storage_group is memory_group
+            and state.memory.records.state_store.storage_group is conversation_group
+            and state.memory.operations.state_store.storage_group is conversation_group
             else None
         )
         executor = AgentExecutor(
@@ -914,7 +907,7 @@ async def _build_local_components(
                     or native.store.store_key != SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical Step requires native SQL persistence")
             turn_store = state.session_turns
-            selected_store = state.conversation.sessions.state_store
+            selected_store = turn_state
             split_source = None
             split_approval_ref = None
             if native.store.storage_context.engine is not selected_store.storage_group.context.engine:
@@ -983,12 +976,11 @@ async def _build_local_components(
                 await state.session_turns.guard_step_in_transaction(transaction, key, generation=generation)
 
             return PlanningStore(PlanStateStore(
-                state.conversation.sessions.state_store,
+                turn_state,
                 namespace=namespace, tenant_id=tenant_id,
                 owner_kind="session", owner_id=key.session_id, _before_edit=guard,
             ))
 
-        turn_state = state.conversation.sessions.state_store
         budget_repository = state.execution.budgets
 
         def prepare_canonical_budget(key, generation):
@@ -1107,10 +1099,9 @@ async def _build_local_components(
             from ._canonical_deferred_publication import bind_deferred_publication
 
             trace_archive = run_store.trace_persistence.archive
-            session_group = state.conversation.sessions.state_store.storage_group
             if (isinstance(trace_archive, ModelInteractionStateStepArchive)
                     and state.plan.route(PersistenceDomain.TRACE).retention is StorageRetentionMode.DURABLE
-                    and all(member.storage_group is session_group for member in trace_archive.transaction_stores)):
+                    and all(member.storage_group is conversation_group for member in trace_archive.transaction_stores)):
                 turn_runner._trace_archive = trace_archive
 
             bind_deferred_publication(turn_runner, state.session_turns, state.checkpoint)
@@ -1235,14 +1226,18 @@ async def _build_local_components(
             if not (await current_policy()).session.enabled:
                 raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
 
-        if state.session_turns is None:
+        if (repository := state.conversation.sessions) is not None:
             session = RuntimeSessionService(
                 state.conversation,
                 state.execution.executions,
                 authorization,
                 execution,
                 HmacCursorSigner("session", runtime_token_seed),
-                history_reader=session_history_reader,
+                history_reader=StepSessionHistoryReader(
+                    store=run_store.read_store(PersistenceDomain.CONVERSATION),
+                    cursor_signer=HmacCursorSigner("session-history", runtime_token_seed),
+                    sessions=repository,
+                ),
                 enabled=session_execution_ready,
                 current_policy=current_policy,
                 cache=(state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
@@ -1261,7 +1256,7 @@ async def _build_local_components(
             )
             session.bind_turn_observer(backend.observe_turns)
             lifecycle.session = session
-            runtime_bridge.pending_turns.session_changed = state.conversation.sessions.notify_session_change
+            runtime_bridge.pending_turns.session_changed = repository.notify_session_change
 
         async def prepare_pending_capture(execution_id: str, principal) -> None:
             await execution.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT)
