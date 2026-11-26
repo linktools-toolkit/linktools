@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from secrets import token_urlsafe
 from types import ModuleType
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
@@ -326,7 +327,8 @@ class ACPAgent:
         admitted: asyncio.Future[Execution | str | None] = asyncio.get_running_loop().create_future()
         self._prompts[session_id] = admitted
         execution_id = None
-        request_id = uuid4().hex
+        native = uses_turn_sessions(self._runtime)
+        request_id = token_urlsafe(9) if native else uuid4().hex
 
         async def on_event(item: ExecutionTreeEvent) -> None:
             if item.depth != 0 or connection is None or connection is not self._connection:
@@ -343,7 +345,7 @@ class ACPAgent:
                     await connection.session_update(session_id, _acp_tool_update(schema, item.execution_id, process))
 
         try:
-            if uses_turn_sessions(self._runtime):
+            if native:
                 with TurnObserver(
                     self._runtime, session_id, self._principal, local_workspace=self._local_workspace,
                 ) as observer:

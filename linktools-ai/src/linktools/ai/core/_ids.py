@@ -4,6 +4,7 @@
 
 import hashlib
 import uuid
+from base64 import b32encode
 
 from ._json import JsonValue, canonical_json_bytes
 from ._validation import (
@@ -63,9 +64,10 @@ def agent_run_id(
     validate_resource_id(execution_id)
     if agent_run_seq < 1:
         raise ValueError("agent_run_seq must be positive")
-    return "r-" + canonical_sha256(
-        ["agent-run", namespace, tenant_id, execution_id, str(agent_run_seq)]
-    )
+    digest = hashlib.sha256(
+        canonical_json_bytes(["agent-run", namespace, tenant_id, execution_id, str(agent_run_seq)])
+    ).digest()
+    return "r-" + b32encode(digest).decode("ascii").rstrip("=").lower()
 
 
 def principal_identity_payload(principal: Principal) -> dict[str, str]:

@@ -5,7 +5,7 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from ..core import TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner
+from ..core import AGENT_RUN_ID_MAX_BYTES, TASK_GRAPH_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
@@ -75,6 +75,9 @@ EXECUTION_SORT_KEY_MAX_BYTES = 8 + RECORD_KEY_MAX_BYTES
 TASK_GRAPH_KEY_MAX_BYTES = 32 + 2 * 128 + TASK_GRAPH_ID_MAX_BYTES
 # Six framed components: record, namespace, tenant, checkpoint, tool_operation, ID.
 TOOL_OPERATION_KEY_MAX_BYTES = 42 + 2 * 128 + TOOL_OPERATION_ID_MAX_BYTES
+# Six framed components: record, namespace, tenant, domain, agent_run, run ID.
+_RUN_ADMISSION_DOMAINS = frozenset(("trace", "checkpoint", "conversation"))
+RUN_ADMISSION_KEY_MAX_BYTES = 27 + max(map(len, _RUN_ADMISSION_DOMAINS)) + 2 * 128 + AGENT_RUN_ID_MAX_BYTES
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
 _EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}
@@ -89,6 +92,13 @@ _CONSTANTS = {
 }
 _EDGE_OWNERS = {"ai_task_graphs": "task_graph", "ai_state_records": "record", "ai_step_tool_operations": "tool_record",
                 "ai_step_run_admissions": "run_admission", "ai_execution_records": "record"}
+
+
+def is_run_admission_address(parts: Sequence[str]) -> bool:
+    """Recognize the bounded owner prefix and run ID shared by record and stream addresses."""
+    return (len(parts) == 6 and parts[3] in _RUN_ADMISSION_DOMAINS
+            and all(1 <= len(value.encode("utf-8")) <= 128 for value in parts[1:3])
+            and 1 <= len(parts[5].encode("utf-8")) <= AGENT_RUN_ID_MAX_BYTES)
 
 
 def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
@@ -111,6 +121,8 @@ def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
                 len(parts) != 6 or parts[3] != "checkpoint" or len(key) > TOOL_OPERATION_KEY_MAX_BYTES
                 or len(parts[5].encode("utf-8")) > TOOL_OPERATION_ID_MAX_BYTES
         ):
+            return "ai_state_records"
+        if parts[4] == "agent_run" and not is_run_admission_address(parts):
             return "ai_state_records"
         if parts[4] in _EXECUTION_ADDRESS_LENGTHS and (
                 parts[3] != "execution" or len(parts) != _EXECUTION_ADDRESS_LENGTHS[parts[4]]):
@@ -210,5 +222,5 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
 
 
 
-__all__ = ["EXECUTION_SHELL_KIND", "TASK_GRAPH_KEY_MAX_BYTES", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["EXECUTION_SHELL_KIND", "TASK_GRAPH_KEY_MAX_BYTES", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RUN_ADMISSION_KEY_MAX_BYTES", "is_run_admission_address", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
 

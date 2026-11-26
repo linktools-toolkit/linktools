@@ -225,6 +225,8 @@ async def test_acp_native_prompt_streams_only_its_canonical_turn() -> None:
 
     async def start_turn(session_id, text, **kwargs):
         assert session_id == "shared-session" and text == "hi" and kwargs["principal"] == principal
+        request_id = kwargs["idempotency_key"]
+        assert len(request_id) == 12 and request_id.isascii()
         # Simulate producer emissions during admission, before the caller
         # receives its turn ID, including a delayed frame for another turn.
         for turn_id, kind, value in [

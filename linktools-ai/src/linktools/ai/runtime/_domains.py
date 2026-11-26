@@ -666,7 +666,9 @@ class RuntimeSessions(Generic[AppT]):
     def observe_turns(
         self, handler: Callable[[SessionTurnNotice], None],
     ) -> Callable[[], None]:
-        """Subscribe a trusted host to turn milestones produced by this Runtime.
+        """Subscribe a trusted host to agent-bound execution turn milestones.
+
+        Native session hosts use :meth:`observe_turn_lifecycle` instead.
 
         Best-effort notices carry confirmed admission and release or display-only
         tool progress. They omit prompts, raw tool payloads, and model output.
@@ -675,6 +677,7 @@ class RuntimeSessions(Generic[AppT]):
         provided. Read current state through the authorized API as needed.
         """
         self._ensure_open()
+        self._require_agent_session()
         return self._service.observe_turns(handler)
 
     def invalidate(self, session_id: str) -> None:

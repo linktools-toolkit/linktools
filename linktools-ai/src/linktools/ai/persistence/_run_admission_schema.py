@@ -8,7 +8,8 @@ from ..storage import (
     sql_audit_columns, sql_audit_indexes, sql_blob, sql_id_column,
     sql_sha256, sql_table_options, sql_unique,
 )
-from .state import STORE_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
+from ._record_owner import RUN_ADMISSION_KEY_MAX_BYTES
+from .state import STORE_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -25,7 +26,7 @@ def build_run_admission_sql_metadata(metadata: "MetaData") -> None:
         "ai_step_run_admissions", metadata, sql_id_column(),
         Column("store_key", LargeBinary(STORE_KEY_MAX_BYTES).with_variant(VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
                nullable=False, comment="Exact namespace, tenant and domain partition admitting this run."),
-        Column("key", LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
+        Column("key", LargeBinary(RUN_ADMISSION_KEY_MAX_BYTES).with_variant(VARBINARY(RUN_ADMISSION_KEY_MAX_BYTES), "mysql"),
                nullable=False, comment="Canonical local run admission identity, independent of the registration owner."),
         Column("scope_key", LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
                nullable=True, comment="Conversation lookup identity derived from the validated domain projection."),

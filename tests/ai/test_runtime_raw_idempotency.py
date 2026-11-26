@@ -34,9 +34,10 @@ from .test_runtime_persistence_evidence import _execution
 
 NOW = datetime(2026, 11, 11, tzinfo=timezone.utc)
 KEY = "界" * 41 + ":keys"
+EXECUTION_KEY = "界" * 20 + ":key"
 
 
-def _record(scope: str = "execution.run", key: str = KEY) -> IdempotencyRecord:
+def _record(scope: str = "execution.run", key: str = EXECUTION_KEY) -> IdempotencyRecord:
     return IdempotencyRecord(scope, key, "a" * 64, ResourceKind.EXECUTION, "execution",
         IdempotencyStatus.RESERVED, None, None, NOW, NOW)
 
@@ -49,7 +50,7 @@ async def test_raw_replay_keys_preserve_maximum_bytes_and_component_boundaries(
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
     namespace, tenant = "n" * 128, "t" * 128
     records = (_record("s" * 128), _record("a:b", "c"), _record("a", "b:c"))
-    assert len(KEY.encode("utf-8")) == 128
+    assert len(EXECUTION_KEY.encode("utf-8")) == 64
     async with Persistence.open(namespace, tenant_id=tenant, storage=storage) as state:
         repository = state.execution.idempotency
         for item in records:
@@ -61,27 +62,27 @@ async def test_raw_replay_keys_preserve_maximum_bytes_and_component_boundaries(
         with pytest.raises(AIError) as conflict:
             await repository.reserve(replace(records[0], request_digest="b" * 64))
         assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
-        assert await repository.get(records[0].scope, KEY, tenant_id=tenant) == records[0]
+        assert await repository.get(records[0].scope, EXECUTION_KEY, tenant_id=tenant) == records[0]
         with pytest.raises(AIError) as invalid:
-            await repository.get(records[0].scope, KEY + "x", tenant_id=tenant)
+            await repository.get(records[0].scope, EXECUTION_KEY + "x", tenant_id=tenant)
         assert invalid.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
-        address = record_key(namespace, tenant, "execution", "idempotency", (records[0].scope, KEY))
-        assert len(address) <= 768 and KEY.encode("utf-8") in address
+        address = record_key(namespace, tenant, "execution", "idempotency", (records[0].scope, EXECUTION_KEY))
+        assert len(address) <= 768 and EXECUTION_KEY.encode("utf-8") in address
 
 
-@pytest.mark.parametrize("value", (
-    _record(),
-    ApprovalRecord("approval", "execution", ApprovalStatus.PENDING, KEY, None, None, None, NOW, None),
-    ExternalCallRecord("call", "execution", ExternalCallStatus.PENDING, KEY, NOW, None),
+@pytest.mark.parametrize(("value", "expected_key"), (
+    (_record(), EXECUTION_KEY),
+    (ApprovalRecord("approval", "execution", ApprovalStatus.PENDING, KEY, None, None, None, NOW, None), KEY),
+    (ExternalCallRecord("call", "execution", ExternalCallStatus.PENDING, KEY, NOW, None), KEY),
 ))
-def test_raw_replay_wire_roundtrips_and_invalid_stored_keys_fail_closed(value: object) -> None:
-    assert KEY not in repr(value)
+def test_raw_replay_wire_roundtrips_and_invalid_stored_keys_fail_closed(value: object, expected_key: str) -> None:
+    assert expected_key not in repr(value)
     encoded = domain_data(value)
     assert _decode_enveloped_domain(encoded, type(value)) == value
     payload = deepcopy(decode_envelope(encoded).value)
     fields = payload["payload"]["fields"]
-    assert fields["idempotency_key"] == KEY
-    for key in (KEY + "x", "", "bad\x00key", " key", "\ud800"):
+    assert fields["idempotency_key"] == expected_key
+    for key in (expected_key + "x", "", "bad\x00key", " key", "\ud800"):
         with pytest.raises(ValueError):
             replace(value, idempotency_key=key)
         fields["idempotency_key"] = key
@@ -94,19 +95,19 @@ def test_raw_replay_wire_roundtrips_and_invalid_stored_keys_fail_closed(value: o
 
 
 def test_terminal_commit_envelope_rejects_invalid_idempotency_keys() -> None:
-    identity = IdempotencyTerminalUpdate("scope", KEY, IdempotencyStatus.STARTED,
+    identity = IdempotencyTerminalUpdate("scope", EXECUTION_KEY, IdempotencyStatus.STARTED,
         IdempotencyStatus.COMPLETED, "a" * 64, "b" * 64, None)
     result = ResultRecord(StoredPayload.inline_json("done"), StopReason.END_TURN, UsageMetrics(), NOW)
     execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, result=result, completed_at=NOW)
     commit = ExecutionTerminalCommit(execution.revision, execution.event_seq, execution, result,
         ExecutionEventType.EXECUTION_SUCCEEDED, {}, identity)
-    assert KEY not in repr(commit)
+    assert EXECUTION_KEY not in repr(commit)
     encoded = domain_data(commit)
     assert _decode_enveloped_domain(encoded, ExecutionTerminalCommit) == commit
     payload = deepcopy(decode_envelope(encoded).value)
     fields = payload["payload"]["fields"]["idempotency"]
-    assert fields["idempotency_key"] == KEY
-    for key in (KEY + "x", "", "bad\x00key", " key", "\ud800"):
+    assert fields["idempotency_key"] == EXECUTION_KEY
+    for key in (EXECUTION_KEY + "x", "", "bad\x00key", " key", "\ud800"):
         with pytest.raises(ValueError):
             replace(identity, idempotency_key=key)
         if key == "\ud800":
@@ -120,11 +121,11 @@ def test_terminal_commit_envelope_rejects_invalid_idempotency_keys() -> None:
 
 def test_raw_execution_keys_are_hidden_in_claims_and_event_repr() -> None:
     values = (
-        ExecutionStartIdentity("scope", KEY, "a" * 64),
-        OperationTerminalUpdate(KEY, OperationStatus.RUNNING, OperationStatus.SUCCEEDED, None, None, None),
-        ExecutionEventRecord("execution", 1, "execution.cancel_requested", {"operation_id": KEY}),
+        (ExecutionStartIdentity("scope", EXECUTION_KEY, "a" * 64), EXECUTION_KEY),
+        (OperationTerminalUpdate(KEY, OperationStatus.RUNNING, OperationStatus.SUCCEEDED, None, None, None), KEY),
+        (ExecutionEventRecord("execution", 1, "execution.cancel_requested", {"operation_id": KEY}), KEY),
     )
-    assert all(KEY not in repr(value) for value in values)
+    assert all(key not in repr(value) for value, key in values)
 
 
 @pytest.mark.asyncio
@@ -133,7 +134,7 @@ async def test_remote_turn_lookup_compacts_scope_and_key_without_delimiter_colli
     coordination = SimpleNamespace(
         _tenant_id="tenant", _state_authority=None, _read_request=AsyncMock(return_value=None),
     )
-    pairs = (("a:b", "c"), ("a", "b:c"), ("s" * 128, KEY))
+    pairs = (("a:b", "c"), ("a", "b:c"), ("s" * 128, EXECUTION_KEY))
     for scope, key in pairs:
         assert await read_admission_request(repository, coordination, scope=scope, key=key, tenant_id="tenant") == (None, None)
     requests = [call.args[0] for call in coordination._read_request.call_args_list]

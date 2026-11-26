@@ -202,7 +202,7 @@ CREATE TABLE ai_step_runs (
 CREATE TABLE ai_step_run_admissions (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(64) NOT NULL COMMENT 'Exact namespace, tenant and domain partition admitting this run.',
-	`key` VARBINARY(768) NOT NULL COMMENT 'Canonical local run admission identity, independent of the registration owner.',
+	`key` VARBINARY(359) NOT NULL COMMENT 'Canonical local run admission identity, independent of the registration owner.',
 	scope_key VARBINARY(768) COMMENT 'Conversation lookup identity derived from the validated domain projection.',
 	parent_key VARBINARY(768) COMMENT 'Parent-run lookup identity derived from the validated domain projection.',
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable ordering by projected start time and complete admission identity.',

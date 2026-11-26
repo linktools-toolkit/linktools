@@ -10,9 +10,10 @@ from sqlalchemy import text
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence._record_owner import record_owner_table
 from linktools.ai.persistence._run_counters import run_counter_address, run_counter_streams
 from linktools.ai.persistence.snapshots import SnapshotLimits
-from linktools.ai.persistence.state import StateTransaction, stream_key, state_store_key
+from linktools.ai.persistence.state import StateTransaction, record_key, stream_key, state_store_key
 from linktools.ai.storage import InMemoryObjectStore
 
 from .test_memory_run_counter_owner import _admission
@@ -92,9 +93,20 @@ async def test_runtime_admission_counter_snapshot_restores_unique_owner(tmp_path
         assert (await state.execution.executions.get_fresh("execution", tenant_id="tenant")).result == commit.result
 
 
+def test_run_admission_key_width_matches_the_longest_owned_address() -> None:
+    from sqlalchemy.dialects import mysql
+    from linktools.ai.persistence.schema import build_runtime_sql_metadata
+
+    key = record_key("n" * 128, "t" * 128, "conversation", "agent_run", ("界" * 21 + "a",))
+    table = build_runtime_sql_metadata(frozenset(PersistenceDomain)).tables["ai_step_run_admissions"]
+    assert len(key) == 359
+    assert record_owner_table(key) == table.name
+    assert str(table.c.key.type.compile(dialect=mysql.dialect())) == "VARBINARY(359)"
+    assert run_counter_address(run_counter_streams(key)[0]) == (key, "event_high_water")
+
+
 def test_run_counter_cursor_mapping_preserves_arbitrary_binary_order() -> None:
     from linktools.ai.persistence._run_counters import RUN_COUNTER_COLUMNS, run_counter_page_start
-    from linktools.ai.persistence.state import record_key
     owners = tuple(record_key(namespace, "tenant", domain, "agent_run", (run,))
         for namespace in ("a", "long-name", "é") for domain in ("trace", "checkpoint", "conversation")
         for run in ("a", "z", "long-run"))
@@ -116,7 +128,6 @@ def test_run_counter_cursor_mapping_preserves_arbitrary_binary_order() -> None:
 @pytest.mark.asyncio
 async def test_sql_run_counter_pages_bound_each_physical_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from linktools.ai.persistence._sql import _SqlTransaction
-    from linktools.ai.persistence.state import record_key
     async with _open_store("sql", tmp_path) as bare:
         store = await bare.storage_group.open_partition(state_store_key("a", "tenant", "trace"), create=True)
         assert store is not None
@@ -157,9 +168,17 @@ async def test_run_counter_routing_requires_matching_step_partition(backend: str
         )
         assert store is not None
         owned = stream_key("run-counter", "tenant", "trace", "event", ("run",))
-        foreign = tuple(stream_key(namespace, tenant, domain, "event", ("run",))
-                        for namespace, tenant, domain in (("other", "tenant", "trace"),
-                            ("run-counter", "other", "trace"), ("run-counter", "tenant", "checkpoint")))
+        too_long = "界" * 21 + "ab"
+        generic = replace(_admission(), key=record_key("run-counter", "tenant", "trace", "agent_run", (too_long,)))
+        foreign = (*(
+            stream_key(namespace, tenant, domain, "event", ("run",))
+            for namespace, tenant, domain in (("other", "tenant", "trace"),
+                ("run-counter", "other", "trace"), ("run-counter", "tenant", "checkpoint"))
+        ), stream_key("run-counter", "tenant", "trace", "event", (too_long,)))
+        assert record_owner_table(generic.key) == "ai_state_records"
+        assert run_counter_streams(generic.key, store_key=store.store_key) == ()
+        await store.mutate(lambda tx: tx.insert_record(generic))
+        assert await store.read_record(generic.key) == generic
         # A generic State owner accepts all legal stream tuples without Step admissions.
         assert await bare.mutate(lambda tx: tx.reserve_sequence(owned, 1)) == 1
         with pytest.raises(AIError) as caught:
