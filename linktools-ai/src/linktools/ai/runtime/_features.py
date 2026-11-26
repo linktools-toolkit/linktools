@@ -204,12 +204,13 @@ class RuntimeFeatures(Generic[AppT]):
         revision: int = 1,
         effect_policy: ToolEffectPolicy = "replay_safe",
         plan_safe: bool = False,
+        sequential: bool = False,
     ) -> "Tool[AgentContext[AppT]]":
         """Register one ordinary model-visible Python tool."""
         _validate_tool_effect_policy(effect_policy, plan_safe)
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
-        adapted = _adapt_tool(function, name=tool_name)
+        adapted = _adapt_tool(function, name=tool_name, sequential=sequential)
         adapted.metadata = tool_metadata(
             effect_policy=effect_policy,
             plan_safe=plan_safe,
@@ -454,7 +455,7 @@ def _tool_context(ctx: PydanticRunContext[AgentContext[object]]) -> AgentContext
     )
 
 
-def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
+def _adapt_tool(function: Callable[..., object], *, name: str, sequential: bool) -> Tool:
     if not callable(function):
         raise TypeError("tool function must be callable")
     signature = inspect.signature(function)
@@ -498,7 +499,7 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
         **get_type_hints(function, include_extras=True),
         parameters[0].name: first.annotation,
     }
-    return Tool(invoke, takes_ctx=True, name=name)
+    return Tool(invoke, takes_ctx=True, name=name, sequential=sequential)
 
 
 def _validate_business_tool_name(value: str) -> None:
