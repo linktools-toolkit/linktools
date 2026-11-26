@@ -106,12 +106,19 @@ async def test_native_session_reads_new_scope_on_first_call_and_loads_rules(tmp_
     ) as runtime:
         agent = runtime.agents.get("reader")
         principal = runtime.default_principal
-        await agent.create_session("session", principal=principal)
+        await runtime.sessions.create_turn_session("session", principal=principal, idempotency_key="create")
         turn = await runtime.sessions.start(
             "session", "Read the file", agent=agent, principal=principal, idempotency_key="once",
         )
         assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         assert requests == 2
+        replay = await runtime.sessions.create_turn_session("session", principal=principal, idempotency_key="create")
+        assert replay["session_id"] == "session" and replay["active_turn_id"] is None
+        with pytest.raises(AIError) as different:
+            await runtime.sessions.create_turn_session(
+                "session", principal=principal, idempotency_key="create", metadata={"other": True},
+            )
+        assert different.value.code is ErrorCode.SESSION_CONFLICT
 
 
 @pytest.mark.asyncio

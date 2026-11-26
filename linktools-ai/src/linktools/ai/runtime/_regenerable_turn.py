@@ -28,8 +28,10 @@ from ..model import MaterializedUserContent, StoredUserInput, native_graph_input
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.contracts import ToolOperationRecord
 from ..persistence.repositories import ToolRepositoryImpl
-from ..persistence._session_turn_sql import MAX_REMEMBERED_SCOPES, MAX_REMEMBERED_SCOPE_BYTES, decode_instruction_scopes
-from ..persistence.turns import CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
+from ..persistence.turns import (
+    MAX_REMEMBERED_SCOPE_BYTES, MAX_REMEMBERED_SCOPES, CanonicalDeferredFrontier, SessionInstructionFrontier,
+    SessionTurnKey, SessionTurnSegment, decode_instruction_scopes, decode_session_lineage,
+)
 from ..session import SessionContext, SessionTurnAdmission, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta, _NativeSubagentLeaf
@@ -459,10 +461,10 @@ class _RegenerableTurnRunner:
                 principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, session_id, tenant_id),
             )
             existing = await self._store.get_session(session_id)
-            if (
-                request_key is None or existing is None
-                or existing["config_json"] != config
-            ):
+            if request_key is None or existing is None:
+                raise AIError(ErrorCode.SESSION_CONFLICT) from None
+            previous_config = existing["config_json"]
+            if {key: value for key, value in previous_config.items() if key != "instruction_scopes"} != config:
                 raise AIError(ErrorCode.SESSION_CONFLICT) from None
             return {
                 "session_id": session_id, "revision": existing["revision"],
