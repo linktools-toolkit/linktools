@@ -85,6 +85,7 @@ class AgentRunRecorder:
         initial_context: LoadedModelContext | None = None,
         initial_attachments: Sequence[Mapping[str, JsonValue]] = (),
         history_boundary: Callable[[], Awaitable[None]] | None = None,
+        traced_tool_starts: tuple[str, ...] = (),
         checkpoint_sink: Callable[[AgentRunCheckpoint], Awaitable[None]] | None = None,
         checkpoint_sink_accepts_frozen: bool = False,
     ) -> None:
@@ -107,7 +108,7 @@ class AgentRunRecorder:
         )
         self._run: AgentRunRecord | None = None
         self._next_event_index = 0
-        self._tool_events: dict[str, set[str]] = {}
+        self._tool_events: dict[str, set[str]] = {call_id: {"TOOL_CALL_STARTED"} for call_id in traced_tool_starts}
         self._tool_operation_ids: dict[str, str] = {}
         self._tool_execution_metadata: dict[str, tuple[dict[str, str], str | None]] = {}
         self._tool_results: dict[str, ToolReturnPart] = {}

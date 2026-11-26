@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturn, ToolReturnPart, UserPromptPart
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, SessionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
@@ -43,12 +43,14 @@ def _append(path: Path, value: str) -> None:
 
 def _features(
     root: Path, *, interrupted: bool = False, crash: bool = False, traced: bool = False,
-    session_checkpoints: bool = False,
+    session_checkpoints: bool = False, wrapped_return: bool = False,
 ) -> RuntimeFeatures:
-    async def effect(context: AgentContext[None]) -> str:
+    async def effect(context: AgentContext[None]) -> str | ToolReturn:
         _append(root / "effects.log", context.execution_id)
         if crash:
             os._exit(91)
+        if wrapped_return:
+            return ToolReturn("confirmed effect", content="private fixture supplement", metadata={"proof": "fixture"})
         return "confirmed effect"
 
     async def model(messages, _info):
@@ -64,6 +66,11 @@ def _features(
                 assert result.tool_call_id == "duplicate-attempt"
             else:
                 assert [(part.tool_call_id, part.content) for part in results] == [("stable-call", "confirmed effect")]
+                if wrapped_return:
+                    assert results[0].metadata == {"proof": "fixture"}
+                    assert [part.content for part in messages[-1].parts if isinstance(part, UserPromptPart)] == [
+                        "private fixture supplement",
+                    ]
             _append(root / "provider.log", "continuation")
             return ModelResponse(parts=[TextPart("done")])
         _append(root / "provider.log", "initial")
@@ -140,7 +147,7 @@ def _crash_native_process(root_path: str, phase: str) -> None:
             Persistence.open(_NAME, storage=PersistenceStorage.from_root(root / "runtime")) as state,
             Runtime.open(persistence=state, features=_features(
                 root, crash=phase.startswith("tool_interrupted"), traced=phase.endswith("_trace"),
-                session_checkpoints=phase.endswith("_session_capability"),
+                session_checkpoints=phase.endswith("_session_capability"), wrapped_return=projected,
             ),
                          authorization=_HostAuthorization()) as runtime,
         ):
@@ -244,6 +251,7 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         Runtime.open(persistence=state, features=_features(
             tmp_path, interrupted=interrupted, traced=traced,
             session_checkpoints=phase.endswith("_session_capability"),
+            wrapped_return=phase == "projected_tool_checkpoint_trace",
         ),
                      authorization=_HostAuthorization()) as runtime,
     ):

@@ -22,14 +22,14 @@ async def test_runtime_inactivity_waits_for_local_worker_and_preserves_retained_
 ) -> None:
     cache = InMemoryCacheBackend(max_bytes=2**24)
     async with _runtimes(tmp_path, cache=cache, shared=False) as (runtimes, entered, finish, block):
-        runtime, state = runtimes[0]
+        runtime, _ = runtimes[0]
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         block()
         execution = await session.start("question", idempotency_key="pending")
         await asyncio.wait_for(entered.wait(), 5)
-        # Terminal-only persistence leaves this live admission outside the SQL execution table.
-        assert await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
+        active = await runtime.history.inspect_session("session", principal=principal)
+        assert active.active_execution_id == execution.execution_id
         waiting = asyncio.Event()
         wait_terminal = LocalExecutionBackend.wait_terminal
 
@@ -76,3 +76,63 @@ async def test_runtime_inactivity_waits_for_local_worker_and_preserves_retained_
         result = await runtime.history.result(execution.execution_id, principal=principal)
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {"text": "answer"}
+
+
+@pytest.mark.asyncio
+async def test_native_inactivity_observers_do_not_consume_committed_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _runtimes(tmp_path, cache=None, native=True) as (runtimes, entered, finish, block):
+        (owner, state), (peer, _) = runtimes
+        principal = owner.default_principal
+        session = await owner.agents.get().create_session("session", principal=principal)
+        block()
+        turn = await session.start("question", idempotency_key="native-pending")
+        await asyncio.wait_for(entered.wait(), 5)
+        assert await state.execution.executions.get(turn.key.turn_id, tenant_id=owner.tenant_id) is None
+
+        occupied = {runtime.sessions: asyncio.Event() for runtime in (owner, peer)}
+        domain = type(owner.sessions)
+        inspect = domain._inspect_native_session
+
+        async def observed_inspect(sessions, session_id, actor):
+            response = await inspect(sessions, session_id, actor)
+            if sessions in occupied and response[1]["active_turn_id"] == turn.key.turn_id:
+                occupied[sessions].set()
+            return response
+
+        async def forbidden_result(*args, **kwargs):
+            pytest.fail("inactivity observation must not materialize a native turn result")
+
+        observers = []
+        with monkeypatch.context() as patch:
+            patch.setattr(domain, "_inspect_native_session", observed_inspect)
+            patch.setattr(History, "turn_result", forbidden_result)
+            for runtime, persistence in runtimes:
+                reader = persistence.session_turn_reader
+                assert reader is not None
+                patch.setattr(reader, "get_history_turn", forbidden_result)
+                observers.append(asyncio.create_task(runtime.sessions.wait_inactive(
+                    "session", principal=principal, timeout_seconds=5, observation_timeout_seconds=1,
+                )))
+            local, remote = observers
+            try:
+                await asyncio.wait_for(asyncio.gather(*(event.wait() for event in occupied.values())), 5)
+                assert not local.done() and not remote.done()
+                local.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await local
+                assert not remote.done()
+                finish.set()
+                inactive = await asyncio.wait_for(remote, 5)
+                assert inactive["session_id"] == "session" and inactive["active_turn_id"] is None
+            finally:
+                finish.set()
+                for task in observers:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*observers, return_exceptions=True)
+
+        result = await peer.history.turn_result("session", turn.key.turn_id, principal=principal)
+        assert result["status"] == "SUCCEEDED" and result["conversation_committed"] is True
+        assert result["output"] == {"text": "answer"}

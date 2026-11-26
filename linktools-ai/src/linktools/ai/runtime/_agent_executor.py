@@ -228,6 +228,7 @@ class _AgentRunScope:
     memory_store: MemoryStore | None = None
     memory_tool_names: tuple[str, ...] = ()
     trace_interaction_base: int = 0
+    traced_tool_starts: tuple[str, ...] = ()
     trace_boundary: Callable[[], Awaitable[None]] | None = None
     trace_auto_flush: bool = False
     plan_store_resolver: (
@@ -474,6 +475,7 @@ class AgentExecutor:
         budget: RunBudgetContext | None = None,
         capture_trace: Callable[[StagingAgentRunStore], None] | None = None,
         trace_interaction_base: int = 0,
+        traced_tool_starts: tuple[str, ...] = (),
         trace_boundary: Callable[[StagingAgentRunStore], Awaitable[None]] | None = None,
         trace_auto_flush: bool = False,
         mode: ExecutionMode = "run",
@@ -548,7 +550,7 @@ class AgentExecutor:
                 canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
                 previous_turn_interrupted=previous_turn_interrupted,
                 output_retries_used=output_retries_used, deferred_approvals=deferred_approvals, budget=budget,
-                trace_interaction_base=trace_interaction_base,
+                trace_interaction_base=trace_interaction_base, traced_tool_starts=traced_tool_starts,
                 trace_boundary=None if trace_boundary is None else flush_trace, trace_auto_flush=trace_auto_flush,
                 tool_effects="read_only" if canonical_step is None else "live",
                 mode=mode, planning=planning, preload_skill_inputs=preload_skill_inputs,
@@ -1357,6 +1359,7 @@ async def _materialize_agent(
         initial_context=scope.initial_context,
         initial_attachments=scope.initial_attachments,
         history_boundary=commit_history_boundary,
+        traced_tool_starts=scope.traced_tool_starts,
         checkpoint_sink=save_checkpoint,
         checkpoint_sink_accepts_frozen=type(scope.run_store) is RuntimeAgentRunStore,
     )

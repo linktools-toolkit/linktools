@@ -1187,6 +1187,7 @@ class RuntimeToolOperationBridge:
         *,
         interrupted_generation: int | None = None,
         retained_returns: Sequence[ToolReturnPart] = (),
+        completed_frontier: Mapping[str, tuple[str, str]] | None = None,
         recover_delegate: Callable[
             [ToolOperationRecord, Mapping[str, JsonValue]], Awaitable[ToolOperationRecord],
         ] | None = None,
@@ -1210,6 +1211,15 @@ class RuntimeToolOperationBridge:
             if (value.execution_id != self._execution_id or value.agent_run_id != self._agent_run_id
                     or value.tool_call_id in receipts):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if completed_frontier and value.tool_call_id in completed_frontier:
+                tool_name, operation_id = completed_frontier[value.tool_call_id]
+                if (value.status is not ToolOperationStatus.COMPLETED
+                        or value.tool_name != tool_name or value.binding_digest != self._binding_digest
+                        or value.tool_operation_id != operation_id
+                        or operation_id != self._operation_id(self._agent_run_id, value.tool_call_id)
+                        or value.producer_generation is None or interrupted_generation is None
+                        or not 1 <= value.producer_generation <= interrupted_generation):
+                    return None
             if value.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}:
                 if (value.binding_digest != self._binding_digest
                         or value.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}):
@@ -1266,7 +1276,9 @@ class RuntimeToolOperationBridge:
                 results.calls[call_id] = PydanticToolControlCapability.build_tool_failed(_INTERRUPTED_TOOL_MESSAGE)
             else:
                 results.calls[call_id] = await self._canonical_effect_result(value)
-        return results if pending_calls else None
+        if completed_frontier and not completed_frontier.keys() <= receipts.keys():
+            return None
+        return results if pending_calls or completed_frontier else None
 
     async def native_delegate_payload(
         self, original: ToolOperationRecord, child: "ExecutionRecord", result: dict[str, JsonValue] | str,

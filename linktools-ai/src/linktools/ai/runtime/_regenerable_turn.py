@@ -22,6 +22,7 @@ from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
 from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
+from ..execution import TOOL_OPERATION_ID_METADATA_KEY
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
@@ -111,6 +112,7 @@ class _AdmittedTurn:
     split_source: _CanonicalSplitStep | None = None
     trace_event_base: int = 0
     trace_interaction_base: int = 0
+    traced_tool_starts: tuple[str, ...] = ()
     preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = ()
     native_stopped_delegates: set[tuple[str, str, int, str]] = field(default_factory=set)
 
@@ -1094,6 +1096,7 @@ class _RegenerableTurnRunner:
             output_retries_used = 0
             instruction_frontier = None
             trace_event_base = trace_interaction_base = 0
+            traced_tool_starts = ()
             trace_recovery = {}
             trace_archive = self._trace_archive
             trace_enabled = request.get("trace", False)
@@ -1208,9 +1211,48 @@ class _RegenerableTurnRunner:
                         if recover_native_results is None:
                             retained_returns = tuple(part for message in continuation if isinstance(message, ModelRequest)
                                                      for part in message.parts if isinstance(part, ToolReturnPart))
+                            completed_frontier = None
+                            if (traced_subagent_parent and not pending and not completed_checkpoint
+                                    and latest_response == len(continuation) - 2 and latest_response >= 0
+                                    and isinstance(continuation[-1], ModelRequest)):
+                                calls = tuple(part for part in continuation[latest_response].parts
+                                              if isinstance(part, ToolCallPart))
+                                returns = tuple(part for part in continuation[-1].parts if isinstance(part, ToolReturnPart))
+                                call_keys = [(part.tool_call_id, part.tool_name) for part in calls]
+                                return_keys = [(part.tool_call_id, part.tool_name) for part in returns]
+                                if (calls and len({call_id for call_id, _ in call_keys}) == len(calls)
+                                        and call_keys == return_keys and all(part.outcome == "success" for part in returns)):
+                                    # The Step checkpoint and Trace cutoff were
+                                    # captured by the same fenced takeover.
+                                    # Trace links each already-published return to
+                                    # the original operation, without flattening
+                                    # the SDK's persisted request projection.
+                                    events = await trace_archive.read_history_associations(
+                                        agent_run_id=key.turn_id, message_seqs=(),
+                                        tool_call_ids=tuple(call_id for call_id, _ in call_keys),
+                                        event_high_water=trace_event_base,
+                                    )
+                                    expected = dict(call_keys)
+                                    confirmed = {}
+                                    for event in events:
+                                        if event.event_type != "TOOL_CALL_SUCCEEDED":
+                                            continue
+                                        call_id = event.tool_call_id
+                                        operation_id = event.metadata.get(TOOL_OPERATION_ID_METADATA_KEY)
+                                        if (event.agent_run_id != key.turn_id or event.agent_conversation_id != key.session_id
+                                                or call_id not in expected or event.tool_name != expected[call_id]
+                                                or not operation_id or call_id in confirmed):
+                                            await self._reject_incomplete_subagent_trace(key, generation + 1)
+                                        confirmed[call_id] = expected[call_id], operation_id
+                                    if set(confirmed) != set(expected):
+                                        await self._reject_incomplete_subagent_trace(key, generation + 1)
+                                    completed_frontier = confirmed
                             deferred_results = await tools.resume_canonical_effects(
                                 pending, interrupted_generation=generation, retained_returns=retained_returns,
+                                completed_frontier=completed_frontier,
                             )
+                            if completed_frontier is not None and deferred_results is None:
+                                await self._reject_incomplete_subagent_trace(key, generation + 1)
                             if not pending and not completed_checkpoint:
                                 latest_ids = (frozenset(part.tool_call_id for part in continuation[latest_response].parts
                                                        if isinstance(part, ToolCallPart)) if latest_response >= 0 else frozenset())
@@ -1242,6 +1284,19 @@ class _RegenerableTurnRunner:
                                 if error.code in {ErrorCode.STORAGE_RECOVERY_REQUIRED, ErrorCode.STORAGE_OWNER_MISMATCH}:
                                     await self._reject_incomplete_subagent_trace(key, generation + 1)
                                 raise
+                        if trace_enabled and trace_event_base and deferred_results is not None and pending:
+                            # Tool-return replay emits SDK start notifications even
+                            # when no leaf is entered. Seed only the exact prior
+                            # starts within the captured Trace cutoff.
+                            starts = await trace_archive.read_history_associations(
+                                agent_run_id=key.turn_id, message_seqs=(),
+                                tool_call_ids=tuple(deferred_results.calls), event_high_water=trace_event_base,
+                            )
+                            traced_tool_starts = tuple(
+                                event.tool_call_id for event in starts
+                                if event.event_type == "TOOL_CALL_STARTED" and event.tool_call_id in pending
+                                and event.tool_name == pending[event.tool_call_id]
+                            )
                     else:
                         if (checkpoint.state != "interrupted"
                                 or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
@@ -1271,7 +1326,7 @@ class _RegenerableTurnRunner:
                 completed_checkpoint=completed_checkpoint, output_retries_used=output_retries_used,
                 mode=mode, planning=planning, plan_store=plan_store, budget=budget,
                 trace_enabled=trace_enabled, trace_event_base=trace_event_base,
-                trace_interaction_base=trace_interaction_base, split_source=split,
+                trace_interaction_base=trace_interaction_base, traced_tool_starts=traced_tool_starts, split_source=split,
                 preload_skill_inputs=tuple(request.get("preload_skills", ())),
                 previous_turn_interrupted=request.get("previous_turn_interrupted") is True,
             )
@@ -2162,6 +2217,7 @@ class _RegenerableTurnRunner:
                          if type(value) is TraceCapability)
             trace_opts.update(
                 capture_trace=capture, trace_interaction_base=turn.trace_interaction_base,
+                traced_tool_starts=turn.traced_tool_starts,
                 trace_boundary=flush, trace_auto_flush=trace.commit.mode != "terminal",
             )
 
