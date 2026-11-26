@@ -113,6 +113,7 @@ class SessionContextTurn:
 class _ContextWindow:
     after: int
     through: int
+    max_context_bytes: int
     turns: tuple[SessionContextTurn, ...]
     size: int
 
@@ -816,13 +817,14 @@ class SqlSessionTurnReader:
         )
 
     async def recent_context(
-        self, session_id: str, *, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
-        checkpoint: SqlStepStore | None = None,
+        self, session_id: str, *, through: int, max_context_bytes: int,
+        lineage: tuple[SessionTurnSegment, ...] = (), checkpoint: SqlStepStore | None = None,
     ) -> tuple[SessionContextTurn, ...]:
         """Read bounded candidates after the caller authorizes the current session head."""
         start = max(0, through - _CONTEXT_POSITIONS)
         cached = self._recent.get(session_id)
-        if cached is not None and cached.after <= start <= cached.through <= through:
+        if (cached is not None and cached.max_context_bytes == max_context_bytes
+                and cached.after <= start <= cached.through <= through):
             if cached.through == through:
                 self._recent.move_to_end(session_id)
                 return cached.turns
@@ -843,10 +845,13 @@ class SqlSessionTurnReader:
             if turns[index].reset_context:
                 turns = turns[index:]
                 break
-        self._remember_context(session_id, after=start, through=through, turns=tuple(
-            turn if turn.seed_checkpoint_prefix is None else replace(turn, seed_checkpoint_prefix=None)
-            for turn in turns
-        ))
+        self._remember_context(
+            session_id, after=start, through=through, max_context_bytes=max_context_bytes,
+            turns=tuple(
+                turn if turn.seed_checkpoint_prefix is None else replace(turn, seed_checkpoint_prefix=None)
+                for turn in turns
+            ),
+        )
         return turns
 
     async def read_context_range(
@@ -922,8 +927,19 @@ class SqlSessionTurnReader:
 
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],
+        max_context_bytes: int,
     ) -> None:
         global _history_cache_total
+        remaining = max_context_bytes
+        for index in range(len(turns) - 1, -1, -1):
+            turn = turns[index]
+            # This is a lower bound on the admitted charge: stored input
+            # and media may consume more. Keep the first non-fitting turn,
+            # since its compacted context can replace the normal transcript.
+            remaining -= turn.transcript_bytes + len(turn.request["prompt"].encode("utf-8"))
+            if remaining < 0:
+                turns = turns[index:]
+                break
         # Charge an entry even for windows containing only failed/cancelled turns.
         size = 1024 + sum(turn.size for turn in turns)
         with _HISTORY_CACHE_LOCK:
@@ -946,7 +962,7 @@ class SqlSessionTurnReader:
                 _history_cache_total -= released
             if _history_cache_total + size > _HISTORY_CACHE_BYTES:
                 return
-            self._recent[session_id] = _ContextWindow(after, through, turns, size)
+            self._recent[session_id] = _ContextWindow(after, through, max_context_bytes, turns, size)
             owner.used += size
             _history_cache_total += size
 
@@ -1043,8 +1059,8 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
     def note_terminal_context(
         self, key: SessionTurnKey, *, turn_no: int, prompt: str | None, stored_input: JsonValue,
-        messages: Sequence[ModelMessage], succeeded: bool, reset_context: bool = False,
-        compacted_context: tuple[ModelMessage, ...] = (),
+        messages: Sequence[ModelMessage], succeeded: bool, max_context_bytes: int,
+        reset_context: bool = False, compacted_context: tuple[ModelMessage, ...] = (),
     ) -> None:
         """Advance coverage only over a known committed adjacent position."""
         cached = self._recent.get(key.session_id)
@@ -1055,7 +1071,8 @@ class SqlSessionTurns(SqlSessionTurnReader):
             if turn_no != 1:
                 return
             turns = ()
-        elif cached.through != turn_no - 1 or cached.after > after:
+        elif (cached.max_context_bytes != max_context_bytes or cached.through != turn_no - 1
+              or cached.after > after):
             return
         else:
             turns = tuple(turn for turn in cached.turns if turn.turn_no > after)
@@ -1065,7 +1082,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
             key.turn_id, turn_no, prompt, stored_input, messages if succeeded else (),
             reset_context=succeeded and reset_context, interrupted=not succeeded, compacted_context=compacted_context,
         ),)
-        self._remember_context(key.session_id, after=after, through=turn_no, turns=turns)
+        self._remember_context(
+            key.session_id, after=after, through=turn_no, turns=turns, max_context_bytes=max_context_bytes,
+        )
 
     async def create(self, session_id: str, *, config: JsonValue) -> None:
         async def write(connection: AsyncSession) -> None:

@@ -418,6 +418,7 @@ class _RegenerableTurnRunner:
             ),
             stored_input=turn.stored_input, messages=messages, succeeded=succeeded,
             reset_context=turn.session_context == "current_turn", compacted_context=compacted_context,
+            max_context_bytes=_CONTEXT_BYTES,
         )
         self._publish(turn.key.session_id, {
             "type": "terminal", "turn_id": turn.key.turn_id, "turn_no": turn.number,
@@ -1933,7 +1934,10 @@ class _RegenerableTurnRunner:
         projection = None
         context_from = through + 1
         candidates = (() if session_context == "current_turn"
-                      else await self._store.recent_context(key.session_id, through=through, lineage=lineage, checkpoint=checkpoint))
+                      else await self._store.recent_context(
+                          key.session_id, through=through, lineage=lineage, checkpoint=checkpoint,
+                          max_context_bytes=_CONTEXT_BYTES,
+                      ))
         interrupted = bool(candidates and candidates[-1].turn_no == through and candidates[-1].interrupted)
         for candidate in reversed(candidates):
             if allow_compaction and candidate.compacted_context:

@@ -388,19 +388,19 @@ async def test_recent_context_reads_latest_positions_and_reuses_covered_history(
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
-        at_129 = await turns.recent_context("chat", through=129)
+        at_129 = await turns.recent_context("chat", through=129, max_context_bytes=1024 * 1024)
         assert [turn.turn_no for turn in at_129] == list(range(2, 130))
         assert all(turn.messages[0].instructions == "frozen" for turn in at_129)
         # 128 turns and one shared frozen binding: one query per owner, body,
         # and binding, not one binding query per historical turn.
         assert (len(reads), len(body_reads), len(binding_reads)) == (1, 1, 1)
-        warm = await turns.recent_context("chat", through=130)
+        warm = await turns.recent_context("chat", through=130, max_context_bytes=1024 * 1024)
         assert (len(reads), len(body_reads), len(binding_reads)) == (2, 1, 1)
-        assert await turns.recent_context("chat", through=130) == warm
+        assert await turns.recent_context("chat", through=130, max_context_bytes=1024 * 1024) == warm
         assert (len(reads), len(body_reads), len(binding_reads)) == (2, 1, 1)
         fresh = SqlSessionTurns(create_sql_storage_context(engine), metadata, namespace="test", tenant_id="a")
         fresh.bind_transcript_reader(*turns._transcript_source)
-        assert await fresh.recent_context("chat", through=130) == warm
+        assert await fresh.recent_context("chat", through=130, max_context_bytes=1024 * 1024) == warm
         assert [turn.turn_no for turn in warm] == list(range(3, 131))
         assert warm[-1].interrupted and warm[-1].request == {"prompt": "turn-130"} and not warm[-1].messages
         assert (len(reads), len(body_reads), len(binding_reads)) == (3, 2, 2)
@@ -431,7 +431,7 @@ async def test_context_reset_is_committed_success_only_in_warm_and_cold_history(
         )
         turns.note_terminal_context(
             key, turn_no=number, prompt=key.turn_id, stored_input=None,
-            messages=messages, succeeded=bool(messages), reset_context=reset,
+            messages=messages, succeeded=bool(messages), reset_context=reset, max_context_bytes=1024 * 1024,
         )
         return key
 
@@ -444,18 +444,18 @@ async def test_context_reset_is_committed_success_only_in_warm_and_cold_history(
         reader.bind_transcript_reader(*turns._transcript_source)
         return reader
 
-    before_reset = await turns.recent_context("chat", through=3)
+    before_reset = await turns.recent_context("chat", through=3, max_context_bytes=1024 * 1024)
     assert [turn.turn_no for turn in before_reset] == [1, 2, 3]
     assert before_reset[1].interrupted and before_reset[1].request == {"prompt": "context-2"}
-    assert await cold_reader().recent_context("chat", through=3) == before_reset
+    assert await cold_reader().recent_context("chat", through=3, max_context_bytes=1024 * 1024) == before_reset
 
     reset = await publish(4, reset=True)
     await publish(5, state="failed", reset=True)
     await publish(6)
 
-    after_reset = await turns.recent_context("chat", through=6)
+    after_reset = await turns.recent_context("chat", through=6, max_context_bytes=1024 * 1024)
     assert [(turn.turn_no, turn.reset_context) for turn in after_reset] == [(4, True), (5, False), (6, False)]
-    assert await cold_reader().recent_context("chat", through=6) == after_reset
+    assert await cold_reader().recent_context("chat", through=6, max_context_bytes=1024 * 1024) == after_reset
 
     # Reset changes the model's default candidates, not exact replay windows or
     # the ability to read public history from before the reset.
