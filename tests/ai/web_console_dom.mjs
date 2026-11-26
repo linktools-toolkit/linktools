@@ -281,7 +281,7 @@ if(process.argv[3]==='native-model-messages') {
   turnSessions=true;turnTrace=true;
   await node('settings').click();node('settings-dialog').close();
   const id='b-current-turn',last='b-previous-turn',session=sessions.get('b');
-  Object.assign(session,{active_turn_id:id,last_turn_no:1,revision:1});
+  Object.assign(session,{active_turn_id:id,active_execution_id:'stale-execution',last_turn_no:1,revision:1});
   timelineOverrides.set('b',{items:[{turn_id:last,turn_no:1,status:'SUCCEEDED',
     conversation_committed:true,user_input:{prompt:'Earlier question',attachments:[]},items:[]}],next_cursor:null});
   await select('#session=b');
@@ -292,6 +292,9 @@ if(process.argv[3]==='native-model-messages') {
   assert.equal(node('native-mode').disabled,false);
   assert.equal(node('activity-mode').disabled,false);
   assert.equal(node('inspector-toggle').hidden,true,'Activity is the single native Trace entry');
+  for(const id of ['detail-view-picker','execution-actions','run-actions','detail-attention','recovery-controls','show-active','open-recovery'])
+    assert.equal(node(id).hidden,true,`canonical session hides legacy ${id}`);
+  assert.equal(node('stop-run').disabled,true);
   assert.equal(calls.filter(call=>call.query.models || call.query.trace).length,0,'opening Chat does not read diagnostics');
 
   const first=deferred('GET /api/sessions/b'),open=node('native-mode').click();
@@ -347,7 +350,7 @@ if(process.argv[3]==='native-model-messages') {
 if(process.argv[3]==='native-stop') {
   turnSessions=true;await node('settings').click();node('settings-dialog').close();
   const id='b-native-stop',session=sessions.get('b');
-  Object.assign(session,{active_turn_id:id,last_turn_no:0,revision:1});
+  Object.assign(session,{active_turn_id:id,active_execution_id:'stale-execution',last_turn_no:0,revision:1});
   const row={turn_id:id,turn_no:1,status:'STARTED',conversation_committed:false,
     user_input:{prompt:'Read files',attachments:[]},items:[]};
   timelineOverrides.set('b',{items:[row],next_cursor:null});
@@ -355,6 +358,7 @@ if(process.argv[3]==='native-stop') {
   const watch=sessionSources.at(-1),emitTurn=frame=>watch.listeners.get('turn')({data:JSON.stringify(frame)});
   emitTurn({type:'snapshot',session});
   await until('active stop button',()=>node('send').textContent==='Stop' && !node('send').disabled);
+  assert.equal(node('current-status').textContent,'Turn in progress');
   const stopResponse=deferred('POST /api/sessions/b/cancel'),stop=node('send').click();
   await stopResponse.requested;
   assert.equal(node('send').disabled,true);
@@ -368,7 +372,11 @@ if(process.argv[3]==='native-stop') {
   emitTurn({type:'terminal',turn_id:id,turn_no:1,revision:2,generation:1,state:'cancelled',
     prompt:'Read files',items:[]});
   await until('terminal Stop frees the composer',()=>node('send').textContent==='Send ↑' && !node('send').disabled);
-  console.log('Native Stop displays cancelling until terminal');
+  assert.equal(node('current-status').hidden,true,'old execution ID does not report occupancy');
+  const listItem=descendants(node('list')).find(item=>item.dataset.listKey==='sessions:b');
+  assert.doesNotMatch(listItem.textContent,/Running/,'legacy owner does not mark a canonical session as running');
+  assert.equal(calls.filter(call=>call.key.startsWith('/api/executions')).length,0);
+  console.log('Native Stop displays cancelling until terminal and ignores stale legacy ownership');
   process.exit(0);
 }
 if(process.argv[3]==='session-published-turn') {

@@ -75,8 +75,10 @@ function showInspector(open, focus=false) {
   if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$(closingMode==='turn-models'?'native-mode':closingMode?'activity-mode':'actions-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
 }
 function renderCurrentState() {
-  const owner=state.view==='sessions'?state.session?.active_execution_id:null,info=owner===state.observedExecution?state.observedInfo:state.execution;
-  let label='No execution selected';
+  const ordinary=state.view==='sessions' && state.config?.turn_sessions;
+  const owner=state.view==='sessions'?(ordinary?state.session?.active_turn_id:state.session?.active_execution_id):null;
+  const info=ordinary?null:owner===state.observedExecution?state.observedInfo:state.execution;
+  let label=ordinary?'No conversation selected':'No execution selected';
   if(state.session && state.view==='sessions') {
     if(!state.config?.read_only && !sessionWatch?.ready)label='Session availability unknown · synchronizing';
     else if(state.session.status!=='OPEN')label=`Session ${state.session.status}${owner?' · occupied':''}`;
@@ -87,10 +89,10 @@ function renderCurrentState() {
   else if(state.executionError)label='Execution unavailable';
   else if(state.selectedExecution || state.selectedSession)label='Loading…';
   $('current-status').textContent=label;
-  $('current-status').hidden=label==='Session available' && !['CANCELLED','FAILED'].includes(state.observedInfo?.status);
+  $('current-status').hidden=label==='Session available' && (ordinary || !['CANCELLED','FAILED'].includes(state.observedInfo?.status));
   $('recovery-shortcut').hidden=!owner || !['RECOVERY_REQUIRED','CANCELLING','START_UNKNOWN'].includes(info?.status);
   $('current-status').classList.toggle('error',state.session?.status==='CLEANUP_REQUIRED' || Boolean(info && (!state.session || owner===info.execution_id) && ['FAILED','START_UNKNOWN','RECOVERY_REQUIRED'].includes(info.status)));
-  $('show-active').hidden=!owner || owner===state.selectedExecution;
+  $('show-active').hidden=ordinary || !owner || owner===state.selectedExecution;
   $('stop-run').setAttribute('aria-label',`Stop selected execution ${state.selectedExecution || ''}`);
 }
 async function api(path, {body, signal}={}) {
@@ -179,21 +181,23 @@ function setDisabled() {
   $('activity-mode').disabled=ordinary?!state.config.turn_trace || !defaultOrdinaryTurn():!state.selectedExecution;
   $('detail-turn-picker').hidden=state.view!=='sessions';
   $('detail-view').disabled=ordinary;
+  $('detail-view-picker').hidden=ordinary;
+  $('execution-actions').hidden=ordinary;
   $('run-actions').hidden=ordinary;
   const needsRecovery=['RECOVERY_REQUIRED','START_UNKNOWN','CANCELLING'].includes(state.execution?.status);
-  $('detail-attention').hidden=!needsRecovery && state.execution?.status!=='FAILED';
+  $('detail-attention').hidden=ordinary || !needsRecovery && state.execution?.status!=='FAILED';
   $('detail-attention-text').textContent=state.execution?.status==='FAILED'?`Failed${state.execution.error_code?' · '+state.execution.error_code:''}. Actions offers retry or fork.`:needsRecovery?`${state.execution.status.replaceAll('_',' ')}${state.execution.error_code?' · '+state.execution.error_code:''}. Review the recorded state before continuing.`:'';
   $('detail-recovery').hidden=!needsRecovery;
-  $('recovery-controls').hidden=state.tab!=='recovery';
+  $('recovery-controls').hidden=ordinary || state.tab!=='recovery';
   $('session-details').hidden=state.tab!=='overview' || state.view!=='sessions' || !state.session || state.execution?.session_id!==state.session.session_id;
-  const active=state.session?.active_execution_id===state.observedExecution?state.observedInfo:null;
+  const active=!ordinary && state.session?.active_execution_id===state.observedExecution?state.observedInfo:null;
   $('end-active').hidden=readonly || !active || !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(active.status) && state.endReadbackId!==active.execution_id;
   $('end-active').disabled=Boolean(active && [...state.actionsPending].some(key=>key.startsWith(`${active.execution_id}:`)));
-  const stoppable=!readonly && state.execution && !terminal(state.execution.status);
+  const stoppable=!ordinary && !readonly && state.execution && !terminal(state.execution.status);
   $('stop-run').hidden=!stoppable;
   $('inspector-active-stop').hidden=readonly || !active || terminal(active.status) || active.execution_id===state.selectedExecution;
   $('inspector-active-stop').disabled=readonly || !active || state.actionsPending.has(`${active.execution_id}:end-stopped`);
-  $('stop-run').disabled=ending;
+  $('stop-run').disabled=ordinary || ending;
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
   $('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);
   const turn=ordinary ? state.session?.active_turn_id : null;
@@ -278,7 +282,7 @@ function setView(view, refreshSelection=true) {
 }
 function navigateView(view) {
   const params=new URLSearchParams({view});
-  if(view==='sessions' && state.selectedSession){params.set('session',state.selectedSession);if(state.conversationInspectorOpen && state.conversationExecution)params.set('execution',state.conversationExecution);}
+  if(view==='sessions' && state.selectedSession){params.set('session',state.selectedSession);if(!state.config?.turn_sessions && state.conversationInspectorOpen && state.conversationExecution)params.set('execution',state.conversationExecution);}
   if(view==='executions' && state.browserExecution)params.set('execution',state.browserExecution);
   if(location.hash==='#'+params)return setView(view);
   location.hash='#'+params;
@@ -345,8 +349,8 @@ function renderList() {
     const node=button('',async () => navigate(session ? id:null,session ? null:id),`list-item${active?' active':''}`);node.dataset.listKey=`${state.view}:${id}`;
     node.append(element('span','list-title',session ? item.metadata?.title || short(id) : short(id)));
     const sub=element('span','list-subtitle');
-    sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':(item.active_turn_id || item.active_execution_id) || !terminal(item.status) && !session ? 'running':''}`));
-    const running=Boolean(item.active_turn_id || item.active_execution_id);
+    const running=session?Boolean(state.config?.turn_sessions?item.active_turn_id:item.active_execution_id):!terminal(item.status);
+    sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':running?'running':''}`));
     const label=session && state.config?.turn_sessions
       ? (running?'Running':item.status==='CLOSED'?'Closed':short(id))
       : session ? `${running?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}`
@@ -371,7 +375,8 @@ let observationRead=null;
 let terminalHistoryRead=null;
 const sessionSubmissions=new Set();
 function sessionSendBlocked() {
-  return state.session?.status!=='OPEN' || sessionSubmissions.has(state.selectedSession) || Boolean(state.session?.active_turn_id || state.session?.active_execution_id)
+  const owner=state.config?.turn_sessions?state.session?.active_turn_id:state.session?.active_execution_id;
+  return state.session?.status!=='OPEN' || sessionSubmissions.has(state.selectedSession) || Boolean(owner)
     || !state.config?.read_only && (!sessionWatch || !sessionWatch.ready);
 }
 function stopSessionWatch() {
@@ -1672,8 +1677,8 @@ function renderLiveTools(live,wanted) {
 }
 function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   cancelLiveRender();
-  // Native chat renders its own live and committed parts in each turn.
-  if(state.view==='sessions' && state.conversationMode==='chat' && state.config?.turn_sessions)return;
+  // Canonical session views never render legacy execution observation.
+  if(state.view==='sessions' && state.config?.turn_sessions)return;
   const started=performance.now();
   try {
   let live=$('live');
