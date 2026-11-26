@@ -303,7 +303,9 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 
 .ordinary-live { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.composer-settings > #agent-picker { display:flex; align-items:center; gap:6px; white-space:nowrap; font-size:12px; }
 
 .turn-file-options { margin:4px 0; font-size:12px; }
-.turn-file-options label { display:block; margin-top:6px; }
+
+.turn-file-options .attachments:empty { display:none; }
+.turn-file-options .attachments li { margin-top:4px; overflow-wrap:anywhere; }
+.turn-file-options .attachments button { margin-left:6px; }

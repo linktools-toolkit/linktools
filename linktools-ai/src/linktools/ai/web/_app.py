@@ -5,6 +5,7 @@
 import asyncio
 import base64
 import json
+import mimetypes
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import ExitStack, aclosing, asynccontextmanager, nullcontext, suppress
 from dataclasses import asdict, fields, is_dataclass, replace
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import anyio
 import httpx2
+from pydantic_ai.messages import BinaryContent
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -58,6 +60,9 @@ _HEADERS = {
 _JSON_REQUEST_MAX_BYTES = 8 * 1024 * 1024
 # Transport bound, not the Runtime's canonical turn limit. Allow JSON escaping and the HTTP envelope.
 _TURN_JSON_REQUEST_MAX_BYTES = 512 * 1024
+_TURN_UPLOAD_MAX_BYTES = 512 * 1024
+_TURN_UPLOAD_MAX_FILES = 32
+_TURN_UPLOAD_JSON_MAX_BYTES = 2 * 1024 * 1024
 _TURN_SSE_LIMIT = 128
 _TURN_SSE_BUFFER = 256 * 1024
 
@@ -290,10 +295,11 @@ def _content(request: Request, field: str = "include_content") -> bool:
     return value == "true"
 
 
-async def _body(request: Request, *, ordinary_turn: bool = False) -> dict[str, object]:
+async def _body(request: Request, *, ordinary_turn: bool = False, upload: bool = False) -> dict[str, object]:
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
         raise ValueError("application/json is required")
-    maximum = _TURN_JSON_REQUEST_MAX_BYTES if ordinary_turn else _JSON_REQUEST_MAX_BYTES
+    maximum = (_TURN_UPLOAD_JSON_MAX_BYTES if upload else
+               _TURN_JSON_REQUEST_MAX_BYTES if ordinary_turn else _JSON_REQUEST_MAX_BYTES)
     if ordinary_turn and int(request.headers.get("content-length", "0")) > maximum:
         raise ValueError("request exceeds JSON body limit")
     data = bytearray()
@@ -305,6 +311,40 @@ async def _body(request: Request, *, ordinary_turn: bool = False) -> dict[str, o
     if not isinstance(payload, dict):
         raise ValueError("request must be an object")
     return payload
+
+
+def _uploaded_prompt(prompt: str, value: object) -> str | tuple[str | BinaryContent, ...]:
+    """Convert browser bytes into the Runtime's existing ordered attachment input."""
+    def invalid(reason: str) -> AIError:
+        return AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "attachments", "reason": reason})
+
+    if not isinstance(value, list) or len(value) > _TURN_UPLOAD_MAX_FILES:
+        raise invalid("attachment_count_invalid")
+    if not value:
+        return prompt
+    remaining = _TURN_UPLOAD_MAX_BYTES
+    parts: list[str | BinaryContent] = [prompt]
+    for item in value:
+        if not isinstance(item, dict):
+            raise invalid("attachment_invalid")
+        name, media_type, encoded = item.get("name"), item.get("media_type"), item.get("data")
+        if (not isinstance(name, str) or not 0 < len(name) <= 255 or not name.isprintable()
+                or "/" in name or chr(92) in name or not isinstance(media_type, str)
+                or len(media_type) > 128 or (media_type and not media_type.isprintable())
+                or not isinstance(encoded, str) or not encoded):
+            raise invalid("attachment_invalid")
+        if len(encoded) > 4 * ((remaining + 2) // 3):
+            raise invalid("attachment_size_limit")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except ValueError as error:
+            raise invalid("attachment_encoding_invalid") from error
+        if not data or len(data) > remaining:
+            raise invalid("attachment_size_limit")
+        remaining -= len(data)
+        media_type = media_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+        parts.append(BinaryContent(data, media_type=media_type, identifier=name))
+    return tuple(parts)
 
 
 class _LocalBoundary:
@@ -415,6 +455,8 @@ class _Console:
             "runtime": self.runtime.status() if self.runtime is not None else None,
             "read_only": self.runtime is None,
             "turn_sessions": self.turn_sessions,
+            **({"attachment_upload": {"max_bytes": _TURN_UPLOAD_MAX_BYTES, "max_files": _TURN_UPLOAD_MAX_FILES}}
+               if self.turn_sessions and self.runtime is not None else {}),
             **({"turn_trace": True} if self.turn_sessions and self.history is not None
                and self.history.has_turn_trace else {}),
             "capabilities": self.capabilities,
@@ -531,22 +573,25 @@ class _Console:
             request.state.phase = "session.get"
         runtime = self.require_runtime()
         session_id = _text(request.query_params, "session_id")
-        payload = await _body(request, ordinary_turn=self.turn_sessions)
-        request_id = _text(payload, "request_id")
         action = request.path_params["action"]
+        payload = await _body(request, ordinary_turn=self.turn_sessions,
+                              upload=self.turn_sessions and action == "messages")
+        request_id = _text(payload, "request_id")
         request.state.operation_id = request_id
         if environ.debug:
             request.state.phase = f"session.{action}"
+        if action == "messages" and "files" in payload:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                "field": "files", "reason": "use_attachment_upload",
+            })
         if self.turn_sessions:
             if action == "messages":
                 if payload.get("planning"):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Ordinary turns do not support plan mode")
-                files = payload.get("files", [])
-                if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
-                    raise ValueError("files must be a list of workspace-relative paths")
+                prompt = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []))
                 turn_id = await runtime.sessions.start_turn(
-                    session_id, _text(payload, "prompt"), agent=_text(payload, "agent_id", "default"),
-                    principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"), files=files,
+                    session_id, prompt, agent="default",
+                    principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
                 )
                 return _json({"turn_id": turn_id}, 202)
             if action in {"cancel", "recover"}:
@@ -590,9 +635,13 @@ class _Console:
                 return _json(receipt)
             return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
         if action == "messages":
+            if "attachments" in payload:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                    "field": "attachments", "reason": "sql_turn_required",
+                })
             execution = await runtime.sessions.start(
                 session_id, _text(payload, "prompt"), principal=self.principal,
-                files=payload.get("files", ()), idempotency_key=request_id,
+                idempotency_key=request_id,
                 planning=payload.get("planning", False), thinking=payload.get("thinking"),
             )
             return _json({"execution_id": execution.execution_id}, 202)

@@ -100,3 +100,73 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
             assert result.status_code == 200
             assert result.json()["turn_id"] == turn_id
             assert result.json()["conversation_committed"] is True
+
+
+@pytest.mark.asyncio
+async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_store(tmp_path):
+    from base64 import b64encode
+
+    from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, UserPromptPart
+
+    from linktools.ai.execution import StoredUserInput
+    from linktools.ai.persistence.codec import decode_domain
+    from linktools.ai.persistence.turns import SessionTurnKey
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+    class WorkspacePolicy(TenantAuthorizationPolicy):
+        pass
+
+    seen = []
+    binary = b"\x00browser upload\xff"
+
+    async def model(messages, _info):
+        seen.extend(
+            (item.identifier, item.data)
+            for message in messages for part in message.parts
+            if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+            for item in part.content if isinstance(item, BinaryContent)
+        )
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = RuntimeFeatures("web-upload")
+    features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    async with (
+        Persistence.open("web-upload", storage=PersistenceStorage.from_root(tmp_path)) as state,
+        Runtime.open(persistence=state, features=features, authorization=WorkspacePolicy()) as runtime,
+        client(create_app(runtime=runtime)) as http,
+    ):
+        config = (await http.get("/api/config")).json()
+        assert config["attachment_upload"]["max_bytes"] > len(binary)
+        created = await http.post("/api/sessions", headers=_HEADERS, json={
+            "session_id": "chat", "request_id": "create",
+        })
+        assert created.status_code == 201, created.text
+        url = "/api/session/messages?session_id=chat"
+        payload = {"prompt": "Read my upload", "request_id": "upload"}
+        old = await http.post(url, headers=_HEADERS, json={**payload, "files": ["server-file.bin"]})
+        assert old.status_code == 400 and old.json()["safe_details"]["reason"] == "use_attachment_upload"
+        item = {"name": "file.bin", "media_type": "application/octet-stream"}
+        broken = await http.post(url, headers=_HEADERS, json={
+            **payload, "attachments": [{**item, "data": "%%%%"}],
+        })
+        assert broken.status_code == 400 and broken.json()["safe_details"]["reason"] == "attachment_encoding_invalid"
+
+        request = {**payload, "attachments": [{**item, "data": b64encode(binary).decode()}]}
+        accepted = await http.post(url, headers=_HEADERS, json=request)
+        assert accepted.status_code == 202, accepted.text
+        turn_id = accepted.json()["turn_id"]
+        repeat = await http.post(url, headers=_HEADERS, json=request)
+        assert repeat.status_code == 202 and repeat.json() == {"turn_id": turn_id}
+        actor = runtime.default_principal
+        session = await runtime.sessions.get("chat", principal=actor)
+        result = await session._turn(turn_id, actor).wait_final(timeout_seconds=10)
+        assert result.view["output"] == {"text": "done"}
+        assert seen == [("file.bin", binary)]
+        row = await state.session_turn_reader.get_turn(SessionTurnKey("chat", turn_id))
+        stored = decode_domain(row["request_json"]["input"], StoredUserInput)
+        assert [ref.size for ref in stored.payload.object_refs()] == [len(binary)]
+        history = (await http.get(f"/api/session?session_id=chat&turn_id={turn_id}")).json()
+        assert history["user_input"]["attachments"][0]["size"] == len(binary)
+        assert request["attachments"][0]["data"] not in json.dumps(history)

@@ -111,8 +111,8 @@ function shortAttemptId() {
   return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(9))))
     .replaceAll('+','-').replaceAll('/','_');
 }
-async function mutate(path, payload, {newAttemptOn=[],scope='',shortRequest=false}={}) {
-  const key = scope + path + JSON.stringify(payload);
+async function mutate(path, payload, {newAttemptOn=[],scope='',shortRequest=false, intent=payload}={}) {
+  const key = scope + path + JSON.stringify(intent);
   let operation = state.pending.get(key);
   if (operation?.running) return operation.running;
   if (!operation) { operation={id:shortRequest?shortAttemptId():crypto.randomUUID()}; state.pending.set(key, operation); }
@@ -143,9 +143,8 @@ function setDisabled() {
       $(id).disabled ||= busy || state.actionsPending.has(`session:${state.selectedSession}:${action}`);
   }
   $('planning-control').hidden=ordinary;
-  $('turn-file-options').hidden=!ordinary || readonly;
-  $('turn-files').disabled=readonly || !ordinary || state.session?.status!=='OPEN';
-  $('new-agent').disabled=readonly || (ordinary && (!state.session || state.session.status!=='OPEN'));
+  $('turn-file-options').hidden=!ordinary || readonly || !state.config?.attachment_upload;
+  $('choose-attachments').disabled=$('turn-files').disabled=readonly || !ordinary || state.session?.status!=='OPEN';
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
   ['retry','fork-run','end-stopped'].forEach(id => $(id).disabled=readonly || !state.execution || ending);
@@ -348,7 +347,7 @@ function ordinaryStatus(value) {
 function ordinaryInput(prompt,attachments=[]) {
   return {
     version:1,prompt:typeof prompt==='string'?{kind:'text',text:prompt}:prompt,files:[],
-    attachments:attachments.map(item=>({...item,identifier:item.path || (item.source==='workspace'?'Workspace file':undefined)})),
+    attachments:attachments.map(item=>({...item,identifier:item.identifier || item.path || (item.source==='workspace'?'Workspace file':undefined)})),
   };
 }
 function ordinaryTurnNode(turn, previous=null) {
@@ -1018,13 +1017,42 @@ function renderThinking() {
   const label=thinkingLabels[thinkingLevels.indexOf(readThinking())];
   $('thinking-value').textContent=label;$('thinking').setAttribute('aria-valuetext',label);
 }
+let turnUploads=[];
+function renderAttachments() {
+  $('queued-attachments').replaceChildren(...turnUploads.map(entry=>{
+    const row=element('li','',entry.file.name);
+    const remove=element('button','quiet','Remove');
+    remove.type='button';remove.setAttribute('aria-label',`Remove ${entry.file.name}`);
+    remove.onclick=()=>{turnUploads=turnUploads.filter(item=>item!==entry);saveDraft();renderAttachments();};
+    row.append(remove);return row;
+  }));
+}
+function selectAttachments() {
+  const picker=$('turn-files'), files=Array.from(picker.files);picker.value='';
+  if(!files.length)return;
+  const limit=state.config.attachment_upload;
+  const total=turnUploads.reduce((size,item)=>size+item.file.size,0)+files.reduce((size,file)=>size+file.size,0);
+  if(turnUploads.length+files.length>limit.max_files || total>limit.max_bytes || files.some(file=>!file.size)){
+    notice(`Choose up to ${limit.max_files} nonempty files, at most ${limit.max_bytes/1024} KiB total.`);return;
+  }
+  turnUploads=[...turnUploads,...files.map(file=>({file,id:shortAttemptId()}))];
+  saveDraft();renderAttachments();
+}
+function readAttachment(file) {
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onerror=()=>reject(new Error('Could not read attachment.'));
+    reader.onload=()=>resolve({name:file.name,media_type:file.type,data:reader.result.slice(reader.result.indexOf(',')+1)});
+    reader.readAsDataURL(file);
+  });
+}
 function saveDraft() {
   if(!state.selectedSession)return;
-  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,planning:$('planning').checked,thinking:$('thinking').value,files:$('turn-files').value});
+  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,planning:$('planning').checked,thinking:$('thinking').value,uploads:turnUploads});
 }
 function restoreDraft(sessionId) {
   const draft=state.drafts.get(sessionId) || {prompt:'',planning:false,thinking:'0'};
-  $('prompt').value=draft.prompt;$('turn-files').value=draft.files || '';$('turn-file-options').open=Boolean(draft.files);
+  $('prompt').value=draft.prompt;turnUploads=draft.uploads || [];renderAttachments();
   $('planning').checked=draft.planning;$('thinking').value=draft.thinking ?? '0';renderThinking();
 }
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
@@ -2382,36 +2410,30 @@ async function ordinaryAction(action) {
 }
 async function sendMessage(event) {
   event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,executionGeneration=state.executionGeneration,promptValue=$('prompt').value;
-  const fileText=$('turn-files').value, files=fileText.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
+  const ordinary=Boolean(state.config?.turn_sessions), uploads=turnUploads;
   if(!sessionId || !state.session || state.session.status!=='OPEN' || state.config?.read_only || !promptValue.trim() || sessionSendBlocked())return;
   sessionSubmissions.add(sessionId);
   $('send').disabled=true;notice('');
   try {
-    // Rejected admission is terminal for its key; another explicit send is a new attempt.
     const options={prompt:promptValue,thinking:readThinking()};
-    if(state.config?.turn_sessions){
-      options.agent_id=$('new-agent').value || 'default';
-      if(files.length)options.files=files;
-    } else options.planning=$('planning').checked;
-    const result=await mutate(sessionURL(sessionId,"messages"),options,{newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT'],shortRequest:Boolean(state.config?.turn_sessions)});
-    if(generation!==state.generation){
-      const draft=state.drafts.get(sessionId);
-      if(draft?.prompt===promptValue && (!state.config?.turn_sessions || (draft.files || '')===fileText)){
-        draft.prompt='';if(state.config?.turn_sessions)draft.files='';
-      }
-      if(state.selectedSession===sessionId && $('prompt').value===promptValue && (!state.config?.turn_sessions || $('turn-files').value===fileText)){
-        $('prompt').value='';if(state.config?.turn_sessions)$('turn-files').value='';
-      }
-      return;
+    if(!ordinary)options.planning=$('planning').checked;
+    const intent=uploads.length?{...options,attachments:uploads.map(item=>item.id)}:options;
+    if(ordinary && uploads.length)options.attachments=await Promise.all(uploads.map(item=>readAttachment(item.file)));
+    const result=await mutate(sessionURL(sessionId,"messages"),options,{
+      intent,newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT','REQUEST_FIELD_INVALID'],shortRequest:ordinary,
+    });
+    const draft=state.drafts.get(sessionId);
+    if(draft?.prompt===promptValue && (!ordinary || draft.uploads===uploads)){
+      draft.prompt='';draft.uploads=[];
     }
-    if($('prompt').value===promptValue && (!state.config?.turn_sessions || $('turn-files').value===fileText)){
-      $('prompt').value='';
-      if(state.config?.turn_sessions){$('turn-files').value='';$('turn-file-options').open=false;}
+    if(state.selectedSession===sessionId && $('prompt').value===promptValue && (!ordinary || turnUploads===uploads)){
+      $('prompt').value='';turnUploads=[];renderAttachments();
     }
-    if(state.config?.turn_sessions){
+    if(generation!==state.generation)return;
+    if(ordinary){
       if(!state.turns.some(turn=>turn.turn_id===result.turn_id)){
         if(state.session && !state.session.active_turn_id)state.session.active_turn_id=result.turn_id;
-        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue,files.map(path=>({path,source:'workspace'}))),items:[],conversation_committed:false});
+        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue,uploads.map(({file})=>({identifier:file.name,media_type:file.type,size:file.size}))),items:[],conversation_committed:false});
       }
       return;
     }
@@ -2453,7 +2475,7 @@ async function startPlan(event) {
   const current=()=>dialog.open && dialog.dataset.attempt===attempt;
   $('plan-error').hidden=true;button.disabled=true;
   try {
-    const result=await mutate('/api/executions/plan',{agent_id:$('plan-agent').value || 'default',prompt});
+    const result=await mutate('/api/executions/plan',{prompt});
     if(current()){ $('plan-prompt').value='';dialog.close();navigate(null,result.execution_id); }
   } catch(error) {
     if(current()){ $('plan-error').textContent=error.message;$('plan-error').hidden=false; }
@@ -2462,14 +2484,13 @@ async function startPlan(event) {
 function openNew() {
   if(!state.config || state.config.read_only)return;
   $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();
-  (state.config.turn_sessions?$('create-session'):$('new-agent')).focus();
+  $('create-session').focus();
 }
 async function createSession(event) {
   event.preventDefault();const button=$('create-session');button.disabled=true;
   const sessionId=$('new-dialog').dataset.sessionId,generation=state.generation,noticeRevision=state.noticeRevision;
   try {
     const options={session_id:sessionId,title:$('new-title').value,cwd:$('new-cwd').value || null};
-    if(!state.config.turn_sessions)options.agent_id=$('new-agent').value || 'default';
     const session=await mutate('/api/sessions',options);
     if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation){$('new-dialog').close();state.conversationMode='chat';state.focusComposerSession=session.session_id;setView('sessions',false);navigate(session.session_id,null);}
     await loadList();
@@ -2654,18 +2675,8 @@ function showSettings() {
 }
 async function bootstrap() {
   state.config=await api('/api/config');$('workspace-label').textContent=state.config.workspace || 'Local Runtime';
-  state.config.capabilities.filter(item=>item.kind==='agent').forEach(item=>{const option=element('option','',item.id);option.value=item.id;$('new-agent').append(option);});
   state.config.metric_names.forEach(name=>{const option=element('option','',name.replace('linktools.',''));option.value=name;$('metric-names').append(option);});
-  if(state.config.turn_sessions){
-    $('planning').checked=false;
-    if(!$('new-agent').options.length){
-      const option=element('option','','default');option.value='default';$('new-agent').append(option);
-    }
-    if([...$('new-agent').options].some(option=>option.value==='default'))$('new-agent').value='default';
-    document.querySelector('.composer-settings').prepend($('agent-picker'));
-    $('plan-agent').replaceChildren(...Array.from($('new-agent').options, option => option.cloneNode(true)));
-    $('plan-agent').value=$('new-agent').value;
-  }
+  if(state.config.turn_sessions)$('planning').checked=false;
   if(state.config.read_only){connection('Read-only');notice('Read-only. Configure a model at startup to send messages.');}
   setDisabled();await loadList();await fromHash();
 }
@@ -2780,6 +2791,8 @@ $('settings').onclick=()=>{
   return settingsRequest;
 };
 $('export').onclick=()=>{closeRunActions();return exportResult().catch(showError);};
+$('choose-attachments').onclick=()=>$('turn-files').click();
+$('turn-files').onchange=selectAttachments;
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
 $('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
 $('recover-turn').onclick=()=>ordinaryAction('recover').catch(showError);

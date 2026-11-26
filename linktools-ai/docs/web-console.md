@@ -92,6 +92,13 @@ authoring tokens. These stored MIME permissions are not re-expanded at restore.
 A match permits an input but does not verify provider support; SDK encoding and
 resource limits still apply.
 
+Use **Attach files** in the conversation composer to select local files.
+Selected files are sent with the message, not read from the server workspace.
+A message accepts up to 32 nonempty files and 512 KiB of attachment bytes in
+total. The Runtime uses its configured Object Store for attachment bodies;
+conversation history carries attachment summaries, not file bytes.
+The Web composer uses the default Agent.
+
 To allow image attachments for one invocation, use `LINKTOOLS_MODEL_VISION=1 ai-web`.
 The same environment variable works for `ai-run` and `ai-acp`. `LINKTOOLS_MODEL_VISION=1`
 (or `true`) adds the `image` category to workspace `input_types`; `LINKTOOLS_MODEL_VISION=0`
