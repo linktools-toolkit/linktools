@@ -85,24 +85,6 @@ class _SessionExecutionService(ExecutionService, Protocol):
 
 
 class _SessionTranscriptStore(Protocol):
-    def iter_conversation_messages(
-        self,
-        *,
-        history_id: str | None,
-        agent_run_id: str,
-        tenant_id: str,
-    ) -> AsyncIterator[object]: ...
-
-    def iter_conversation_message_range(
-        self,
-        *,
-        history_id: str | None,
-        agent_run_id: str,
-        tenant_id: str,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[object]: ...
-
     async def load_conversation_model_context(
         self,
         *,
@@ -823,59 +805,6 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 checkpoint_sequence=record.continuation.checkpoint_sequence,
                 projection_digest=record.continuation.projection_digest,
             )
-
-    async def _iter_session_messages(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-    ) -> AsyncIterator[object]:
-        async with self.consume_session(session_id, principal.tenant_id):
-            record = await self.read_authorized(
-                session_id, principal, AuthorizationAction.SESSION_READ
-            )
-            if self._transcript_store is None or record.continuation is None:
-                return
-            history_id = record.continuation.history_id or record.history_id
-            message_count = record.continuation.message_count
-            if message_count is None:
-                messages = self._transcript_store.iter_conversation_messages(
-                    history_id=history_id,
-                    agent_run_id=record.continuation.agent_run_id,
-                    tenant_id=self._runtime_conversation.sessions.tenant_id,
-                )
-            else:
-                messages = self._transcript_store.iter_conversation_message_range(
-                    history_id=history_id,
-                    agent_run_id=record.continuation.agent_run_id,
-                    tenant_id=self._runtime_conversation.sessions.tenant_id,
-                    start=0,
-                    end=message_count,
-                )
-            async for message in messages:
-                yield message
-
-    def iter_session_messages(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-    ) -> AsyncIterator[object]:
-        return self._iter_session_messages(session_id, principal=principal)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     async def _read_session_record(self, session_id: str, *, tenant_id: str) -> SessionRecord | None:
         repository = self._runtime_conversation.sessions
