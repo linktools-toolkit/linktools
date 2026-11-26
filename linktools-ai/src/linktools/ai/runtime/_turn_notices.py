@@ -9,7 +9,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from ..core import validate_persistence_namespace, validate_resource_id, validate_tenant_id
+from ..core import validate_execution_id, validate_persistence_namespace, validate_session_id, validate_tenant_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,8 +35,8 @@ class TurnNotice:
     phase: Literal["admitted", "terminal", "cancelling", "waiting"]
 
     def __post_init__(self) -> None:
-        validate_resource_id(self.session_id)
-        validate_resource_id(self.turn_id)
+        validate_session_id(self.session_id)
+        validate_execution_id(self.turn_id)
         if type(self.revision) is not int or self.revision < 1 or self.phase not in ("admitted", "terminal", "cancelling", "waiting"):
             raise ValueError("invalid turn notice")
 

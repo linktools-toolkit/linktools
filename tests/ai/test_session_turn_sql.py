@@ -58,6 +58,52 @@ async def accept(turns: SqlSessionTurns, turn: str, *, revision: int = 0, throug
 
 
 @pytest.mark.asyncio
+async def test_native_public_turn_id_validation_precedes_authorization_and_sql(tmp_path):
+    from linktools.ai.core import TenantAuthorizationPolicy
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.runtime import Runtime, TurnNotice, TurnNoticeScope
+
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    async def model(_messages, _info):
+        pytest.fail("invalid native turn IDs must not reach the provider")
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            pytest.fail("invalid native turn IDs must not reach authorization")
+
+    storage = PersistenceStorage.sqlite(tmp_path / "native-public.db")
+    async with (
+        Persistence.open("native-public", storage=storage) as state,
+        Runtime.open(
+            persistence=state, authorization=HostAuthorization(), features=model_features(_Models(_UsageFunctionModel(model))),
+        ) as runtime,
+    ):
+        principal = runtime.default_principal
+        oversized = "你" * 21 + "xy"
+        engine = state.execution.executions.state_store.storage_group.context.engine.sync_engine
+
+        def capture(*_args):
+            pytest.fail("invalid native turn IDs must not reach SQL")
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            for read in (runtime.history.turn_result, runtime.history.turn_trace, runtime.sessions.budget_usage,
+                         runtime.sessions.cancel_turn, runtime.sessions.recover_turn):
+                with pytest.raises(AIError) as invalid:
+                    await read("session", oversized, principal=principal)
+                assert invalid.value.code is ErrorCode.REQUEST_FIELD_INVALID
+            with pytest.raises(AIError) as invalid:
+                runtime.sessions.invalidate_turn_session("session", oversized, revision=1)
+            assert invalid.value.code is ErrorCode.REQUEST_FIELD_INVALID
+            with pytest.raises(AIError) as invalid:
+                TurnNotice(TurnNoticeScope("native-public", principal.tenant_id), "session", oversized, 1, "admitted")
+            assert invalid.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+
+@pytest.mark.asyncio
 async def test_native_turn_id_fits_graph_execution_identity_at_the_sql_boundary(store):
     from pathlib import Path
 

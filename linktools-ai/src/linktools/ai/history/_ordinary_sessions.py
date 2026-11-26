@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, Thinking
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, CursorSigner, ExecutionStatus, JsonValue, Page, Principal, PrincipalKind, ResourceKind,
     ResourceRef, TenantAuthorizationPolicy, UsageMetrics, canonical_sha256, decode_cursor, encode_cursor,
-    principal_identity_payload, validate_page_limit, validate_resource_id, validate_session_id,
+    principal_identity_payload, validate_execution_id, validate_page_limit, validate_session_id,
 )
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
@@ -310,8 +310,8 @@ class _OrdinarySessionHistory:
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
         source: StateStepArchive | None, cursor: str | None, limit: int,
     ) -> Page[SessionTurnTraceItem]:
+        validate_execution_id(turn_id)
         await self._session(session_id, principal, local_workspace=local_workspace)
-        validate_resource_id(turn_id)
         key = SessionTurnKey(session_id, turn_id)
         owner = await self._store.get_turn(key)
         if owner is None:
@@ -373,8 +373,8 @@ class _OrdinarySessionHistory:
         self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool,
         for_execution: bool = False,
     ) -> _ObservedTurnResult:
+        validate_execution_id(turn_id)
         session = await self._session(session_id, principal, local_workspace=local_workspace)
-        validate_resource_id(turn_id)
         lineage = await self._authorize_lineage(session, principal)
         row = await self._store.get_history_turn(
             SessionTurnKey(session_id, turn_id), lineage=lineage, include_authority=for_execution,

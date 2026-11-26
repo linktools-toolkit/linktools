@@ -11,7 +11,7 @@ from ..session import SessionTurnNotice, SessionAdmission, SessionTurnAdmission,
 from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, overlay_correlation,
-    validate_agent_id, validate_resource_id, validate_session_id, validate_session_request_key,
+    validate_agent_id, validate_execution_id, validate_session_id, validate_session_request_key,
 )
 from ..errors import AIError, ErrorCode
 from ..persistence.turns import SessionTurnKey
@@ -494,7 +494,7 @@ class RuntimeSessions(Generic[AppT]):
         """Read the admitted budget and current accounting for one native turn."""
         runner, runtime = self._require_turn_sessions()
         validate_session_id(session_id)
-        validate_resource_id(turn_id)
+        validate_execution_id(turn_id)
         return await runner.read_budget_usage(
             SessionTurnKey(session_id, turn_id), principal=principal,
             tenant_id=runtime.tenant_id, authorization=runtime._authorization,
@@ -503,7 +503,7 @@ class RuntimeSessions(Generic[AppT]):
     async def cancel_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
         runner, runtime = self._require_turn_sessions()
         validate_session_id(session_id)
-        validate_resource_id(turn_id)
+        validate_execution_id(turn_id)
         return await runner.cancel_session_turn(
             SessionTurnKey(session_id, turn_id), principal=principal,
             tenant_id=runtime.tenant_id, authorization=runtime._authorization,
@@ -511,11 +511,11 @@ class RuntimeSessions(Generic[AppT]):
 
     async def recover_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
         runner, runtime = self._require_turn_sessions()
+        validate_session_id(session_id)
+        validate_execution_id(turn_id)
         resolver = runtime._binding_resolver
         if resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        validate_session_id(session_id)
-        validate_resource_id(turn_id)
         return await runner.recover_session_turn(
             SessionTurnKey(session_id, turn_id), principal=principal, namespace=runtime.namespace,
             tenant_id=runtime.tenant_id, app=runtime.app, authorization=runtime._authorization,
@@ -543,7 +543,7 @@ class RuntimeSessions(Generic[AppT]):
         """Notify any local observers to re-read the authoritative session."""
         runner, _ = self._require_turn_sessions()
         validate_session_id(session_id)
-        validate_resource_id(turn_id)
+        validate_execution_id(turn_id)
         if type(revision) is not int or revision < 1 or phase not in ("admitted", "terminal", "cancelling", "waiting"):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         runner.invalidate_session(session_id, turn_id, revision=revision, phase=phase)
