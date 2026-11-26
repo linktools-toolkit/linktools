@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Isolated failure experiment; not a change to production durability policy."""
+"""Fault injection for opt-in independent terminal-buffered executions."""
 
 import asyncio
 import json
@@ -90,7 +90,7 @@ def _crash_worker(database: str, effects: str, phase: str) -> None:
         async with Persistence.open('volatile-probe', storage=_storage(Path(database))) as persistence:
             async with Runtime.open(persistence=persistence,
                                       features=_features(Path(effects), [], phase)) as runtime:
-                execution = await runtime.agents.get().session('session').start('work', idempotency_key='work')
+                execution = await runtime.agents.get().start('work', idempotency_key='work')
                 Path(database + '.execution').write_text(execution.execution_id)
                 await execution.wait(timeout_seconds=10)
         raise AssertionError('selected crash boundary was not reached')
@@ -104,8 +104,7 @@ async def test_volatile_turn_process_crash_keeps_prior_turn_and_business_idempot
     database, effects = tmp_path / 'state.db', tmp_path / 'effects.db'
     async with Persistence.open('volatile-probe', storage=_storage(database)) as persistence:
         async with Runtime.open(persistence=persistence, features=_features(effects, [])) as runtime:
-            session = await runtime.agents.get().create_session('session')
-            prior = await session.start('baseline', idempotency_key='baseline')
+            prior = await runtime.agents.get().start('baseline', idempotency_key='baseline')
             assert (await prior.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
             prior_id = prior.execution_id
 
@@ -128,11 +127,12 @@ async def test_volatile_turn_process_crash_keeps_prior_turn_and_business_idempot
             before = await persistence.execution.executions.get(lost_id, tenant_id=persistence.tenant_id)
             assert (before is not None) is (phase == 'after_terminal')
             assert await persistence.execution.executions.get(prior_id, tenant_id=persistence.tenant_id) is not None
-            previous = await runtime.agents.get().session('session').start('baseline', idempotency_key='baseline')
+            previous = await runtime.agents.get().start('baseline', idempotency_key='baseline')
             assert previous.execution_id == prior_id
             assert (await previous.wait(timeout_seconds=10)).result.output == {'text': 'baseline completed'}
             assert calls == []
-            execution = await runtime.agents.get().session('session').start('work', idempotency_key='work')
+            # Submit explicitly; no recovery path replays the interrupted process.
+            execution = await runtime.agents.get().start('work', idempotency_key='work')
             assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
             assert (execution.execution_id == lost_id) is (phase == 'after_terminal')
             assert len(calls) == (0 if phase == 'after_terminal' else 2)
@@ -166,8 +166,7 @@ async def test_volatile_turn_replacement_does_not_publish_the_stale_worker(
     async with Persistence.open('volatile-probe', storage=storage) as first:
         async with Runtime.open(persistence=first,
                                   features=_features(effects, calls, entered=entered, release=release)) as old:
-            session = await old.agents.get().create_session('session')
-            lost = await session.start('work', idempotency_key='work')
+            lost = await old.agents.get().start('work', idempotency_key='work')
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 backend = old._execution_service.runtime_backend()
@@ -199,7 +198,7 @@ async def test_volatile_turn_replacement_does_not_publish_the_stale_worker(
                 async with Persistence.open('volatile-probe', storage=storage) as second:
                     async with Runtime.open(persistence=second,
                                               features=_features(effects, replacement_calls)) as new:
-                        replacement = await new.agents.get().session('session').start('work', idempotency_key='work')
+                        replacement = await new.agents.get().start('work', idempotency_key='work')
                         assert replacement.execution_id != lost.execution_id
                         assert (await replacement.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
                         assert len(replacement_calls) == 2
@@ -214,7 +213,7 @@ async def test_volatile_turn_replacement_does_not_publish_the_stale_worker(
                         assert await second.execution.executions.get(lost.execution_id, tenant_id=second.tenant_id) is None
                         stored = await second.execution.executions.get(replacement.execution_id, tenant_id=second.tenant_id)
                         assert stored.status is ExecutionStatus.SUCCEEDED
-                        replay = await new.agents.get().session('session').start('work', idempotency_key='work')
+                        replay = await new.agents.get().start('work', idempotency_key='work')
                         assert replay.execution_id == replacement.execution_id
             finally:
                 release.set()
@@ -263,8 +262,7 @@ async def test_probe_lease_loss_after_last_check_before_sql_commit(
     new_buffer = _PayloadBuffer() if buffered_trace else None
     async with Persistence.open('volatile-probe', storage=storage) as first:
         async with Runtime.open(persistence=first, features=_features(effects, old_calls, buffer=old_buffer, trace=buffered_trace)) as old:
-            session = await old.agents.get().create_session('session')
-            stale = await session.start('work', idempotency_key='work')
+            stale = await old.agents.get().start('work', idempotency_key='work')
             try:
                 await asyncio.wait_for(commit_entered.wait(), 5)
                 backend = old._execution_service.runtime_backend()
@@ -273,7 +271,7 @@ async def test_probe_lease_loss_after_last_check_before_sql_commit(
                 async with Persistence.open('volatile-probe', storage=storage) as second:
                     async with Runtime.open(persistence=second,
                                               features=_features(effects, new_calls, entered=new_entered, release=new_release, buffer=new_buffer, trace=buffered_trace)) as new:
-                        fresh = await new.agents.get().session('session').start('work', idempotency_key='work')
+                        fresh = await new.agents.get().start('work', idempotency_key='work')
                         await asyncio.wait_for(new_entered.wait(), 5)
                         assert fresh.execution_id != stale.execution_id
                         commit_release.set()
@@ -340,7 +338,7 @@ async def test_probe_lease_loss_after_last_check_before_sql_commit(
                         replay_calls = old_calls if receipt == 'unknown_close' else new_calls
                         before = len(replay_calls)
                         replay_runtime = old if receipt == 'unknown_close' else new
-                        replay = await replay_runtime.agents.get().session('session').start('work', idempotency_key='work')
+                        replay = await replay_runtime.agents.get().start('work', idempotency_key='work')
                         assert replay.execution_id == stale.execution_id
                         assert (await replay.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
                         assert len(replay_calls) == before
