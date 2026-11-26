@@ -1467,8 +1467,8 @@ async def restore_snapshot(
                 native_inputs.setdefault(prompt.root.group_id, []).append(prompt)
             if row["state"] == "succeeded" and "output_ref" in row["result_json"]:
                 result = row["result_json"]
-                root = decode_session_transcript_root(result)
-                structured_turns.setdefault(root.group_id, []).append((root, result["output_ref"]))
+                transcript_root = decode_session_transcript_root(result)
+                structured_turns.setdefault(transcript_root.group_id, []).append((transcript_root, result["output_ref"]))
     for transcript_root in ordinary_roots:
         _validate_native_partition(transcript_root.store_key, namespace, tenant_id)
         closure = native_closures.get(transcript_root.group_id)
@@ -1593,10 +1593,10 @@ async def restore_snapshot(
         if group_id in native_checkpoints:
             _validate_native_checkpoint_payloads(native_checkpoints[group_id], closure, checkpoint_payloads)
         for reference in native_inputs.get(group_id, ()):
-            root = reference.root
+            input_root = reference.root
             try:
-                (identity,) = closure.message_identities(root.store_key, root.slices)
-                _, (message,) = decode_model_message_payloads((checkpoint_payloads[(root.store_key, identity)],))
+                (identity,) = closure.message_identities(input_root.store_key, input_root.slices)
+                _, (message,) = decode_model_message_payloads((checkpoint_payloads[(input_root.store_key, identity)],))
                 if (not isinstance(message, ModelRequest) or len(message.parts) != 1
                         or not isinstance(message.parts[0], UserPromptPart)
                         or not isinstance(message.parts[0].content, str)):
@@ -1605,7 +1605,7 @@ async def restore_snapshot(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         for transcript_root, output_ref in structured_turns.get(group_id, ()):
             try:
-                messages = decode_model_message_payloads(tuple(
+                _, messages = decode_model_message_payloads(tuple(
                     checkpoint_payloads[(transcript_root.store_key, identity)]
                     for identity in closure.message_identities(transcript_root.store_key, transcript_root.slices)
                 ))

@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Thin conversation receipts and snapshots preserve canonical Execution ownership."""
+"""Memory turn codecs and native SQL snapshots preserve exact content ownership."""
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent
+from pydantic import BaseModel
+from pydantic_ai.messages import BinaryContent, ModelResponse, ToolCallPart
 
-from linktools.ai.core import PromptLimits
+from linktools.ai.core import ExecutionStatus, PromptLimits, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
 from linktools.ai.runtime import Runtime
+from linktools.ai.model import StoredUserInput
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.inputs import ExecutionInputMaterializer
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.persistence._session_transcript import decode_session_transcript_root
 from linktools.ai.persistence.codec import (
-    _encode_persisted_domain, decode_session_turn_commit, encode_session_turn_commit,
+    decode_domain, decode_session_turn_commit, encode_session_turn_commit,
     iter_runtime_object_refs,
 )
 from linktools.ai.persistence.contracts import SessionTurnCommit
 from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from linktools.ai.storage import InMemoryObjectStore, read_object
 
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_session_timeline import _session
 from .test_conversation_output_retention import (
-    _NAMESPACE, _canonical_output, _features, _models, _storage,
+    _NAMESPACE, _features, _storage,
 )
 
 
@@ -71,10 +74,11 @@ def test_current_turn_codec_preserves_forward_compatible_extra_fields() -> None:
     ("end_message_index", True),
 ))
 async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
-    tmp_path: Path, field: str, value: object,
+    field: str, value: object,
 ) -> None:
-    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
-    storage = Persistence(storage)
+    # The receipt codec is still used by real agent-bound Memory sessions.
+    # SQL Session turns have a different physical owner and manifest format.
+    storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="turn-codec", tenant_id="tenant")
     try:
         repository = storage.conversation.sessions
@@ -99,55 +103,71 @@ async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
         await storage.close()
 
 
+class _NativeHostAuthorization(TenantAuthorizationPolicy):
+    """Authorize ordinary SQL Session operations for this test host."""
+
+
+class _CanonicalOutput(BaseModel):
+    canonical: str
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("sqlite", "local_sqlite"))
-async def test_snapshot_roundtrips_turn_references_and_execution_payload_owners(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+async def test_snapshot_roundtrips_turn_references_and_native_payload_owners(
+    tmp_path: Path, backend: str,
 ) -> None:
     output = {"canonical": "x" * (80 * 1024)}
     attachment = b"input attachment" * 8192
-    _canonical_output(monkeypatch, output)
+
+    async def model(_messages, info):
+        [tool] = info.output_tools
+        return ModelResponse(parts=[ToolCallPart(tool.name, output, tool_call_id="structured-output")])
+
+    policy = _NativeHostAuthorization()
     storage = _storage(tmp_path, backend)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_113, Runtime.open(persistence=persistence_113, features=model_features(_models(), _features())) as runtime:
+    async with (
+        Persistence.open(_NAMESPACE, storage=storage) as state,
+        Runtime.open(persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), _features()),
+                     authorization=policy) as runtime,
+    ):
         principal = runtime.default_principal
-        session = await runtime.agents.get().create_session("session")
-        result = (await session.run(("original input", BinaryContent(attachment, media_type="text/plain")), timeout_seconds=5)).result
-        expected = (await session.timeline()).items
-    reader = _storage(tmp_path, backend)
-    reader = Persistence(reader)
-    await reader.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id, read_only=True)
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turn = await runtime.sessions.start(
+            "session", ("original input", BinaryContent(attachment, media_type="text/plain")),
+            agent="default", principal=principal, idempotency_key="capture", output=_CanonicalOutput,
+        )
+        result = await turn.wait_final(timeout_seconds=10)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        expected = (await runtime.history.turn_session("session", principal=principal))["timeline"]["items"]
+        [item] = expected
+        assert item["turn_id"] == turn.key.turn_id and item["output"] == output
+        live = await state.session_turns.get_turn(turn.key)
+        assert live["result_json"]["output_ref"] is not None
+        assert decode_session_transcript_root(live["result_json"]).count >= 2
+        assert "output" not in live["result_json"] and "canonical" not in live["result_json"]
+        assert state.conversation.sessions is None
+        assert await state.execution.executions.get(turn.key.turn_id, tenant_id=principal.tenant_id) is None
+
     archive = InMemoryObjectStore("turn-snapshot")
     limits = SnapshotLimits(max_entries=1000, max_bytes=4 * 1024 * 1024)
-    try:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend), read_only=True) as reader:
         snapshot = await reader.export_snapshot(object_store=archive, limits=limits)
-    finally:
-        await reader.close()
     root = tmp_path / "restored"
     await Persistence.restore_snapshot(snapshot, object_store=archive, root=root, limits=limits)
-    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_root(root), tenant_id="default", read_only=True) as history_persistence_139, History.open(persistence=history_persistence_139) as history:
-        assert (await history.session_detail("session", principal=principal)).timeline.items == expected
-    restored = PersistenceStorage.from_root(root)
-    restored = Persistence(restored)
-    await restored.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
-    try:
-        commits = await restored.conversation.sessions.list_timeline_commits(
-            "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
-        )
-        assert len(commits) == 1
-        commit = commits[0]
-        refs = tuple(iter_runtime_object_refs(encode_session_turn_commit(commit), default_domain=PersistenceDomain.CONVERSATION))
-        assert refs == ()
-        assert commit.execution_id == result.execution_id
-        owner = await restored.execution.executions.get(commit.execution_id, tenant_id=principal.tenant_id)
-        assert owner is not None
-        refs = tuple(iter_runtime_object_refs(_encode_persisted_domain(owner), default_domain=PersistenceDomain.EXECUTION))
-        assert len(refs) == 1 and refs[0][0] is PersistenceDomain.EXECUTION
+    async with (
+        Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_root(root),
+                         tenant_id=principal.tenant_id, read_only=True) as restored,
+        History.open(persistence=restored, authorization=policy) as history,
+    ):
+        assert (await history.turn_session("session", principal=principal))["timeline"]["items"] == expected
+        owner = await restored.session_turn_reader.get_turn(turn.key)
+        assert owner["result_json"]["output_ref"] == live["result_json"]["output_ref"]
+        assert decode_session_transcript_root(owner["result_json"]).slices == decode_session_transcript_root(live["result_json"]).slices
+        assert await restored.execution.executions.get(turn.key.turn_id, tenant_id=principal.tenant_id) is None
+        stored = decode_domain(owner["request_json"]["input"], StoredUserInput)
+        [ref] = stored.payload.object_refs()
         objects = restored.object_store(PersistenceDomain.EXECUTION)
-        assert owner.result.output.kind == "inline"
-        assert owner.result.output.decode() == output
-        ref = refs[0][1]
         assert await read_object(objects, ref.key, expected_digest=ref.digest, expected_size=ref.size) == attachment
-        prompt = await ExecutionInputMaterializer(None, PromptLimits(), object_store=objects).restore(owner.stored_user_input)
+        prompt = await ExecutionInputMaterializer(None, PromptLimits(), object_store=objects).restore(stored)
+        assert prompt[0] == "original input"
         assert [part.data for part in prompt if isinstance(part, BinaryContent)] == [attachment]
-    finally:
-        await restored.close()
