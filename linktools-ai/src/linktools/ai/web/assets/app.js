@@ -143,7 +143,7 @@ function setDisabled() {
       $(id).disabled ||= busy || state.actionsPending.has(`session:${state.selectedSession}:${action}`);
   }
   $('planning-control').hidden=ordinary;
-  $('turn-file-options').hidden=!ordinary || readonly || !state.config?.attachment_upload;
+  $('choose-attachments').hidden=!ordinary || readonly || !state.config?.attachment_upload;
   $('choose-attachments').disabled=$('turn-files').disabled=readonly || !ordinary || state.session?.status!=='OPEN';
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);

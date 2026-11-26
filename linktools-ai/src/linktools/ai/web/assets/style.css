@@ -287,16 +287,22 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .reader-actions{margin-left:auto;display:flex;align-items:center}.conversation-nav .reader-actions button{padding:6px 10px;border-radius:6px;border:0;font-size:12px;background:#fff1ee;color:#a53a2a}.reading .conversation{padding-top:8px}
 @media(max-width:620px){.conversation-nav{padding:0 16px;gap:22px}.conversation-nav button{font-size:12px}.native-toolbar{gap:8px;min-height:50px}.native-toolbar select{font-size:11px}.native-turn{max-width:75px}.native-status{font-size:10px}.native-message{grid-template-columns:1fr;gap:8px;padding:14px 0}.native-text{font-size:14px;line-height:23px}.native-literal{font-size:12px}.native-tool-heading{font-size:12px}.native-tool-result>.native-text{font-size:12px;line-height:20px}}
 
-.composer-bar>.composer-settings{display:flex;align-items:center;gap:20px;min-width:0;flex-wrap:wrap}
-.thinking-control{display:grid;grid-template-columns:auto auto;gap:4px 12px;font-size:12px;min-width:145px}
+.composer-bar>.composer-settings{display:flex;align-items:center;gap:8px;min-width:0}
+.thinking-control{display:flex;align-items:center;gap:6px;font-size:12px;min-width:0;white-space:nowrap}
 .thinking-control output{color:var(--muted);text-align:right}
-.thinking-control input{grid-column:1/-1;width:100%;margin:0;padding:0;accent-color:var(--accent)}
+.thinking-control input{width:clamp(40px,9vw,108px);min-width:36px;margin:0;padding:0;accent-color:var(--accent)}
 .planning-control{display:flex;flex-direction:row;align-items:center;gap:6px;white-space:nowrap;font-size:12px}
 .live-tools{margin:10px 0}
 .live-tool{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}
 .live-tool .tool-name{font-weight:600;min-width:0}.live-tool .tool-status{color:var(--muted);text-align:right;min-width:0}
 .live-tool.error .tool-status,.tool-message.error .tool-status{color:var(--danger)}
-@media(max-width:600px){.composer-bar>.composer-settings{gap:12px}.thinking-control{min-width:125px}.composer-bar{flex-wrap:wrap}.live-tool{gap:8px}}
+#composer-actions{flex-shrink:0}
+@media(max-width:600px){.live-tool{gap:8px}}
+@media(max-width:480px){
+  .composer-bar,.composer-bar>.composer-settings{gap:4px}
+  .thinking-label{display:none}
+  #composer-actions button{padding-inline:8px}
+}
 .turn-process{margin:10px 0 14px;padding:10px 12px;background:var(--wash);border:1px solid var(--line);border-radius:8px}
 .turn-process .tool-message:last-child{margin-bottom:0}
 .turn-process .live-tool:last-child{border-bottom:0}
@@ -304,10 +310,9 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .ordinary-live { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 
-.turn-file-options { margin:4px 0; font-size:12px; }
-
-.turn-file-options .attachments:empty { display:none; }
-.turn-file-options .attachments li { margin-top:4px; overflow-wrap:anywhere; }
-.turn-file-options .attachments button { margin-left:6px; }
+#queued-attachments { display:flex; gap:6px; overflow-x:auto; list-style:none; padding:0; margin:2px 0; }
+#queued-attachments:empty { display:none; }
+#queued-attachments li { flex-shrink:0; font-size:12px; }
+#queued-attachments button { margin-left:6px; }
 
 #choose-attachments { display:inline-grid; place-items:center; min-width:36px; min-height:36px; }
