@@ -514,6 +514,20 @@ class RuntimeSessions(Generic[AppT]):
             tenant_id=runtime.tenant_id, authorization=runtime._authorization,
         )
 
+    async def abandon_turn(
+        self, session_id: str, turn_id: str, *, expected_generation: int, principal: Principal,
+    ) -> bool:
+        """Mark an expired ordinary turn failed and free its session without replaying it."""
+        runner, runtime = self._require_turn_sessions()
+        validate_session_id(session_id)
+        validate_execution_id(turn_id)
+        if type(expected_generation) is not int or expected_generation < 1:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "expected_generation"})
+        return await runner.abandon_session_turn(
+            SessionTurnKey(session_id, turn_id), expected_generation=expected_generation, principal=principal,
+            tenant_id=runtime.tenant_id, authorization=runtime._authorization,
+        )
+
     async def recover_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
         runner, runtime = self._require_turn_sessions()
         validate_session_id(session_id)

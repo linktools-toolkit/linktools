@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 
 _PREVIEW_BYTES = 256 * 1024
+_PREVIEW_TYPES = ("delta", "tool", "progress", "preview_reset", "thinking_completed")
 _WAITING_STATES = {"WAITING_DEFERRED", "WAITING_RETRY"}
 _FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "RECOVERY_REQUIRED"}
 _END_STATES = _FINAL_STATES | _WAITING_STATES
@@ -56,11 +57,11 @@ class TurnObserver:
         if self._turn_id is not None and turn_id not in (None, self._turn_id):
             return
         kind = frame.get("type")
-        if kind not in ("delta", "tool", "gap", "terminal", "waiting", "preview_reset"):
+        if kind not in ("gap", "terminal", "waiting") and (
+            not self._preview or kind not in _PREVIEW_TYPES
+        ):
             return
         if kind == "gap" and frame.get("phase") == "cancelling":
-            return
-        if not self._preview and kind in ("delta", "tool", "preview_reset"):
             return
         terminal = kind in ("terminal", "waiting")
         stopped = kind == "gap" and frame.get("phase") == "producer_stopped"

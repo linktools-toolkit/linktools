@@ -67,6 +67,14 @@ workspace, subject to the same policy and limits. Published turns and admitted
 attachment bytes do not change. Use strict execution when identical prior tool
 results must be continued rather than regenerated.
 
+If recovery reports that a stopped ordinary turn cannot resume, the same
+composer control can offer **End turn**. This is a separate confirmation:
+it does not retry recovery or rerun tools. The Runtime releases only the
+confirmed producer generation after its lease expires and preserves recorded
+tool uncertainty. This control does not end Graph or split-store turns, and
+turns with persisted children need a separate disposition. The child-absence
+check is supported on SQLite.
+
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file
 `.linktools/config.yaml`, shared by `ai-run`, `ai-acp`, and `ai-web`:

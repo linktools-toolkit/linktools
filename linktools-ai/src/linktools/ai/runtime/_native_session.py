@@ -48,9 +48,9 @@ class _NativeMetadataObserver(TurnObserver):
         self._receive(frame)
 
     def _receive(self, frame: dict[str, JsonValue]) -> None:
-        # Raw text and thinking are not part of the metadata callback. They
-        # must not evict tool events from its bounded observer queue.
-        if frame.get("type") not in {"delta", "preview_reset"}:
+        # Preview frames are not part of the metadata callback and must
+        # not evict tool events from its bounded observer queue.
+        if frame.get("type") in ("tool", "gap", "terminal", "waiting"):
             super()._receive(frame)
 
     def finish_from_authority(self, turn_id: str, result: _NativeTurnResult) -> None:
@@ -104,7 +104,11 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
         return await self._sessions.recover_turn(self.key.session_id, self.key.turn_id, principal=self.principal)
 
     async def observe(self, *, preview: bool = True) -> AsyncIterator[dict[str, JsonValue]]:
-        """Observe this admitted turn from now on; earlier deltas are not replayed."""
+        """Observe live previews (including thinking timing and model status) and settlement.
+
+        With preview disabled, observe settlement and delivery gaps only.
+        Earlier previews are not replayed.
+        """
         with TurnObserver(
             self._runtime, self.key.session_id, self.principal,
             local_workspace=self._local_workspace, preview=preview,

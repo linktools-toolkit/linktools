@@ -17,13 +17,17 @@ from .test_web_console import _HEADERS, client
 
 
 @pytest.mark.asyncio
-async def test_web_structured_turn_replays_the_validated_output_item(tmp_path):
+async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, caplog):
     class Policy(TenantAuthorizationPolicy):
         pass
 
     expected = {"count": 3}
+    output_requests = []
 
     def respond(_messages, info):
+        output_requests.append((len(info.output_tools), any(
+            tool.name == CANONICAL_OUTPUT_TOOL_NAME for tool in info.output_tools
+        )))
         output_tool, = info.output_tools
         assert output_tool.name == CANONICAL_OUTPUT_TOOL_NAME
         return ModelResponse(parts=[ToolCallPart(output_tool.name, expected, tool_call_id="output")])
@@ -56,7 +60,13 @@ async def test_web_structured_turn_replays_the_validated_output_item(tmp_path):
                         break
                 else:
                     pytest.fail("Structured turn did not publish a terminal result")
-        assert terminal["state"] == "succeeded", terminal
+        if terminal["state"] != "succeeded":
+            source = next((record.getMessage() for record in reversed(caplog.records)
+                           if record.name == "linktools.ai.runtime._regenerable_turn"
+                           and record.msg.startswith("Canonical turn failed:")
+                           and record.args and record.args[0] == turn_id), None)
+            pytest.fail(f"Structured turn failed: state={terminal['state']}, code={terminal.get('error_code')}, "
+                        f"output declarations (count, expected present)={output_requests}, source={source}")
         assert terminal["output"] == expected  # SDK contract remains unchanged.
         item, = terminal["items"]
         assert item["item_kind"] == "structured_output" and item["content"] == expected

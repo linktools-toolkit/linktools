@@ -139,7 +139,9 @@ async function mutate(path, payload, {newAttemptOn=[],scope='',shortRequest=fals
 }
 function activeTurnAction() {
   const id=state.session?.active_turn_id;
-  return state.turns.find(turn=>turn.turn_id===id)?.can_recover===true?'recover':'cancel';
+  const turn=state.turns.find(row=>row.turn_id===id);
+  if(turn?.blockedGeneration && !turn.conversation_committed && (turn.liveGeneration || 0)<=turn.blockedGeneration)return 'abandon';
+  return turn?.can_recover===true?'recover':'cancel';
 }
 function setDisabled() {
   renderCurrentState();
@@ -198,9 +200,10 @@ function setDisabled() {
     :Boolean(active && (state.actionsPending.has(`${active.execution_id}:cancel`)
       || state.actionsPending.has(`${active.execution_id}:end-stopped`)));
   const send=$('send'), reader=$('reader-stop');
-  const recover=stop && ordinary && activeTurnAction()==='recover';
-  const activeLabel=recover?'Recover':'Stop';
-  const activeAriaLabel=recover?'Recover current turn':'Stop current turn';
+  const turnAction=stop && ordinary ? activeTurnAction() : 'cancel';
+  const recover=turnAction==='recover', endFailed=turnAction==='abandon';
+  const activeLabel=endFailed?'End turn':recover?'Recover':'Stop';
+  const activeAriaLabel=endFailed?'End the failed turn without replay':recover?'Recover current turn':'Stop current turn';
   send.type=stop?'button':'submit';
   const actionLabel=stop?activeLabel:'Send ↑';
   if(send.textContent!==actionLabel)send.textContent=actionLabel;
@@ -447,7 +450,8 @@ function ordinaryTurnNode(turn, previous=null) {
   node.append(answers);
   if(!turn.conversation_committed && (turn.previewGap!=null || !turn.previewHasPrefix))
     node.append(element('p','muted','Live preview is incomplete. The final reply will appear here.'));
-  if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
+  if(turn.abandoned)node.append(element('p','muted','Turn ended without replaying tools. Earlier tool effects may be unconfirmed.'));
+  else if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
   const heading={RECOVERY_REQUIRED:'Recovery required',WAITING_DEFERRED:'Waiting for approval or tool results',CANCELLING:'Cancelling…'}[turn.status];
   if(heading)node.append(element('div','turn-heading',heading));
   return node;
@@ -736,7 +740,8 @@ function watchOrdinarySession(id) {
         : {liveGeneration:frame.generation,liveParts:[],previewGap:missingPreview?frame.generation:null};
       // An authorized history read can reveal an active turn, not prove its preview prefix was observed.
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',can_recover:false,
-        user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,previewHasPrefix:true,...preview});
+        user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,previewHasPrefix:true,
+        blockedGeneration:frame.generation>(row?.blockedGeneration || 0)?null:row.blockedGeneration,...preview});
     } else if(frame.type==='waiting'){
       const row=state.turns.find(item=>item.turn_id===frame.turn_id);
       if(activeTurn()!==frame.turn_id || row?.conversation_committed
@@ -2540,14 +2545,34 @@ async function watchExecution(id,generation) {
   } finally {if(state.stream===controller){state.stream=null;if(current())renderLive();}}
 }
 async function ordinaryAction(action) {
-  const id=state.selectedSession,turn=state.session?.active_turn_id,key=`turn:${turn}`;
+  const id=state.selectedSession,turn=state.session?.active_turn_id,key=`turn:${turn}`,generation=state.generation;
   if(!id || !turn || state.actionsPending.has(key))return;
   if(action==='recover' && !confirm('Recover this turn only after its previous producer has stopped. Continue?'))return;
+  const blockedGeneration=state.turns.find(row=>row.turn_id===turn)?.blockedGeneration;
+  if(action==='abandon' && (!blockedGeneration || !confirm('End this turn without rerunning any tools? Earlier messages will be kept. Any already attempted effects may still be unconfirmed.')))return;
+  const current=()=>state.generation===generation && state.selectedSession===id && state.session?.active_turn_id===turn;
+  if(!current())return;
   state.actionsPending.add(key);setDisabled();
   try {
-    const result=await mutate(sessionURL(id,action),{turn_id:turn});
-    if(state.selectedSession===id && state.session?.active_turn_id===turn && !result.accepted)
-      notice(action==='recover'?'Turn still owned or already complete.':'Stop not confirmed. Watch the turn for its final status.');
+    let result;
+    try {
+      result=await mutate(sessionURL(id,action),{turn_id:turn,...(action==='abandon'?{expected_generation:blockedGeneration}:{})});
+    } catch(error) {
+      const details=error.details?.safe_details, failedGeneration=details?.generation;
+      const canOfferEnd=action==='recover' && error.code==='STORAGE_RECOVERY_REQUIRED'
+        && ['native_child_reservation_missing','native_subagent_trace_incomplete'].includes(details?.reason)
+        && Number.isSafeInteger(failedGeneration) && failedGeneration>0;
+      const row=state.turns.find(item=>item.turn_id===turn);
+      if(!current() || row?.conversation_committed)return;
+      if(!canOfferEnd || !row)throw error;
+      if((row.liveGeneration || 0)>failedGeneration)return;
+      patchOrdinaryTurn({...row,blockedGeneration:failedGeneration});
+      notice('Recovery could not resume this turn. Choose End turn to continue without replaying tools.');
+      return;
+    }
+    if(current() && !result.accepted)
+      notice(action==='abandon'?'The turn could not be ended yet. Wait for its lease to expire, then choose End turn again.'
+        :action==='recover'?'Turn still owned or already complete.':'Stop not confirmed. Watch the turn for its final status.');
   } finally {state.actionsPending.delete(key);setDisabled();}
 }
 async function sendMessage(event) {

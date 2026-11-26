@@ -1078,6 +1078,7 @@ async def _build_local_components(
                 ),
                 instruction_resolver=instruction_resolver, instruction_resolver_for=instruction_resolver_for,
                 prepare_step=prepare_canonical_step, prepare_plan=prepare_canonical_plan,
+                abandon_child_repository=(state.execution.executions if native_subagent_topology else None),
                 cancel_subagents=cancel_native_subagents,
                 prepare_subagents=prepare_native_subagents if native_subagent_topology else None,
                 recover_subagent=recover_native_subagent,

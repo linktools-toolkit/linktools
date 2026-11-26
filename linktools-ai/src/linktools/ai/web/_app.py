@@ -647,6 +647,12 @@ class _Console:
                     planning=planning, attachment_display_names=names,
                 )
                 return _json({"turn_id": turn_id}, 202)
+            if action == "abandon":
+                accepted = await runtime.sessions.abandon_turn(
+                    session_id, _text(payload, "turn_id"), expected_generation=payload.get("expected_generation"),
+                    principal=self.principal,
+                )
+                return _json({"accepted": accepted})
             if action in {"cancel", "recover"}:
                 operation = runtime.sessions.cancel_turn if action == "cancel" else runtime.sessions.recover_turn
                 accepted = await operation(session_id, _text(payload, "turn_id"), principal=self.principal)

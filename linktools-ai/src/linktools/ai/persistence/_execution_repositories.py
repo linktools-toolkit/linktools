@@ -880,6 +880,19 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return tuple(value for value in values if statuses is None or value.status in statuses)
         return await self.read_content(read)
 
+    async def require_no_children_for_abandon(
+        self, transaction: StateTransaction, execution_id: str,
+    ) -> None:
+        """Check after the same-group canonical parent write fenced child admission."""
+        children = await transaction.list_records(RecordQuery(
+            kind="execution", parent_key=self._parent("execution", "execution", (execution_id,)), limit=1,
+        ))
+        if children:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"reason": "abandon_child_disposition_required"},
+            )
+
     async def list_children(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ExecutionRecord, ...]:

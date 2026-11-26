@@ -181,6 +181,7 @@ async def _turn_view(
         "updated_at": row["updated_at"].isoformat(),
         "user_input": {"version": 1, "prompt": prompt, "files": [], "attachments": attachments},
         "conversation_committed": state in ("succeeded", "failed", "cancelled"),
+        **({"abandoned": True} if isinstance(result, Mapping) and result.get("abandoned") is True else {}),
         **activity,
         "output": output,
         "error_code": result.get("error_code") if isinstance(result, Mapping) else None,

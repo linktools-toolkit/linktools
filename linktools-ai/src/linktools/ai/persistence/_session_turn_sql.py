@@ -281,7 +281,7 @@ class SqlSessionTurnReader:
         self._transcript_source = None
         self._input_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None
         self._input_object_key = ObjectKeyFactory(namespace)
-        self._input_tenant_id = tenant_id
+        self._tenant_id = tenant_id
         self._split_transcript_source = None
         self._recent: OrderedDict[str, _ContextWindow] = OrderedDict()
         self._recent_budget = _ContextBudget()
@@ -300,7 +300,7 @@ class SqlSessionTurnReader:
         if value.codec != "text" or ref is None or value.view is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if ref.store_id != RUNTIME_OBJECT_STORE_ID or ref.key != self._input_object_key.key(
-            PersistenceDomain.EXECUTION, self._input_tenant_id, ref.digest,
+            PersistenceDomain.EXECUTION, self._tenant_id, ref.digest,
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if self._input_reader is None:
@@ -1129,32 +1129,49 @@ class SqlSessionTurns(SqlSessionTurnReader):
         binding_refs: tuple[tuple[int, int | None], ...] = (),
         output_ref: tuple[int, int] | None = None,
         usage: UsageMetrics | None = None,
+        _abandon_expired: bool = False,
+        _guard_abandon: tuple[StateStore, Callable[[StateTransaction], Awaitable[None]]] | None = None,
         _publish_trace: tuple[tuple[StateStore, ...], Callable[[StateGroupTransaction], Awaitable[None]]] | None = None,
     ) -> bool:
         """Finalize and release using the same lock order as acceptance."""
+        if _abandon_expired and state != "failed":
+            raise ValueError("an abandoned turn must be marked failed")
+        if _guard_abandon is not None and self._context.engine.dialect.name != "sqlite":
+            # SQLite either owns the writer snapshot after the CAS or cannot
+            # upgrade a stale read transaction. A repeatable-read server
+            # transaction can instead observe an older child set after a write.
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"reason": "abandon_child_snapshot_unsupported"},
+            )
         prepared = await self._prepare_finish(
             key, generation=generation, turn_no=turn_no, state=state, result=result,
             transcript=transcript, binding_refs=binding_refs, output_ref=output_ref, usage=usage,
+            _expired=_abandon_expired,
         )
         try:
-            if prepared.transcript is None and _publish_trace is None:
+            if prepared.transcript is None and _publish_trace is None and _guard_abandon is None:
                 return await self._context.run_mutation(prepared.write, domain="session.finish")
 
             trace_stores, publish_trace = ((), None) if _publish_trace is None else _publish_trace
+            guard_stores = () if _guard_abandon is None else (_guard_abandon[0],)
             stores = prepared.stores
             group = stores[0].storage_group
-            if any(member.storage_group is not group for member in trace_stores):
+            if any(member.storage_group is not group for member in (*trace_stores, *guard_stores)):
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
             async def publish(transaction: StateGroupTransaction) -> bool:
                 if not await self._finish_in_group(transaction, prepared):
                     return False
+                if _guard_abandon is not None:
+                    member, guard = _guard_abandon
+                    await guard(transaction.transaction(member))
                 if publish_trace is not None:
                     # A Trace write failure rolls back both terminal and release.
                     await publish_trace(transaction)
                 return True
 
-            return await group.mutate(tuple(dict.fromkeys((*stores, *trace_stores))), publish)
+            return await group.mutate(tuple(dict.fromkeys((*stores, *trace_stores, *guard_stores))), publish)
         except _TerminalFenceLost:
             return False
 
@@ -1165,6 +1182,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         usage: UsageMetrics | None = None,
         _graph_trace_suffix: tuple[ContentArchive, PreparedArchive, NativeMessageRoot] | None = None,
         _graph_step_source: bool = False,
+        _expired: bool = False,
     ) -> _PreparedSessionTerminal:
         """Prepare the caller's normalized suffix, without starting another mutation."""
         if state not in ("succeeded", "failed", "cancelled"):
@@ -1206,7 +1224,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         async def write(connection: AsyncSession) -> bool:
             if not await self._finish_turn(
-                connection, key, generation=generation, turn_no=turn_no, state=state, result=result,
+                connection, key, generation=generation, turn_no=turn_no, state=state, result=result, _expired=_expired,
             ):
                 return False
             if body is not None:

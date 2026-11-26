@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from ..spec import RepositoryInstructionResolver
     from ..workspace import Workspace
     from ..persistence.turns import SqlSessionTurns
+    from ..persistence.repositories import ExecutionRepositoryImpl
     from ..persistence.runs import StateStepArchive
     from ._canonical_trace_interactions import _CapturedTurnInteractions
     from ..execution import ExecutionStartReservation, ExecutionStartReservationResult, PendingToolContinuation, PendingDeferredCall
@@ -146,6 +147,7 @@ class _RegenerableTurnRunner:
         instruction_resolver_for: Callable[[RepositoryInstructions], RepositoryInstructionResolver],
         prepare_step: Callable[[AgentBinding, SessionTurnKey, int], Awaitable[
             tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None]] | None = None,
+        abandon_child_repository: ExecutionRepositoryImpl | None = None,
         cancel_subagents: Callable[[SessionTurnKey, Principal, Principal], Awaitable[None]] | None = None,
         prepare_subagents: Callable[
             [_AdmittedTurn, AgentBinding, Principal, Callable[[], RepositoryInstructions | None]],
@@ -166,6 +168,7 @@ class _RegenerableTurnRunner:
         self._instruction_resolver = instruction_resolver
         self._instruction_resolver_for = instruction_resolver_for
         self._prepare_step = prepare_step
+        self._abandon_child_repository = abandon_child_repository
         self._cancel_subagents = cancel_subagents
         self._prepare_subagents = prepare_subagents
         self._recover_subagent = recover_subagent
@@ -655,6 +658,70 @@ class _RegenerableTurnRunner:
         budget = self._prepare_budget(key, turn["generation"])
         return await budget.repository.read(budget.scope_id)
 
+    async def abandon_session_turn(
+        self, key: SessionTurnKey, *, expected_generation: int,
+        principal: Principal, tenant_id: str, authorization: AuthorizationPolicy,
+    ) -> bool:
+        """Release an expired ordinary turn without certifying or repeating its effects."""
+        if principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, key.session_id, tenant_id),
+        )
+        row = await self._store.get_turn_for_recovery(key)
+        if row is None:
+            return False
+        request = row["request_json"]
+        await authorization.authorize(
+            principal, AuthorizationAction.EXECUTION_CANCEL,
+            ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, request["principal"]["principal_id"]),
+        )
+        if row["state"] != "accepted" or row["generation"] != expected_generation or self.has_local_producer(key):
+            return False
+        frozen = row["binding_json"]
+        contract = None if frozen is None else AgentBindingContract.from_payload(frozen)
+        if request.get("graph_execution") or request.get("split_step"):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        child_guard = None
+        if contract is not None and contract.subagents:
+            children = self._abandon_child_repository
+            if children is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+            async def require_no_children(transaction):
+                await children.require_no_children_for_abandon(transaction, key.turn_id)
+
+            child_guard = (children.state_store, require_no_children)
+        session = await self._store.get_session(key.session_id)
+        if session is None or session["active_turn_id"] != key.turn_id.encode():
+            return False
+        trace_enabled = request.get("trace", False)
+        event_base, agent_id = 0, None
+        if trace_enabled:
+            archive = self._trace_archive
+            if archive is None or contract is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            agent_id = contract.agent_spec.id
+            event_base, _ = await archive.state_store.read(
+                lambda transaction: archive._canonical_trace_frontier(transaction, key.turn_id),
+            )
+        turn = _AdmittedTurn(
+            key, row["turn_no"], request["prompt"], [], 0, session["revision"], None, row["generation"],
+            trace_enabled=trace_enabled, trace_event_base=event_base,
+        )
+        code = ErrorCode.STORAGE_RECOVERY_REQUIRED.value
+        trace = await self._terminal_trace(turn, agent_id, "failed", code)
+        if not await self._store.finish(
+            key, generation=turn.generation, turn_no=turn.number, state="failed",
+            result={"error_code": code, "abandoned": True}, _abandon_expired=True,
+            _guard_abandon=child_guard, **trace,
+        ):
+            return False
+        # Re-read the committed view rather than constructing it from incomplete input or effects.
+        self._gap(key)
+        self._notice_lifecycle(key, "terminal", turn.revision + 1)
+        return True
+
     async def cancel_session_turn(
         self, key: SessionTurnKey, *, principal: Principal, tenant_id: str, authorization: AuthorizationPolicy,
     ) -> bool:
@@ -1100,7 +1167,8 @@ class _RegenerableTurnRunner:
                             if not completed_checkpoint or not continuation or not isinstance(continuation[-1], ModelResponse):
                                 self._gap(key)
                                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                                              safe_details={"reason": "native_subagent_trace_incomplete"})
+                                              safe_details={"reason": "native_subagent_trace_incomplete",
+                                                            "generation": generation + 1})
                             await self._require_completed_trace(
                                 key, continuation[-1], event_head=trace_event_base,
                                 request_head=trace_interaction_base,
@@ -2027,6 +2095,10 @@ class _RegenerableTurnRunner:
                             # The child may have crossed its first-start fence.
                             # Missing proof cannot be projected as parent failure.
                             if isinstance(error, AIError) and error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED:
+                                if error.safe_details.get("reason") == "native_child_reservation_missing":
+                                    raise AIError(error.code, safe_details={
+                                        "reason": "native_child_reservation_missing", "generation": turn.generation,
+                                    }) from error
                                 raise
                             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
                         native_subagent_leaf = None
