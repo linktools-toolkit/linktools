@@ -228,6 +228,47 @@ async def test_native_session_mutation_cannot_use_a_different_authorized_revisio
         assert current["metadata"] == {"source": "writer"}
 
 
+async def test_native_fork_cannot_copy_metadata_from_a_different_revision(tmp_path, monkeypatch) -> None:
+    class Policy(TenantAuthorizationPolicy):
+        pass
+
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with (
+        Persistence.open("session-owner", storage=storage, tenant_id="tenant") as state,
+        Runtime.open(persistence=state, features=RuntimeFeatures("session-owner"), authorization=Policy()) as runtime,
+    ):
+        sessions = runtime.sessions
+        original = await sessions.create_turn_session("source", principal=_PRINCIPAL, metadata={"value": "old"})
+        revision = original["revision"]
+        get = state.session_turns.get_session
+        once = True
+
+        async def interleave(session_id):
+            nonlocal once
+            row = await get(session_id)
+            if session_id == "source" and once:
+                once = False
+                assert await sessions.update_turn_session(
+                    "source", principal=_PRINCIPAL, expected_revision=revision, metadata={"value": "current"},
+                )
+            return row
+
+        with monkeypatch.context() as patch:
+            patch.setattr(state.session_turns, "get_session", interleave)
+            assert not await sessions.fork_turn_session(
+                "source", "child", principal=_PRINCIPAL, expected_revision=revision + 1, idempotency_key="fork",
+            )
+        with pytest.raises(AIError) as absent:
+            await runtime.history.turn_session_state("child", principal=_PRINCIPAL)
+        assert absent.value.code is ErrorCode.AUTHORIZATION_DENIED
+        for _ in range(2):
+            assert await sessions.fork_turn_session(
+                "source", "child", principal=_PRINCIPAL, expected_revision=revision + 1, idempotency_key="fork",
+            )
+        child = await runtime.history.turn_session_state("child", principal=_PRINCIPAL)
+        assert child["metadata"] == {"value": "current"}
+
+
 @pytest.mark.parametrize("resource", ("session", "execution"))
 async def test_management_authorization_uses_one_sql_select(tmp_path, resource) -> None:
     from sqlalchemy import event

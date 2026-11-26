@@ -1095,9 +1095,9 @@ class SqlSessionTurns(SqlSessionTurnReader):
         await self._context.run_mutation(write, domain="session.create")
 
     async def fork_session(
-        self, source_id: str, target_id: str, *, expected_revision: int, config: JsonValue, request_id: str,
+        self, source_id: str, target_id: str, *, expected_revision: int | None, config: JsonValue, request_id: str,
     ) -> bool:
-        """Freeze the source head with a CAS and insert one child session; never copy turns."""
+        """Freeze a matching source head; without a matching revision only replay is allowed."""
         validate_session_request_key(request_id)
         if source_id == target_id:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1112,6 +1112,8 @@ class SqlSessionTurns(SqlSessionTurnReader):
                         and lineage["config_fingerprint"] == canonical_sha256(config)):
                     return True
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if expected_revision is None:
+                return False
             row = (await connection.execute(self._sessions.select().filter_by(
                 **source, revision=expected_revision,
             ))).mappings().one_or_none()

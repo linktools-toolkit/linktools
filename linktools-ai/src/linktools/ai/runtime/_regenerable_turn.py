@@ -515,7 +515,8 @@ class _RegenerableTurnRunner:
         )
         config = source["config_json"]
         return await self._store.fork_session(
-            source_id, target_id, expected_revision=expected_revision, request_id=request_id,
+            source_id, target_id, request_id=request_id,
+            expected_revision=expected_revision if source["revision"] == expected_revision else None,
             config={"metadata": config.get("metadata", {}), "cwd": config.get("cwd")},
         )
 
