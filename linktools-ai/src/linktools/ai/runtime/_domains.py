@@ -574,13 +574,14 @@ class RuntimeSessions(Generic[AppT]):
     async def get(
         self, session_id: str, *, principal: Principal | None = None,
     ) -> "Session[AppT] | _NativeSession[AppT, _NativeTurnResult]":
-        if await self._has_native_session(session_id):
+        if self.supports_turn_sessions:
             _, runtime = self._require_turn_sessions()
-            session = self._bind_native_session(
-                session_id, principal=runtime._resolve_principal(principal), local_workspace=False,
-            )
-            await session.inspect()
-            return session
+            history = runtime.history
+            if history is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            actor = runtime._resolve_principal(principal)
+            if await history._lookup_runtime_turn_session(session_id, principal=actor) is not None:
+                return self._bind_native_session(session_id, principal=actor, local_workspace=False)
         return await self._get_session(session_id, principal)
 
     async def start(
