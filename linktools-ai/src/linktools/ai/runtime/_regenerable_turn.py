@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, replace
 
 from linktools.core import environ
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
+from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -96,6 +96,7 @@ class _AdmittedTurn:
     deferred_results: DeferredToolResults | None = None
     deferred_approvals: tuple[PendingDeferredCall, ...] = ()
     native_subagents: bool = False
+    previous_turn_interrupted: bool = False
     settled_native_subagents: bool = False
     recover_native_results: Callable[[], Awaitable[DeferredToolResults | None]] | None = None
     instruction_frontier: SessionInstructionFrontier | None = None
@@ -1208,6 +1209,9 @@ class _RegenerableTurnRunner:
                         for operation in (*settled_continuation.approvals, *settled_continuation.calls):
                             if pending.get(operation.tool_call_id) != operation.tool_name:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        for operation in settled_continuation.approvals:
+                            if isinstance(settled_results.approvals.get(operation.tool_call_id), ToolApproved):
+                                await tools.resume_canonical_approval(operation, generation=generation)
                         deferred_results = settled_results
             turn = _AdmittedTurn(
                 key, row["turn_no"], model_prompt if isinstance(model_prompt, str) else prompt, history,
@@ -1227,6 +1231,7 @@ class _RegenerableTurnRunner:
                 trace_enabled=trace_enabled, trace_event_base=trace_event_base,
                 trace_interaction_base=trace_interaction_base, split_source=split,
                 preload_skill_inputs=tuple(request.get("preload_skills", ())),
+                previous_turn_interrupted=request.get("previous_turn_interrupted") is True,
             )
             self._admitted(turn)
             try:
@@ -1516,6 +1521,8 @@ class _RegenerableTurnRunner:
             missing=ErrorCode.STORAGE_RECOVERY_REQUIRED,
         )
         for position in positions:
+            if position.interrupted:
+                continue
             prior = position.request
             prior_input = self._stored_input(prior)
             input_bytes, media_bytes = self._input_usage(prior["prompt"], prior_input)
@@ -1606,7 +1613,7 @@ class _RegenerableTurnRunner:
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
         input_bytes, media_bytes = self._input_usage(text, captured if stored_input is not None else None)
-        context_from, history = await self._admission_history(
+        context_from, history, _ = await self._admission_history(
             key, through=through, lineage=lineage, session_context=execution.session_context,
             remaining=_CONTEXT_BYTES - input_bytes,
             remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
@@ -1770,11 +1777,16 @@ class _RegenerableTurnRunner:
         if terminal_bytes < _TERMINAL_RESERVE:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
-        context_from, history = await self._admission_history(
+        context_from, history, interrupted = await self._admission_history(
             key, through=through, lineage=lineage, session_context=session_context,
             remaining=_CONTEXT_BYTES - input_size,
             remaining_media=self.attachment_limits.max_binary_input_bytes - media_bytes,
         )
+        if interrupted:
+            request["previous_turn_interrupted"] = True
+            terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({**request, "binding": frozen_binding}))
+            if terminal_bytes < _TERMINAL_RESERVE:
+                raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
         if not await self._store.accept(
             key, expected_revision=revision, context_from=context_from, context_through=through,
@@ -1789,18 +1801,21 @@ class _RegenerableTurnRunner:
             stored_input=request.get("input"),
             native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
             budget=run_budget, split_source=split, preload_skill_inputs=preload_skill_inputs,
-            native_subagents=native_subagents,
+            native_subagents=native_subagents, previous_turn_interrupted=interrupted,
         )
 
     async def _admission_history(
         self, key: SessionTurnKey, *, through: int, lineage: tuple[SessionTurnSegment, ...],
         session_context: SessionContext, remaining: int, remaining_media: int,
-    ) -> tuple[int, list[ModelMessage]]:
+    ) -> tuple[int, list[ModelMessage], bool]:
         history: list[tuple[ModelMessage, ...]] = []
         context_from = through + 1
         candidates = (() if session_context == "current_turn"
                       else await self._store.recent_context(key.session_id, through=through, lineage=lineage))
+        interrupted = bool(candidates and candidates[-1].turn_no == through and candidates[-1].interrupted)
         for candidate in reversed(candidates):
+            if candidate.interrupted:
+                continue
             if not isinstance(candidate.request, dict) or not isinstance(candidate.request.get("prompt"), str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Missing admitted session input")
             candidate_prompt = candidate.request["prompt"]
@@ -1814,7 +1829,7 @@ class _RegenerableTurnRunner:
             remaining -= size
             remaining_media -= media_bytes
             context_from = candidate.turn_no
-        return context_from, [message for messages in reversed(history) for message in messages]
+        return context_from, [message for messages in reversed(history) for message in messages], interrupted
 
     @staticmethod
     def _stored_input(request: Mapping[str, JsonValue]) -> StoredUserInput | None:
@@ -2129,6 +2144,7 @@ class _RegenerableTurnRunner:
                         output_retries_used=turn.output_retries_used, mode=turn.mode, planning=turn.planning,
                         plan_store=turn.plan_store, budget=turn.budget,
                         preload_skill_inputs=turn.preload_skill_inputs, split_step=turn.split_source is not None,
+                        previous_turn_interrupted=turn.previous_turn_interrupted,
                         native_subagent_leaf=native_subagent_leaf,
                         settled_native_subagents=turn.settled_native_subagents, **trace_opts,
                     )

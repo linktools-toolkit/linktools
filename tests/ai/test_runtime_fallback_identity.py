@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -77,7 +77,6 @@ async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, select
         for index, capability in enumerate(capabilities):
             result.capability(capability, id=f"identity-{index}")
         result.capability(ExecutionCapability(retain_history=True))
-        result.capability(TraceCapability())
         return result
 
     async def assert_persisted(persistence):
@@ -121,7 +120,6 @@ async def test_parallel_fallback_and_primary_keep_distinct_response_identities(t
         features.model(agent, _Binding(model(selected)))
     features.capability(ModelFallback(model("fallback")), id="fallback")
     features.capability(ExecutionCapability(retain_history=True))
-    features.capability(TraceCapability())
     storage = PersistenceStorage.sqlite(tmp_path / "parallel.sqlite")
     async with Persistence.open("parallel-identities", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features, authorization=_SessionAuthorization(),

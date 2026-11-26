@@ -243,6 +243,7 @@ class _AgentRunScope:
     mode: ExecutionMode = "run"
     planning: bool = False
     regenerable: bool = False
+    previous_turn_interrupted: bool = False
     canonical_step: AtomicStepPersistence | None = None
     thinking: ThinkingValue = None
     parent_agent_run_id: str | None = None
@@ -482,6 +483,7 @@ class AgentExecutor:
         split_step: bool = False,
         native_subagent_leaf: _NativeSubagentLeaf | None = None,
         settled_native_subagents: bool = False,
+        previous_turn_interrupted: bool = False,
     ) -> AgentExecutionOutcome:
         """Run a plain turn with no durable recorder or execution handoff."""
         if context.session_id is None:
@@ -544,6 +546,7 @@ class AgentExecutor:
                 repository_instructions=repository_instructions, regenerable=canonical_step is None,
                 repository_instruction_boundary=repository_instruction_boundary,
                 canonical_step=canonical_step, tool_operations=tool_operations, deferred_tool_results=deferred_tool_results,
+                previous_turn_interrupted=previous_turn_interrupted,
                 output_retries_used=output_retries_used, deferred_approvals=deferred_approvals, budget=budget,
                 trace_interaction_base=trace_interaction_base,
                 trace_boundary=None if trace_boundary is None else flush_trace, trace_auto_flush=trace_auto_flush,
@@ -965,6 +968,8 @@ class AgentExecutor:
                         final_result = await agent.run(
                             user_prompt,
                             deps=scope.context,
+                            instructions=("The previous turn was interrupted. Its results were not confirmed."
+                                          if scope.previous_turn_interrupted else None),
                             message_history=(
                                 without_history_system_prompts(scope.history)
                                 if scope.replace_history_system_prompt else scope.history

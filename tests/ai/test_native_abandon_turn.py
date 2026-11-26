@@ -35,6 +35,7 @@ class _HostPolicy(TenantAuthorizationPolicy):
 ))
 async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, monkeypatch, boundary):
     prompts = []
+    instructions = []
     stopped = asyncio.Event()
     original = _RegenerableTurnRunner._settle_with_lease
 
@@ -44,7 +45,8 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         return await original(self, turn, **kwargs)
 
-    async def model(messages, _info):
+    async def model(messages, info):
+        instructions.append(info.instructions or "")
         prompts.extend(part.content for message in messages for part in message.parts if isinstance(part, UserPromptPart))
         return ModelResponse(parts=[TextPart("retained answer")])
 
@@ -110,7 +112,7 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
             "child-succeeded": (ExecutionStatus.SUCCEEDED,),
             "child-failed": (ExecutionStatus.FAILED,),
             "child-cancelled": (ExecutionStatus.CANCELLED,),
-            "mixed": (ExecutionStatus.SUCCEEDED, ExecutionStatus.WAITING_DEFERRED),
+            "mixed": (ExecutionStatus.SUCCEEDED, ExecutionStatus.PENDING_START),
         }.get(boundary, ())
         terminal_reasons = {
             ExecutionStatus.SUCCEEDED: StopReason.END_TURN,
@@ -180,4 +182,14 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         row = await _wait_for_committed(lambda: turns.get_turn(new_key), lambda value: value["state"] != "accepted")
         assert row["state"] == "succeeded"
         assert prompts == ["new prompt"]
+        notice = "The previous turn was interrupted."
+        assert len(instructions) == 1 and notice in instructions[0]
         assert (await turns.get_turn(key)) == old
+        if boundary == "no-child":
+            later = await runtime.sessions.start_turn(
+                "session", "one more prompt", agent="default", principal=principal, idempotency_key="later",
+            )
+            later_key = SessionTurnKey("session", later)
+            row = await _wait_for_committed(lambda: turns.get_turn(later_key), lambda value: value["state"] != "accepted")
+            assert row["state"] == "succeeded"
+            assert len(instructions) == 2 and notice not in instructions[1]

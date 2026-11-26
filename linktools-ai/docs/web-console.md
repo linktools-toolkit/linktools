@@ -73,7 +73,9 @@ failed turn, without retrying recovery or rerunning tools. The Runtime releases 
 confirmed producer generation after its lease expires and preserves recorded
 tool uncertainty. This control does not end Graph or split-store turns.
 On SQLite, any persisted child must already be in a durable terminal state.
-Ending the parent does not change the child or its tool receipts.
+Ending the parent does not change the child or its tool receipts. The next ordinary
+turn that uses the session context receives a short interruption notice, not
+the failed turn's tool calls or unconfirmed results.
 
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file

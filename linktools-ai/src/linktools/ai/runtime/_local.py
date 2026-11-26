@@ -303,6 +303,7 @@ class _OwnedNativeParent(_ChildWorkerScope):
     generation: int
     principal: Principal
     child_approvals: dict[str, "NativeSubagentAdmission"] = field(default_factory=dict)
+    parked_cancels: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1042,12 +1043,19 @@ class LocalExecutionBackend:
                         expected_revision=current.revision,
                         expected_event_seq=current.event_seq,
                     )
+                parent = self._native_parents.get(current.parent_execution_id)
+                proof = None if parent is None or not parent.stopping else parent.child_approvals.get(commit.execution_id)
+                if proof is not None:
+                    proof.require_deferred_child(current)
                 committed = await self._runtime_commands.commit_deferred_cancel_checkpoint(
                     effective_commit,
-
                     expected_pending_tools=checkpoint.recovery.pending_tools,
                     background_tasks=self._execution_task_set(commit.execution_id),
                 )
+                if proof is not None and committed.status is ExecutionStatus.CANCELLING:
+                    # This exact WAITING predecessor CAS proves that no child
+                    # continuation crossed its resume fence before Stop.
+                    parent.parked_cancels[commit.execution_id] = (committed.revision, committed.producer_generation)
             elif (
                 current.status is expected_status
                 and current.revision == commit.expected_revision
@@ -1293,7 +1301,7 @@ class LocalExecutionBackend:
     @asynccontextmanager
     async def canonical_subagent_parent(
         self, key: "SessionTurnKey", generation: int, principal: Principal,
-        *, stop_children: Callable[[], Awaitable[None]],
+        *, stop_children: Callable[[], Awaitable[bool]],
     ) -> AsyncIterator[None]:
         """Stop durable children before abandoning their local owners on explicit cancellation."""
         identity = key.turn_id
@@ -1305,10 +1313,18 @@ class LocalExecutionBackend:
         self._native_parents[identity] = parent
         try:
             yield
-        except asyncio.CancelledError:
+        except (AIError, asyncio.CancelledError) as error:
+            if isinstance(error, AIError) and error.code not in {
+                ErrorCode.EXECUTION_CANCELLED, ErrorCode.STORAGE_CONFLICT, ErrorCode.TOOL_EFFECT_UNKNOWN,
+            }:
+                raise
             parent.stopping = True
             stopping = asyncio.create_task(stop_children(), name=f"ai-native-child-stop-{identity}")
-            await self._await_checkpoint_task(stopping, label="native child stop")
+            stopped, _ = await self._await_checkpoint_task(stopping, label="native child stop")
+            if stopped and isinstance(error, AIError):
+                # Fencing the delegate after Stop can change the local signal;
+                # the original tool receipt remains exactly as written.
+                raise asyncio.CancelledError from error
             raise
         finally:
             parent.stopping = True
@@ -3024,7 +3040,10 @@ class LocalExecutionBackend:
                 # A remote immutable cancel intent does not prove worker effects
                 # settled. Never let the generic manager write a standalone terminal.
                 return CancelEffectOutcome.UNKNOWN
-            return await self._confirm_cancel_effects(current, force=force)
+            parent = None if current is None else self._native_parents.get(current.parent_execution_id)
+            parked = (current is not None and parent is not None and parent.stopping
+                      and parent.parked_cancels.get(current.execution_id) == (current.revision, current.producer_generation))
+            return await self._confirm_cancel_effects(current, force=force, parked_cancel_committed=parked)
         scope = self._handoff_scopes.get(execution.execution_id)
         if scope is not None:
             scope.cancel_tools()
@@ -3044,7 +3063,7 @@ class LocalExecutionBackend:
     async def _confirm_cancel_effects(
         self,
         execution: ExecutionRecord | None,
-        *, force: bool = False, producer_drained: bool = False,
+        *, force: bool = False, producer_drained: bool = False, parked_cancel_committed: bool = False,
     ) -> CancelEffectOutcome:
         if execution is None:
             return CancelEffectOutcome.UNKNOWN
@@ -3095,7 +3114,8 @@ class LocalExecutionBackend:
         # prevents a remote model response from publishing afterward.
         return (
             CancelEffectOutcome.CONFIRMED
-            if execution.status is ExecutionStatus.CANCELLING and (execution.agent_run_seq == 0 or revoke)
+            if execution.status is ExecutionStatus.CANCELLING
+            and (execution.agent_run_seq == 0 or revoke or parked_cancel_committed)
             else CancelEffectOutcome.UNKNOWN
         )
 

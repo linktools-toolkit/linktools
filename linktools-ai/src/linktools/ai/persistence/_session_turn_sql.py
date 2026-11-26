@@ -100,6 +100,7 @@ class SessionContextTurn:
     size: int
     transcript_bytes: int
     reset_context: bool = False
+    interrupted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -793,8 +794,9 @@ class SqlSessionTurnReader:
             case((succeeded, columns.request_json["input"])), columns.request_json.type,
         ).label("stored_input")
         reset = (columns.request_json["session_context"].as_string() == "current_turn").label("reset_context")
+        interrupted = (columns.result_json["abandoned"].as_boolean().is_(True)).label("interrupted")
         statement = select(
-            columns.turn_no, columns.state, prompt, stored_input, result, columns.binding_key, reset,
+            columns.turn_no, columns.state, prompt, stored_input, result, columns.binding_key, reset, interrupted,
             columns.turn_id, columns.session_key, columns.generation, columns.split_source_receipt,
             columns.request_json["graph_execution"].as_string().label("graph_execution"),
         ).where(
@@ -807,11 +809,12 @@ class SqlSessionTurnReader:
         if len(rows) != through - after:
             raise AIError(missing, "The finalized session context range is incomplete")
         return tuple(
-            self._context_turn(
-                row["turn_no"], row["prompt"], row["stored_input"], row["messages"],
-                reset_context=row["reset_context"] is True,
-            )
-            for row in rows if row["state"] == "succeeded"
+            (SessionContextTurn(row["turn_no"], {}, (), 1024, 0, interrupted=True)
+             if row["state"] == "failed" else self._context_turn(
+                 row["turn_no"], row["prompt"], row["stored_input"], row["messages"],
+                 reset_context=row["reset_context"] is True,
+             ))
+            for row in rows if row["state"] == "succeeded" or (row["state"] == "failed" and row["interrupted"] is True)
         )
 
     @staticmethod

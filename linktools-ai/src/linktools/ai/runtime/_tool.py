@@ -1122,6 +1122,23 @@ class RuntimeToolOperationBridge:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return values
 
+    async def resume_canonical_approval(self, pending: "PendingDeferredCall", *, generation: int) -> None:
+        """Seed only the original, still-pending receipt for an approved canonical leaf."""
+        operation_id = self._operation_id(self._agent_run_id, pending.tool_call_id)
+        if (self._canonical_event_writer is None or self._producer_generation != generation + 1
+                or pending.operation_id != operation_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        observed = await self._repository.observe_operation(operation_id, tenant_id=self._tenant_id)
+        value = None if observed is None else observed.value
+        if (value is None or value.status is not ToolOperationStatus.PENDING or value.owner is not None
+                or (value.execution_id, value.agent_run_id, value.binding_digest, value.producer_generation,
+                    value.tool_call_id, value.tool_name, value.capability_ref, value.arguments_payload)
+                != (self._execution_id, self._agent_run_id, self._binding_digest, generation,
+                    pending.tool_call_id, pending.tool_name, pending.capability_ref, pending.arguments_payload)):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        self._operation_ids[pending.tool_call_id] = operation_id
+        self._effect_receipts[pending.tool_call_id] = observed
+
     async def resume_canonical_effects(
         self,
         pending_calls: Mapping[str, str],

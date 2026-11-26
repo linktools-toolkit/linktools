@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
-from linktools.ai.errors import AIError
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
@@ -82,15 +82,28 @@ def _model(role, fn):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "cancel,trace,recover",
-    ((False, False, False), (True, False, False), (False, True, False), (False, True, True)),
-    ids=("success", "cancel", "cli-default-trace", "recover-completed-trace"),
+    "cancel,trace,recover,wrapped_cancel",
+    ((False, False, False, False), (True, False, False, False), (True, False, False, True),
+     (False, True, False, False), (False, True, True, False)),
+    ids=("success", "cancel", "cancel-wrapped", "cli-default-trace", "recover-completed-trace"),
 )
 async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool, trace: bool, recover: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool, trace: bool, recover: bool, wrapped_cancel: bool,
 ) -> None:
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
+
+    if wrapped_cancel:
+        from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+
+        unknown = RuntimeToolOperationBridge.unknown
+
+        async def wrapped_unknown(bridge, decision, error):
+            await unknown(bridge, decision, error)
+            if bridge._canonical_event_writer is not None and isinstance(error, asyncio.CancelledError):
+                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+
+        monkeypatch.setattr(RuntimeToolOperationBridge, "unknown", wrapped_unknown)
 
     entered, release, tool_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     calls: list[str] = []
@@ -229,6 +242,13 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
         assert calls == expected_calls
         [child_id] = child_ids
         assert child_id != turn_id and returned_ids == ([] if cancel else [child_id])
+        if cancel:
+            stopped_child = await state.execution.executions.get(child_id, tenant_id=runtime.tenant_id)
+            assert stopped_child.status.value in {"CANCELLED", "FAILED"}
+        if wrapped_cancel:
+            [original] = await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=runtime.tenant_id)
+            assert original.tool_call_id == _DELEGATE_CALL and original.status.value == "EFFECT_UNKNOWN"
+
         assert await state.execution.executions.get(turn_id, tenant_id=runtime.tenant_id) is None
         assert await state.conversation.sessions.get(_SESSION, tenant_id=runtime.tenant_id) is None
 
@@ -318,7 +338,7 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path)
     features.model("child", _model("child", child))
     features.capability(ExecutionCapability(retain_history=True))
     features.capability(StepPersistenceCapability())
-    features.tool(confirm_fixture, effect_policy="none")
+    features.tool(confirm_fixture, effect_policy="replay_safe")
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="parent", allow_subagents=("reviewer",),
                    allow_tools=("confirm_fixture",), allow_skills=())
@@ -339,6 +359,10 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path)
         pending, = await runtime.approvals.list(turn.key, principal=principal)
         assert pending.status is ApprovalStatus.PENDING
         assert calls == ["approval requested"] and child_ids == []
+        [original] = await state.checkpoint.tools.list_by_agent_run(
+            turn.key.turn_id, execution_id=turn.key.turn_id, tenant_id=runtime.tenant_id,
+        )
+        assert original.tool_call_id == "approval" and original.status is ToolOperationStatus.PENDING
 
         phase = "approval decision and resume"
         try:
@@ -364,6 +388,9 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path)
         assert {record.tool_call_id: record.status for record in records} == {
             "approval": ToolOperationStatus.COMPLETED, _DELEGATE_CALL: ToolOperationStatus.COMPLETED,
         }
+        approved = next(record for record in records if record.tool_call_id == "approval")
+        assert approved.tool_operation_id == original.tool_operation_id and approved.fence == original.fence + 1
+        assert approved.producer_generation == row["generation"]
         [child_id] = child_ids
         assert child_id != turn.key.turn_id
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id=runtime.tenant_id) is None
