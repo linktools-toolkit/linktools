@@ -82,6 +82,24 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
             finally:
                 await events.aclose()
 
+    async def wait(self) -> ResultT:
+        """Wait for this attempt to settle and read its authorized, typed result."""
+        with TurnObserver(
+            self._runtime, self.key.session_id, self.principal,
+            local_workspace=self._local_workspace, preview=False,
+        ) as observer:
+            initial = await self.result()
+            if initial.status.value in _END_STATES:
+                return initial
+            events = observer.events(self.key.turn_id)
+            try:
+                async for event in events:
+                    if event["type"] == "terminal":
+                        return await self.result()
+            finally:
+                await events.aclose()
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
     async def _replay_events(self) -> AsyncIterator[dict[str, JsonValue]]:
         result = await self.result()
         # Replays have no newly started producer to drain. Current means a
