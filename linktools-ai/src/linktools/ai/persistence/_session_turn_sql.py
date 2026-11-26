@@ -1602,6 +1602,54 @@ class SqlSessionTurns(SqlSessionTurnReader):
 
         await self._context.run_mutation(write, domain="session.instructions")
 
+    async def request_parked_cancel(
+        self, frontier: CanonicalDeferredFrontier, *, receipt_store: StateStore,
+        cancel_receipts: Callable[[StateGroupTransaction], Awaitable[bool]],
+    ) -> Literal["lost", "requested", "ready"]:
+        """Stop an exact same-group frontier before any approval can resume it."""
+        binding = self._transcript_write_binding
+        if binding is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        turn_store = binding[0]
+        group = turn_store.storage_group
+        if receipt_store.storage_group is not group:
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        async def mutate(scope: StateGroupTransaction):
+            async def request(connection: AsyncSession) -> bool:
+                from sqlalchemy import and_, or_
+
+                columns = self._turns.c
+                matched = await connection.execute(self._turns.update().filter_by(
+                    **self._turn_values(frontier.key), generation=frontier.generation,
+                ).where(
+                    columns.split_source_receipt.is_(None),
+                    columns.result_json["checkpoint_id"].as_string() == frontier.checkpoint_id,
+                    or_(
+                        and_(columns.state.in_(("waiting", "ready")), columns.lease_until.is_(None)),
+                        and_(columns.state == "cancelling", columns.lease_until <= self._now,
+                             columns.result_json["cancel_effects_unresolved"].as_boolean().is_(True)),
+                    ),
+                ).values(state="cancelling", lease_until=self._now))
+                return matched.rowcount == 1
+
+            owner = scope.transaction(turn_store)
+            if not await owner.run_sql(self._context, request):
+                return "lost"
+            resolved = await cancel_receipts(scope)
+
+            async def persist_outcome(connection: AsyncSession) -> None:
+                await connection.execute(self._turns.update().filter_by(
+                    **self._turn_values(frontier.key), generation=frontier.generation, state="cancelling",
+                ).values(result_json=None if resolved else {
+                    **frontier.to_json(), "cancel_effects_unresolved": True,
+                }))
+
+            await owner.run_sql(self._context, persist_outcome)
+            return "ready" if resolved else "requested"
+
+        return await group.mutate(tuple(dict.fromkeys((turn_store, receipt_store))), mutate)
+
     async def request_split_wait_cancel(self, key: SessionTurnKey, *, generation: int) -> bool:
         """Record Stop for a parked split owner; there is no live lease to wait for."""
         columns = self._turns.c

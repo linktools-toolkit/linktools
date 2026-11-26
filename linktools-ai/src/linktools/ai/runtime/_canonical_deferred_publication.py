@@ -98,4 +98,49 @@ def bind_deferred_publication(runner, turns, checkpoint) -> None:
             max_bytes=turn.terminal_bytes, **trace_opts,
         )
 
-    runner.bind_deferred_publication(publish)
+    async def stop(frontier):
+        tools = checkpoint.tools
+        owner = approvals.state_store
+        if external.state_store is not owner or tools.state_store is not owner:
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        turn_id = frontier.key.turn_id
+        tenant_id = tools.tenant_id
+        approval_ids = frontier.approval_operation_ids
+        external_ids = frontier.external_operation_ids
+        selected = set((*approval_ids, *external_ids))
+
+        async def cancel_receipts(group) -> bool:
+            records = await tools.list_by_agent_run(turn_id, tenant_id=tenant_id, execution_id=turn_id)
+            by_id = {record.tool_operation_id: record for record in records}
+            if len(by_id) != len(records) or any(
+                (record := by_id.get(identity)) is None or record.execution_id != turn_id
+                or record.agent_run_id != turn_id or record.producer_generation != frontier.generation
+                for identity in selected
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            async def withdraw(repository, ids, *, prefix, stamp):
+                identities = tuple(
+                    deferred_resource_id(prefix, tenant_id, turn_id, turn_id, by_id[identity].tool_call_id)
+                    for identity in ids
+                )
+                await repository.cancel_pending_in_transaction(
+                    group.transaction(owner), identities, execution_id=turn_id, tenant_id=tenant_id, **stamp,
+                )
+
+            now = datetime.now(timezone.utc)
+            await withdraw(approvals, approval_ids, prefix="approval-v1", stamp={"decided_at": now})
+            await withdraw(external, external_ids, prefix="external-call-v1", stamp={"cancelled_at": now})
+            await tools.cancel_parked_operations_in_transaction(
+                group.transaction(owner), tuple(by_id[identity] for identity in (*approval_ids, *external_ids)),
+                cancelled_at=now,
+            )
+            return all(
+                record.status in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED, ToolOperationStatus.CANCELLED}
+                or record.status is ToolOperationStatus.PENDING and record.tool_operation_id in selected
+                for record in records
+            )
+
+        return await turns.request_parked_cancel(frontier, receipt_store=owner, cancel_receipts=cancel_receipts)
+
+    runner.bind_deferred_publication(publish, stop)

@@ -731,8 +731,10 @@ function watchOrdinarySession(id) {
           if(part.tool?.status==='RUNNING')return {tool:{...part.tool,status:interrupted}};
           return part;
         }) : null;
+      const input=status==='CANCELLED' && frame.prompt==='' && previous?.user_input
+        ? previous.user_input : ordinaryInput(frame.prompt,frame.attachments);
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status,
-        user_input:ordinaryInput(frame.prompt,frame.attachments),items,process,liveParts:[],previewGap:null,interruptedPreview,
+        user_input:input,items,process,liveParts:[],previewGap:null,interruptedPreview,
         output:frame.output,error_code:frame.error_code,conversation_committed:true});
     }
     renderList();setDisabled();

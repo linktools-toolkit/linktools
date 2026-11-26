@@ -24,7 +24,7 @@ from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
 from ..persistence.codec import decode_domain, encode_domain
-from ..persistence.turns import SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
+from ..persistence.turns import CanonicalDeferredFrontier, SessionInstructionFrontier, SessionTurnKey, SessionTurnSegment, decode_session_lineage
 from ..session import SessionContext, SessionTurnAdmission, project_tool_process_event
 from ..spec import RepositoryInstructions
 from ._agent_executor import DurableBoundary, LiveDelta
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from ..inputs import ExecutionInputMaterializer
     from ..spec import RepositoryInstructionResolver
     from ..workspace import Workspace
-    from ..persistence.turns import CanonicalDeferredFrontier, SqlSessionTurns
+    from ..persistence.turns import SqlSessionTurns
     from ..persistence.runs import StateStepArchive
     from ._canonical_trace_interactions import _CapturedTurnInteractions
     from ..execution import ExecutionStartReservation, ExecutionStartReservationResult, PendingToolContinuation, PendingDeferredCall
@@ -155,6 +155,7 @@ class _RegenerableTurnRunner:
         self._prepare_plan = prepare_plan
         self._prepare_budget = prepare_budget
         self._publish_deferred = None
+        self._stop_deferred = None
         self._split_recovery_source: Callable[[], Awaitable[_CanonicalSplitStep]] | None = None
         self._cancel_graph_turn: Callable[[SessionTurnKey, Principal], Awaitable[bool]] | None = None
         self._prepare_split_wait_resume = None
@@ -189,8 +190,9 @@ class _RegenerableTurnRunner:
             )
         return True
 
-    def bind_deferred_publication(self, publish) -> None:
+    def bind_deferred_publication(self, publish, stop=None) -> None:
         self._publish_deferred = publish
+        self._stop_deferred = stop
 
     def observe_lifecycle(self, callback: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
         """Offer only committed turn identifiers and revisions to a host carrier."""
@@ -648,6 +650,25 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             return await self._cancel_graph_turn(key, principal)
         split = turn["request_json"].get("split_step", False)
+        result = turn["result_json"]
+        if (not split and turn["state"] == "cancelling" and isinstance(result, Mapping)
+                and result.get("cancel_effects_unresolved") is True):
+            await self._finish_cold_cancellation(key, turn, session["revision"])
+            return True
+        if not split and turn["state"] in ("waiting", "ready"):
+            if self._stop_deferred is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            frontier = await self._store.get_waiting_turn(key)
+            if frontier is None or frontier.generation != turn["generation"]:
+                return False
+            stopped = await self._stop_deferred(frontier)
+            if stopped == "lost":
+                return False
+            self._gap(key, cancelling=True)
+            self._notice_lifecycle(key, "cancelling", session["revision"])
+            if stopped == "ready":
+                await self._finish_cold_cancellation(key, turn, session["revision"])
+            return True
         changed = (
             await self._store.request_split_wait_cancel(key, generation=turn["generation"])
             if split and turn["state"] in ("waiting", "ready")
@@ -676,6 +697,52 @@ class _RegenerableTurnRunner:
             elif outcome != "not_acquired":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return True
+
+    async def _finish_cold_cancellation(self, key, row, revision) -> bool:
+        request, generation = row["request_json"], row["generation"]
+        result = row["result_json"]
+        if isinstance(result, Mapping) and result.get("cancel_effects_unresolved") is True:
+            if self._stop_deferred is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            frontier = CanonicalDeferredFrontier.from_json(
+                key, generation, {name: value for name, value in result.items() if name != "cancel_effects_unresolved"},
+            )
+            if await self._stop_deferred(frontier) != "ready":
+                return False
+        trace_enabled = request.get("trace", False)
+        trace_archive = self._trace_archive
+        trace_recovery = {}
+        trace_event_base = 0
+        trace_agent_id = None
+        if trace_enabled:
+            if trace_archive is None or row["binding_json"] is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            trace_agent_id = AgentBindingContract.from_payload(row["binding_json"]).agent_spec.id
+
+            async def capture_trace_frontier(transaction):
+                nonlocal trace_event_base
+                trace_event_base, _ = await trace_archive._canonical_trace_frontier(transaction, key.turn_id)
+
+            trace_recovery["_trace_frontier"] = trace_archive.state_store, capture_trace_frontier
+        if not await self._store.take_over(
+            key, generation=generation, lease_seconds=_LEASE_SECONDS, cancelling=True, **trace_recovery,
+        ):
+            return False
+        stored = self._stored_input(request)
+        turn = _AdmittedTurn(
+            key, row["turn_no"], request["prompt"], [], 0, revision, None, generation + 1,
+            attachments=() if stored is None else stored_input_attachment_views(stored),
+            trace_enabled=trace_enabled, trace_event_base=trace_event_base,
+        )
+        code = ErrorCode.EXECUTION_CANCELLED.value
+        trace = await self._terminal_trace(turn, trace_agent_id, "cancelled", code)
+        finished = await self._store.finish(
+            key, generation=generation + 1, turn_no=row["turn_no"], state="cancelled", result={"error_code": code},
+            **trace,
+        )
+        if finished:
+            self._terminal(turn, "cancelled", error_code=code)
+        return finished
 
     async def resume_deferred(
         self, frontier: CanonicalDeferredFrontier, continuation: PendingToolContinuation,
@@ -793,40 +860,7 @@ class _RegenerableTurnRunner:
                         self._notice_lifecycle(key, "terminal", session["revision"] + 1)
                     return recovered
             if row["state"] == "cancelling":
-                trace_enabled = request.get("trace", False)
-                trace_archive = self._trace_archive
-                trace_recovery = {}
-                trace_event_base = 0
-                trace_agent_id = None
-                if trace_enabled:
-                    if trace_archive is None or row["binding_json"] is None:
-                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                    trace_agent_id = AgentBindingContract.from_payload(row["binding_json"]).agent_spec.id
-
-                    async def capture_trace_frontier(transaction):
-                        nonlocal trace_event_base
-                        trace_event_base, _ = await trace_archive._canonical_trace_frontier(transaction, key.turn_id)
-
-                    trace_recovery["_trace_frontier"] = trace_archive.state_store, capture_trace_frontier
-                if not await self._store.take_over(
-                    key, generation=generation, lease_seconds=_LEASE_SECONDS, cancelling=True, **trace_recovery,
-                ):
-                    return False
-                stored = self._stored_input(request)
-                turn = _AdmittedTurn(
-                    key, row["turn_no"], request["prompt"], [], 0, session["revision"], None, generation + 1,
-                    attachments=() if stored is None else stored_input_attachment_views(stored),
-                    trace_enabled=trace_enabled, trace_event_base=trace_event_base,
-                )
-                code = ErrorCode.EXECUTION_CANCELLED.value
-                trace = await self._terminal_trace(turn, trace_agent_id, "cancelled", code)
-                finished = await self._store.finish(
-                    key, generation=generation + 1, turn_no=row["turn_no"], state="cancelled", result={"error_code": code},
-                    **trace,
-                )
-                if finished:
-                    self._terminal(turn, "cancelled", error_code=code)
-                return finished
+                return await self._finish_cold_cancellation(key, row, session["revision"])
 
             lineage = decode_session_lineage(session["lineage_json"])
             await self._authorize_lineage(
@@ -1265,6 +1299,9 @@ class _RegenerableTurnRunner:
             # lost its fence, only a durable cancellation authorizes this branch.
             row = await self._store.get_turn(turn.key)
             if row is not None and row["state"] == "cancelling" and row["generation"] == turn.generation:
+                result = row["result_json"]
+                if isinstance(result, Mapping) and result.get("cancel_effects_unresolved") is True:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                 code = ErrorCode.EXECUTION_CANCELLED.value
                 if await self._finish_retained_turn(
                     turn, state="cancelled",

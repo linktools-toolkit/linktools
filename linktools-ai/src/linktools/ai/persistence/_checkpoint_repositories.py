@@ -846,6 +846,19 @@ class ToolRepositoryImpl(_RepositoryBase):
             return tuple(values)
         return await self._store.read(read)
 
+    async def cancel_parked_operations_in_transaction(
+        self, transaction: StateTransaction, operations: Sequence[ToolOperationRecord], *, cancelled_at: datetime,
+    ) -> None:
+        for operation in operations:
+            if operation.status is not ToolOperationStatus.PENDING:
+                continue
+            stored = await transaction.get_record(self._tool_key(operation.tool_operation_id))
+            if stored is None or await self._decode(stored, ToolOperationRecord) != operation:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self._replace_tool_in_transaction(
+                transaction, stored, replace(operation, status=ToolOperationStatus.CANCELLED, updated_at=cancelled_at),
+            )
+
     async def get_operations(
         self, operation_ids: Sequence[str], *, tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]:
