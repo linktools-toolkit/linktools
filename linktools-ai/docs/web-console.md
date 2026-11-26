@@ -26,11 +26,10 @@ as `ai-run`; memory is supplied by the Runtime capability. Prefer environment
 configuration for credentials rather than shell history. The console does not
 persist or edit model credentials.
 
-The default local console keeps the full tool-enabled execution profile.
-Use `ai-web --ordinary` to use the lower-I/O session store for plain text
-Agents, with a separate session list. This mode does not enable filesystem or
-shell tools, Memory, durable Trace or checkpoint-based tool recovery. An
-ineligible Agent is rejected rather than retried through the strict profile.
+The local console uses canonical SQL conversations with native Step and Trace.
+It keeps the default Agent's tools and rejects unsupported bindings before
+admission rather than silently dropping tools. Skill and MCP tools require a
+same-store native Step. Subagent delegation is not available on this turn path.
 
 An embedded ordinary Runtime can enable the native read-only tools without adding
 a second tool configuration. Declare the Workspace through `FileSystemCapability`

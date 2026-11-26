@@ -111,7 +111,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..model import FallbackBinding, ModelBinding, UserPromptInput, model_binding_error, validate_model_inputs
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions, SkillSpec
+from ..spec import CapabilityRef, RepositoryInstructions, SkillSpec
 from ..workspace import (
     WorkspaceResource,
     SupportsClose,
@@ -231,6 +231,7 @@ class _AgentRunScope:
     skill_resource_paths: Mapping[str, "str | None"] = field(default_factory=dict)
     initial_skills: tuple[SkillDefinition, ...] | None = None
     preload_skills: tuple[SkillDefinition, ...] = ()
+    preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] | None = None
     mode: ExecutionMode = "run"
     planning: bool = False
     regenerable: bool = False
@@ -338,7 +339,9 @@ class AgentExecutor:
 
     async def _load_preload_skills(self, scope: _AgentRunScope) -> tuple[SkillDefinition, ...]:
         context = scope.context.input_context
-        raw = () if context is None else context.preload_skills
+        raw = scope.preload_skill_inputs
+        if raw is None:
+            raw = () if context is None else context.preload_skills
         inputs = tuple(SkillInput.from_payload(value) for value in raw)
         if tuple(item.skill.id for item in inputs) != scope.binding.compiled_agent.spec.preload_skills:
             raise AIError(ErrorCode.BINDING_CONFLICT,
@@ -395,6 +398,7 @@ class AgentExecutor:
 
     def require_regenerable(
         self, binding: AgentBinding, *, canonical_step: bool = False, canonical_trace: bool = False,
+        split_step: bool = False,
     ) -> None:
         compiled = binding.compiled_agent
         policy = _runtime_feature_policy(compiled.runtime_contributions)
@@ -402,8 +406,8 @@ class AgentExecutor:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical memory requires a coowned Step store")
         unsupported = [name for name, selected in (
             ("agent_capabilities", compiled.selected_capabilities),
-            ("skills", compiled.skill_definitions),
-            ("mcp", compiled.mcp_servers),
+            ("skills", compiled.skill_definitions and (not canonical_step or split_step)),
+            ("mcp", compiled.mcp_servers and (not canonical_step or split_step)),
             ("subagents", compiled.selected_subagents),
             ("checkpoints", policy.restart_checkpoints != canonical_step),
             ("trace", policy.durable_trace != canonical_trace),
@@ -463,6 +467,8 @@ class AgentExecutor:
         mode: ExecutionMode = "run",
         planning: bool = False,
         plan_store: PlanningStore | None = None,
+        preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = (),
+        split_step: bool = False,
     ) -> AgentExecutionOutcome:
         """Run a plain turn with no durable recorder or execution handoff."""
         if context.session_id is None:
@@ -472,7 +478,7 @@ class AgentExecutor:
         if (canonical_step is None) != (tool_operations is None):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         self.require_regenerable(
-            binding, canonical_step=canonical_step is not None, canonical_trace=trace_boundary is not None,
+            binding, canonical_step=canonical_step is not None, canonical_trace=trace_boundary is not None, split_step=split_step,
         )
         if planning and plan_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -521,7 +527,7 @@ class AgentExecutor:
                 trace_interaction_base=trace_interaction_base,
                 trace_boundary=None if trace_boundary is None else flush_trace, trace_auto_flush=trace_auto_flush,
                 tool_effects="read_only" if canonical_step is None else "live",
-                mode=mode, planning=planning,
+                mode=mode, planning=planning, preload_skill_inputs=preload_skill_inputs,
                 plan_store_resolver=None if plan_store is None else lambda _ctx: plan_store,
                 memory_store=memory_store, memory_tool_names=memory_names if memory_store is not None else (),
             ))
@@ -1241,7 +1247,7 @@ async def _materialize_agent(
             initial_skills,
             skill_sources,
             resource_paths=scope.skill_resource_paths,
-            discover=current_skills,
+            discover=None if current_agent is None else current_skills,
             preload_skills=scope.preload_skills,
             mounted_resources={
                 skill.id: skill.source_ref

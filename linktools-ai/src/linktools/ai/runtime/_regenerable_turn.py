@@ -102,6 +102,7 @@ class _AdmittedTurn:
     split_source: _CanonicalSplitStep | None = None
     trace_event_base: int = 0
     trace_interaction_base: int = 0
+    preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -823,7 +824,7 @@ class _RegenerableTurnRunner:
             if canonical_trace != request.get("trace", False):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             self._executor.require_regenerable(
-                binding, canonical_step=native_step is not None, canonical_trace=canonical_trace,
+                binding, canonical_step=native_step is not None, canonical_trace=canonical_trace, split_step=split is not None,
             )
             if "repository_instructions" not in request or "cwd" not in request:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "Turn has no admitted workspace evidence")
@@ -970,6 +971,7 @@ class _RegenerableTurnRunner:
                 mode=mode, planning=planning, plan_store=plan_store, budget=budget,
                 trace_enabled=trace_enabled, trace_event_base=trace_event_base,
                 trace_interaction_base=trace_interaction_base, split_source=split,
+                preload_skill_inputs=tuple(request.get("preload_skills", ())),
             )
             self._admitted(turn)
             try:
@@ -1330,7 +1332,7 @@ class _RegenerableTurnRunner:
         plan_store = self._prepare_plan(key, 1) if planning else None
         trace_enabled = self._require_turn_trace(binding, canonical_step=native_step is not None)
         self._executor.require_regenerable(
-            binding, canonical_step=native_step is not None, canonical_trace=trace_enabled,
+            binding, canonical_step=native_step is not None, canonical_trace=trace_enabled, split_step=split is not None,
         )
         if await self.canonicalize_cwd(cwd) != cwd:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "cwd"})
@@ -1351,6 +1353,9 @@ class _RegenerableTurnRunner:
             "cwd": cwd,
             "repository_instructions": None if repository_instructions is None else repository_instructions.to_payload(),
         }
+        preload_skill_inputs = await self._executor.capture_preload_skills(binding)
+        if preload_skill_inputs:
+            request["preload_skills"] = [dict(value) for value in preload_skill_inputs]
         if trace_enabled:
             if split is not None:
                 raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
@@ -1424,7 +1429,7 @@ class _RegenerableTurnRunner:
             repository_instructions, session_context=session_context, model_prompt=model_prompt, attachments=attachments,
             stored_input=request.get("input"),
             native_step=native_step, trace_enabled=trace_enabled, mode=mode, planning=planning, plan_store=plan_store,
-            budget=run_budget, split_source=split,
+            budget=run_budget, split_source=split, preload_skill_inputs=preload_skill_inputs,
         )
 
     async def _admission_history(
@@ -1683,7 +1688,8 @@ class _RegenerableTurnRunner:
                     generation=turn.generation, continuation=turn.continuation,
                     deferred_tool_results=turn.deferred_results, deferred_approvals=turn.deferred_approvals,
                     output_retries_used=turn.output_retries_used, mode=turn.mode, planning=turn.planning,
-                    plan_store=turn.plan_store, budget=turn.budget, **trace_opts,
+                    plan_store=turn.plan_store, budget=turn.budget,
+                    preload_skill_inputs=turn.preload_skill_inputs, split_step=turn.split_source is not None, **trace_opts,
                 )
                 if isinstance(outcome, DeferredToolRequests):
                     if turn.native_step is None or self._publish_deferred is None:
