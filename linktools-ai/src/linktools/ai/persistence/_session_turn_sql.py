@@ -93,6 +93,7 @@ def _release_context_budget(budget: _ContextBudget) -> None:
 
 @dataclass(frozen=True, slots=True)
 class SessionContextTurn:
+    turn_id: str
     turn_no: int
     request: JsonValue
     messages: tuple[ModelMessage, ...]
@@ -800,7 +801,7 @@ class SqlSessionTurnReader:
             raise AIError(missing, "The finalized session context range is incomplete")
         return tuple(
             self._context_turn(
-                row["turn_no"], row["prompt"], row["stored_input"],
+                row["turn_id"].decode("utf-8"), row["turn_no"], row["prompt"], row["stored_input"],
                 row["messages"] if row["state"] == "succeeded" else (),
                 reset_context=row["state"] == "succeeded" and row["reset_context"] is True,
                 interrupted=row["state"] != "succeeded",
@@ -810,13 +811,13 @@ class SqlSessionTurnReader:
 
     @staticmethod
     def _context_turn(
-        turn_no: int, prompt: str, stored_input: JsonValue, messages: Sequence[ModelMessage], *,
+        turn_id: str, turn_no: int, prompt: str, stored_input: JsonValue, messages: Sequence[ModelMessage], *,
         reset_context: bool = False, interrupted: bool = False,
     ) -> SessionContextTurn:
         request = {"prompt": prompt, **({"input": stored_input} if stored_input is not None else {})}
         transcript_bytes = len(encode_model_messages(messages))
         size = max(1024, len(canonical_json_bytes(request)) + transcript_bytes)
-        return SessionContextTurn(turn_no, request, tuple(messages), size, transcript_bytes, reset_context, interrupted)
+        return SessionContextTurn(turn_id, turn_no, request, tuple(messages), size, transcript_bytes, reset_context, interrupted)
 
     def _remember_context(
         self, session_id: str, *, after: int, through: int, turns: tuple[SessionContextTurn, ...],
@@ -959,7 +960,7 @@ class SqlSessionTurns(SqlSessionTurnReader):
         if prompt is None:
             return
         turns += (self._context_turn(
-            turn_no, prompt, stored_input, messages if succeeded else (),
+            key.turn_id, turn_no, prompt, stored_input, messages if succeeded else (),
             reset_context=succeeded and reset_context, interrupted=not succeeded,
         ),)
         self._remember_context(key.session_id, after=after, through=turn_no, turns=turns)

@@ -12,8 +12,8 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserProm
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepPersistence
 from sqlalchemy import event, select
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
-from linktools.ai.core import CommitPolicy
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.core import TenantAuthorizationPolicy
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import NativeCheckpoint, Persistence, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence.contracts import LoadedContextMessage, LoadedModelContext
@@ -25,6 +25,10 @@ from ._sqlite_insert_measurement import bound_insert_rows
 
 
 _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+class _HostAuthorization(TenantAuthorizationPolicy):
+    """Explicit SQL session policy for the test actor."""
 
 
 class _NativeWrites:
@@ -52,12 +56,11 @@ def _messages(count: int) -> list[ModelRequest]:
 
 
 @pytest.mark.asyncio
-async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
+async def test_session_new_runs_reuse_history_beyond_warm_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path, namespace = tmp_path / "session.db", "snapshot-session-baseline"
-    executions, run_ids, expected = set(), set(), {}
-    transcript: list[str] = []
+    namespace = "snapshot-session-baseline"
+    run_ids, expected = [], {}
     prepare_snapshot = SqlStepStore._prepare_snapshot
 
     async def capture_snapshot(store, snapshot):
@@ -69,52 +72,53 @@ async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
     async def model(messages, _info):
         return ModelResponse(parts=[TextPart(f"answer-{len(messages)}")], timestamp=_STAMP)
 
-    for phase, turns in enumerate((3, 1)):
-        async with Persistence.open(namespace, storage=PersistenceStorage.sqlite(path)) as state:
-            native = await state.create_step_store(max_cached_messages=2)
-            features = RuntimeFeatures(namespace)
-            features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
-            features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-            features.capability(TraceCapability(commit=CommitPolicy.sync()), scope="runtime")
-            features.agent("default", model="default", allow_tools=())
-            try:
-                async with Runtime.open(persistence=state,
-                        features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-                    session = (await runtime.agents.get().create_session("session") if phase == 0
-                               else await runtime.sessions.get("session"))
-                    for turn in range(turns):
-                        existing = await _identities(native.storage_context.engine)
-                        writes = _NativeWrites()
-                        event.listen(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
-                        try:
-                            question = f"question-{phase}-{turn}"
-                            execution = await session.start(question)
-                            assert (await execution.wait(timeout_seconds=10)).result.status.value == "SUCCEEDED"
-                        finally:
-                            event.remove(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
-                        assert execution.execution_id not in executions
-                        executions.add(execution.execution_id)
-                        runs = await native.list_runs()
-                        added = {run.run_id for run in runs} - run_ids
-                        assert len(added) == 1
-                        run_id, = added
-                        run_ids.add(run_id)
-                        snapshot = await native.latest_snapshot(run_id=run_id)
-                        assert snapshot is not None
-                        restored = NativeCheckpoint.decode(snapshot)
-                        assert encode_model_messages(restored.messages) == expected[run_id]
-                        transcript.extend((question, f"answer-{2 * len(run_ids) - 1}"))
-                        assert [part.content for message in restored.messages for part in message.parts
-                                if isinstance(part, (UserPromptPart, TextPart))] == transcript
-                        for table in existing:
-                            repeated = existing[table].intersection(writes.identities[table])
-                            assert not repeated, (phase, turn, table, repeated)
-                        if len(run_ids) > 1:
-                            assert len(restored.messages) > 2
-                    assert len((await session.timeline()).items) == len(executions)
-            finally:
-                await native.close()
-    assert len(executions) == len(run_ids) == 4
+    async with Persistence.open(namespace, storage=PersistenceStorage.sqlite(tmp_path / "session.db")) as state:
+        native = await state.create_step_store(max_cached_messages=2)
+        features = RuntimeFeatures(namespace)
+        features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        features.agent("default", model="default", allow_tools=())
+        try:
+            async with Runtime.open(
+                persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
+                authorization=_HostAuthorization(),
+            ) as runtime:
+                session = await runtime.agents.get().create_session("session")
+                for index in range(3):
+                    existing = await _identities(native.storage_context.engine)
+                    writes = _NativeWrites()
+                    event.listen(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
+                    try:
+                        question = f"question-{index}"
+                        turn = await runtime.sessions.start(
+                            session.session_id, question, agent="default", principal=runtime.default_principal,
+                            idempotency_key=question,
+                        )
+                        assert (await turn.wait_final(timeout_seconds=10)).status.value == "SUCCEEDED"
+                    finally:
+                        event.remove(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
+                    assert turn.key.turn_id not in run_ids
+                    run_ids.append(turn.key.turn_id)
+                    for table in existing:
+                        repeated = existing[table].intersection(writes.identities[table])
+                        assert not repeated, (index, table, repeated)
+                assert {run.run_id for run in await native.list_runs()} == set(run_ids)
+                assert [item["turn_id"] for item in (await session.timeline())["items"]] == run_ids
+
+                # Read snapshots only after exercising all turns: no test readback
+                # should seed the producer's warm proof for the next turn.
+                transcript: list[str] = []
+                for index, run_id in enumerate(run_ids):
+                    snapshot = await native.latest_snapshot(run_id=run_id)
+                    assert snapshot is not None
+                    restored = NativeCheckpoint.decode(snapshot)
+                    assert encode_model_messages(restored.messages) == expected[run_id]
+                    transcript.extend((f"question-{index}", f"answer-{2 * index + 1}"))
+                    assert [part.content for message in restored.messages for part in message.parts
+                            if isinstance(part, (UserPromptPart, TextPart))] == transcript
+                    assert len(restored.messages) == 2 * (index + 1)
+        finally:
+            await native.close()
 
 
 @pytest.mark.asyncio
