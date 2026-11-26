@@ -315,7 +315,9 @@ class SqlSessionTurnReader:
         self._split_transcript_source = resolve
 
     async def _read_transcripts(self, statement, *, display: bool, body_limit: int | None = None,
-                                compacted_context: bool | str = False) -> tuple[Mapping[str, object], ...]:
+                                compacted_context: bool | str = False,
+                                reset_window: tuple[int, int, ErrorCode] | None = None,
+                                ) -> tuple[Mapping[str, object], ...]:
         if self._transcript_source is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         turn_store, archive_provider, capture = self._transcript_source
@@ -331,6 +333,15 @@ class SqlSessionTurnReader:
             if not isinstance(owner, SqlStateRowReader):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             rows = await owner.read_sql_rows(self._context, statement)
+            if reset_window is not None:
+                after, through, missing = reset_window
+                if (len(rows) != through - after
+                        or any(row["turn_no"] != number for number, row in enumerate(rows, after + 1))):
+                    raise AIError(missing, "The finalized session context range is incomplete")
+                for index in range(len(rows) - 1, -1, -1):
+                    if rows[index]["state"] == "succeeded" and rows[index]["reset_context"] is True:
+                        rows = rows[index:]
+                        break
             selected = rows[:body_limit]
             prompts = {}
             for position, row in enumerate(selected):
@@ -818,7 +829,7 @@ class SqlSessionTurnReader:
         turns += await self.read_context_range(
             session_id, after=after, through=through, lineage=lineage,
             checkpoint=checkpoint if cached is None and not lineage else None,
-            compacted_context=not lineage,
+            compacted_context=not lineage, _trim_reset=True,
         )
         for index in range(len(turns) - 1, -1, -1):
             if turns[index].reset_context:
@@ -833,7 +844,7 @@ class SqlSessionTurnReader:
     async def read_context_range(
         self, session_id: str, *, after: int, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
         missing: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR, checkpoint: SqlStepStore | None = None,
-        compacted_context: bool | str = False,
+        compacted_context: bool | str = False, _trim_reset: bool = False,
     ) -> tuple[SessionContextTurn, ...]:
         """Read finalized input and only the confirmed conversation transcripts."""
         from sqlalchemy import case, select, type_coerce
@@ -868,8 +879,11 @@ class SqlSessionTurnReader:
                 )
             else:
                 checkpoint = None
-        rows = await self._read_transcripts(statement, display=False, compacted_context=compacted_context)
-        if len(rows) != through - after:
+        rows = await self._read_transcripts(
+            statement, display=False, compacted_context=compacted_context,
+            reset_window=(after, through, missing) if _trim_reset else None,
+        )
+        if not _trim_reset and len(rows) != through - after:
             raise AIError(missing, "The finalized session context range is incomplete")
         return tuple(
             self._context_turn(

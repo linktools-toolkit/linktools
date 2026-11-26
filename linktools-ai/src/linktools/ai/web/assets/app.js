@@ -507,36 +507,78 @@ async function catchUpOrdinary(watch, through=null) {
   watch.catchUp=read;
   try {await read;} finally {if(watch.catchUp===read)watch.catchUp=null;}
 }
+function installOrdinaryGapTurns(incoming) {
+  if(!incoming.size)return;
+  const container=$('conversation');
+  const follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40;
+  const nodes=new Map([...container.children].map(node=>[node.dataset.turn,node]));
+  const rows=new Map(state.turns.map(row=>[row.turn_id,row]));
+  for(const [id,turn] of incoming){
+    const before=rows.get(id);
+    if(before?.conversation_committed)incoming.delete(id);
+    else rows.set(id,{...before,...turn});
+  }
+  if(!incoming.size)return;
+  state.turns=[...rows.values()].sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity));
+  container.querySelector(':scope > .empty')?.remove();
+  let anchor=$('live') || null;
+  for(let i=state.turns.length-1;i>=0;--i){
+    const turn=state.turns[i],node=nodes.get(turn.turn_id);
+    if(incoming.has(turn.turn_id)){
+      const content=ordinaryTurnNode(turn,node);
+      if(node)node.replaceWith(content);else container.insertBefore(content,anchor);
+      anchor=content;
+    } else if(node)anchor=node;
+  }
+  if(follows)container.scrollTop=container.scrollHeight;
+}
+function advanceOrdinaryHistory(watch,through) {
+  let covered=Math.max(watch.committedThrough ?? 0,through);
+  // Terminal notices received while paging may already fill the next slots.
+  for(const turn of state.turns){
+    if(turn.turn_no===covered+1 && turn.conversation_committed)covered++;
+  }
+  watch.committedThrough=covered;
+}
 async function readOrdinaryGap(watch,current) {
-  // Keep a completed pre-gap watermark, not the highest received event:
-  // a terminal frame can overtake the history read during reconnection.
+  // A terminal frame may overtake the read, but cannot prove a skipped range.
   const after=watch.committedThrough;
   const payload=await readSession(watch.id);
   if(!current())return;
-  // A newer read may already own occupancy. This authorized page still
-  // fills its range of committed history, regardless of read generation.
   if(acceptSession(payload))renderSessionHeader();
   watch.readActive();
   if(!payload.timeline)return;
   const through=payload.session.last_turn_no;
-  let timeline=payload.timeline;
-  for(;;){
-    const items=timeline?.items || [];
-    for(const turn of items){
-      if((after===null || turn.turn_no>after)
-        && !state.turns.some(row=>row.turn_id===turn.turn_id && row.conversation_committed))patchOrdinaryTurn(turn);
+  const incoming=new Map();
+  let timeline=payload.timeline, complete=false;
+  // Read at most two normal history pages per reconnect; deeper history
+  // remains reachable via Load earlier turns without claiming it was seen.
+  for(let page=0;page<2;++page){
+    const items=timeline.items || [];
+    for(const turn of items)if(after===null || turn.turn_no>after)incoming.set(turn.turn_id,turn);
+    if(after===null || !timeline.next_cursor || !items.length || items[0].turn_no<=after+1){
+      complete=after===null || !timeline.next_cursor || (items.length && items[0].turn_no<=after+1);
+      break;
     }
-    if(after===null && !state.hasEarlierTurns){
-      state.turnCursor=timeline?.next_cursor || null;
-      $('turns-more').hidden=!state.turnCursor;
+    if(page===0){
+      const earlier=await api(sessionURL(watch.id,'',{limit:'50',cursor:timeline.next_cursor}));
+      if(!current())return;
+      timeline=earlier.timeline;
     }
-    const cursor=timeline?.next_cursor;
-    if(after===null || !cursor || !items.length || items[0].turn_no<=after+1)break;
-    const earlier=await api(sessionURL(watch.id,'',{limit:'50',cursor}));
-    if(!current())return;
-    timeline=earlier.timeline;
   }
-  if(Number.isSafeInteger(through))watch.committedThrough=Math.max(watch.committedThrough ?? 0,through);
+  installOrdinaryGapTurns(incoming);
+  if(!complete && timeline.next_cursor){
+    const gap=watch.historyGap;
+    if(!gap || through>gap.through){
+      watch.historyGap={through};
+      state.turnCursor=timeline.next_cursor;
+    }
+  } else if(complete && Number.isSafeInteger(through)){
+    advanceOrdinaryHistory(watch,through);
+    if(watch.historyGap && through>=watch.historyGap.through)watch.historyGap=null;
+  }
+  if(after===null && !state.hasEarlierTurns)state.turnCursor=timeline.next_cursor || null;
+  $('turns-more').hidden=!state.turnCursor;
   renderList();setDisabled();
 }
 function watchOrdinarySession(id) {
@@ -1272,12 +1314,21 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
 async function moreTurns() {
   const generation=state.generation,id=state.selectedSession,cursor=state.turnCursor,noticeRevision=state.noticeRevision,key=`session:${id}:turns`;
   if(!id || !cursor || state.actionsPending.has(key))return;
+  const watch=sessionWatch,gap=watch?.historyGap;
   state.actionsPending.add(key);$('turns-more').disabled=true;$('trace-earlier-turns').disabled=true;
   try {
     const payload=await api(sessionURL(id,"",{limit:"50",cursor}));
     if(generation!==state.generation || id!==state.selectedSession)return;
     // Earlier pages supply history only; their session owner may predate live readback.
-    state.turns=mergePage(payload.timeline.items,state.turns,item=>item.turn_id || item.execution_id);state.turnCursor=payload.timeline.next_cursor;state.hasEarlierTurns=true;
+    state.turns=mergePage(payload.timeline.items,state.turns,item=>item.turn_id || item.execution_id);
+    if(gap)state.turns.sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity));
+    if(cursor===state.turnCursor){
+      state.turnCursor=payload.timeline.next_cursor;state.hasEarlierTurns=true;
+      if(gap && watch.historyGap===gap && (!state.turnCursor || payload.timeline.items[0]?.turn_no<=(watch.committedThrough ?? 0)+1)){
+        advanceOrdinaryHistory(watch,gap.through);
+        watch.historyGap=null;
+      }
+    }
     if(nativeTurnInspector() && state.conversationMode==='activity' && !$('inspector').hidden){
       chooseOrdinaryInspectionTurn();
       $('trace-earlier-turns').hidden=!state.turnCursor;

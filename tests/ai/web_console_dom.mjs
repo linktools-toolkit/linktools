@@ -680,6 +680,39 @@ if(process.argv[3]==='session-published-turn') {
     active_turn_id:null,last_turn_no:2,revision:5},timeline:{items:[],next_cursor:null}});
   await until('gap metadata refreshes the open header',()=>node('conversation-title').textContent==='Gap title');
   assert.equal(node('conversation-meta').textContent,'next');
+  // Catch up only two pages automatically; a later live terminal must not
+  // erase a missing older range or force existing articles to be recreated.
+  const existingTurn=node('conversation').children.find(row=>row.dataset.turn===ordinaryTurn);
+  const gapTurns=(start,end)=>Array.from({length:end-start+1},(_,i)=>{
+    const turn_no=start+i;
+    return {turn_id:`missed-${turn_no}`,turn_no,status:'SUCCEEDED',conversation_committed:true,
+      user_input:{prompt:`Missed ${turn_no}`,attachments:[]},items:[]};
+  });
+  const gapCalls=calls.length,readGap=deferred('GET /api/sessions/b');
+  emitTurn({type:'terminal',turn_id:'missed-123',turn_no:123,revision:126,generation:1,state:'succeeded',prompt:'Live 123',items:[]});
+  await readGap.requested;
+  detailResponses.set('/api/sessions/b',url=>{
+    const cursor=url.searchParams.get('cursor');
+    const timeline=cursor==='before-73'?{items:gapTurns(23,72),next_cursor:'before-23'}
+      :cursor==='before-23'?{items:gapTurns(3,22),next_cursor:null}
+      :{items:gapTurns(73,122),next_cursor:'before-73'};
+    return {session:{...ordinarySession,active_turn_id:null,last_turn_no:122,revision:125},timeline};
+  });
+  readGap({session:{...ordinarySession,active_turn_id:null,last_turn_no:122,revision:125},
+    timeline:{items:gapTurns(73,122),next_cursor:'before-73'}});
+  await until('two bounded pages are installed',()=>node('conversation').textContent.includes('Missed 23'));
+  assert.equal(calls.slice(gapCalls).filter(call=>call.key==='/api/sessions/b').length,2);
+  assert.equal(node('conversation').children.find(row=>row.dataset.turn===ordinaryTurn),existingTurn,'old saved nodes survive catch-up');
+  assert.match(node('conversation').textContent,/Live 123/);
+  assert.doesNotMatch(node('conversation').textContent,/Missed 22\b/);
+  assert.equal(node('turns-more').hidden,false);
+  await node('turns-more').click();
+  assert.match(node('conversation').textContent,/Missed 22\b/);
+  assert.deepEqual(node('conversation').children.filter(row=>row.dataset.turn).slice(0,3).map(row=>row.dataset.turn),
+    [ordinaryTurn,'b-next-turn','missed-3']);
+  assert.equal(calls.at(-1).query.cursor,'before-23');
+  assert.equal(node('turns-more').hidden,true);
+
   assert.equal(calls.slice(beforeNative).filter(call=>call.key.startsWith('/api/executions/')).length,0);
   process.exit(0);
 }
