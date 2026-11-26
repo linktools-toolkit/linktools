@@ -32,7 +32,7 @@ def test_single_typed_owner_nulls_have_explicit_server_types(kind: str) -> None:
         assert "NULL AS payload_bytes" not in sql
         if dialect.name == "mysql" and kind == "agent_run":
             assert "CAST(NULL AS CHAR(64)) AS state" in sql
-            assert "CAST(NULL AS CHAR) AS lease_owner" in sql
+            assert "CAST(NULL AS CHAR(64)) AS lease_owner" in sql
             assert "COLLATE utf8mb4_bin)" not in sql
         if dialect.name == "postgresql":
             assert "CAST(NULL AS BYTEA) AS payload_bytes" in sql
