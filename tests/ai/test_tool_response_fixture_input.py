@@ -30,6 +30,7 @@ from linktools.ai.core import (
     ExecutionStatus,
     Principal,
     ResourceRef,
+    TenantAuthorizationPolicy,
     canonical_sha256,
     principal_identity_payload,
     service_principal,
@@ -214,16 +215,28 @@ async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path)
     features = RuntimeFeatures("fixture-conversation")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
-    async with Persistence.open('fixture-session', storage=storage) as persistence_178, Runtime.open(persistence=persistence_178, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with (
+        Persistence.open("fixture-session", storage=storage) as state,
+        Runtime.open(persistence=state, features=model_features(RuntimeUsageModels(), features),
+                     authorization=HostAuthorization()) as runtime,
+    ):
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
         with pytest.raises(AIError) as rejected:
-            await runtime.agents.get().start("question", session_id="session")
-        assert rejected.value.code is ErrorCode.BINDING_CONFLICT
-        assert rejected.value.safe_details["reason"] == "tool_response_fixture_session_unsupported"
-        session = await runtime._state.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-        assert session.active_execution_id is None
-        assert await runtime._state.conversation.sessions.timeline_head("session", tenant_id=runtime.tenant_id) == 0
-        assert await runtime._state.execution.executions.list_by_session("session", tenant_id=runtime.tenant_id) == ()
+            await runtime.agents.get().start("question", session_id="session", idempotency_key="fixture")
+        assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        assert rejected.value.safe_details["reason"] == "turn_agent_features_unsupported"
+        assert rejected.value.safe_details["features"] == ["tool_response_fixture"]
+        session = await runtime.history.turn_session("session", principal=principal)
+        assert session["session"]["active_turn_id"] is None
+        assert session["session"]["last_turn_no"] == 0
+        assert session["timeline"]["items"] == []
+        assert await state.session_turns.find_request("session", "fixture") is None
+        assert await state.execution.executions.list_by_session("session", tenant_id=runtime.tenant_id) == ()
     await assets.close()
 
 
