@@ -1083,7 +1083,9 @@ class DefaultExecutionService(TaskExecutionService):
             child = await self.load_authorized(child.execution_id, principal, AuthorizationAction.EXECUTION_READ)
             if child.status not in terminal:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        result = await self.consume_result_from_execution(child, tenant_id=principal.tenant_id)
+        # The parent still needs the exact terminal child record to settle its
+        # retained tool operation. Closing retention here invalidates that proof.
+        result = await self._result_from_execution(child, tenant_id=principal.tenant_id)
         if (result.execution_id, result.status) != (child.execution_id, child.status):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return child, result

@@ -1101,10 +1101,14 @@ async def _build_local_components(
                 binding=binding.binding_contract, mode=mode, timeout_seconds=0.0, reserved=reserved,
             )
             result_payload, error_code, error_payload = await tools.native_delegate_payload(original, child, result)
-            return await backend._runtime_commands.settle_native_subagent_result(
+            receipt = await backend._runtime_commands.settle_native_subagent_result(
                 state.session_turns, key, generation=generation, principal=principal, original=original,
                 child=child, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
             )
+            await execution.request_terminal_handoff(
+                child.execution_id, tenant_id=principal.tenant_id, terminal_commit=child.conversation,
+            )
+            return receipt
 
         turn_runner = (
             None if state.session_turns is None or not enable_turn_sessions else _RegenerableTurnRunner(

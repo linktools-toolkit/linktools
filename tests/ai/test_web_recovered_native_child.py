@@ -23,7 +23,7 @@ from .test_canonical_turn_subagents import _HEADERS, _SESSION, _HostAuthorizatio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ("recovered", "unknown-start-no-dispatch", "reservation-missing"))
+@pytest.mark.parametrize("outcome", ("recovered", "unknown-start-no-dispatch", "unknown-settlement-no-handoff", "reservation-missing"))
 async def test_web_recovery_first_starts_only_the_original_reserved_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
@@ -163,8 +163,9 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
 
         monkeypatch.setattr(state.execution.executions, "reserve_native_subagent", no_new_reservation)
         unknown_start = outcome == "unknown-start-no-dispatch"
+        unknown_settlement = outcome == "unknown-settlement-no-handoff"
+        commands = runtime._execution_service.runtime_backend()._runtime_commands
         if unknown_start:
-            commands = runtime._execution_service.runtime_backend()._runtime_commands
             commit = commands.commit_recovered_native_subagent_start
 
             async def lose_start_ack(*args, **kwargs):
@@ -173,6 +174,15 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
             monkeypatch.setattr(commands, "commit_recovered_native_subagent_start", lose_start_ack)
+        if unknown_settlement:
+            settle = commands.settle_native_subagent_result
+
+            async def lose_settlement_ack(*args, **kwargs):
+                completed = await settle(*args, **kwargs)
+                assert completed.status is ToolOperationStatus.COMPLETED
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+            monkeypatch.setattr(commands, "settle_native_subagent_result", lose_settlement_ack)
 
         recovered = await http.post("/api/session/recover", params=params, headers=_HEADERS,
                                     json={"turn_id": turn_id, "request_id": "recover"})
@@ -207,10 +217,15 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             assert same_child.status is ExecutionStatus.STARTED and same_child.agent_run_seq == 0
             assert receipt.status is IdempotencyStatus.STARTED
             assert calls == ["parent dispatch"] and returned_children == []
+        elif unknown_settlement:
+            assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
+            assert row["state"] == "accepted" and settled.status is ToolOperationStatus.COMPLETED
+            assert same_child.status is ExecutionStatus.SUCCEEDED and not same_child.retention_closed
+            assert calls == ["parent dispatch", "child dispatch"] and returned_children == []
         else:
             assert recovered.status_code == 200 and recovered.json()["accepted"], recovered.text
             assert row["state"] == "succeeded" and settled.status is ToolOperationStatus.COMPLETED
-            assert same_child.status is ExecutionStatus.SUCCEEDED
+            assert same_child.status is ExecutionStatus.SUCCEEDED and same_child.retention_closed
             assert receipt.status is IdempotencyStatus.COMPLETED
             assert calls == ["parent dispatch", "child dispatch", "parent continuation"]
             assert returned_children == [reserved.execution_id]

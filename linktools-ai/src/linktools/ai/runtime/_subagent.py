@@ -169,7 +169,7 @@ class SubagentDispatcher:
                 or (child.principal_id, child.principal_kind) != (principal.principal_id, principal.kind)
                 or child.binding_digest != frozen.binding_digest
                 or child.mode != ("plan" if mode == "plan" else "run")
-                or view.get("prompt") != task.strip()
+                or view.get("prompt") != {"kind": "text", "text": task.strip()}
                 or not isinstance(captured_files, list)
                 or any(not isinstance(item, Mapping) for item in captured_files)
                 or tuple(item.get("path") for item in captured_files) != files):
