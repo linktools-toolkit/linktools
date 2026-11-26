@@ -40,7 +40,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence.contracts import ExecutionRecord, ExecutionRecoveryState, RecoveryHandoffPhase
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
 from ._session_tool_test_helpers import _split_sqlite_storage
 from .test_runtime_binding_contract import _execution
 
@@ -104,9 +104,9 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         model_calls.append(prompt)
         if prompt == "second question":
             assert "first question" in prompts
-            assert [part.content for part in returned] == ["retained tool result"]
+            assert [part.content for part in returned] == (["retained tool result"] if restart else [])
             output = second_output
-        elif not returned:
+        elif restart and not returned:
             return ModelResponse(parts=[ToolCallPart("lookup", {}, tool_call_id="lookup-call")])
         else:
             ready.set()
@@ -115,123 +115,94 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         assert info.output_tools
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, output)])
 
+    from linktools.ai.capability import SessionCapability
+    from linktools.ai.core import TenantAuthorizationPolicy
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group.capability(SessionCapability(checkpoints=restart), scope="runtime")
     group.tool(lookup, effect_policy="replay_safe")
-    group.agent("default", model="default", allow_tools=("lookup",), allow_capabilities=())
-    if restart:
-        group.capability(native_checkpoint(), scope="runtime")
+    group.agent("default", model="default", allow_tools=("lookup",) if restart else (), allow_capabilities=())
     if trace:
         group.capability(TraceCapability(), scope="runtime")
-    async def assert_native_snapshot(runtime, run_id):
-        recovery = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
-        if restart:
-            assert await recovery.latest_checkpoint(agent_run_id=run_id, include_interrupted=True) is not None
-        else:
-            with pytest.raises(AIError) as unavailable:
-                await recovery.latest_checkpoint(agent_run_id=run_id, include_interrupted=True)
-            assert unavailable.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
-
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "runtime.db"
     storage_factory = _split_sqlite_storage if split_storage else PersistenceStorage.sqlite
-    storage = storage_factory(database)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_126, Runtime.open(persistence=persistence_126, features=model_features(models, group)) as runtime:
-        await runtime.agents.get().create_session("session")
-        session = runtime.agents.get().session("session")
-        execution = await session.start("first question", output=_Answer, idempotency_key="first")
+
+    async def assert_checkpoint(state, turn_id):
+        steps = await state.create_step_store()
+        try:
+            assert (await steps.latest_snapshot(run_id=turn_id, include_interrupted=True) is not None) is restart
+        finally:
+            await steps.close()
+
+    async with (
+        Persistence.open(_NAMESPACE, storage=storage_factory(database)) as state,
+        Runtime.open(persistence=state, features=model_features(models, group), authorization=HostAuthorization()) as runtime,
+    ):
+        agent = runtime.agents.get()
+        await agent.create_session("session")
+        if split_storage and restart:
+            # This matrix enables arbitrary tools and structured output. The
+            # narrower split Step profiles have their own round-trip tests.
+            with pytest.raises(AIError) as unavailable:
+                await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
+            assert unavailable.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+            assert (await runtime.history.turn_session_state("session", principal=runtime.default_principal))[
+                "active_turn_id"
+            ] is None
+            assert model_calls == tool_calls == []
+            return
+        turn = await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
         try:
             await asyncio.wait_for(ready.wait(), 10)
-            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert record is not None
-            assert record.restart_checkpoints is restart
-            assert record.durable_trace is trace
-            run_id = agent_run_id(
-                namespace=_NAMESPACE, tenant_id=runtime.tenant_id,
-                execution_id=execution.execution_id, agent_run_seq=record.agent_run_seq,
-            )
-            await assert_native_snapshot(runtime, run_id)
-            active_head = await runtime._state.execution.executions.get(
-                execution.execution_id, tenant_id=runtime.tenant_id,
-            )
-            assert active_head is not None
-            assert (active_head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and active_head.history_seal_digest is None)
-            assert record.producer_generation > 0
-            assert record.producer_claim_id is not None
-
-            async def observe_progress() -> None:
-                seen: set[ExecutionEventType] = set()
-                stream = execution.watch()
-                try:
-                    async for item in stream:
-                        seen.add(item.event.event_type)
-                        if {ExecutionEventType.MODEL_REQUEST_STARTED, ExecutionEventType.TOOL_CALL_FINISHED} <= seen:
-                            return
-                finally:
-                    await stream.aclose()
-
-            await asyncio.wait_for(observe_progress(), 10)
+            assert (await runtime.history.turn_session_state("session", principal=runtime.default_principal))[
+                "active_turn_id"
+            ] == turn.key.turn_id
+            await assert_checkpoint(state, turn.key.turn_id)
         finally:
             release.set()
-        result = (await execution.wait(timeout_seconds=10)).result
-        assert result.status is ExecutionStatus.SUCCEEDED
-        assert result.output == first_output
-        history = (await session.history()).items
-        assert any(item.item_kind == "tool_result" and item.content == "retained tool result" for item in history)
-        terminal_head = await runtime._state.execution.executions.get(
-            execution.execution_id, tenant_id=runtime.tenant_id,
-        )
-        assert terminal_head is not None
-        assert (terminal_head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and (terminal_head.history_seal_digest is not None) is trace)
-        terminal_record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert terminal_record.producer_generation == record.producer_generation
-        assert terminal_record.producer_claim_id == record.producer_claim_id
-        seal = await runtime._state.execution.executions.get_history_seal(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert (seal is not None) is trace
-        assert terminal_head.history_seal_digest == (seal.seal_digest if seal is not None else None)
-        archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
-        assert (await archive.get_agent_run(agent_run_id=run_id) is not None) is trace
-        assert bool(await archive.list_model_interactions(agent_run_id=run_id)) is trace
-        assert bool(await archive.list_events(agent_run_id=run_id)) is trace
-        await assert_native_snapshot(runtime, run_id)
-        if split_storage:
-            handoff = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert handoff is not None and handoff.recovery_state is ExecutionRecoveryState.COMPLETED
-            assert handoff.recovery.handoff_phase is RecoveryHandoffPhase.COMPLETED
-            assert handoff.recovery.terminal_handoff is not None
-
-    reopened = storage_factory(database)
-    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_196, Runtime.open(persistence=persistence_196, features=model_features(models, group)) as runtime:
-        restored = await runtime.executions.get(execution.execution_id)
-        assert (await restored.wait(timeout_seconds=10)).result.output == first_output
-        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert record is not None
-        assert record.restart_checkpoints is restart and record.durable_trace is trace
-        assert await runtime._state.execution.executions.get(
-            execution.execution_id, tenant_id=runtime.tenant_id,
-        ) == terminal_head
-        archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
-        assert (await archive.get_agent_run(agent_run_id=run_id) is not None) is trace
-        assert bool(await archive.list_model_interactions(agent_run_id=run_id)) is trace
-        assert bool(await archive.list_events(agent_run_id=run_id)) is trace
-        await assert_native_snapshot(runtime, run_id)
+        terminal = await turn.wait_final(timeout_seconds=10)
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        assert terminal.view["output"] == first_output
+        assert terminal.view["conversation_committed"] is True
+        history = await runtime.history.turn_session("session", principal=runtime.default_principal)
+        assert history["timeline"]["items"] == [terminal.view]
+        assert (await runtime.history.turn_session_state("session", principal=runtime.default_principal))[
+            "active_turn_id"
+        ] is None
+        await assert_checkpoint(state, turn.key.turn_id)
+        observed_trace = ()
         if trace:
-            assert (await restored.trace()).items
-            assert (await restored.model_interactions(include_content=True)).items
-        session = runtime.agents.get().session("session")
-        assert (await session.history()).items == history
+            observed_trace = (await _wait_for_committed(
+                lambda: runtime.history.turn_trace("session", turn.key.turn_id, principal=runtime.default_principal),
+                lambda page: any(item.payload["kind"] == "MODEL_RESPONSE" for item in page.items),
+            )).items
+
+    async with (
+        Persistence.open(_NAMESPACE, storage=storage_factory(database)) as state,
+        Runtime.open(persistence=state, features=model_features(models, group), authorization=HostAuthorization()) as runtime,
+    ):
+        agent = runtime.agents.get()
+        assert await runtime.history.turn_session("session", principal=runtime.default_principal) == history
         before_replay = list(model_calls)
-        replay = await session.start("first question", output=_Answer, idempotency_key="first")
-        assert replay.execution_id == execution.execution_id
-        assert (await replay.wait(timeout_seconds=10)).result.output == first_output
+        replay = await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
+        assert replay.key == turn.key
+        assert (await replay.wait_final(timeout_seconds=10)).view == terminal.view
         assert model_calls == before_replay
-        second = await session.run(
-            "second question", output=_Answer, idempotency_key="second", timeout_seconds=10,
-        )
-        assert second.result.status is ExecutionStatus.SUCCEEDED
-        assert second.result.output == second_output
-    assert tool_calls == ["lookup"]
-    assert model_calls == ["first question", "first question", "second question"]
+        await assert_checkpoint(state, turn.key.turn_id)
+        evidence = await runtime.history.turn_trace("session", turn.key.turn_id, principal=runtime.default_principal)
+        assert bool(evidence.items) is trace
+        restored_trace = {item.step_event_seq: item for item in evidence.items}
+        assert all(restored_trace.get(item.step_event_seq) == item for item in observed_trace)
+        second = await agent.start("second question", idempotency_key="second", output=_Answer, session_id="session")
+        following = await second.wait_final(timeout_seconds=10)
+        assert following.status is ExecutionStatus.SUCCEEDED
+        assert following.view["output"] == second_output
+    assert tool_calls == (["lookup"] if restart else [])
+    assert model_calls == ["first question"] * (2 if restart else 1) + ["second question"]
 
 
 @pytest.mark.parametrize("persisted", (False, True), ids=("domain", "persisted"))
@@ -362,7 +333,7 @@ async def test_recovery_cannot_enable_restart_after_execution_admission(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("late_response", ("text", "tool"))
 @pytest.mark.parametrize("trace", (False, True), ids=("no-trace", "trace"))
-async def test_remote_force_cancel_releases_session_and_fences_late_provider(
+async def test_remote_force_cancel_fences_late_provider(
     tmp_path: Path, late_response: str, trace: bool,
 ) -> None:
     from pydantic_ai.messages import TextPart
@@ -401,8 +372,7 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
     original = PersistenceStorage.sqlite(database)
     remote_state = PersistenceStorage.sqlite(database)
     async with Persistence.open(_NAMESPACE, storage=original) as persistence_409, Runtime.open(persistence=persistence_409, features=model_features(models, group)) as owner:
-        await owner.agents.get().create_session("session")
-        execution = await owner.agents.get().session("session").start("hold the provider", idempotency_key="first")
+        execution = await owner.agents.get().start("hold the provider", idempotency_key="first")
         try:
             await asyncio.wait_for(entered.wait(), 10)
             # Public wait can return the remote terminal result before this old
@@ -417,9 +387,6 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
                 )
                 assert cancelling is not None and cancelling.status is ExecutionStatus.CANCELLING
                 assert not worker.done()
-                with pytest.raises(AIError) as busy:
-                    await observer.agents.get().session("session").start("still busy", idempotency_key="busy")
-                assert busy.value.code is ErrorCode.SESSION_BUSY
 
                 forced = await remote.cancel(idempotency_key="force-cancel", force=True)
                 assert forced.cancelled
@@ -432,8 +399,6 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
                 )
                 assert head is not None
                 assert (head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and (head.history_seal_digest is not None) is trace)
-                session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
-                assert session is not None and session.active_execution_id is None
                 assert (await remote.cancel(idempotency_key="force-cancel", force=True)).cancelled
                 assert calls == ["hold the provider"] and effects == []
 
@@ -447,7 +412,7 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
                 ) == head
                 assert (await remote.wait(timeout_seconds=10)).result.status is ExecutionStatus.CANCELLED
                 assert effects == []
-                next_turn = await observer.agents.get().session("session").run(
+                next_turn = await observer.agents.get().run(
                     "next question", idempotency_key="next", timeout_seconds=10,
                 )
                 assert next_turn.result.status is ExecutionStatus.SUCCEEDED
@@ -456,6 +421,70 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
             release.set()
     assert calls == ["hold the provider", "next question"]
     assert effects == []
+
+
+@pytest.mark.asyncio
+async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path: Path) -> None:
+    from pydantic_ai.messages import TextPart
+    from linktools.ai.capability import StepPersistenceCapability
+    from linktools.ai.core import TenantAuthorizationPolicy
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Authorize the native SQL Session fixture."""
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls, effects = [], []
+
+    async def effect(_context: AgentContext[None]) -> str:
+        effects.append("effect")
+        return "unexpected"
+
+    async def model(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        prompt = next(part.content for message in reversed(messages) for part in message.parts
+                      if isinstance(part, UserPromptPart))
+        calls.append(prompt)
+        if prompt == "held":
+            entered.set()
+            await release.wait()
+            return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="late")])
+        return ModelResponse(parts=[TextPart("next answer")])
+
+    group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(StepPersistenceCapability(), scope="runtime")
+    group.tool(effect, effect_policy="non_replay_safe")
+    group.agent("default", model="default", allow_tools=("effect",))
+    features = model_features(_Models(_UsageFunctionModel(model)), group)
+    authorization = HostAuthorization()
+    database = tmp_path / "native-stop.db"
+    async with (
+        Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as state,
+        Runtime.open(persistence=state, features=features, authorization=authorization) as owner,
+    ):
+        actor = owner.default_principal
+        await owner.sessions.create_turn_session("session", principal=actor)
+        held = await owner.sessions.start("session", "held", principal=actor, agent="default", idempotency_key="held")
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            async with (
+                Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(database)) as remote_state,
+                Runtime.open(persistence=remote_state, features=features, authorization=authorization) as observer,
+            ):
+                assert await observer.sessions.cancel_turn("session", held.key.turn_id, principal=actor)
+                with pytest.raises(AIError) as busy:
+                    await observer.sessions.start("session", "busy", principal=actor, agent="default",
+                                                  idempotency_key="busy")
+                assert busy.value.code is ErrorCode.SESSION_BUSY
+                release.set()
+                assert (await held.wait_final(timeout_seconds=10)).status is ExecutionStatus.CANCELLED
+                result = await observer.history.turn_result("session", held.key.turn_id, principal=actor)
+                assert result["status"] == "CANCELLED" and result.get("output") is None
+                assert not await remote_state.checkpoint.tools.list_by_execution(held.key.turn_id, tenant_id=actor.tenant_id)
+                next_turn = await observer.sessions.start("session", "next", principal=actor, agent="default",
+                                                          idempotency_key="next")
+                assert (await next_turn.wait_final(timeout_seconds=10)).view["output"] == {"text": "next answer"}
+        finally:
+            release.set()
+    assert calls == ["held", "next"] and effects == []
 
 
 @pytest.mark.asyncio
@@ -503,8 +532,7 @@ async def test_remote_force_cancel_orders_with_tool_admission(
     original = PersistenceStorage.sqlite(database)
     remote_state = PersistenceStorage.sqlite(database)
     async with Persistence.open(_NAMESPACE, storage=original) as persistence_515, Runtime.open(persistence=persistence_515, features=model_features(models, group)) as owner:
-        await owner.agents.get().create_session("session")
-        execution = await owner.agents.get().session("session").start("perform effect")
+        execution = await owner.agents.get().start("perform effect")
         try:
             await asyncio.wait_for(reached.wait(), 10)
             worker = owner._execution_service.runtime_backend()._tasks[execution.execution_id]
@@ -527,9 +555,6 @@ async def test_remote_force_cancel_orders_with_tool_admission(
                     assert await observer._state.checkpoint.tools.list_by_execution(
                         execution.execution_id, tenant_id=observer.tenant_id,
                     ) == operations
-                session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
-                assert session is not None
-                assert session.active_execution_id == (execution.execution_id if claimed else None)
                 assert effects == []
                 release.set()
                 await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 10)
@@ -577,8 +602,7 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
     original = PersistenceStorage.sqlite(database)
     remote_state = PersistenceStorage.sqlite(database)
     async with Persistence.open(_NAMESPACE, storage=original) as persistence_588, Runtime.open(persistence=persistence_588, features=model_features(models, group)) as owner:
-        await owner.agents.get().create_session("session")
-        execution = await owner.agents.get().session("session").start("perform uncertain effect")
+        execution = await owner.agents.get().start("perform uncertain effect")
         with pytest.raises(AIError) as unknown:
             await execution.wait(timeout_seconds=10)
         assert unknown.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
@@ -595,11 +619,6 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
             )
             assert len(operations) == 1 and operations[0].status is ToolOperationStatus.EFFECT_UNKNOWN
             assert len(await remote.recovery_effects()) == 1
-            session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
-            assert session is not None and session.active_execution_id == execution.execution_id
-            with pytest.raises(AIError) as busy:
-                await observer.agents.get().session("session").start("next question", idempotency_key="busy")
-            assert busy.value.code is ErrorCode.SESSION_BUSY
             effect = operations[0]
             resolved = await remote.resolve_tool_effect(
                 effect.tool_operation_id, expected_fence=effect.fence,
@@ -617,8 +636,6 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
             )
             assert terminal is not None and terminal.status is ExecutionStatus.CANCELLED
             assert (await remote.wait(timeout_seconds=10)).result.status is ExecutionStatus.CANCELLED
-            session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
-            assert session is not None and session.active_execution_id is None
             head = await observer._state.execution.executions.get(
                 execution.execution_id, tenant_id=observer.tenant_id,
             )
@@ -636,6 +653,7 @@ async def test_force_cancel_does_not_revoke_nonordinary_execution_ownership(exec
     from .test_local_execution_recovery import _ToolOperations, _backend, _record
 
     backend = _backend()
+    backend._resolve_graph_cancel_link = None
     record = replace(
         _record(), status=ExecutionStatus.CANCELLING, agent_run_seq=1,
         restart_checkpoints=execution_kind == "restartable", durable_trace=False,
@@ -723,8 +741,7 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
     original = PersistenceStorage.sqlite(database)
     remote_state = PersistenceStorage.sqlite(database)
     async with Persistence.open(_NAMESPACE, storage=original) as persistence_738, Runtime.open(persistence=persistence_738, features=model_features(models, group)) as owner:
-        await owner.agents.get().create_session("session")
-        root = await owner.agents.get().session("session").start("root", idempotency_key="root")
+        root = await owner.agents.get().start("root", idempotency_key="root")
         try:
             await asyncio.wait_for(entered["root"].wait(), 10)
             child_id = await _start_delegated_execution(owner, owner._state, root.execution_id, "child")
@@ -755,8 +772,6 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
                     )
                     assert head is not None and (head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
                     terminal_heads.append(head)
-                session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
-                assert session is not None and session.active_execution_id is None
                 assert (await remote.cancel(idempotency_key="cancel-tree", force=True)).cancelled
                 assert all(not worker.done() for worker in workers)
                 release.set()
@@ -772,7 +787,7 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
 
 
 @pytest.mark.asyncio
-async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_release(tmp_path: Path) -> None:
+async def test_unknown_delegated_tool_effect_prevents_parent_cancel(tmp_path: Path) -> None:
     from pydantic_ai.messages import TextPart
 
     from linktools.ai.core import ToolOperationStatus
@@ -808,8 +823,7 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
     original = PersistenceStorage.sqlite(database)
     remote_state = PersistenceStorage.sqlite(database)
     async with Persistence.open(_NAMESPACE, storage=original) as persistence_827, Runtime.open(persistence=persistence_827, features=model_features(models, group)) as owner:
-        await owner.agents.get().create_session("session")
-        root = await owner.agents.get().session("session").start("root", idempotency_key="root")
+        root = await owner.agents.get().start("root", idempotency_key="root")
         try:
             await asyncio.wait_for(entered.wait(), 10)
             root_worker = owner._execution_service.runtime_backend()._tasks[root.execution_id]
@@ -831,11 +845,6 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
                     assert await observer._state.execution.executions.get_result(execution_id, tenant_id=observer.tenant_id) is None
                     head = await observer._state.execution.executions.get(execution_id, tenant_id=observer.tenant_id)
                     assert head is not None and (head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
-                session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
-                assert session is not None and session.active_execution_id == root.execution_id
-                with pytest.raises(AIError) as busy:
-                    await observer.agents.get().session("session").start("next", idempotency_key="busy")
-                assert busy.value.code is ErrorCode.SESSION_BUSY
                 operations = await observer._state.checkpoint.tools.list_by_execution(child_id, tenant_id=observer.tenant_id)
                 assert len(operations) == 1 and operations[0].status is ToolOperationStatus.EFFECT_UNKNOWN
                 remote_child = await observer.executions.get(child_id)
@@ -846,8 +855,6 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
                 )
                 assert (await remote.cancel(idempotency_key="cancel-resolved-tree", force=True)).cancelled
                 assert (await remote.cancel(idempotency_key="cancel-resolved-tree", force=True)).cancelled
-                session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
-                assert session is not None and session.active_execution_id is None
                 assert (await remote_child.wait(timeout_seconds=10)).result.status is ExecutionStatus.CANCELLED
                 release.set()
                 await asyncio.wait_for(asyncio.gather(root_worker, return_exceptions=True), 10)
@@ -918,8 +925,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
             state = await _wait_for_committed(run.state, lambda value: value.node_states[0].execution_id is not None)
             root_id = state.node_states[0].execution_id
         else:
-            await owner.agents.get().create_session("session")
-            root = await owner.agents.get().session("session").start("root", idempotency_key="root")
+            root = await owner.agents.get().start("root", idempotency_key="root")
             root_id = root.execution_id
         assert root_id is not None
         try:
@@ -951,8 +957,6 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
                     assert (await remote.cancel(idempotency_key="root-force", force=True)).cancelled
                     assert (await remote.cancel(idempotency_key="root-force", force=True)).cancelled
                     assert (await remote_child.wait(timeout_seconds=10)).result.status is ExecutionStatus.CANCELLED
-                    session = await observer._state.conversation.sessions.get("session", tenant_id=observer.tenant_id)
-                    assert session is not None and session.active_execution_id is None
                 release.set()
                 await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), 10)
                 assert (await remote.wait(timeout_seconds=10)).result.status is ExecutionStatus.CANCELLED
@@ -969,7 +973,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("restart", (False, True), ids=("no-restart", "restart"))
 @pytest.mark.parametrize("split_storage", (False, True), ids=("combined-storage", "split-storage"))
-async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
+async def test_no_trace_terminal_readback_preserves_execution_and_single_metric(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart: bool, split_storage: bool,
 ) -> None:
     from pydantic_ai.messages import TextPart
@@ -1012,18 +1016,12 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
     storage_factory = _split_sqlite_storage if split_storage else PersistenceStorage.sqlite
     storage = storage_factory(tmp_path / "terminal.db")
     async with Persistence.open(_NAMESPACE, storage=storage) as persistence_1039, Runtime.open(persistence=persistence_1039, metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE), features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-        await runtime.agents.get().create_session("session")
-        session = runtime.agents.get().session("session")
-        execution = await session.start("question", idempotency_key="question")
+        agent = runtime.agents.get()
+        execution = await agent.start("question", idempotency_key="question")
         result = (await execution.wait(timeout_seconds=10)).result
         assert committed_unknown
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {"text": "durable answer"}
-        history = (await session.history()).items
-        assert [item.content for item in history if item.item_kind == "user"] == ["question"]
-        assert [item.content for item in history if item.item_kind == "assistant"] == ["durable answer"]
-        stored_session = await runtime._state.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-        assert stored_session is not None and stored_session.active_execution_id is None
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.status is ExecutionStatus.SUCCEEDED
         assert record.restart_checkpoints is restart and not record.durable_trace
@@ -1038,10 +1036,9 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
         assert await archive.get_agent_run(agent_run_id=run_id) is None
         assert not await archive.list_events(agent_run_id=run_id)
         assert not await archive.list_model_interactions(agent_run_id=run_id)
-        replay = await session.start("question", idempotency_key="question")
+        replay = await agent.start("question", idempotency_key="question")
         assert replay.execution_id == execution.execution_id
         assert (await replay.wait(timeout_seconds=10)).result == result
-        assert (await session.history()).items == history
     assert len(terminal_metrics) == 1
     assert terminal_metrics[0].status == "SUCCEEDED"
 
@@ -1075,7 +1072,6 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
     initial = storage()
     async with Persistence.open(_NAMESPACE, storage=initial) as persistence_1103, Runtime.open(persistence=persistence_1103, features=model_features(models, group)) as runtime:
         assert persistence_1103.exclusive_execution_writer is (backend == "exclusive_sqlite")
-        await runtime.agents.get().create_session("session")
 
         async def interrupted_launch(
             request: ExecutionRequest, execution: ExecutionRecord, **kwargs: object,
@@ -1084,7 +1080,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
 
         with monkeypatch.context() as fault:
             fault.setattr(runtime._execution_service.runtime_backend(), "launch", interrupted_launch)
-            execution = await runtime.agents.get().session("session").start(
+            execution = await runtime.agents.get().start(
                 "accepted without a worker", idempotency_key="admission",
             )
         admitted = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -1120,6 +1116,4 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
         assert await runtime._state.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == head
-        session = await runtime._state.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-        assert session is not None and session.active_execution_id == execution.execution_id
         assert requests == []
