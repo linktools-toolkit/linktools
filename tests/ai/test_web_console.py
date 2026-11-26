@@ -1607,7 +1607,7 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
                     async for frame in observer.events(turn_id):
                         if frame["type"] == "terminal":
                             assert frame["state"] == "succeeded"
-                            terminal = frame
+                            terminal = json.loads(json.dumps(frame))
                         if frame["type"] != "tool":
                             continue
                         item = frame["item"]
