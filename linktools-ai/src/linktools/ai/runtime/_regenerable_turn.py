@@ -248,7 +248,8 @@ class _RegenerableTurnRunner:
         async def confirm() -> None:
             try:
                 row = await self._store.get_turn(key)
-                if row is not None and row["state"] == "cancelling" and self._producers.get(key) is producer:
+                if (row is not None and row["state"] == "cancelling"
+                        and self._producers.get(key) is producer and not producer.done() and not producer.cancelling()):
                     if self._begin_child_stop is not None:
                         self._begin_child_stop(key, row["generation"])
                     producer.cancel()
@@ -753,14 +754,19 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             frontier = await self._store.get_waiting_turn(key)
             if frontier is None or frontier.generation != turn["generation"]:
-                return False
+                return await self._cancellation_accepted(key)
             stopped = await self._stop_deferred(frontier)
             if stopped == "lost":
-                return False
+                return await self._cancellation_accepted(key)
             self._gap(key, cancelling=True)
             self._notice_lifecycle(key, "cancelling", session["revision"])
             if stopped == "ready":
                 await self._finish_cold_cancellation(key, turn, session["revision"], actor=principal)
+            return True
+        if turn["state"] in ("succeeded", "failed", "cancelled"):
+            return turn["state"] == "cancelled"
+        if not split and turn["state"] == "cancelling":
+            self._remote_cancel(key)
             return True
         changed = (
             await self._store.request_split_wait_cancel(key, generation=turn["generation"])
@@ -768,16 +774,15 @@ class _RegenerableTurnRunner:
             else await self._store.request_cancel(key)
         )
         if not changed and not (split and turn["state"] == "cancelling"):
-            return False
+            return await self._cancellation_accepted(key)
         producer = self._producers.get(key)
-        if producer is not None:
+        if changed:
+            self._gap(key, cancelling=True)
+            self._notice_lifecycle(key, "cancelling", session["revision"])
+        if producer is not None and not producer.done() and not producer.cancelling():
             if changed and not split and self._begin_child_stop is not None:
                 self._begin_child_stop(key, turn["generation"])
             producer.cancel()
-        elif changed:
-            self._gap(key, cancelling=True)
-        if changed:
-            self._notice_lifecycle(key, "cancelling", session["revision"])
         if producer is None and split:
             if self._split_recovery_source is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -792,6 +797,12 @@ class _RegenerableTurnRunner:
             elif outcome != "not_acquired":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return True
+
+    async def _cancellation_accepted(self, key: SessionTurnKey) -> bool:
+        current = await self._store.get_turn(key)
+        if current is not None and current["state"] == "cancelling":
+            self._remote_cancel(key)
+        return current is not None and current["state"] in ("cancelling", "cancelled")
 
     async def _finish_cold_cancellation(
         self, key: SessionTurnKey, row: Mapping[str, object], revision: int, *, actor: Principal,
@@ -1435,10 +1446,11 @@ class _RegenerableTurnRunner:
         try:
             while not producer.done():
                 done, _ = await asyncio.wait((producer,), timeout=_LEASE_SECONDS / 3)
-                if done:
+                if done or producer.cancelling():
                     break
                 if not await self._store.renew(turn.key, generation=turn.generation, lease_seconds=_LEASE_SECONDS):
-                    producer.cancel()
+                    if not producer.cancelling():
+                        producer.cancel()
                     break
             outcome, = await asyncio.gather(producer, return_exceptions=True)
             if outcome is True:

@@ -108,6 +108,19 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
             pytest.fail(f"{mode}: {error}", pytrace=False)
 
 
+def test_native_stop_displays_cancelling_until_terminal() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the optional Web client tests")
+    script = Path(__file__).with_name("web_console_dom.mjs")
+    assets = Path(__file__).parents[2] / "linktools-ai/src/linktools/ai/web/assets"
+    result = subprocess.run([node, str(script), str(assets), "native-stop"],
+                            capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode:
+        pytest.fail(re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<web module>", result.stderr),
+                    pytrace=False)
+
+
 def test_web_stream_attempts_preserve_request_and_replay_boundaries() -> None:
     node = shutil.which("node")
     if node is None:

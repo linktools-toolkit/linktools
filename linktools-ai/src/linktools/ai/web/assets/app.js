@@ -202,16 +202,17 @@ function setDisabled() {
   const send=$('send'), reader=$('reader-stop');
   const turnAction=stop && ordinary ? activeTurnAction() : 'cancel';
   const recover=turnAction==='recover' || turnAction==='abandon';
-  const activeLabel=recover?'Recover':'Stop';
-  const activeAriaLabel=recover?'Recover current turn':'Stop current turn';
+  const stopping=ordinary && stop && !recover && state.turns.some(row=>row.turn_id===turn && row.status==='CANCELLING');
+  const activeLabel=recover?'Recover':stopping?'Stopping…':'Stop';
+  const activeAriaLabel=recover?'Recover current turn':stopping?'Stopping current turn':'Stop current turn';
   send.type=stop?'button':'submit';
   const actionLabel=stop?activeLabel:'Send ↑';
   if(send.textContent!==actionLabel)send.textContent=actionLabel;
   send.setAttribute('aria-label',stop?activeAriaLabel:'Send message');
   send.classList.toggle('danger',stop && !recover);send.classList.toggle('primary',!stop || recover);
-  send.disabled=stop?stopPending:composerDisabled || sessionSendBlocked();
+  send.disabled=stop?stopPending || stopping:composerDisabled || sessionSendBlocked();
   reader.hidden=!stop || state.conversationMode==='chat';
-  reader.disabled=stopPending;
+  reader.disabled=stopPending || stopping;
   if(reader.textContent!==activeLabel)reader.textContent=activeLabel;
   reader.setAttribute('aria-label',activeAriaLabel);
   if(ordinary){

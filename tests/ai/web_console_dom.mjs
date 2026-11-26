@@ -30,6 +30,7 @@ class Element {
   querySelector(selector){if(selector===':scope > .empty')return this.children.find(child=>child.className?.split(' ').includes('empty')) || null;return this.querySelectorAll(selector)[0] || null;}
   querySelectorAll(selector){const matches=[];for(const child of this.children){if(selector==='[data-request-focus]' && child.dataset?.requestFocus)matches.push(child);matches.push(...(child.querySelectorAll?.(selector)||[]));}return matches;}
   focus(){document.activeElement=this;}
+  addEventListener(name,listener){this.listeners ??= new Map();this.listeners.set(name,listener);}
   scrollIntoView(){}
   setAttribute(name,value){this.attributes ??= {};this.attributes[name]=String(value);}
   getAttribute(name){return this.attributes?.[name];}
@@ -53,7 +54,8 @@ for(const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)){
   node.isConnected=true;all.push(node);
 }
 const handlers=new Map();
-globalThis.document={getElementById:id=>nodes.get(id)?.isConnected?nodes.get(id):null,createElement:tag=>new Element(tag),querySelectorAll:selector=>all.filter(node=>Object.hasOwn(node.dataset,selector.slice(6,-1)))};
+const documentEvents=new EventTarget();
+globalThis.document={getElementById:id=>nodes.get(id)?.isConnected?nodes.get(id):null,createElement:tag=>new Element(tag),querySelectorAll:selector=>all.filter(node=>Object.hasOwn(node.dataset,selector.slice(6,-1))),addEventListener:documentEvents.addEventListener.bind(documentEvents)};
 globalThis.window={addEventListener:(name,handler)=>{if(!handlers.has(name))handlers.set(name,[]);handlers.get(name).push(handler);}};
 globalThis.requestAnimationFrame=callback=>setTimeout(()=>callback(performance.now()),0);
 globalThis.cancelAnimationFrame=clearTimeout;
@@ -273,6 +275,33 @@ if(process.argv[3]==='snapshot-tail') {
   failedStream.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(failedSnapshot)+'\n\n'));failedStream.close();
   await until('failed terminal snapshot keeps metadata readback',()=>failureReads()>beforeFinalFailure);
   console.log('Successful SSE tail reuses metadata; transport/reconnect and observation errors reread authority');
+  process.exit(0);
+}
+if(process.argv[3]==='native-stop') {
+  turnSessions=true;await node('settings').click();node('settings-dialog').close();
+  const id='b-native-stop',session=sessions.get('b');
+  Object.assign(session,{active_turn_id:id,last_turn_no:0,revision:1});
+  const row={turn_id:id,turn_no:1,status:'STARTED',conversation_committed:false,
+    user_input:{prompt:'Read files',attachments:[]},items:[]};
+  timelineOverrides.set('b',{items:[row],next_cursor:null});
+  await select('#session=b');
+  const watch=sessionSources.at(-1),emitTurn=frame=>watch.listeners.get('turn')({data:JSON.stringify(frame)});
+  emitTurn({type:'snapshot',session});
+  await until('active stop button',()=>node('send').textContent==='Stop' && !node('send').disabled);
+  const stopResponse=deferred('POST /api/sessions/b/cancel'),stop=node('send').click();
+  await stopResponse.requested;
+  assert.equal(node('send').disabled,true);
+  stopResponse({accepted:true});await stop;
+  const stoppingRead=deferred('GET /api/sessions/b');
+  emitTurn({type:'gap',phase:'cancelling',turn_id:id});
+  await stoppingRead.requested;
+  stoppingRead({...row,status:'CANCELLING',can_recover:false});
+  await until('confirmed cancellation updates the button',()=>node('send').textContent==='Stopping…');
+  assert.equal(node('send').disabled,true);
+  emitTurn({type:'terminal',turn_id:id,turn_no:1,revision:2,generation:1,state:'cancelled',
+    prompt:'Read files',items:[]});
+  await until('terminal Stop frees the composer',()=>node('send').textContent==='Send ↑' && !node('send').disabled);
+  console.log('Native Stop displays cancelling until terminal');
   process.exit(0);
 }
 if(process.argv[3]==='session-published-turn') {
