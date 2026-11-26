@@ -100,12 +100,32 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
 
     from linktools.ai.acp import ACPApplication
     from linktools.ai.capability import ExecutionCapability
-    from linktools.ai.core import ExecutionStatus
+    from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.workspace import Workspace
 
     from ._runtime_test_helpers import _Models
     from .test_runtime_shared_stream import _CombinedCache, _CountingStreamBackend
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Explicitly authorize native workspace sessions on this host."""
+
+    class RequestError(Exception):
+        @classmethod
+        def invalid_params(cls, detail):
+            return cls(detail)
+
+        internal_error = invalid_params
+
+    acp = SimpleNamespace(PROTOCOL_VERSION=1, RequestError=RequestError)
+    schema = SimpleNamespace(**{
+        name: _schema_object
+        for name in (
+            "InitializeResponse", "AgentCapabilities", "SessionCapabilities",
+            "SessionListCapabilities", "Implementation", "NewSessionResponse", "PromptResponse",
+        )
+    })
+    monkeypatch.setattr("linktools.ai.acp._require_acp", lambda: (acp, schema))
 
     cache = _CombinedCache()
     streams = _CountingStreamBackend()
@@ -114,27 +134,38 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
             retain_history=retain_history,
         )
     )
+    features = model_features(_Models(TestModel(call_tools=[])))
+    features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     application = ACPApplication.for_workspace(
-        Workspace.load(tmp_path), features=model_features(_Models(TestModel(call_tools=[]))),
+        Workspace.load(tmp_path), features=features,
         storage=PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache,
                                           coordination=None if coordination == "none" else streams if coordination == "stream" else cache),
-        execution=declaration,
+        execution=declaration, authorization=HostAuthorization(),
     )
     served = False
 
     async def serve(agent: ACPAgent) -> None:
         nonlocal served
-        session = await agent._runtime.agents.get().create_session("acp-session")
-        result = await session.run("hello", timeout_seconds=5)
-        assert result.result.status is ExecutionStatus.SUCCEEDED
-        record = await agent._runtime._state.execution.executions.get(
-            result.result.execution_id, tenant_id=agent._runtime.tenant_id,
-        )
+        await agent.initialize(acp.PROTOCOL_VERSION)
+        session_id = (await agent.new_session(cwd=str(tmp_path)))["sessionId"]
+        response = await agent.prompt(session_id, [SimpleNamespace(type="text", text="hello")])
+        assert response["stopReason"] == "end_turn"
+        runtime = agent._runtime
+        session = await runtime.sessions.get(session_id, principal=agent._principal)
+        assert session.session_id == session_id
+        timeline = await session.timeline()
+        [turn] = timeline["items"]
+        assert await runtime._state.execution.executions.get(
+            turn["turn_id"], tenant_id=runtime.tenant_id,
+        ) is None
+
+        # A workspace's Execution declaration still configures standalone
+        # Execution; the ACP session turn has its own transcript owner.
+        execution = await runtime.agents.get().start("standalone")
+        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None
         assert record.conversation is (True if declaration is None else retain_history)
-        assert (await agent._runtime.sessions.get(
-            session.session_id, principal=agent._principal,
-        )).session_id == session.session_id
         served = True
 
     monkeypatch.setattr("linktools.ai.acp.serve_stdio", serve)
