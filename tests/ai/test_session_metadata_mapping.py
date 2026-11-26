@@ -21,16 +21,17 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
 from linktools.ai.session import CreateSessionRequest, SessionManager, UpdateSessionRequest
 
 pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("owner", "tenant")
 
 
-@pytest.fixture(params=("memory", "sqlite"))
-def storage(request: pytest.FixtureRequest, tmp_path: Path) -> PersistenceStorage:
-    return (PersistenceStorage.in_memory() if request.param == "memory"
-            else PersistenceStorage.sqlite(tmp_path / "state.db"))
+@pytest.fixture
+def storage() -> PersistenceStorage:
+    return PersistenceStorage.in_memory()
 
 
 def _metadata(
@@ -235,3 +236,136 @@ async def test_session_create_snapshots_outer_metadata_before_validation_awaits(
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+class _NativeMetadataPolicy(TenantAuthorizationPolicy):
+    """Host-authorized SQL sessions, not the legacy SessionManager."""
+
+
+def _native(tmp_path: Path, policy: TenantAuthorizationPolicy | None = None):
+    return Runtime.open(
+        "session-metadata", features=RuntimeFeatures("session-metadata"), tenant_id="tenant",
+        storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+        authorization=policy if policy is not None else _NativeMetadataPolicy(),
+    )
+
+
+@pytest.mark.parametrize("kind", ("dict", "mappingproxy", "userdict"))
+async def test_native_session_metadata_mappings_share_identity_and_revision(tmp_path: Path, kind: str):
+    async with _native(tmp_path) as runtime:
+        sessions = runtime.sessions
+        values: dict[str, JsonValue] = {"label": "initial", "nested": {"items": [1, True, None]}}
+        initial, _ = _metadata(kind, values)
+        created = await sessions.create_turn_session(
+            "session", principal=_PRINCIPAL, metadata=initial, idempotency_key="create",
+        )
+        assert created["metadata"] == values and created["revision"] == 0
+        for replay_kind in ("dict", "mappingproxy", "userdict"):
+            replay, _ = _metadata(replay_kind, dict(values))
+            assert await sessions.create_turn_session(
+                "session", principal=_PRINCIPAL, metadata=replay, idempotency_key="create",
+            ) == created
+        with pytest.raises(AIError) as conflict:
+            await sessions.create_turn_session(
+                "session", principal=_PRINCIPAL, metadata={"label": "different"}, idempotency_key="create",
+            )
+        assert conflict.value.code is ErrorCode.SESSION_CONFLICT
+        changed = {**values, "label": "updated"}
+        update, _ = _metadata(kind, changed)
+        assert await sessions.update_turn_session("session", principal=_PRINCIPAL, expected_revision=0, metadata=update)
+        assert not await sessions.update_turn_session(
+            "session", principal=_PRINCIPAL, expected_revision=0, metadata={"label": "stale"},
+        )
+        reserved, _ = _metadata(kind, {"linktools.ai.reserved": True})
+        with pytest.raises(AIError) as invalid:
+            await sessions.update_turn_session("session", principal=_PRINCIPAL, expected_revision=1, metadata=reserved)
+        assert invalid.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        persisted = await sessions.inspect("session", principal=_PRINCIPAL)
+        assert persisted["metadata"] == changed and persisted["revision"] == 1
+
+
+@pytest.mark.parametrize("kind", ("dict", "mappingproxy", "userdict"))
+@pytest.mark.parametrize("action", (AuthorizationAction.SESSION_CREATE, AuthorizationAction.SESSION_UPDATE))
+@pytest.mark.parametrize("boundary", ("cwd", "authorization"))
+async def test_native_session_snapshots_metadata_before_awaits(tmp_path: Path, monkeypatch, kind, action, boundary):
+    entered, proceed = asyncio.Event(), asyncio.Event()
+
+    class Policy(_NativeMetadataPolicy):
+        async def authorize(self, principal, actual, resource):
+            await super().authorize(principal, actual, resource)
+            if boundary == "authorization" and actual is action and resource.id == "session":
+                entered.set()
+                await proceed.wait()
+
+    async def canonicalize_path(_runner, value):
+        if boundary == "cwd" and value is not None:
+            entered.set()
+            await proceed.wait()
+        return value
+
+    monkeypatch.setattr(_RegenerableTurnRunner, "canonicalize_cwd", canonicalize_path)
+    async with _native(tmp_path, Policy()) as runtime:
+        sessions = runtime.sessions
+        nested = {"items": ["initial"]}
+        expected = {"label": "before", "nested": {"items": ["initial"]}}
+        metadata, mutable = _metadata(kind, {"label": "before", "nested": nested})
+        cwd = "work" if boundary == "cwd" else None
+        if action is AuthorizationAction.SESSION_CREATE:
+            with pytest.raises(AIError) as invalid:
+                await sessions.create_turn_session(
+                    "invalid", principal=_PRINCIPAL, metadata={"linktools.ai.reserved": True},
+                    idempotency_key="invalid",
+                )
+            assert invalid.value.code is ErrorCode.REQUEST_FIELD_INVALID
+            assert await runtime._state.session_turns.get_session("invalid") is None
+            operation = sessions.create_turn_session(
+                "session", principal=_PRINCIPAL, metadata=metadata, idempotency_key="create", cwd=cwd,
+            )
+        else:
+            await sessions.create_turn_session("session", principal=_PRINCIPAL)
+            operation = sessions.update_turn_session(
+                "session", principal=_PRINCIPAL, expected_revision=0, metadata=metadata, cwd=cwd, replace_cwd=True,
+            )
+        task = asyncio.create_task(operation)
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            nested["items"].append("after")
+            nested["extra"] = ["after"]
+            mutable["label"] = "after"
+            mutable["linktools.ai.reserved"] = True
+            proceed.set()
+            accepted = await asyncio.wait_for(task, 5)
+            persisted = await sessions.inspect("session", principal=_PRINCIPAL)
+            assert persisted["metadata"] == expected and persisted["cwd"] == cwd
+            if action is AuthorizationAction.SESSION_CREATE:
+                assert persisted["revision"] == 0
+                replay, _ = _metadata(kind, expected)
+                assert await sessions.create_turn_session(
+                    "session", principal=_PRINCIPAL, metadata=replay, idempotency_key="create", cwd=cwd,
+                ) == accepted
+            else:
+                assert accepted is True and persisted["revision"] == 1
+        finally:
+            proceed.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_native_session_rejects_invalid_json_metadata_without_writes(tmp_path: Path):
+    async with _native(tmp_path) as runtime:
+        sessions = runtime.sessions
+        cycles = []
+        cycles.append(cycles)
+        with pytest.raises(AIError) as invalid_create:
+            await sessions.create_turn_session("session", principal=_PRINCIPAL, metadata={"nested": cycles})
+        assert invalid_create.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        assert await runtime._state.session_turns.get_session("session") is None
+        created = await sessions.create_turn_session("session", principal=_PRINCIPAL)
+        with pytest.raises(AIError) as invalid_update:
+            await sessions.update_turn_session(
+                "session", principal=_PRINCIPAL, expected_revision=0, metadata={"nested": {"bad": float("inf")}},
+            )
+        assert invalid_update.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        persisted = await sessions.inspect("session", principal=_PRINCIPAL)
+        assert persisted["metadata"] == created["metadata"] and persisted["revision"] == created["revision"]

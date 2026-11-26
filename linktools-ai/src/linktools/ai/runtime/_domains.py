@@ -5,12 +5,12 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar, cast, overload
 
 from ..session import SessionTurnNotice, SessionAdmission, SessionTurnAdmission, PublishedSessionTurn, SessionService, SessionContext, normalize_session_context
 from ..agent import AgentBindingContract
 from ..core import (
-    AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, overlay_correlation,
+    AuthorizationAction, BudgetUsage, JsonValue, Principal, PromptLimits, ResourceKind, ResourceRef, normalize_json_value, overlay_correlation,
     validate_agent_id, validate_execution_id, validate_session_id, validate_session_request_key,
 )
 from ..errors import AIError, ErrorCode
@@ -38,6 +38,20 @@ if TYPE_CHECKING:
     from .turn_clients import _SessionOccupancy
 
 AppT = TypeVar("AppT")
+
+
+def _snapshot_session_metadata(metadata: "Mapping[str, JsonValue] | None") -> dict[str, JsonValue]:
+    if metadata is None:
+        return {}
+    try:
+        # The outer Mapping is an API input; the JSON normalizer detaches its
+        # nested containers before any authorization or workspace await.
+        values = cast(dict[str, JsonValue], normalize_json_value(dict(metadata)))
+    except (TypeError, ValueError, RecursionError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "metadata"}) from error
+    if any(key.startswith("linktools.ai.") for key in values):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return values
 
 
 class RuntimeAgents(Generic[AppT]):
@@ -342,11 +356,12 @@ class RuntimeSessions(Generic[AppT]):
         validate_session_id(session_id)
         if idempotency_key is not None:
             validate_session_request_key(idempotency_key)
+        metadata = _snapshot_session_metadata(metadata)
         await self._require_session_available()
         return await runner.create_session(
             session_id, principal=principal, tenant_id=runtime.tenant_id,
             authorization=runtime._authorization,
-            metadata={} if metadata is None else metadata, request_key=idempotency_key, cwd=cwd,
+            metadata=metadata, request_key=idempotency_key, cwd=cwd,
         )
 
     async def fork_turn_session(
@@ -372,7 +387,8 @@ class RuntimeSessions(Generic[AppT]):
     ) -> bool:
         return await self._mutate_turn_session(
             session_id, principal=principal, expected_revision=expected_revision,
-            action=AuthorizationAction.SESSION_UPDATE, metadata=metadata, cwd=cwd, replace_cwd=replace_cwd,
+            action=AuthorizationAction.SESSION_UPDATE, metadata=_snapshot_session_metadata(metadata),
+            cwd=cwd, replace_cwd=replace_cwd,
         )
 
     async def close_turn_session(
@@ -385,7 +401,7 @@ class RuntimeSessions(Generic[AppT]):
 
     async def _mutate_turn_session(
         self, session_id: str, *, principal: Principal, expected_revision: int,
-        action: AuthorizationAction, metadata: "Mapping[str, JsonValue] | None" = None,
+        action: AuthorizationAction, metadata: dict[str, JsonValue] | None = None,
         cwd: str | None = None, replace_cwd: bool = False,
     ) -> bool:
         runner, runtime = self._require_turn_sessions()
@@ -408,7 +424,7 @@ class RuntimeSessions(Generic[AppT]):
             return await store.close_session(
                 session_id, expected_revision=expected_revision,
             )
-        config = {**row["config_json"], "metadata": dict(metadata or {})}
+        config = {**row["config_json"], "metadata": metadata}
         if replace_cwd:
             config["cwd"] = await runner.canonicalize_cwd(cwd)
         return await store.update_session(

@@ -443,17 +443,15 @@ class _RegenerableTurnRunner:
     async def create_session(
         self, session_id: str, *, principal: Principal, tenant_id: str,
         authorization: AuthorizationPolicy,
-        metadata: Mapping[str, JsonValue], request_key: str | None = None, cwd: str | None = None,
+        metadata: dict[str, JsonValue], request_key: str | None = None, cwd: str | None = None,
     ) -> dict[str, JsonValue]:
         if principal.tenant_id != tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        if any(key.startswith("linktools.ai.") for key in metadata):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         await authorization.authorize(principal, AuthorizationAction.SESSION_CREATE, ResourceRef(
             ResourceKind.SESSION, session_id, tenant_id,
         ))
         cwd = await self.canonicalize_cwd(cwd)
-        config: JsonValue = {"metadata": dict(metadata), "create_request_key": request_key, "cwd": cwd}
+        config: JsonValue = {"metadata": metadata, "create_request_key": request_key, "cwd": cwd}
         try:
             await self._store.create(session_id, config=config)
         except IntegrityError:
@@ -468,11 +466,11 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.SESSION_CONFLICT) from None
             return {
                 "session_id": session_id, "revision": existing["revision"],
-                "metadata": dict(metadata), "state": existing["status"], "cwd": cwd,
+                "metadata": metadata, "state": existing["status"], "cwd": cwd,
                 "active_turn_id": None if existing["active_turn_id"] is None else existing["active_turn_id"].decode("utf-8"),
             }
         return {
-            "session_id": session_id, "revision": 0, "metadata": dict(metadata),
+            "session_id": session_id, "revision": 0, "metadata": metadata,
             "state": "open", "active_turn_id": None, "cwd": cwd,
         }
 
