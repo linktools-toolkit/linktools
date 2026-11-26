@@ -63,9 +63,9 @@ def _request_number(value: str | None) -> bytes | None:
         number = int(value)
     except ValueError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if number < 1:
+    if not 1 <= number < 10 ** 128:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return _identity(str(number))
+    return number.to_bytes((number.bit_length() + 7) // 8, "big")
 
 
 def _order(timestamp: datetime, sequence: int) -> bytes:
@@ -147,7 +147,7 @@ class SqlTraceEventStore:
             sequence = row["sequence"]
             if type(sequence) is not int or sequence < 1:
                 raise ValueError("Trace sequence must be positive")
-            for name in ("run_id", "request_identity", "request_number", "message_identity", "tool_call_id", "error_code", "history_identity"):
+            for name in ("run_id", "request_identity", "message_identity", "tool_call_id", "error_code", "history_identity"):
                 if _identity(_text(row[name])) != row[name]:
                     raise ValueError("Trace identity is not canonical binary")
             scalars = {name: _text(row[name]) for name in _INLINE_SCALARS}
@@ -286,7 +286,7 @@ class SqlTraceEventStore:
         if after_timestamp is not None:
             statement = statement.where(t.order_key > _order(after_timestamp, after_sequence))
         if model_request_seq is not None:
-            statement = statement.where(t.request_number == _identity(str(model_request_seq)))
+            statement = statement.where(t.request_number == _request_number(str(model_request_seq)))
         if step_index is not None:
             statement = statement.where(t.step_index == step_index)
         if tool_call_id is not None:

@@ -457,7 +457,7 @@ CREATE TABLE ai_trace_events (
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original event timestamp encoded as ISO 8601.',
 	order_key VARBINARY(64) NOT NULL COMMENT 'UTC event timestamp and sequence for stable chronological paging.',
 	request_identity VARBINARY(128) NULL COMMENT 'Original model request correlation string; leading zeros remain significant.',
-	request_number VARBINARY(128) NULL COMMENT 'Canonical decimal request number used only for numeric filtering.',
+	request_number VARBINARY(54) NULL COMMENT 'Unsigned binary request number used only for numeric filtering.',
 	message_identity VARBINARY(128) NULL COMMENT 'Successful response message identity; other message metadata remains in the body.',
 	tool_call_id VARBINARY(128) NULL COMMENT 'Original UTF-8 tool call identifier.',
 	tool_name LONGBLOB NULL COMMENT 'Untruncated inline tool name as UTF-8 bytes; null for Native references.',

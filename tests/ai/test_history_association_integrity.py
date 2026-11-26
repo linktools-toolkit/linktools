@@ -79,6 +79,32 @@ async def test_trace_indexes_keep_cursor_cut(
 
 
 @pytest.mark.asyncio
+async def test_trace_numeric_filter_preserves_raw_request_identity(tmp_path: Path) -> None:
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "requests.db"))
+    try:
+        archive, run_id = await _seed_trace(storage, 0)
+        run = await storage.run_store.get_agent_run(agent_run_id=run_id)
+        assert run is not None
+        await archive.register_agent_run(run, execution_id="execution")
+        metadata_key = "linktools.ai.model_request_seq"
+        timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        identities = ("000256", "9" * 128)
+        for index, identity in enumerate(identities, 1):
+            await archive.append_event(StepEvent(
+                run_id, "MODEL_REQUEST_STARTED", index, timestamp=timestamp + timedelta(seconds=index),
+                metadata={metadata_key: identity}, event_index=index,
+            ), execution_id="execution")
+        for index, identity in enumerate(identities, 1):
+            rows = await archive.list_trace_events(
+                agent_run_id=run_id, event_high_water=2,
+                after_timestamp=None, after_sequence=0, limit=10, model_request_seq=int(identity),
+            )
+            assert [(sequence, event.metadata[metadata_key]) for sequence, event in rows] == [(index, identity)]
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
 async def test_associations_find_response_request_and_tools_at_captured_cut(
     tmp_path: Path,
 ) -> None:
