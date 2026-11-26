@@ -2168,7 +2168,8 @@ class LocalExecutionBackend:
         if (lease is None or task_invocation.execution_id != execution.execution_id
                 or execution.producer_generation != 0 or execution.agent_run_seq != 0
                 or execution.producer_claim_id is not None
-                or not execution.durable_trace or self._execution_buffer is not None
+                or not (execution.durable_trace or execution.restart_checkpoints)
+                or self._execution_buffer is not None
                 or execution.status is not ExecutionStatus.STARTED
                 or execution.recovery_state is not ExecutionRecoveryState.ADMITTED):
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -2296,8 +2297,8 @@ class LocalExecutionBackend:
 
     def _require_attached_graph_step_source(self, execution: ExecutionRecord, turns: "SqlSessionTurns") -> SqlStepStore:
         binding = turns._transcript_write_binding
-        if (not isinstance(self._run_store, RuntimeAgentRunStore)
-                or not self._run_store._shares_graph_step_projection() or binding is None):
+        if (not isinstance(self._run_store, RuntimeAgentRunStore) or binding is None
+                or execution.durable_trace and not self._run_store._shares_graph_step_projection()):
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         store, _, transcript_source = binding
         native = self._run_store.step_store
@@ -2314,7 +2315,8 @@ class LocalExecutionBackend:
         self, execution: ExecutionRecord, runner: "_RegenerableTurnRunner", binding: AgentBinding,
     ) -> SqlStepStore:
         native = self._require_attached_graph_step_source(execution, runner._store)
-        if self._queue_deferred_graph is None or not runner._require_turn_trace(binding, canonical_step=True):
+        if (self._queue_deferred_graph is None
+                or execution.durable_trace and not runner._require_turn_trace(binding, canonical_step=True)):
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
         if any(leaf.commit.mode == "terminal" for feature in policy.capabilities
@@ -2335,7 +2337,8 @@ class LocalExecutionBackend:
         """Claim a real Graph-bound canonical turn before entering local lifecycle."""
         execution = reservation.execution
         if (not isinstance(request.user_prompt, str) or request.files
-                or not execution.durable_trace or self._execution_buffer is not None):
+                or not (execution.durable_trace or execution.restart_checkpoints)
+                or self._execution_buffer is not None):
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         if execution.restart_checkpoints:
             binding = await self._execution_binding(execution, request.resolved_binding)
@@ -5370,7 +5373,7 @@ class LocalExecutionBackend:
                     agent_run_id, loaded_context,
                     source_run=(recovery_run if current.restart_checkpoints and recovery_history_agent_run_id is not None else None),
                 )
-                if graph_resume_source is not None:
+                if graph_resume_source is not None and current.durable_trace:
                     self._run_store.confirm_graph_step_trace_source(
                         agent_run_id, producer_generation, graph_resume_source[0], history, resumed=True,
                     )
@@ -6414,8 +6417,9 @@ class LocalExecutionBackend:
             turn.prompt, turn.history, messages, output,
             instructions=spec.instructions, system_prompt=spec.system_prompt, structured=structured,
         )
+        shared_source = current.durable_trace or current.restart_checkpoints
         output_ref = canonical_structured_output_reference(
-            messages[len(turn.history):] if current.durable_trace else transcript,
+            messages[len(turn.history):] if shared_source else transcript,
         ) if structured else None
         encoded_body = len(encode_model_messages(transcript))
         if output_ref is not None:
@@ -6436,9 +6440,9 @@ class LocalExecutionBackend:
         )
         return await self._settle_attached_graph(
             current, commit, turn=turn, turns=turns, producer_generation=producer_generation,
-            transcript=None if current.durable_trace else transcript,
-            binding_refs=() if current.durable_trace else binding_refs, output_ref=output_ref,
-            trace_run_id=agent_run_id, trace_messages=messages if current.durable_trace else None,
+            transcript=None if shared_source else transcript,
+            binding_refs=() if shared_source else binding_refs, output_ref=output_ref,
+            trace_run_id=agent_run_id, trace_messages=messages if shared_source else None,
             notice_messages=context_messages,
         )
 
@@ -6505,6 +6509,7 @@ class LocalExecutionBackend:
         plan: ExecutionTerminalSealPlan | None = None
         trace_root = None
         raw_suffix = None
+        step_suffix = None
         committed = None
         owner = self._turn_owners.get(current.execution_id)
         step_alias = None if owner is None else owner.graph_step_alias
@@ -6530,6 +6535,14 @@ class LocalExecutionBackend:
                         native_alias=None if step_alias is None else step_alias[1],
                     )
                     raw_suffix = tuple(trace_messages[len(turn.history):])
+            elif current.restart_checkpoints and status is ExecutionStatus.SUCCEEDED:
+                assert step_alias is not None
+                step_run, root, recorded = step_alias
+                if (trace_run_id != step_run or trace_messages is None
+                        or tuple(trace_messages) != tuple(recorded) or root.count != len(recorded)):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                prefix = len(turn.history)
+                step_suffix = (root.slice(prefix, root.count), tuple(recorded[prefix:]))
             async with self._audit_lock(current.execution_id):
                 owner = self._turn_owners.get(current.execution_id)
                 if owner is None or owner.producer_generation != producer_generation:
@@ -6562,6 +6575,7 @@ class LocalExecutionBackend:
                     binding_refs=binding_refs, output_ref=output_ref, pending_events=pending,
                     _graph_trace_plan=plan, _graph_trace_suffix=trace_root,
                     _graph_trace_messages=raw_suffix, _graph_step_checkpoint=checkpoint,
+                    **({} if step_suffix is None else {"_native_step_suffix": step_suffix}),
                     start_identity=(owner.reservation.idempotency
                                     if owner.reservation.idempotency.status is IdempotencyStatus.STARTED else None),
                 )
@@ -6879,7 +6893,8 @@ class LocalExecutionBackend:
                     and snapshot.run_id == agent_run_id and snapshot.idempotency_key is not None
                     and written.native_messages is not None and written.native_messages.prepared is not None):
                 root = native.message_root(written.native_messages.prepared.root)
-                self._run_store.confirm_graph_step_trace_source(snapshot.run_id, generation, root, snapshot.messages)
+                if execution.durable_trace:
+                    self._run_store.confirm_graph_step_trace_source(snapshot.run_id, generation, root, snapshot.messages)
                 if snapshot.state == "complete":
                     owner.graph_step_checkpoint = (
                         native, snapshot.run_id, snapshot.conversation_id, snapshot.idempotency_key,

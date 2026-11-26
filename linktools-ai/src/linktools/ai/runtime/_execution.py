@@ -1613,7 +1613,8 @@ class DefaultExecutionService(TaskExecutionService):
             native_step_source=native_source,
             restart_checkpoints=(policy.restart_checkpoints
                                  or parent is not None and parent.restart_checkpoints),
-            durable_trace=(policy.durable_trace or requires_task_invocation_capture
+            durable_trace=(policy.durable_trace
+                           or requires_task_invocation_capture and (graph_task is None or native_source is None)
                            or parent is not None and parent.durable_trace),
             conversation=policy.execution.retain_history,
         )

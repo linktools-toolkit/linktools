@@ -2105,7 +2105,7 @@ class StateCommands:
 
         tools = self._tools
         if (type(native) is not SqlStepStore or not isinstance(authority, _TaskGraphCancelOwner)
-                or type(tools) is not ToolRepositoryImpl or not execution.durable_trace
+                or type(tools) is not ToolRepositoryImpl
                 or execution.native_step_source is None or execution.native_step_source != native.backup_source
                 or execution.agent_run_seq < 1
                 or run_id != agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
@@ -4616,6 +4616,7 @@ class StateCommands:
         _graph_trace_plan: ExecutionTerminalSealPlan | None = None,
         _graph_trace_suffix: NativeMessageRoot | None = None,
         _graph_trace_messages: Sequence[ModelMessage] = (),
+        _native_step_suffix: "tuple[NativeMessageRoot, Sequence[ModelMessage]] | None" = None,
         _graph_step_checkpoint: "tuple[SqlStepStore, str, str, str | None, int] | None" = None,
         _cold_graph_task: "tuple[TaskRepositoryImpl, TaskLease | _TaskGraphCancelOwner] | None" = None,
     ) -> ExecutionTerminalCommitResult:
@@ -4642,7 +4643,8 @@ class StateCommands:
         result: "JsonValue"
         if terminal.status is ExecutionStatus.SUCCEEDED:
             state, result = "succeeded", None
-            if (transcript is None and _graph_trace_suffix is None) or commit.result.output is None:
+            if ((transcript is None and _graph_trace_suffix is None and _native_step_suffix is None)
+                    or commit.result.output is None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         elif terminal.status is ExecutionStatus.CANCELLED:
             if initial.status is not ExecutionStatus.CANCELLING:
@@ -4654,6 +4656,14 @@ class StateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if state != "succeeded" and commit.result.output is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if _native_step_suffix is not None and (
+            state != "succeeded" or initial.durable_trace or _graph_trace_plan is not None
+            or _graph_trace_suffix is not None or _graph_trace_messages
+            or _graph_step_checkpoint is None or _cold_graph_task is not None
+            or transcript is not None or binding_refs or commit.producer_generation is None
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
         cold_stores = ()
         if _cold_graph_task is not None:
@@ -4677,10 +4687,9 @@ class StateCommands:
             step_store, step_run, step_conversation, replay_key, prefix_count = _graph_step_checkpoint
             if (type(step_store) is not SqlStepStore
                     or (_cold_graph_task is not None and (state != "cancelled" or replay_key is not None or prefix_count != 0))
-                    or (_cold_graph_task is None and _graph_trace_plan is None)
                     or (replay_key is None and state == "succeeded")
                     or (replay_key is not None and not replay_key)
-                    or (state == "succeeded") != (_graph_trace_suffix is not None)
+                    or (state == "succeeded") != (_graph_trace_suffix is not None or _native_step_suffix is not None)
                     or (state != "succeeded" and initial.recovery is not None and (
                         initial.recovery.pending_tools is not None
                         or initial.recovery_state in {ExecutionRecoveryState.WAITING, ExecutionRecoveryState.HANDOFF}
@@ -4756,14 +4765,24 @@ class StateCommands:
             ) for projection in projections)
         if trace_suffix is None and (_graph_trace_suffix is not None or _graph_trace_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        native_suffix = None
+        native_messages: Sequence[ModelMessage] = ()
+        if _native_step_suffix is not None:
+            root, native_messages = _native_step_suffix
+            archive = await binding[1](create=True)
+            native_suffix = (archive, PreparedArchive(), root)
+        raw_source = trace_suffix or native_suffix
         prepared = await turns._prepare_finish(
             key, generation=generation, turn_no=turn_no, state=state, result=result,
             transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
-            _graph_trace_suffix=trace_suffix,
+            _graph_trace_suffix=raw_source,
         )
         result_source = None
         if prepared.transcript is not None:
-            source_messages = transcript if trace_suffix is None else _graph_trace_messages
+            source_messages = (
+                (_graph_trace_messages if native_suffix is None else native_messages)
+                if raw_source is not None else transcript
+            )
             assert source_messages is not None and commit.result.output is not None
             archive, content, root = prepared.transcript
             if archive.content_scope != archive_content_scope(self._namespace, self._tenant_id):
@@ -4794,7 +4813,8 @@ class StateCommands:
             await group.transaction(binding[0]).run_sql(turns._context, require_attached)
             execution_tx = group.transaction(execution_store)
             guard = None
-            if (seal is not None or _cold_graph_task is not None) and commit.producer_generation is not None:
+            if (seal is not None or _cold_graph_task is not None or _graph_step_checkpoint is not None
+                ) and commit.producer_generation is not None:
                 guard = await self._execution.require_execution_producer_in_transaction(
                     execution_tx, key.turn_id, expected_producer_generation=commit.producer_generation,
                 )
@@ -4812,22 +4832,24 @@ class StateCommands:
                     await group.transaction(binding[0]).run_sql(turns._context, check_step))
                 if state == "succeeded":
                     assert checkpoint_root is not None
-                    suffix = _graph_trace_suffix
+                    suffix = _graph_trace_suffix if native_suffix is None else native_suffix[2]
                     if suffix is None or checkpoint_root.count != prefix_count + suffix.count:
                         raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
-                    await step_store._require_same_native_message_occurrences(
-                        execution_tx, checkpoint_root.slice(prefix_count, checkpoint_root.count), suffix,
-                    )
-                    assert trace_content is not None
+                    exact_suffix = checkpoint_root.slice(prefix_count, checkpoint_root.count)
+                    if native_suffix is not None and exact_suffix != suffix:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    if native_suffix is None:
+                        await step_store._require_same_native_message_occurrences(execution_tx, exact_suffix, suffix)
                     # Its official checkpoint already owns these exact physical
                     # roots. Trace and Session may stage owner edges, not resave
                     # the body; leave other interaction/payload roots untouched.
-                    backing = {(part.first, part.count) for part in checkpoint_root.slices}
-                    published = tuple(sequence for sequence in trace_content.native_messages if sequence.slices
-                        and all((part.first, part.count) in backing for part in sequence.slices))
-                    for sequence in published:
-                        trace_content.native_messages.pop(sequence)
-                        trace_content.native_publishers.pop(sequence, None)
+                    if trace_content is not None:
+                        backing = {(part.first, part.count) for part in checkpoint_root.slices}
+                        published = tuple(sequence for sequence in trace_content.native_messages if sequence.slices
+                            and all((part.first, part.count) in backing for part in sequence.slices))
+                        for sequence in published:
+                            trace_content.native_messages.pop(sequence)
+                            trace_content.native_publishers.pop(sequence, None)
                 if cold_tools is not None:
                     await self._require_cold_cancelled_graph_step(
                         group, key.turn_id, tools=cold_tools, native=step_store, run_id=step_run,
