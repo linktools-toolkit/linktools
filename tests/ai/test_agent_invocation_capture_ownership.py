@@ -516,7 +516,9 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
 async def test_pending_invocation_capture_preserves_complete_replay_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invocation_written: bool, session_id: str | None,
 ) -> None:
+    from linktools.ai.core import TenantAuthorizationPolicy
     from linktools.ai.inputs import AgentTaskInputContext
+    from linktools.ai.session import CreateSessionRequest
     from linktools.ai.task import Task, TaskNodeContext
 
     models = _ControlledModels()
@@ -536,10 +538,22 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
         return greeting + " " + context.input["name"]
 
     producer = Task("capture.greeting", produce, effect_policy="none")
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
     features = _agents()
     if session_id is not None:
         features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('capture-ready', storage=storage) as persistence_371, Runtime.open(persistence=persistence_371, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_371, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    authorization = HostAuthorization() if session_id is not None else None
+    async with (
+        Persistence.open("capture-ready", storage=storage) as persistence,
+        Runtime.open(persistence=persistence, features=model_features(models, features), authorization=authorization) as runtime,
+        TaskEngine.open(persistence=persistence, context=runtime.context,
+                        authorization=runtime._execution_service._authorization) as runtime_engine,
+    ):
+        if session_id is not None:
+            await runtime.sessions.create(CreateSessionRequest(principal, session_id, "create-session"))
         task = Task.from_agent("capture.agent", runtime.agents.get(), build_input=project)
         engine = runtime_engine.with_definitions(producer, task)
         capture_state = runtime._state.task.tasks.state_store
@@ -567,7 +581,13 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
         try:
             await asyncio.wait_for(entered.wait(), 30)
             execution = await run.execution("agent")
-            assert (await asyncio.wait_for(execution.wait(), 30)).result.status is ExecutionStatus.SUCCEEDED
+            if session_id is None:
+                assert (await asyncio.wait_for(execution.wait(), 30)).result.status is ExecutionStatus.SUCCEEDED
+            else:
+                # Attached Graph dispatch requires the original invocation to be durable first.
+                assert not models.entered.is_set()
+                head = await runtime.executions.inspect(execution.execution_id, principal=principal)
+                assert head.status is ExecutionStatus.STARTED
             if invocation_written:
                 early = await runtime_engine.inputs.capture_input(execution.execution_id, request)
             else:
