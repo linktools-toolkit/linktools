@@ -1023,7 +1023,10 @@ async def _build_local_components(
         )
 
         @asynccontextmanager
-        async def prepare_native_subagents(turn, binding: AgentBinding, principal: Principal):
+        async def prepare_native_subagents(
+            turn, binding: AgentBinding, principal: Principal,
+            instructions: Callable[[], RepositoryInstructions | None],
+        ):
             turns = state.session_turns
             tools = state.checkpoint.tools
             executions = state.execution.executions
@@ -1037,6 +1040,7 @@ async def _build_local_components(
                 yield lambda capability: dispatcher.claimed_native_leaf(
                     turns=turns, key=turn.key, generation=turn.generation, tools=tools, principal=principal,
                     binding=binding.binding_contract, capability=capability, mode=turn.mode,
+                    instructions=instructions,
                 )
 
         async def recover_native_subagent(key, generation, principal, binding, mode, tools, original, args, start_reserved):

@@ -330,7 +330,8 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path)
         turn = await runtime.sessions.start(
             _SESSION, "Confirm fixture A first", agent="default", principal=principal, idempotency_key="original",
         )
-        assert (await turn.wait(timeout_seconds=10)).status is ExecutionStatus.WAITING_DEFERRED
+        paused_result = await asyncio.wait_for(turn.wait(), timeout=10)
+        assert paused_result.status is ExecutionStatus.WAITING_DEFERRED
         paused = await state.session_turns.get_turn(turn.key)
         assert paused is not None and paused["state"] == "waiting" and paused["generation"] == 1
         pending, = await runtime.approvals.list(turn.key, principal=principal)

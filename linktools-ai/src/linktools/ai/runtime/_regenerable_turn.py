@@ -148,7 +148,8 @@ class _RegenerableTurnRunner:
             tuple[AtomicStepPersistence, RuntimeToolOperationBridge] | None]] | None = None,
         cancel_subagents: Callable[[SessionTurnKey, Principal, Principal], Awaitable[None]] | None = None,
         prepare_subagents: Callable[
-            [_AdmittedTurn, AgentBinding, Principal], AbstractAsyncContextManager[_NativeSubagentLeaf],
+            [_AdmittedTurn, AgentBinding, Principal, Callable[[], RepositoryInstructions | None]],
+            AbstractAsyncContextManager[_NativeSubagentLeaf],
         ] | None = None,
         recover_subagent: Callable[
             [SessionTurnKey, int, Principal, AgentBinding, ExecutionMode, RuntimeToolOperationBridge,
@@ -2009,7 +2010,11 @@ class _RegenerableTurnRunner:
                 if turn.native_subagents or turn.recover_native_results is not None:
                     if self._prepare_subagents is None:
                         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                    native_subagents = self._prepare_subagents(turn, binding, context.principal)
+                    native_subagents = self._prepare_subagents(
+                        turn, binding, context.principal,
+                        repository_boundary.current_instructions if repository_boundary is not None
+                        else lambda: turn.repository_instructions,
+                    )
                 async with native_subagents as native_subagent_leaf:
                     deferred_results = turn.deferred_results
                     if turn.recover_native_results is not None:

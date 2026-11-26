@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..persistence.repositories import ExecutionRepositoryImpl, ToolRepositoryImpl
     from ..persistence.state import StateStore, StateTransaction
     from ..persistence.turns import ExecutionAuthority, SessionTurnKey, SqlSessionTurns
+    from ..spec import RepositoryInstructions
     from ._tool import ToolOperationDecision
 
 
@@ -31,6 +32,7 @@ class NativeSubagentAdmission:
     invocation_id: str
     principal: Principal
     original: ToolOperationRecord | None = None
+    instructions: RepositoryInstructions | None = None
 
     def require_child(self, child: ExecutionRecord, principal: Principal, generation: int | None) -> None:
         if ((child.parent_execution_id, child.root_execution_id, child.parent_invocation_id)

@@ -164,6 +164,9 @@ class _RepositoryInstructionBoundary:
             return ""
         return overlay.render(include_preamble=not self._has_initial)
 
+    def current_instructions(self) -> RepositoryInstructions | None:
+        return _merge_repository_instructions(self._initial, self._overlay)
+
     def render_initial(self) -> str:
         return self._initial_text
 

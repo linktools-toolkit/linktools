@@ -3,7 +3,7 @@
 """Transport-only ACP adapter over the public Runtime."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from secrets import token_urlsafe
@@ -58,14 +58,22 @@ class ACPTextContent(Protocol):
 class ACPAgent:
     """Translate ACP requests into Runtime calls and durable event reads."""
 
-    def __init__(self, runtime: Runtime, *, principal: Principal, workspace: Workspace | None = None) -> None:
+    def __init__(
+        self, runtime: Runtime, *, principal: Principal, workspace: Workspace | None = None,
+        list_session_ids: Callable[[Principal], Awaitable[Sequence[str]]] | None = None,
+    ) -> None:
+        """Bind a host's explicit session scope for embedded SQL listing."""
         self._runtime = runtime
         self._principal = principal
         self._workspace = workspace
+        self._list_session_ids = list_session_ids
         self._connection: ACPConnection | None = None
         self._initialized = False
         self._prompts: dict[str, asyncio.Future[Execution | str | None]] = {}
         self._local_workspace = principal.kind == PrincipalKind.LOCAL_TRUSTED.value
+
+    def _can_list_sessions(self) -> bool:
+        return self._local_workspace or self._list_session_ids is not None or not uses_turn_sessions(self._runtime)
 
     def on_connect(self, connection: ACPConnection) -> None:
         if self._connection is not connection:
@@ -82,7 +90,7 @@ class ACPAgent:
             agentCapabilities=schema.AgentCapabilities(
                 loadSession=True,
                 sessionCapabilities=schema.SessionCapabilities(
-                    list=schema.SessionListCapabilities(),
+                    list=schema.SessionListCapabilities() if self._can_list_sessions() else None,
                 ),
             ),
             authMethods=[],
@@ -193,15 +201,22 @@ class ACPAgent:
         **kwargs: JsonValue,
     ) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
+        acp, schema = _require_acp()
+        if not self._can_list_sessions():
+            raise acp.RequestError.internal_error({"reason": "host_session_scope_required"})
         workspace = self._workspace
         try:
             logical_cwd = None if cwd is None else self._workspace_cwd(cwd)
         except AIError:
             return schema.ListSessionsResponse(sessions=[])
         if uses_turn_sessions(self._runtime):
+            source = self._list_session_ids
+            session_ids = None if source is None else await source(self._principal)
+            if source is not None and session_ids is None:
+                raise acp.RequestError.internal_error({"reason": "invalid_host_session_scope"})
             page = await self._runtime.history.turn_sessions(
-                principal=self._principal, cursor=cursor, limit=64, local_workspace=self._local_workspace,
+                principal=self._principal, cursor=cursor, limit=64,
+                session_ids=session_ids, local_workspace=self._local_workspace,
             )
             entries = ((item["session_id"], item.get("cwd")) for item in page["items"])
             next_cursor = page["next_cursor"]
@@ -453,6 +468,7 @@ class ACPApplication:
     storage: PersistenceStorage
     execution: ExecutionCapability | None = None
     authorization: AuthorizationPolicy | None = None
+    list_session_ids: Callable[[Principal], Awaitable[Sequence[str]]] | None = None
 
     @classmethod
     def for_workspace(
@@ -463,9 +479,10 @@ class ACPApplication:
         storage: PersistenceStorage,
         execution: ExecutionCapability | None = None,
         authorization: AuthorizationPolicy | None = None,
+        list_session_ids: Callable[[Principal], Awaitable[Sequence[str]]] | None = None,
     ) -> "ACPApplication":
         """Assemble workspace and execution capabilities into the given features."""
-        return cls(workspace, features, storage, execution, authorization)
+        return cls(workspace, features, storage, execution, authorization, list_session_ids)
 
     def __post_init__(self) -> None:
         """Complete this application's feature declarations once, before serving."""
@@ -486,6 +503,7 @@ class ACPApplication:
                     runtime,
                     principal=runtime.default_principal,
                     workspace=self.workspace,
+                    list_session_ids=self.list_session_ids,
                 )
             )
 

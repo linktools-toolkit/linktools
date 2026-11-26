@@ -203,3 +203,94 @@ async def test_acp_application_can_serve_again_after_transport_failure(
     )
     assert all(capture.models["default"] is binding for capture in captures)
     assert all(capture.workspace is application.workspace for capture in captures)
+
+
+@pytest.mark.asyncio
+async def test_acp_native_host_listing_requires_scope_and_preserves_acl_and_cursor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from linktools.ai.core import AuthorizationAction, PrincipalKind, TenantAuthorizationPolicy
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.session import CreateSessionRequest
+
+    from ._runtime_test_helpers import RuntimeUsageModels
+
+    class RequestError(Exception):
+        @classmethod
+        def internal_error(cls, detail):
+            return cls(detail["reason"])
+
+    acp = SimpleNamespace(PROTOCOL_VERSION=1, RequestError=RequestError)
+    schema = SimpleNamespace(**{
+        name: _schema_object
+        for name in (
+            "InitializeResponse", "AgentCapabilities", "SessionCapabilities",
+            "SessionListCapabilities", "Implementation", "ListSessionsResponse", "SessionInfo",
+        )
+    })
+    monkeypatch.setattr("linktools.ai.acp._require_acp", lambda: (acp, schema))
+
+    actor = Principal("caller", "default", "service")
+    local = Principal("local", "default", PrincipalKind.LOCAL_TRUSTED.value)
+    scoped = [f"scope-{index:02d}" for index in range(65)]
+    denied = scoped[-1]
+    unlisted = "different-session"
+    checked = []
+
+    class HostPolicy(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            await super().authorize(principal, action, resource)
+            if principal == actor and action is AuthorizationAction.SESSION_READ:
+                checked.append(resource.id)
+                if resource.id == denied:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    calls = []
+    current_scope = scoped.copy()
+
+    async def list_session_ids(principal):
+        calls.append(principal)
+        return tuple(current_scope)
+
+    async with Runtime.open(
+        "acp-list", storage=PersistenceStorage.from_root(tmp_path / "state"),
+        features=model_features(RuntimeUsageModels()), authorization=HostPolicy(),
+    ) as runtime:
+        for session_id in (*scoped, unlisted):
+            await runtime.sessions.create(CreateSessionRequest(actor, session_id, session_id))
+
+        def can_list(initialized):
+            return initialized["agentCapabilities"]["sessionCapabilities"]["list"] is not None
+
+        unconfigured = ACPAgent(runtime, principal=actor)
+        assert not can_list(await unconfigured.initialize(acp.PROTOCOL_VERSION))
+        with pytest.raises(RequestError, match="host_session_scope_required"):
+            await unconfigured.list_sessions()
+        assert checked == []
+
+        embedded = ACPAgent(runtime, principal=actor, list_session_ids=list_session_ids)
+        assert can_list(await embedded.initialize(acp.PROTOCOL_VERSION))
+        first = await embedded.list_sessions()
+        first_ids = {entry["sessionId"] for entry in first["sessions"]}
+        assert first_ids == set(scoped[1:-1])
+        assert set(checked) == set(scoped[1:])
+        cursor = first["nextCursor"]
+        assert cursor is not None
+
+        current_scope.append(unlisted)
+        with pytest.raises(AIError) as changed:
+            await embedded.list_sessions(cursor=cursor)
+        assert changed.value.code is ErrorCode.CURSOR_INVALID
+        current_scope.pop()
+        second = await embedded.list_sessions(cursor=cursor)
+        assert [entry["sessionId"] for entry in second["sessions"]] == [scoped[0]]
+        assert second["nextCursor"] is None
+        assert calls == [actor, actor, actor]
+
+        trusted = ACPAgent(runtime, principal=local)
+        assert can_list(await trusted.initialize(acp.PROTOCOL_VERSION))
+        trusted_first = await trusted.list_sessions()
+        trusted_ids = {entry["sessionId"] for entry in trusted_first["sessions"]}
+        assert {denied, unlisted} <= trusted_ids

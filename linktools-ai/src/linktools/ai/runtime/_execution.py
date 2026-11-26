@@ -1583,6 +1583,22 @@ class DefaultExecutionService(TaskExecutionService):
             )
             if request.input_context.repository_instructions is not None:
                 RepositoryInstructions.from_payload(request.input_context.repository_instructions)
+        elif _native_parent is not None:
+            # The canonical parent has an instruction frontier, not a legacy
+            # ExecutionRecord. Inherit the committed frontier before resolving
+            # only the child's explicitly selected attachment paths.
+            inherited = _native_parent.instructions
+            documents = {} if inherited is None else {doc.source: doc for doc in inherited.documents}
+            if instruction_resolver is not None:
+                for path in dict.fromkeys(input_instruction_paths):
+                    resolved = await instruction_resolver.resolve(path, exclude_sources=frozenset(documents))
+                    for document in resolved.documents:
+                        documents.setdefault(document.source, document)
+            if documents:
+                resolved_instructions = RepositoryInstructions(tuple(documents.values()))
+                if instruction_resolver is not None:
+                    instruction_resolver.validate(resolved_instructions)
+                repository_instructions = await self._capture_repository_instructions(resolved_instructions)
         elif instruction_resolver is not None and graph_task is None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
                 if parent is None:

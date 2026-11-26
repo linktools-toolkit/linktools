@@ -32,7 +32,13 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
 
     project = tmp_path / "project"
     project.mkdir()
-    attachment = project / "fixture.txt"
+    root_rule = project / "AGENTS.md"
+    root_rule.write_text("PINNED-PARENT-RULE", encoding="utf-8")
+    child_folder = project / "child"
+    child_folder.mkdir()
+    child_rule = child_folder / "AGENTS.md"
+    child_rule.write_text("PINNED-CHILD-RULE", encoding="utf-8")
+    attachment = child_folder / "fixture.txt"
     original_bytes = b"captured before interruption"
     attachment.write_bytes(original_bytes)
     workspace = Workspace.load(project, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="allow")))
@@ -40,7 +46,9 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
     returned_children: list[str] = []
     invocation = "original-delegate"
 
-    async def parent(messages, _info):
+    async def parent(messages, info):
+        assert "PINNED-PARENT-RULE" in (info.instructions or "")
+        assert "PINNED-CHILD-RULE" not in (info.instructions or "")
         results = [part.content for message in messages for part in message.parts
                    if isinstance(part, ToolReturnPart) and part.tool_call_id == invocation]
         if results:
@@ -50,13 +58,18 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             returned_children.append(result["execution_id"])
             return ModelResponse(parts=[TextPart("completed from retained delegation")])
         calls.append("parent dispatch")
+        root_rule.write_text("CHANGED-PARENT-RULE", encoding="utf-8")
         return ModelResponse(parts=[ToolCallPart(
-            "delegate_task", {"subagent_id": "child", "task": "Read the retained file", "files": [attachment.name]},
+            "delegate_task", {"subagent_id": "child", "task": "Read the retained file",
+                              "files": [attachment.relative_to(project).as_posix()]},
             tool_call_id=invocation,
         )])
 
-    async def child(messages, _info):
+    async def child(messages, info):
         calls.append("child dispatch")
+        instructions = info.instructions or ""
+        assert "PINNED-PARENT-RULE" in instructions and "PINNED-CHILD-RULE" in instructions
+        assert "CHANGED-PARENT-RULE" not in instructions and "CHANGED-CHILD-RULE" not in instructions
         [prompt] = [part for message in messages for part in message.parts if isinstance(part, UserPromptPart)]
         assert [item.data for item in prompt.content if isinstance(item, BinaryContent)] == [original_bytes]
         return ModelResponse(parts=[TextPart("read the retained file")])
@@ -116,6 +129,7 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             await runtime.handoff()
 
     attachment.unlink()
+    child_rule.write_text("CHANGED-CHILD-RULE", encoding="utf-8")
     request_key = canonical_sha256({"kind": "subagent", "parent_execution_id": turn_id, "invocation_id": invocation})
     async with open_host() as (state, runtime, http):
         turns = state.session_turns

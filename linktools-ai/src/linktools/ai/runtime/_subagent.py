@@ -25,7 +25,7 @@ from ..model import normalize_input_files
 from ..persistence.contracts import ToolOperationRecord
 from ..persistence.turns import SessionTurnKey, SqlSessionTurns
 from ..persistence.repositories import ExecutionRepositoryImpl, ToolRepositoryImpl
-from ..spec import SubagentRef
+from ..spec import RepositoryInstructions, SubagentRef
 from ._execution import DefaultExecutionService
 from ._handoff import execution_handoff_scope
 from ._native_subagent import NativeSubagentAdmission
@@ -188,6 +188,7 @@ class SubagentDispatcher:
         self, *, turns: SqlSessionTurns, key: SessionTurnKey, generation: int,
         tools: ToolRepositoryImpl, principal: Principal, binding: AgentBindingContract,
         capability: SubagentCapability, mode: ExecutionMode,
+        instructions: Callable[[], RepositoryInstructions | None],
     ) -> _ClaimedLeaf:
         """Bind only the configured native delegate to fresh leaf authority."""
         frozen = binding.subagent_binding_map
@@ -198,6 +199,7 @@ class SubagentDispatcher:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             proof = NativeSubagentAdmission(
                 turns, key, generation, tools, decision, call.tool_call_id, principal,
+                instructions=instructions(),
             )
 
             async def launch(ref: SubagentRef, task: str, *, files: tuple[str, ...], invocation_id: str):
