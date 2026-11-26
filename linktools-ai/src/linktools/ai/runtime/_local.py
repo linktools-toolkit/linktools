@@ -159,7 +159,6 @@ from ..persistence.contracts import (
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
-    RepositoryInstructionBarrier,
     SessionRepository,
     ToolOperationRecord,
 )
@@ -8080,11 +8079,10 @@ class LocalExecutionBackend:
             instructions, source_domain=PersistenceDomain.CHECKPOINT,
         )
 
-    async def commit_repository_instruction_barrier(
+    async def commit_repository_instruction_overlay(
         self,
         execution: ExecutionRecord,
         overlay: RepositoryInstructions,
-        barrier: RepositoryInstructionBarrier,
         *,
         producer_generation: int | None = None,
     ) -> ExecutionRecord:
@@ -8094,34 +8092,9 @@ class LocalExecutionBackend:
         if owner is not None:
             owner.attempt = None
         await self.promote_pending_execution(execution.execution_id)
-        existing = tuple(
-            item
-            for item in execution.recovery.repository_instruction_barriers
-            if item.agent_run_id == barrier.agent_run_id
-            and item.tool_call_id == barrier.tool_call_id
-        )
-        if existing:
-            if existing[0] != barrier:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            current = await self._execution.executions.get_recovery(
-                execution.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if current is None or current.recovery is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            current_overlay = await self.load_repository_instructions(
-                current.recovery.repository_instruction_overlay
-            )
-            _validate_repository_instruction_frontier(current, current_overlay)
-            if (
-                current_overlay is None
-                or not _repository_instructions_contain(current_overlay, overlay)
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return current
         if execution.session_id is not None:
             sessions = self._legacy_sessions()
-            # Discovery knowledge can outlive a failed barrier. Persist it first
+            # Discovery knowledge can outlive an unsuccessful overlay commit. Persist it first
             # so a committed execution pin never loses its Session scope memory,
             # including when conversation and recovery use different stores.
             await sessions.state_store.mutate(
@@ -8139,7 +8112,6 @@ class LocalExecutionBackend:
             execution,
             recovery=replace(
                 execution.recovery, repository_instruction_overlay=overlay_reference,
-                repository_instruction_barriers=(*execution.recovery.repository_instruction_barriers, barrier),
             ),
             revision=execution.revision + 1, updated_at=datetime.now(timezone.utc),
         )
@@ -8181,24 +8153,14 @@ class LocalExecutionBackend:
             )
             if current is None or current.recovery is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            matching = tuple(
-                item
-                for item in current.recovery.repository_instruction_barriers
-                if item.agent_run_id == barrier.agent_run_id
-                and item.tool_call_id == barrier.tool_call_id
+            if (current.recovery_state is not ExecutionRecoveryState.ACTIVE
+                    or current.recovery.agent_run_id != execution.recovery.agent_run_id):
+                raise
+            current_overlay = await self.load_repository_instructions(
+                current.recovery.repository_instruction_overlay
             )
-            if matching:
-                if matching[0] != barrier:
-                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
-                current_overlay = await self.load_repository_instructions(
-                    current.recovery.repository_instruction_overlay
-                )
-                _validate_repository_instruction_frontier(current, current_overlay)
-                if (
-                    current_overlay is None
-                    or not _repository_instructions_contain(current_overlay, overlay)
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            _validate_repository_instruction_frontier(current, current_overlay)
+            if _repository_instructions_contain(current_overlay, overlay):
                 return current
             raise
 

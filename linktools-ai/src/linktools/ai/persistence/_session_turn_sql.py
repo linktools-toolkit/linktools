@@ -9,7 +9,6 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from threading import RLock
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeVar
 from weakref import finalize
 
@@ -62,7 +61,6 @@ if TYPE_CHECKING:
     from ..core import Principal
     from ._archive import ContentArchive
     from ..execution import PendingToolContinuation
-    from ..model import StoredUserInput
     from .state import StateGroupTransaction, StateStore, StateTransaction
     from ..storage import SqlStorageContext
     from ._split_step_source import SplitStepSourceObservation, SplitStepWaiting
@@ -173,29 +171,23 @@ class SessionInstructionFrontier:
     """Frozen discovery evidence outside the immutable request and public history."""
 
     overlay: RepositoryInstructions
-    barriers: Mapping[str, str]
 
     def to_json(self) -> dict[str, JsonValue]:
-        return {"overlay": self.overlay.to_payload(), "barriers": dict(self.barriers)}
+        return {"overlay": self.overlay.to_payload()}
 
     @classmethod
     def from_json(cls, value: object) -> SessionInstructionFrontier | None:
         if value is None:
             return None
         try:
-            if not isinstance(value, Mapping) or value.keys() != {"overlay", "barriers"}:
+            if not isinstance(value, Mapping) or value.keys() != {"overlay"}:
                 raise ValueError("invalid instruction frontier")
             overlay = RepositoryInstructions.from_payload(value["overlay"])
-            barriers = value["barriers"]
-            if (not overlay.documents or not isinstance(barriers, Mapping)
-                    or not 1 <= len(barriers) <= len(overlay.documents)
-                    or any(not isinstance(key, str) or not key or not isinstance(digest, str)
-                           or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)
-                           for key, digest in barriers.items())):
-                raise ValueError("invalid instruction discovery barriers")
+            if not overlay.documents:
+                raise ValueError("empty instruction frontier")
         except (TypeError, ValueError, AIError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        return cls(overlay, MappingProxyType(dict(barriers)))
+        return cls(overlay)
 
 
 _Receipt = TypeVar("_Receipt")

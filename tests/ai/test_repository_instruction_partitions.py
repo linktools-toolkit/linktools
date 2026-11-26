@@ -12,10 +12,7 @@ from linktools.ai.core import PersistenceDomain, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.inputs import RepositoryInstructionPayload
-from linktools.ai.persistence.contracts import (
-    ExecutionRecoveryDetail,
-    RepositoryInstructionBarrier,
-)
+from linktools.ai.persistence.contracts import ExecutionRecoveryDetail
 from linktools.ai.spec import (
     RepositoryInstructionDocument,
     RepositoryInstructions,
@@ -42,8 +39,9 @@ class _Port:
 
 
 class _Resolver:
-    async def resolve(self, *args: object, **kwargs: object) -> object:
-        raise AssertionError("historical barrier replay must not rediscover sources")
+    async def resolve(self, path, *, exclude_sources):
+        assert exclude_sources == {"agents:pkg/AGENTS.md", "agents:pkg/deep/AGENTS.md"}
+        return RepositoryInstructions()
 
 
 def _instructions() -> tuple[RepositoryInstructions, RepositoryInstructions]:
@@ -61,22 +59,11 @@ def _instructions() -> tuple[RepositoryInstructions, RepositoryInstructions]:
 
 
 def _checkpoint(
-    first: RepositoryInstructions,
     latest: RepositoryInstructions,
     *,
     latest_payload_digest: str | None = None,
 ) -> tuple[object, dict[str, str]]:
     arguments = {"path": "pkg/file.txt"}
-    first_barrier = RepositoryInstructionBarrier(
-        "step",
-        "call-a",
-        canonical_sha256(arguments),
-    )
-    latest_barrier = RepositoryInstructionBarrier(
-        "step",
-        "call-b",
-        canonical_sha256({"path": "pkg/deep/file.txt"}),
-    )
     reference = RepositoryInstructionPayload(
         canonical_sha256(latest.to_payload()) if latest_payload_digest is None else latest_payload_digest,
         latest.to_payload(),
@@ -84,62 +71,36 @@ def _checkpoint(
     checkpoint = replace(_execution(datetime.now(timezone.utc)), recovery=ExecutionRecoveryDetail(
         agent_run_id="step",
         repository_instruction_overlay=reference,
-        repository_instruction_barriers=(first_barrier, latest_barrier),
     ))
     return checkpoint, arguments
 
 
 @pytest.mark.asyncio
-async def test_historical_barrier_replay_keeps_latest_overlay() -> None:
+async def test_existing_tool_call_uses_latest_overlay_even_with_changed_arguments() -> None:
     first, latest = _instructions()
-    checkpoint, arguments = _checkpoint(first, latest)
+    checkpoint, _ = _checkpoint(latest)
     coordinator = _RecoveryCoordinator(
         _Port(checkpoint, latest),  # type: ignore[arg-type]
         _Resolver(),  # type: ignore[arg-type]
     )
 
-    overlay, reconsider = await coordinator.check_repository_instructions(
+    overlay = await coordinator.check_repository_instructions(
         execution=SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
         initial=None,
         overlay=first,
         tool_name="read_file",
         tool_call_id="call-a",
-        arguments=arguments,
+        arguments={"path": "pkg/other.txt"},
         path_fields=("path",),
     )
 
     assert overlay == latest
-    assert reconsider is True
-
-
-@pytest.mark.asyncio
-async def test_historical_barrier_replay_rejects_changed_arguments() -> None:
-    first, latest = _instructions()
-    checkpoint, _ = _checkpoint(first, latest)
-    coordinator = _RecoveryCoordinator(
-        _Port(checkpoint, latest),  # type: ignore[arg-type]
-        _Resolver(),  # type: ignore[arg-type]
-    )
-
-    with pytest.raises(AIError) as raised:
-        await coordinator.check_repository_instructions(
-            execution=SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
-            initial=None,
-            overlay=first,
-            tool_name="read_file",
-            tool_call_id="call-a",
-            arguments={"path": "pkg/other.txt"},
-            path_fields=("path",),
-        )
-
-    assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
 
 @pytest.mark.asyncio
 async def test_latest_overlay_uses_loaded_content_without_rechecking_digest() -> None:
     first, latest = _instructions()
     checkpoint, arguments = _checkpoint(
-        first,
         latest,
         latest_payload_digest="0" * 64,
     )
@@ -148,7 +109,7 @@ async def test_latest_overlay_uses_loaded_content_without_rechecking_digest() ->
         _Resolver(),  # type: ignore[arg-type]
     )
 
-    overlay, reconsider = await coordinator.check_repository_instructions(
+    overlay = await coordinator.check_repository_instructions(
         execution=SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
         initial=None,
         overlay=first,
@@ -159,12 +120,11 @@ async def test_latest_overlay_uses_loaded_content_without_rechecking_digest() ->
     )
 
     assert overlay == latest
-    assert reconsider is True
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("initial", "paths", "bytes", "overlay"))
-async def test_dynamic_instruction_union_limits_precede_barrier_commit(tmp_path, kind) -> None:
+async def test_dynamic_instruction_union_limits_precede_overlay_commit(tmp_path, kind) -> None:
     from linktools.ai.workspace import WorkspaceInstructionResolver, WorkspacePolicy
 
     root = RepositoryInstructionDocument("agents:AGENTS.md", ".", "根规则")
@@ -186,12 +146,11 @@ async def test_dynamic_instruction_union_limits_precede_barrier_commit(tmp_path,
     if kind == "overlay":
         persisted = RepositoryInstructions((child,))
         checkpoint = replace(checkpoint, recovery=replace(checkpoint.recovery,
-            repository_instruction_overlay=RepositoryInstructionPayload.capture(persisted, persisted.to_payload()).to_reference(PersistenceDomain.CHECKPOINT),
-            repository_instruction_barriers=(RepositoryInstructionBarrier("earlier", "first", "a" * 64),)))
+            repository_instruction_overlay=RepositoryInstructionPayload.capture(persisted, persisted.to_payload()).to_reference(PersistenceDomain.CHECKPOINT)))
 
     class Port(_Port):
-        async def commit_repository_instruction_barrier(self, *args, **kwargs):
-            raise AssertionError("over-limit union must not write scopes, payloads or barriers")
+        async def commit_repository_instruction_overlay(self, *args, **kwargs):
+            raise AssertionError("over-limit union must not write scopes or payloads")
 
     coordinator = _RecoveryCoordinator(
         Port(checkpoint, persisted),
@@ -221,9 +180,9 @@ async def test_pinned_sources_are_not_recounted_or_revalidated_without_discovery
         _Port(checkpoint, None),
         WorkspaceInstructionResolver(tmp_path, WorkspacePolicy(max_repository_instruction_bytes=1), RepositoryInstructions()),
     )
-    overlay, reconsider = await coordinator.check_repository_instructions(
+    overlay = await coordinator.check_repository_instructions(
         execution=SimpleNamespace(execution_id="execution"), initial=initial,
         overlay=None, tool_name="read_files", tool_call_id="call",
         arguments={"paths": ["first.txt", "second.txt"]}, path_fields=("paths",),
     )
-    assert overlay is None and reconsider is False
+    assert overlay is None

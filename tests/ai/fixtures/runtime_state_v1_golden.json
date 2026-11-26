@@ -98,7 +98,6 @@
     "recovery_conversation_intent",
     "recovery_terminal_handoff",
     "recovery_terminal_outcome",
-    "repository_instruction_barrier",
     "resource_ref",
     "result_record",
     "session_record",

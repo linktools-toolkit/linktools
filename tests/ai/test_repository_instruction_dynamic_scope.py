@@ -107,7 +107,7 @@ def _boundary(
 
 
 @pytest.mark.asyncio
-async def test_repository_instruction_check_precedes_ask_permission() -> None:
+async def test_ask_permission_precedes_repository_instruction_discovery() -> None:
     repository = _Boundary(fail=True)
     toolset = _boundary(
         FunctionToolset([_read_file]),
@@ -118,7 +118,9 @@ async def test_repository_instruction_check_precedes_ask_permission() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallFailed, match="repository instructions changed"):
+    from pydantic_ai.exceptions import ApprovalRequired
+
+    with pytest.raises(ApprovalRequired):
         await toolset.call_tool(
             "_read_file",
             {"path": "pkg/file.txt"},
@@ -126,24 +128,19 @@ async def test_repository_instruction_check_precedes_ask_permission() -> None:
             tools["_read_file"],
         )
 
-    assert len(repository.calls) == 1
-    assert repository.calls[0]["arguments"] == {"path": "pkg/file.txt"}
+    assert repository.calls == []
 
 
 @pytest.mark.asyncio
-async def test_repository_instruction_refresh_can_fence_one_model_call() -> None:
-    repository = _Boundary(fail=True)
+async def test_repository_instruction_discovery_allows_one_model_call() -> None:
+    repository = _Boundary()
     toolset = _boundary(FunctionToolset([_read_file]), "_read_file", repository)
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallFailed):
-        await toolset.call_tool(
-            "_read_file",
-            {"path": "pkg/file.txt"},
-            context,
-            tools["_read_file"],
-        )
+    assert await toolset.call_tool(
+        "_read_file", {"path": "pkg/file.txt"}, context, tools["_read_file"],
+    ) == "pkg/file.txt"
     assert repository.calls[0]["tool_call_id"] == "call"
 
 
@@ -215,7 +212,7 @@ async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(
 
         async def check_repository_instructions(self, **kwargs):
             self.checked.append(kwargs)
-            return self.overlay, self.overlay != kwargs["overlay"]
+            return self.overlay
 
     coordinator = Coordinator()
     execution = SimpleNamespace(execution_id="execution")
@@ -238,9 +235,8 @@ async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(
         coordinator.overlay = RepositoryInstructions((RepositoryInstructionDocument(
             "agents:pkg/AGENTS.md", "pkg", "new sibling rule",
         ),))
-        with pytest.raises(ToolCallFailed):
-            await original.check(tool_name="_read_file", tool_call_id="sibling",
-                                 arguments={"path": "pkg/file.txt"}, path_fields=("path",))
+        await original.check(tool_name="_read_file", tool_call_id="sibling",
+                             arguments={"path": "pkg/file.txt"}, path_fields=("path",))
         assert original.approval_frontiers((call,))["call"] == frontier
     checked_before_resume = len(coordinator.checked)
     restored = _RepositoryInstructionBoundary(
@@ -264,12 +260,9 @@ async def test_recovered_approval_only_reuses_its_observed_instruction_frontier(
     else:
         tools = await restored_tools.get_tools(context)
         args = {"path": "pkg/new.txt" if mismatch == "new_scope" else "file.txt"}
-        if mismatch is None:
-            assert await restored_tools.call_tool("_read_file", args, context, tools["_read_file"]) == "file.txt"
-            # Approval permits observation replay, not bypassing the path check.
-            assert len(coordinator.checked) == checked_before_resume + 1
+        if mismatch in (None, "new_scope"):
+            assert await restored_tools.call_tool("_read_file", args, context, tools["_read_file"]) == args["path"]
         else:
-            with pytest.raises(ToolCallFailed):
+            with pytest.raises(ApprovalRequired if mismatch == "approval_flag" else ToolCallFailed):
                 await restored_tools.call_tool("_read_file", args, context, tools["_read_file"])
-    if mismatch is not None:
-        assert len(coordinator.checked) == checked_before_resume + (mismatch == "new_scope")
+    assert len(coordinator.checked) == checked_before_resume + (mismatch in (None, "new_scope"))

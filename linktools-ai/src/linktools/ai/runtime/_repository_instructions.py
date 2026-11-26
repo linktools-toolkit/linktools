@@ -15,15 +15,9 @@ from ..capability import ToolCallFailed, ToolCallRetry
 from ..core import PersistenceDomain, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import RepositoryInstructionDocument, RepositoryInstructionResolver, RepositoryInstructions
-from ._tool_boundary import RepositoryInstructionBoundary, is_instruction_file_read
+from ._tool_boundary import RepositoryInstructionBoundary
 from ..inputs import RepositoryInstructionPayload
 from ..execution import ExecutionRecord
-
-_REPOSITORY_INSTRUCTION_RECONSIDER = (
-    "This call was made before the current repository instructions were available. "
-    "Re-check the current instructions before retrying the call."
-)
-
 
 def _merge_repository_instructions(
     initial: RepositoryInstructions | None,
@@ -120,12 +114,11 @@ def _validate_repository_instruction_frontier(
     if execution.recovery is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     reference = execution.recovery.repository_instruction_overlay
-    barriers = execution.recovery.repository_instruction_barriers
     if reference is None:
-        if overlay is not None or barriers:
+        if overlay is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return
-    if overlay is None or not barriers:
+    if overlay is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     RepositoryInstructionPayload.from_reference(reference, source_domain=PersistenceDomain.CHECKPOINT)
 
@@ -139,7 +132,7 @@ class _RepositoryInstructionApproval:
 class _RepositoryInstructionBoundary:
     def __init__(
         self,
-        check_frontier: Callable[..., Awaitable[tuple[RepositoryInstructions | None, bool]]],
+        check_frontier: Callable[..., Awaitable[RepositoryInstructions | None]],
         initial: RepositoryInstructions | None,
         overlay: RepositoryInstructions | None,
         approved_frontiers: Mapping[str, _RepositoryInstructionApproval] | None = None,
@@ -151,8 +144,6 @@ class _RepositoryInstructionBoundary:
         self._initial_text = "" if not self._has_initial else initial.render()
         self._overlay_text = self._render_overlay_text(overlay)
         self._lock = asyncio.Lock()
-        self._revision = 0
-        self._observed_revision = -1
         self._approved_frontiers = dict(approved_frontiers or {})
         self._checked_approvals: dict[str, _RepositoryInstructionApproval] = {}
         self._observed_frontier: str | None = None
@@ -171,7 +162,6 @@ class _RepositoryInstructionBoundary:
         return self._initial_text
 
     def render_overlay(self) -> str:
-        self._observed_revision = self._revision
         self._observed_frontier = self._frontier_digest()
         return self._overlay_text
 
@@ -212,25 +202,21 @@ class _RepositoryInstructionBoundary:
         approved: bool = False,
     ) -> None:
         async with self._lock:
-            # Reading the guidance is how the model learns it; other calls must
-            # wait for a request that has observed the newly pinned frontier.
-            if self._observed_revision != self._revision and (
-                approved or not is_instruction_file_read(tool_name, arguments, path_fields)
-            ):
+            # Only a resumed approval needs proof of the previously observed
+            # instructions. Ordinary tools never wait for a model round trip.
+            if approved and self._observed_frontier != self._frontier_digest():
                 permit = self._approved_frontiers.get(tool_call_id)
                 if (
-                    not approved
-                    or permit is None
+                    permit is None
                     or permit.tool_name != tool_name
                     or permit.frontier_digest != self._frontier_digest()
                 ):
-                    raise ToolCallFailed(_REPOSITORY_INSTRUCTION_RECONSIDER)
+                    raise ToolCallFailed("This approval no longer matches its repository instructions. Request a new approval.")
                 # The SDK binds approval to the frozen original args through
                 # ToolApproved.override_args; its validators may normalize them.
                 self._checked_approvals[tool_call_id] = permit
-            previous_signature = _repository_instruction_signature(self._overlay)
             try:
-                next_overlay, reconsider = (
+                next_overlay = (
                     await self._check_frontier(
                         initial=self._initial,
                         overlay=self._overlay,
@@ -248,16 +234,9 @@ class _RepositoryInstructionBoundary:
                         "or request a valid path before retrying."
                     ) from error
                 raise
-            next_signature = _repository_instruction_signature(next_overlay)
-            if next_signature != previous_signature:
-                next_text = self._render_overlay_text(next_overlay)
+            if next_overlay != self._overlay:
                 self._overlay = next_overlay
-                self._overlay_text = next_text
-                self._revision += 1
-            else:
-                self._overlay = next_overlay
-            if reconsider:
-                raise ToolCallFailed(_REPOSITORY_INSTRUCTION_RECONSIDER)
+                self._overlay_text = self._render_overlay_text(next_overlay)
 
 
 class _RepositoryInstructionCapability(Capability[AgentContext[object]]):

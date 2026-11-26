@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..agent import AgentBindingContract, bind_output, restore_output
 from ..capability import AgentContext
-from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes, canonical_sha256, normalize_json_value
+from ..core import AuthorizationAction, ExecutionDeltaType, ExecutionEventType, ImmutableJsonMapping, JsonValue, Principal, ResourceKind, ResourceRef, ToolOperationStatus, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..inputs import stored_input_attachment_views
 from ..model import MaterializedUserContent, StoredUserInput, native_graph_input_content, normalize_input_files, validate_model_inputs
@@ -38,7 +38,6 @@ from ._repository_instructions import (
     _RepositoryInstructionApproval, _RepositoryInstructionBoundary,
     _discover_repository_overlay, _instruction_paths, _merge_repository_instructions,
 )
-from ._tool_boundary import is_instruction_file_read
 from ._feature_policy import _runtime_feature_policy
 
 if TYPE_CHECKING:
@@ -1870,7 +1869,6 @@ class _RegenerableTurnRunner:
         initial = turn.repository_instructions
         frontier = turn.instruction_frontier
         overlay = None if frontier is None else frontier.overlay
-        barriers = {} if frontier is None else dict(frontier.barriers)
         if overlay is not None:
             if resolver is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -1893,23 +1891,16 @@ class _RegenerableTurnRunner:
         async def check(*, initial, overlay, tool_name, tool_call_id, arguments, path_fields):
             paths = _instruction_paths(arguments, path_fields)
             if not paths:
-                return overlay, False
-            instruction_read = is_instruction_file_read(tool_name, arguments, path_fields)
-            if tool_call_id in barriers:
-                if barriers[tool_call_id] != canonical_sha256(normalize_json_value(arguments)):
-                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-                return overlay, not instruction_read
+                return overlay
             discovered = await _discover_repository_overlay(resolver, initial, overlay, paths)
             if discovered is None:
-                return overlay, False
-            next_barriers = {**barriers, tool_call_id: canonical_sha256(normalize_json_value(arguments))}
+                return overlay
+            # Expose new instructions only after the fenced transaction commits.
             await self._store.append_instruction_frontier(
                 turn.key, generation=turn.generation, max_bytes=turn.terminal_bytes,
-                frontier=SessionInstructionFrontier(discovered, next_barriers),
+                frontier=SessionInstructionFrontier(discovered),
             )
-            # Expose new instructions only after the fenced transaction commits.
-            barriers.update(next_barriers)
-            return discovered, not instruction_read
+            return discovered
 
         return _RepositoryInstructionBoundary(check, initial, overlay, approved_frontiers=approved)
 

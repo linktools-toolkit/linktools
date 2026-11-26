@@ -37,18 +37,15 @@ from ..core import (
     ToolOperationStatus,
     UsageMetrics,
     canonical_sha256,
-    normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import StoredPayload
 from ..spec import CapabilityRef, RepositoryInstructionResolver, RepositoryInstructions
 from ..inputs import CanonicalUserInput
-from ._tool_boundary import is_instruction_file_read
 from ._repository_instructions import (
     _RepositoryInstructionApproval,
     _discover_repository_overlay,
     _instruction_paths,
-    _repository_instruction_signature,
     _repository_instructions_contain,
     _validate_repository_instruction_frontier,
 )
@@ -68,7 +65,6 @@ from ..persistence.contracts import (
     PendingDeferredCall,
     PendingToolContinuation,
     RecoveryHandoffPhase,
-    RepositoryInstructionBarrier,
     ToolOperationRecord,
 )
 from ..session import ConversationCursor
@@ -375,11 +371,10 @@ class _RecoveryCoordinatorPort(Protocol):
         reference: RuntimePayloadRef | None,
     ) -> RepositoryInstructions | None: ...
 
-    async def commit_repository_instruction_barrier(
+    async def commit_repository_instruction_overlay(
         self,
         execution: ExecutionRecord,
         overlay: RepositoryInstructions,
-        barrier: RepositoryInstructionBarrier,
         *,
         producer_generation: int | None = None,
     ) -> ExecutionRecord: ...
@@ -430,11 +425,11 @@ class _RecoveryCoordinator:
         arguments: dict[str, object],
         path_fields: tuple[str, ...],
         producer_generation: int | None = None,
-    ) -> tuple[RepositoryInstructions | None, bool]:
+    ) -> RepositoryInstructions | None:
         paths = _instruction_paths(arguments, path_fields)
         resolver = self._instruction_resolver
         if not paths or resolver is None:
-            return overlay, False
+            return overlay
         current = await self._port.load_recovery_execution(
             execution.execution_id,
             tenant_id=self._port.tenant_id,
@@ -450,36 +445,11 @@ class _RecoveryCoordinator:
             current.recovery.repository_instruction_overlay
         )
         _validate_repository_instruction_frontier(current, persisted_overlay)
-        arguments_digest = canonical_sha256(normalize_json_value(arguments))
-        matching = tuple(
-            barrier
-            for barrier in current.recovery.repository_instruction_barriers
-            if barrier.agent_run_id == current.recovery.agent_run_id
-            and barrier.tool_call_id == tool_call_id
-        )
-        instruction_read = is_instruction_file_read(tool_name, arguments, path_fields)
-        if matching:
-            barrier = matching[0]
-            if barrier.arguments_digest != arguments_digest:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return persisted_overlay, not instruction_read
-
         next_overlay = await _discover_repository_overlay(resolver, initial, persisted_overlay, paths)
         if next_overlay is None:
-            return persisted_overlay, (
-                not instruction_read and _repository_instruction_signature(overlay)
-                != _repository_instruction_signature(persisted_overlay)
-            )
-        barrier = RepositoryInstructionBarrier(
-            current.recovery.agent_run_id,
-            tool_call_id,
-            arguments_digest,
-        )
-        committed = await self._port.commit_repository_instruction_barrier(
-            current,
-            next_overlay,
-            barrier,
-            producer_generation=producer_generation,
+            return persisted_overlay
+        committed = await self._port.commit_repository_instruction_overlay(
+            current, next_overlay, producer_generation=producer_generation,
         )
         if committed.recovery is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -498,7 +468,7 @@ class _RecoveryCoordinator:
             current.recovery.agent_run_id,
             tool_call_id,
         )
-        return committed_overlay, not instruction_read
+        return committed_overlay
 
     async def commit_deferred_pause(
         self,

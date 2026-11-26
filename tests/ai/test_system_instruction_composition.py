@@ -6,10 +6,9 @@ import asyncio
 from pathlib import Path
 from functools import partial
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
-from linktools.ai.capability import ToolCallFailed, filesystem_capabilities
+from linktools.ai.capability import filesystem_capabilities
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.capabilities import AbstractCapability, Capability
 from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary
@@ -44,7 +43,7 @@ class _RefreshCoordinator:
         arguments: dict[str, object],
         path_fields: tuple[str, ...],
         producer_generation: int | None = None,
-    ) -> tuple[RepositoryInstructions | None, bool]:
+    ) -> RepositoryInstructions | None:
         del execution, initial, tool_name, tool_call_id, path_fields, producer_generation
         self.active_checks += 1
         self.max_active_checks = max(self.max_active_checks, self.active_checks)
@@ -52,22 +51,13 @@ class _RefreshCoordinator:
             await asyncio.sleep(0)
             path = arguments.get("path")
             if not isinstance(path, str):
-                return overlay, False
+                return overlay
             self.paths.append(path)
             if path != "a" or overlay is not None:
-                return overlay, False
-            return (
-                RepositoryInstructions(
-                    (
-                        RepositoryInstructionDocument(
-                            "agents:pkg/AGENTS.md",
-                            "pkg",
-                            "package rules",
-                        ),
-                    )
-                ),
-                True,
-            )
+                return overlay
+            return RepositoryInstructions((RepositoryInstructionDocument(
+                "agents:pkg/AGENTS.md", "pkg", "package rules",
+            ),))
         finally:
             self.active_checks -= 1
 
@@ -199,7 +189,7 @@ async def test_request_instruction_parts_follow_f0_f1_o_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repository_partition_is_stable_and_fences_same_turn_siblings() -> None:
+async def test_repository_partition_is_stable_and_loads_same_turn_siblings() -> None:
     initial = RepositoryInstructions(
         (
             RepositoryInstructionDocument(
@@ -225,18 +215,17 @@ async def test_repository_partition_is_stable_and_fences_same_turn_siblings() ->
     assert boundary.render_overlay() == ""
 
     async def refresh(path: str) -> None:
-        with pytest.raises(ToolCallFailed):
-            await boundary.check(
-                tool_name="read_file",
-                tool_call_id=f"call-{path}",
-                arguments={"path": path},
-                path_fields=("path",),
-            )
+        await boundary.check(
+            tool_name="read_file",
+            tool_call_id=f"call-{path}",
+            arguments={"path": path},
+            path_fields=("path",),
+        )
 
     await asyncio.gather(refresh("a"), refresh("b"))
 
     assert coordinator.max_active_checks == 1
-    assert coordinator.paths == ["a"]
+    assert coordinator.paths == ["a", "b"]
     assert boundary.render_initial() == initial_text
     overlay_text = boundary.render_overlay()
     assert "package rules" in overlay_text
@@ -248,4 +237,4 @@ async def test_repository_partition_is_stable_and_fences_same_turn_siblings() ->
         arguments={"path": "b"},
         path_fields=("path",),
     )
-    assert coordinator.paths == ["a", "b"]
+    assert coordinator.paths == ["a", "b", "b"]

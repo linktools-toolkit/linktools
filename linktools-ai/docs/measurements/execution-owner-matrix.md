@@ -101,7 +101,6 @@ owner, not eight owners.
 | `recovery.agent_run_id`, `source_agent_run_id` | Fixed run identities selected by recovery | Retained identifiers, not run copies. |
 | `recovery.pending_tools` | Entire pending continuation owner | Complete template reference is integrated. Exact admitted fields use the fixed checkpoint operation; unadmitted facts retain a unique template/payload owner. |
 | `recovery.repository_instruction_overlay` | Fixed instruction content with retained Asset sources where applicable | Existing reference implementation; preserve exact accepted semantics. |
-| `recovery.repository_instruction_barriers` | Runtime observation/approval frontier | Keep authoritative frontier facts unless the new fixed owner explicitly includes them; never recompute from current Asset heads. |
 | `recovery.handoff_phase` | Runtime recovery state-machine coordination | Retained control. |
 | `recovery.terminal_handoff` | Fixed terminal handoff/outcome content plus necessary phase control | Complete handoff template reference is integrated. Error sharing with terminal_details is integrated from `d3e56ff8`, not validated. |
 | `result.output` and handoff outcome output | Step payload or verified exact Native location | All-size fixed payload references and the enclosing outcome template are integrated; no verification result is asserted. |

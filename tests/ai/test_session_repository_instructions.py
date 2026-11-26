@@ -16,7 +16,7 @@ from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import ExecutionCapability
+from linktools.ai.capability import ExecutionCapability, SessionCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, CommitPolicy, ExecutionStatus, SessionStatus, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -24,7 +24,7 @@ from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceSt
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.execution import ExecutionRecoveryDetail, RepositoryInstructionBarrier
+from linktools.ai.execution import ExecutionRecoveryDetail
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.storage import InMemoryCacheBackend, StorageOverlay, StorageRoute
 from linktools.ai.session import SessionRecord
@@ -39,6 +39,7 @@ from ._runtime_test_helpers import (
     native_checkpoint,
     workspace_features,
 )
+from .test_canonical_turn_subagents import _HostAuthorization
 
 
 @asynccontextmanager
@@ -62,6 +63,51 @@ async def _storage(root: Path, backend: str) -> AsyncIterator[PersistenceStorage
     finally:
         if engine is not None:
             await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_session_reads_new_scope_on_first_call_and_loads_rules(tmp_path: Path) -> None:
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    (nested / "AGENTS.md").write_text("NESTED-ONLY-GUIDANCE", encoding="utf-8")
+    (nested / "README.md").write_text("first read body", encoding="utf-8")
+    requests = 0
+
+    async def model(messages, info):
+        nonlocal requests
+        requests += 1
+        instructions = info.instructions or ""
+        if requests == 1:
+            assert "NESTED-ONLY-GUIDANCE" not in instructions
+            return ModelResponse(parts=[
+                ToolCallPart("read_file", {"path": "pkg/README.md"}, "read-once"),
+                ToolCallPart("list_files", {"path": "pkg"}, "list-once"),
+            ])
+        assert requests == 2
+        assert "NESTED-ONLY-GUIDANCE" in instructions
+        returns = [part for part in messages[-1].parts if isinstance(part, ToolReturnPart)]
+        assert {part.tool_call_id for part in returns} == {"read-once", "list-once"}
+        assert all(part.outcome == "success" for part in returns)
+        assert "first read body" in str(next(part for part in returns if part.tool_call_id == "read-once").content)
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = workspace_features("native-no-instruction-retry", workspace=Workspace.load(tmp_path))
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    features.agent("reader", model="default", allow_tools=("read_file", "list_files"), tool_retries=0)
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    async with Persistence.open(
+        "native-no-instruction-retry", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+    ) as persistence, Runtime.open(
+        persistence=persistence, features=features, authorization=_HostAuthorization(),
+    ) as runtime:
+        agent = runtime.agents.get("reader")
+        principal = runtime.default_principal
+        await agent.create_session("session", principal=principal)
+        turn = await runtime.sessions.start(
+            "session", "Read the file", agent=agent, principal=principal, idempotency_key="once",
+        )
+        assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        assert requests == 2
 
 
 @pytest.mark.asyncio
@@ -100,11 +146,9 @@ async def test_session_reloads_known_scopes_before_first_model_request(
                 assert text not in instructions
             if discovery_rule is not None:
                 assert discovery_rule not in instructions
-        elif attempts == 2 and discovery_rule is not None:
-            assert discovery_rule in instructions
-            assert any(isinstance(part, ToolReturnPart) and part.outcome == "failed"
-                       for part in messages[-1].parts)
         else:
+            if discovery_rule is not None:
+                assert discovery_rule in instructions
             assert not any(is_tool_retry(part) for part in messages[-1].parts)
             assert "contents" in str(messages[-1])
             return ModelResponse(parts=[TextPart("done")])
@@ -124,7 +168,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
         initial_rule, discovery_rule, forbidden_rules = initial, discover, absent
         result = (await session.run(name, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
-        assert attempts == (3 if discover is not None else 2)
+        assert attempts == 2
 
     async with _storage(tmp_path, backend) as storage:
         async with Persistence.open("scope-memory", storage=storage) as persistence:
@@ -283,17 +327,18 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
     rules.write_text("PINNED-RULE", encoding="utf-8")
     (nested / "file.txt").write_text("approved contents", encoding="utf-8")
     requests = 0
-    pause_requests = 1 if initial_scope else 2
+    pause_requests = 1
 
     async def model(messages, info):
         nonlocal requests
         requests += 1
         instructions = info.instructions or ""
-        assert "LATER-RULE" not in instructions
-        if requests == 1 and not initial_scope:
+        if initial_scope:
+            assert "PINNED-RULE" in instructions and "LATER-RULE" not in instructions
+        elif requests == 1:
             assert "PINNED-RULE" not in instructions
         else:
-            assert "PINNED-RULE" in instructions
+            assert "LATER-RULE" in instructions and "PINNED-RULE" not in instructions
         if requests == pause_requests + 1:
             assert "approved contents" in str(messages[-1])
             assert not any(is_tool_retry(part) for part in messages[-1].parts)
@@ -372,11 +417,11 @@ async def test_discovery_scope_commit_precedes_execution_pin_across_storage_grou
                 promote_pending_execution=promote, _store_repository_instructions=store_pin,
             )
             with pytest.raises(AIError) as interrupted:
-                await LocalExecutionBackend.commit_repository_instruction_barrier(
+                await LocalExecutionBackend.commit_repository_instruction_overlay(
                     port,
                     SimpleNamespace(execution_id="active", session_id="session",
                                     recovery=ExecutionRecoveryDetail(agent_run_id="run")),
-                    overlay, RepositoryInstructionBarrier("run", "call", "a" * 64),
+                    overlay,
                 )
             assert interrupted.value.code is ErrorCode.STORAGE_UNAVAILABLE
             stored = await sessions.get("session", tenant_id="tenant")
