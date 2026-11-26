@@ -844,8 +844,17 @@ class RuntimeToolOperationBridge:
         portable_args = _portable_arguments(args)
         arguments_digest = canonical_sha256(portable_args)
         fingerprint = (tool_def.name, arguments_digest)
-        if any(fingerprint == (record.tool_name, record.arguments_digest)
-               for record in self._reported_interruptions.values()):
+        # A new call can run a verified replay-safe tool; the interrupted call
+        # keeps its original receipt and is never re-dispatched here.
+        if any(
+            fingerprint == (record.tool_name, record.arguments_digest)
+            and not (
+                call.tool_call_id != record.tool_call_id
+                and replay_safe and record.replay_safe
+                and capability_ref is not None and capability_ref == record.capability_ref
+            )
+            for record in self._reported_interruptions.values()
+        ):
             raise ToolCallFailed(_INTERRUPTED_TOOL_MESSAGE)
         prior = self._decisions.get(key)
         if prior is not None:
@@ -865,7 +874,7 @@ class RuntimeToolOperationBridge:
                 if self._canonical_event_writer is not None:
                     raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
                 if self._budget_scope_id is not None:
-                    raise AIError(ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED, safe_details={
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT, safe_details={
                         "scope_id": self._budget_scope_id,
                         "dimension": "tool_calls", "reason": "duplicate_dispatch",
                     })

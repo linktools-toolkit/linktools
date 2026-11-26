@@ -409,7 +409,9 @@ class BudgetRepositoryImpl(RepositoryBase):
             if (value.scope_id, value.call_id) != (scope_id, call_id):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if value.admission_id != admission_id:
-                self._reject(scope_id, "tool_calls", "duplicate_dispatch")
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT, safe_details={
+                    "scope_id": scope_id, "dimension": "tool_calls", "reason": "duplicate_dispatch",
+                })
             return usage
         await self._check_admission(transaction, row, usage, "tool_calls")
         updated = replace(usage, tool_calls=usage.tool_calls + 1)

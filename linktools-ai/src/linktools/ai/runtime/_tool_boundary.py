@@ -476,8 +476,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 result = await self._invoke(
                     call, tool.tool_def, final_args, invoke, capture=capture,
                     preflight=(bridge.require_fresh_control
-                               if split_approved is not None or self._budget is not None
-                               or self._tool_metrics is not None else None),
+                               if split_approved is not None or self._budget is not None else None),
                     entering=entering,
                 )
             except (

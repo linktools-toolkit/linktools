@@ -133,6 +133,7 @@ async def test_lost_ack_confirms_same_budget_and_effect_without_second_charge(
             await commands.commit_tool_admission(_request(), observed=effect)
         else:
             await commands.commit_tool_admission_boundary(_request(), execution=current, observed=effect)
+    assert repeated.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
     assert repeated.value.safe_details["reason"] == "duplicate_dispatch"
     assert (await state.execution.budgets.read("shared")).tool_calls == 1
 
@@ -354,6 +355,7 @@ async def test_budgeted_bridge_cannot_reuse_a_claimed_dispatch_receipt(admission
     assert decision.budget_admitted and (await state.execution.budgets.read("shared")).tool_calls == 1
     with pytest.raises(AIError) as duplicate:
         await bridge.begin(ctx, call, definition, {}, True)
+    assert duplicate.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
     assert duplicate.value.safe_details["reason"] == "duplicate_dispatch"
     await bridge.defer(decision)
     successor = await bridge.begin(ctx, call, definition, {}, True)
