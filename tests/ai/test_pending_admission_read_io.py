@@ -199,3 +199,70 @@ async def test_pending_admission_reads_authority_across_separate_groups(tmp_path
             identities, "session.resume", "request", tenant_id="tenant",
             sessions=sessions, session_id="session",
         ) == (None, admitted)
+
+
+@pytest.mark.asyncio
+async def test_closed_native_session_can_replay_exact_receipt_but_cannot_admit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def model(messages, info):
+        nonlocal calls
+        calls += 1
+        return ModelResponse(parts=[TextPart("answer")])
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Use native host authorization and require the admitted execution owner."""
+
+    namespace = "closed-admission-replay"
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    features = RuntimeFeatures(namespace)
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(_UsageFunctionModel(model)), features)
+
+    async def start(runtime, *, prompt="question", key="request", principal=None):
+        return await runtime.sessions.start(
+            "session", prompt, principal=principal or runtime.default_principal,
+            agent="default", idempotency_key=key,
+        )
+
+    async with Runtime.open(namespace, storage=storage, features=features, authorization=HostAuthorization()) as runtime:
+        await runtime.sessions.create_turn_session("session", principal=runtime.default_principal)
+
+        async def lose_response():
+            admitted = await start(runtime)
+            assert (await admitted.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+            raise TimeoutError("client did not receive the admitted receipt")
+
+        with pytest.raises(TimeoutError, match="client did not receive"):
+            await lose_response()
+        view = await runtime.history.turn_session("session", principal=runtime.default_principal)
+        first, = view["timeline"]["items"]
+        assert await runtime.sessions.close_turn_session(
+            "session", expected_revision=view["session"]["revision"], principal=runtime.default_principal,
+        )
+
+    async with Runtime.open(namespace, storage=storage, features=features, authorization=HostAuthorization()) as runtime:
+        turns = runtime._state.session_turns
+
+        async def no_admission(*_args, **_kwargs):
+            pytest.fail("not even an optimistic admission is allowed after session close")
+
+        monkeypatch.setattr(turns, "accept", no_admission)
+        replay = await start(runtime)
+        assert replay.key.turn_id == first["turn_id"]
+        result = await replay.wait_final(timeout_seconds=5)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert result.view["output"] == {"text": "answer"}
+        with pytest.raises(AIError) as changed:
+            await start(runtime, prompt="changed question")
+        assert changed.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        with pytest.raises(AIError) as denied:
+            await start(runtime, principal=Principal("foreign", runtime.tenant_id))
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        with pytest.raises(AIError) as closed:
+            await start(runtime, key="new-request")
+        assert closed.value.code is ErrorCode.SESSION_CONFLICT
+        assert await turns.find_request("session", "new-request") is None
+        assert calls == 1

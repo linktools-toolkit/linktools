@@ -558,7 +558,8 @@ class _RegenerableTurnRunner:
             principal, AuthorizationAction.SESSION_READ,
             ResourceRef(ResourceKind.SESSION, session_id, tenant_id),
         )
-        if session["status"] != "open":
+        # A closed session still owns its admitted receipts, but cannot admit new work.
+        if session["status"] != "open" and not session["has_request"]:
             raise AIError(ErrorCode.SESSION_CONFLICT)
         lineage = decode_session_lineage(session["lineage_json"])
         await self._authorize_lineage(
