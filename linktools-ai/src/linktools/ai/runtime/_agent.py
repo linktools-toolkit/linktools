@@ -191,20 +191,33 @@ class Session(Generic[AppT]):
         self,
         new_session_id: str,
         *,
+        expected_revision: int | None = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
         cwd: "str | None" = None,
-    ) -> "Session[AppT]":
+    ) -> "Session[AppT] | None":
+        """Fork the committed prefix at an explicit revision on SQL storage."""
+        sessions = self._runtime.sessions
+        actor = principal or self._principal
         agent = self._definition()
+        if sessions._uses_turn_sessions:
+            if expected_revision is None or idempotency_key is None or cwd is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                    "field": "expected_revision" if expected_revision is None else
+                             "idempotency_key" if idempotency_key is None else "cwd",
+                })
+            forked = await sessions.fork_turn_session(
+                self.session_id, new_session_id, principal=self._runtime._resolve_principal(actor),
+                expected_revision=expected_revision, idempotency_key=idempotency_key,
+            )
+            return agent.session(new_session_id, principal=actor) if forked else None
+        if expected_revision is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "expected_revision"})
         await self._runtime._fork_session(
-            agent.id,
-            self.session_id,
-            new_session_id,
-            principal=principal or self._principal,
-            idempotency_key=idempotency_key,
-            cwd=cwd,
+            agent.id, self.session_id, new_session_id, principal=actor,
+            idempotency_key=idempotency_key, cwd=cwd,
         )
-        return agent.session(new_session_id, principal=principal or self._principal)
+        return agent.session(new_session_id, principal=actor)
 
     async def update(
         self,
@@ -214,30 +227,53 @@ class Session(Generic[AppT]):
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
         cwd: "str | None" = None,
-    ) -> SessionView:
+        replace_cwd: bool = False,
+    ) -> SessionView | bool:
+        """Update session metadata; SQL uses the native revision check."""
+        sessions = self._runtime.sessions
+        actor = principal or self._principal
+        if sessions._uses_turn_sessions:
+            if idempotency_key is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "idempotency_key"})
+            return await sessions.update_turn_session(
+                self.session_id, principal=self._runtime._resolve_principal(actor),
+                expected_revision=expected_revision, metadata=metadata, cwd=cwd,
+                replace_cwd=replace_cwd or cwd is not None,
+            )
+        if replace_cwd:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "replace_cwd"})
         return await self._runtime._update_session(
-            self.agent_id,
-            self.session_id,
-            expected_revision=expected_revision,
-            metadata=metadata,
-            principal=principal or self._principal,
-            idempotency_key=idempotency_key,
-            cwd=cwd,
+            self.agent_id, self.session_id, expected_revision=expected_revision,
+            metadata=metadata, principal=actor, idempotency_key=idempotency_key, cwd=cwd,
         )
 
     async def close(
         self,
         *,
+        expected_revision: int | None = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
         force: bool = False,
         wait_timeout_seconds: int = 30,
-    ) -> SessionView:
+    ) -> SessionView | bool:
+        """Close an idle SQL session at an explicit revision."""
+        sessions = self._runtime.sessions
+        actor = principal or self._principal
+        if sessions._uses_turn_sessions:
+            if expected_revision is None or idempotency_key is not None or force or wait_timeout_seconds != 30:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                    "field": "expected_revision" if expected_revision is None else
+                             "idempotency_key" if idempotency_key is not None else
+                             "force" if force else "wait_timeout_seconds",
+                })
+            return await sessions.close_turn_session(
+                self.session_id, principal=self._runtime._resolve_principal(actor),
+                expected_revision=expected_revision,
+            )
+        if expected_revision is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "expected_revision"})
         return await self._runtime._close_session(
-            self.session_id,
-            principal=principal or self._principal,
-            idempotency_key=idempotency_key,
-            force=force,
+            self.session_id, principal=actor, idempotency_key=idempotency_key, force=force,
             wait_timeout_seconds=wait_timeout_seconds,
         )
 

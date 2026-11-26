@@ -225,3 +225,54 @@ async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path
             assert same.key == admitted.key
             assert (await same.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_bound_native_session_mutations_use_canonical_revisions(tmp_path):
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Authorize the canonical SQL session on the Runtime's behalf."""
+
+    async def model(_messages, _info):
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = RuntimeFeatures("sdk-native-mutations")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("default", allow_tools=(), allow_capabilities=())
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    async with (
+        Persistence.open("sdk-native-mutations", storage=PersistenceStorage.from_root(tmp_path)) as state,
+        Runtime.open(persistence=state, features=features, authorization=HostAuthorization()) as runtime,
+    ):
+        agent = runtime.agents.get()
+        await agent.create_session("source")
+        bound = agent.session("source")
+        admitted = await bound.start("original", idempotency_key="send")
+        assert (await admitted.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        revision = (await bound.inspect())["revision"]
+
+        assert not await bound.update(expected_revision=revision - 1, metadata={"wrong": True})
+        assert await bound.update(expected_revision=revision, metadata={"title": "Updated"})
+        assert (await bound.inspect())["metadata"] == {"title": "Updated"}
+        assert await bound.fork("stale", expected_revision=revision, idempotency_key="stale") is None
+        source_revision = (await bound.inspect())["revision"]
+        child = await bound.fork("child", expected_revision=source_revision, idempotency_key="fork")
+        assert child is not None and child.session_id == "child" and child.agent_id == bound.agent_id
+        repeated = await bound.fork("child", expected_revision=source_revision, idempotency_key="fork")
+        assert repeated is not None and repeated.session_id == child.session_id
+        timeline = await child.timeline()
+        assert [turn["turn_id"] for turn in timeline["items"]] == [admitted.key.turn_id]
+        assert (await child.inspect())["metadata"] == {"title": "Updated"}
+
+        child_revision = (await child.inspect())["revision"]
+        assert await child.update(expected_revision=child_revision, metadata={"title": "Child"})
+        assert not await child.close(expected_revision=child_revision)
+        assert await child.close(expected_revision=child_revision + 1)
+        assert (await child.inspect())["status"] == "CLOSED"
+        assert (await bound.inspect())["status"] == "OPEN"
+        for session_id in ("source", "child", "stale"):
+            assert await state.conversation.sessions.get(session_id, tenant_id=runtime.tenant_id) is None
+
+        with pytest.raises(AIError) as invalid:
+            await bound.close(expected_revision=source_revision + 1, force=True)
+        assert invalid.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        assert invalid.value.safe_details["field"] == "force"
