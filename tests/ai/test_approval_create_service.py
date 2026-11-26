@@ -10,8 +10,11 @@ import pytest
 
 from linktools.ai.core import (
     ApprovalDecision,
+    AuthorizationAction,
     ExecutionStatus,
     Principal,
+    ResourceKind,
+    ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest
@@ -32,34 +35,39 @@ class _Executions:
     async def get(self, execution_id: str, *, tenant_id: str) -> object | None:
         if execution_id == "execution" and tenant_id == "tenant":
             return SimpleNamespace(
-                execution_id=execution_id, principal_id="owner",
+                execution_id=execution_id, principal_id="owner", parent_execution_id=None,
                 status=ExecutionStatus.SUCCEEDED,
             )
         return None
 
 
-class _DenyAuthorization:
+class _RecordingAuthorization:
+    def __init__(self, allowed: bool) -> None:
+        self.allowed = allowed
+        self.calls: list[tuple[Principal, AuthorizationAction, ResourceRef]] = []
+
     async def authorize(self, principal, action, resource) -> None:
-        del principal, action, resource
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        self.calls.append((principal, action, resource))
+        if not self.allowed:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
 
 @pytest.mark.asyncio
-async def test_approval_list_requires_authorization_even_without_pending_tools() -> None:
-    service = DefaultApprovalService(
-        object(),
-        _Executions(),
-        _DenyAuthorization(),
-        objects=object(),
-    )
+@pytest.mark.parametrize("allowed", (False, True))
+async def test_approval_list_requires_authorization_even_without_pending_tools(allowed: bool) -> None:
+    policy = _RecordingAuthorization(allowed)
+    service = DefaultApprovalService(object(), _Executions(), policy, objects=object())
+    principal = Principal("caller", "tenant", "service")
 
-    with pytest.raises(AIError) as error:
-        await service.list(
-            "execution",
-            principal=Principal("caller", "tenant", "service"),
-        )
+    if allowed:
+        assert await service.list("execution", principal=principal) == ()
+    else:
+        with pytest.raises(AIError) as error:
+            await service.list("execution", principal=principal)
+        assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
 
-    assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+    assert policy.calls == [(principal, AuthorizationAction.APPROVAL_READ,
+                            ResourceRef(ResourceKind.EXECUTION, "execution", "tenant"))]
 
 
 def test_approval_decision_request_keeps_only_external_decision_input() -> None:

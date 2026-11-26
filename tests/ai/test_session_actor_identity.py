@@ -36,7 +36,7 @@ class SharedSessionPolicy(TenantAuthorizationPolicy):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_commit", (False, True))
 async def test_shared_session_preserves_actor_in_live_and_portable_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_commit: bool,
+    tmp_path: Path, terminal_commit: bool,
 ) -> None:
     entered, finish = asyncio.Event(), asyncio.Event()
 
@@ -78,22 +78,17 @@ async def test_shared_session_preserves_actor_in_live_and_portable_history(
         assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         row = await state.session_turns.get_turn(turn.key)
         assert row["request_json"]["principal"]["principal_id"] == "peer"
-        assert await state.conversation.sessions.get("shared", tenant_id="default") is None
+        assert state.conversation.sessions is None
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id="default") is None
 
-        async def no_legacy_read(*args, **kwargs):
-            pytest.fail("native session display must not consult legacy session storage")
-
-        with monkeypatch.context() as patch:
-            patch.setattr(state.conversation.sessions, "get", no_legacy_read)
-            expected = (await session.timeline(principal=owner))["items"]
-            assert len(expected) == 1 and expected[0]["conversation_committed"]
-            assert expected[0]["status"] == ExecutionStatus.SUCCEEDED.value
-            assert (await session.timeline(principal=peer))["items"] == expected
-            for denied in denied_actors:
-                with pytest.raises(AIError) as error:
-                    await session.timeline(principal=denied)
-                assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+        expected = (await session.timeline(principal=owner))["items"]
+        assert len(expected) == 1 and expected[0]["conversation_committed"]
+        assert expected[0]["status"] == ExecutionStatus.SUCCEEDED.value
+        assert (await session.timeline(principal=peer))["items"] == expected
+        for denied in denied_actors:
+            with pytest.raises(AIError) as error:
+                await session.timeline(principal=denied)
+            assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
 
     archive = InMemoryObjectStore()
     limits = SnapshotLimits(max_entries=10000, max_bytes=10000000)
@@ -107,7 +102,7 @@ async def test_shared_session_preserves_actor_in_live_and_portable_history(
     async with Persistence.open("shared-session", storage=PersistenceStorage.from_root(root), read_only=True) as state:
         restored_turn = await state.session_turn_reader.get_turn(turn.key)
         assert restored_turn["request_json"]["principal"]["principal_id"] == "peer"
-        assert await state.conversation.sessions.get("shared", tenant_id="default") is None
+        assert state.conversation.sessions is None
         async with History.open(persistence=state, authorization=policy) as history:
             for actor in (owner, peer):
                 assert (await history.turn_session("shared", principal=actor))["timeline"]["items"] == expected
