@@ -208,7 +208,8 @@ async def materialize_runtime_storage(
     for store in (*stores.values(), *capability_stores.values()):
         await store.initialize()
 
-    execution_group = stores[PersistenceDomain.EXECUTION].storage_group
+    execution_store = stores[PersistenceDomain.EXECUTION]
+    execution_group = execution_store.storage_group
     if stores[PersistenceDomain.CHECKPOINT].storage_group is not execution_group:
         raise AIError(
             ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
