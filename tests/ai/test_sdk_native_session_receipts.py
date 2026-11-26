@@ -135,3 +135,50 @@ async def test_closing_runtime_wakes_waiting_native_sdk_observer(tmp_path, monke
             tasks.create_task(observe_close())
             await snapshot.wait()
             await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_native_inactivity_rechecks_remote_sqlite_without_notice_bridge(tmp_path, monkeypatch):
+    entered, release, seen_busy = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def model(_messages, _info):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("done")])
+
+    storage = PersistenceStorage.from_root(tmp_path)
+    async with (
+        Runtime.open("native-session-receipts", storage=storage, features=_features(model),
+                     authorization=_Authorization()) as producer,
+        Runtime.open("native-session-receipts", storage=storage, features=_features(model),
+                     authorization=_Authorization()) as observer,
+        asyncio.timeout(10),
+    ):
+        caller = producer.default_principal
+        await producer.sessions.create_turn_session("chat", principal=caller)
+        turn = await producer.sessions.start(
+            "chat", "remote", agent="default", principal=caller, idempotency_key="send",
+        )
+        await entered.wait()
+        read = observer.history.turn_session_state
+
+        async def observe_state(*args, **kwargs):
+            view = await read(*args, **kwargs)
+            if view["active_turn_id"] == turn.key.turn_id:
+                seen_busy.set()
+            return view
+
+        monkeypatch.setattr(observer.history, "turn_session_state", observe_state)
+        async with asyncio.TaskGroup() as tasks:
+            waiter = tasks.create_task(observer.sessions.wait_inactive(
+                "chat", principal=observer.default_principal, timeout_seconds=5,
+            ))
+            await seen_busy.wait()
+            assert not waiter.done()
+            release.set()
+            await turn.wait_final(timeout_seconds=5)
+        assert waiter.result()["active_turn_id"] is None
+        assert waiter.result()["last_turn_no"] == 1 and calls == 1

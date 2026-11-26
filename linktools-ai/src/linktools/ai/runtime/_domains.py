@@ -771,12 +771,14 @@ class RuntimeSessions(Generic[AppT]):
             )
         validate_timeout(timeout_seconds)
         validate_timeout(observation_timeout_seconds)
+        runner, _ = self._require_turn_sessions()
         wake = asyncio.Event()
+        delay = 1.0
 
         def changed(frame: dict[str, JsonValue]) -> None:
             if frame.get("type") == "terminal" or (
                 frame.get("type") == "gap"
-                and frame.get("phase") not in ("waiting", "cancelling", "producer_stopped")
+                and frame.get("phase") not in ("waiting", "cancelling")
             ):
                 wake.set()
 
@@ -786,11 +788,37 @@ class RuntimeSessions(Generic[AppT]):
             async with deadline:
                 while True:
                     wake.clear()
-                    async with asyncio.timeout(observation_timeout_seconds):
-                        _, view = await self._inspect_native_session(session_id, principal)
-                    if view["active_turn_id"] is None:
+                    observation = asyncio.timeout(observation_timeout_seconds)
+                    try:
+                        async with observation:
+                            _, view = await self._inspect_native_session(session_id, principal)
+                    except TimeoutError as error:
+                        if not observation.expired():
+                            raise
+                        raise TimeoutError("session inactivity observation timed out") from error
+                    if deadline.expired() or observation.expired():
+                        raise TimeoutError("session inactivity observation timed out")
+                    active = view["active_turn_id"]
+                    if active is None:
                         return view
-                    await wake.wait()
+                    if not isinstance(active, str):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if runner.has_local_producer(SessionTurnKey(session_id, active)):
+                        await wake.wait()
+                        delay = 1.0
+                        continue
+                    # A peer may publish without a notice carrier. Recheck only
+                    # this SDK wait, with backoff; local producers wake directly.
+                    passive = asyncio.timeout(delay)
+                    try:
+                        async with passive:
+                            await wake.wait()
+                    except TimeoutError:
+                        if not passive.expired():
+                            raise
+                        delay = min(30.0, delay * 2)
+                    else:
+                        delay = 1.0
         except TimeoutError as error:
             if not deadline.expired():
                 raise

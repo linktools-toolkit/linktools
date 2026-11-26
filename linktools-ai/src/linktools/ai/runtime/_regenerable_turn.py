@@ -297,6 +297,10 @@ class _RegenerableTurnRunner:
             **({"phase": "cancelling"} if cancelling else {}),
         })
 
+    def has_local_producer(self, key: SessionTurnKey) -> bool:
+        producer = self._producers.get(key)
+        return producer is not None and not producer.done()
+
     def _producer_stopped(self, turn: _AdmittedTurn | _AttachedGraphTurn) -> None:
         # Local evidence only: the transport may not report this phase and
         # the existing lease remains the sole durable write authority.
