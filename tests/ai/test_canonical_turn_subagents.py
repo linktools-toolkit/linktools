@@ -16,6 +16,7 @@ from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersi
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -78,10 +79,13 @@ def _model(role, fn):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel,trace", ((False, False), (True, False), (False, True)),
-                         ids=("success", "cancel", "cli-default-trace"))
+@pytest.mark.parametrize(
+    "cancel,trace,recover",
+    ((False, False, False), (True, False, False), (False, True, False), (False, True, True)),
+    ids=("success", "cancel", "cli-default-trace", "recover-completed-trace"),
+)
 async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
-    tmp_path: Path, cancel: bool, trace: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool, trace: bool, recover: bool,
 ) -> None:
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
@@ -172,6 +176,14 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
             assert any(item["item_kind"] == "assistant" and item["content"] == _ANSWER for item in frame["items"])
 
     async with open_host() as (state, runtime, app, http):
+        if recover:
+            async def lose_terminal_commit(_key, *, generation, state, **_options):
+                assert generation == 1 and state == "succeeded"
+                return False
+
+            # The worker completed native Step and both model/tool Trace
+            # boundaries, but its terminal SQL publication was never committed.
+            monkeypatch.setattr(state.session_turns, "finish", lose_terminal_commit)
         created = await http.post("/api/sessions", headers=_HEADERS,
                                   json={"session_id": _SESSION, "request_id": "create"})
         assert created.status_code == 201, created.text
@@ -198,7 +210,10 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                             continue
                         if frame["type"] == "tool" and frame["item"]["key"] == f"tool:{_DELEGATE_CALL}":
                             tool_statuses.append(frame["item"]["status"])
+                        if frame["type"] == "gap" and recover:
+                            break
                         if frame["type"] == "terminal":
+                            assert not recover
                             assert frame["state"] == ("cancelled" if cancel else "succeeded"), frame
                             if not cancel:
                                 assert_answer(frame)
@@ -215,7 +230,24 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
         assert await state.execution.executions.get(turn_id, tenant_id=runtime.tenant_id) is None
         assert await state.conversation.sessions.get(_SESSION, tenant_id=runtime.tenant_id) is None
 
-    async with open_host() as (_, runtime, _, http):
+    async with open_host() as (state, runtime, _, http):
+        if recover:
+            key = SessionTurnKey(_SESSION, turn_id)
+            turns = state.session_turns
+            assert (await turns.get_turn(key))["state"] == "accepted"
+            before = await runtime.history.turn_trace(_SESSION, turn_id, principal=runtime.default_principal)
+            assert before.items[-1].payload["kind"] == "MODEL_RESPONSE"
+            # Simulate expiration rather than sleep for the full lease period.
+            async with turns._context.engine.begin() as connection:
+                changed = await connection.execute(
+                    turns._turns.update().filter_by(**turns._turn_values(key)).values(lease_until=0),
+                )
+                assert changed.rowcount == 1
+            assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
+            row = await turns.get_turn(key)
+            assert row["state"] == "succeeded" and row["generation"] == 2
+            after = await runtime.history.turn_trace(_SESSION, turn_id, principal=runtime.default_principal)
+            assert after == before
         assert await request(http) == turn_id
         stored = await http.get("/api/session", params={**params, "turn_id": turn_id})
         assert stored.status_code == 200, stored.text

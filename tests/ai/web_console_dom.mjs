@@ -393,13 +393,30 @@ if(process.argv[3]==='session-published-turn') {
   await stopResponse.requested;
   stopResponse({accepted:false});await stop;
   assert.match(node('notice').textContent,/Stop not confirmed/);
+  const pendingTool={kind:'tool',key:'tool:pending',tool_name:'pending_tool',status:'RUNNING'};
+  emitTurn({type:'tool',...live,item:pendingTool});
+  assert.match(node('conversation').textContent,/pending_tool.*In progress/s);
+  assert.ok(thoughtCards()[1].className.split(' ').includes('process-running'));
+  const readsBeforeDisconnect=calls.length;
+  ordinaryWatch.onerror();
+  assert.equal(calls.length,readsBeforeDisconnect,'preserving the prefix does not fetch');
+  assert.equal(liveAnswer(),answerBody);
+  assert.equal(nativeThought(),liveThought);
+  assert.equal(liveThought.open,true);
+  assert.equal(liveThought.elapsedNode.textContent,'15 ms');
+  assert.ok(!thoughtCards()[1].className.split(' ').includes('process-running'));
+  assert.match(node('conversation').textContent,/pending_tool.*Outcome unconfirmed.*Live preview is incomplete/s);
+  emitTurn({type:'delta',...live,attempt:2,delta_kind:'text',part_index:2,text:'disconnected suffix'});
+  emitTurn({type:'tool',...live,item:{...pendingTool,status:'SUCCEEDED'}});
+  assert.doesNotMatch(node('conversation').textContent,/disconnected suffix|Completed/);
+
   emitTurn({type:'terminal',turn_id:ordinaryTurn,turn_no:1,revision:2,generation:1,state:'succeeded',
     prompt:'Native question',items:[{item_kind:'thinking',content:'Native thought continues',elapsed_ms:15}, {item_kind:'assistant',content:'Native finished'}]});
   assert.match(node('conversation').textContent,/Native question.*Thinking.*Native thought.*Native finished/s);
   assert.equal(nativeThought().open,true);
   assert.equal(nativeThought().elapsedNode.textContent,'15 ms');
   assert.equal(node('conversation').textContent.split('Native thought').length,2);
-  assert.doesNotMatch(node('conversation').textContent,/Native preview/);
+  assert.doesNotMatch(node('conversation').textContent,/Native preview|pending_tool|Live preview is incomplete/);
   node('prompt').value='Next native question';
   const nextNative=deferred('POST /api/sessions/b/messages'),sendNative=node('composer').requestSubmit();
   await nextNative.requested;

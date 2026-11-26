@@ -4,6 +4,7 @@
 
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
 
@@ -371,15 +372,13 @@ class Agent(Generic[AppT]):
         budget: RunBudget | None, output: "type[BaseModel] | None", principal: "Principal | None",
         session_id: str | None, idempotency_key: str | None, mode: ExecutionMode, planning: bool | None,
         thinking: "ThinkingValue | None", correlation: "Mapping[str, object] | None",
-        input_context: ExecutionInputContext | None = None, legacy_observation: bool = False,
+        input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
         if session_id is not None:
             sessions = self._runtime.sessions
             if sessions._uses_turn_sessions:
-                if input_context is not None or legacy_observation:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
-                        "field": "input_context" if input_context is not None else "observation",
-                    })
+                if input_context is not None:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "input_context"})
                 actor = self._runtime._resolve_principal(principal)
                 session = sessions._bind_native_session(session_id, principal=actor, local_workspace=False)
                 receipt = await sessions._start_turn_receipt(
@@ -389,12 +388,24 @@ class Agent(Generic[AppT]):
                     mode=mode, planning=planning,
                     thinking=thinking, correlation=correlation,
                 )
-                return session._turn(receipt.turn_id, actor)
+                return replace(session._turn(receipt.turn_id, actor), _replayed=receipt.replayed)
         return await self.execution_port.start(
             validate_user_input(user_prompt), files=files, session_context=session_context,
             budget=budget, output=output, principal=principal, session_id=session_id,
             idempotency_key=idempotency_key, mode=mode, planning=planning, thinking=thinking,
             correlation=correlation, **({"input_context": input_context} if mode == "run" else {}),
+        )
+
+    def _open_native_observer(self, session_id, principal, on_event, include_event_content):
+        if session_id is None or on_event is None or not self._runtime.sessions._uses_turn_sessions:
+            return nullcontext()
+        if include_event_content:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "include_event_content"})
+        from ._native_session import _NativeMetadataObserver
+
+        return _NativeMetadataObserver(
+            self._runtime, session_id, self._runtime._resolve_principal(principal),
+            local_workspace=False,
         )
 
     async def run(
@@ -418,28 +429,29 @@ class Agent(Generic[AppT]):
         close_timeout_seconds: float = 5.0,
         raise_on_stream_error: bool = False,
     ) -> "WaitResult[ExecutionResult] | WaitResult[_NativeTurnResult]":
-        """Run and wait; planning enables a capability, while include_event_content only controls observation."""
+        """Run and wait, optionally delivering a live callback.
+
+        Native SQL sessions project metadata only. include_event_content has
+        no effect without a callback and is rejected for native callbacks.
+        """
         validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
                       raise_on_stream_error=raise_on_stream_error)
-        execution = await self._start_on_owner(
-            user_prompt,
-            files=files,
-            session_context=session_context,
-            budget=budget,
-            output=output,
-            principal=principal,
-            session_id=session_id,
-            idempotency_key=idempotency_key,
-            mode="run", planning=planning,
-            thinking=thinking,
-            correlation=correlation,
-            input_context=input_context, legacy_observation=(on_event is not None or include_event_content
-                or close_timeout_seconds != 5.0 or raise_on_stream_error),
-        )
         from ._native_session import _NativeSessionTurn
 
-        if isinstance(execution, _NativeSessionTurn):
-            return WaitResult(await execution.wait_final(timeout_seconds=timeout_seconds), None)
+        with self._open_native_observer(session_id, principal, on_event, include_event_content) as observer:
+            execution = await self._start_on_owner(
+                user_prompt, files=files, session_context=session_context, budget=budget, output=output,
+                principal=principal, session_id=session_id, idempotency_key=idempotency_key,
+                mode="run", planning=planning, thinking=thinking, correlation=correlation, input_context=input_context,
+            )
+            if isinstance(execution, _NativeSessionTurn):
+                if observer is None:
+                    return WaitResult(await execution.wait_final(timeout_seconds=timeout_seconds), None)
+                assert on_event is not None
+                return await execution._wait_observed(
+                    observer, agent_id=self.id, on_event=on_event, timeout_seconds=timeout_seconds,
+                    close_timeout_seconds=close_timeout_seconds, raise_on_stream_error=raise_on_stream_error,
+                )
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
@@ -486,26 +498,28 @@ class Agent(Generic[AppT]):
         close_timeout_seconds: float = 5.0,
         raise_on_stream_error: bool = False,
     ) -> "WaitResult[ExecutionResult] | WaitResult[_NativeTurnResult]":
-        """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
+        """Execute plan mode with plan-safe tools and wait; this is not a dry run.
+
+        Like run(), native SQL callbacks are metadata-only.
+        """
         validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
                       raise_on_stream_error=raise_on_stream_error)
-        execution = await self._start_on_owner(
-            user_prompt,
-            files=files,
-            session_context=session_context,
-            budget=budget,
-            output=output,
-            principal=principal,
-            session_id=session_id,
-            idempotency_key=idempotency_key,
-            mode="plan", planning=True, thinking=thinking,
-            correlation=correlation, legacy_observation=(on_event is not None or include_event_content
-                or close_timeout_seconds != 5.0 or raise_on_stream_error),
-        )
         from ._native_session import _NativeSessionTurn
 
-        if isinstance(execution, _NativeSessionTurn):
-            return WaitResult(await execution.wait_final(timeout_seconds=timeout_seconds), None)
+        with self._open_native_observer(session_id, principal, on_event, include_event_content) as observer:
+            execution = await self._start_on_owner(
+                user_prompt, files=files, session_context=session_context, budget=budget, output=output,
+                principal=principal, session_id=session_id, idempotency_key=idempotency_key,
+                mode="plan", planning=True, thinking=thinking, correlation=correlation,
+            )
+            if isinstance(execution, _NativeSessionTurn):
+                if observer is None:
+                    return WaitResult(await execution.wait_final(timeout_seconds=timeout_seconds), None)
+                assert on_event is not None
+                return await execution._wait_observed(
+                    observer, agent_id=self.id, on_event=on_event, timeout_seconds=timeout_seconds,
+                    close_timeout_seconds=close_timeout_seconds, raise_on_stream_error=raise_on_stream_error,
+                )
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,

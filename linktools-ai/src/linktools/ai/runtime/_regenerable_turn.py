@@ -955,9 +955,8 @@ class _RegenerableTurnRunner:
             # Cold recovery may settle proven history, but only an exact approval
             # frontier grants a live subagent toolset to a resumed producer.
             native_subagents = ready is not None and subagent_topology
-            # Cold child settlement does not reconstruct missing parent Trace events.
-            settle_subagents = (ready is None and subagent_topology and not canonical_trace
-                                and self._recover_subagent is not None)
+            settle_subagents = (ready is None and subagent_topology
+                                and (canonical_trace or self._recover_subagent is not None))
             self._executor.require_regenerable(
                 binding, canonical_step=native_step is not None, canonical_trace=canonical_trace,
                 split_step=split is not None, native_subagents=native_subagents or settle_subagents,
@@ -1083,7 +1082,17 @@ class _RegenerableTurnRunner:
                             events = await steps.list_events(run_id=key.turn_id)
                             completed_checkpoint = any(event.kind == "run_completed" for event in events)
                         recover_delegate = None
-                        if settle_subagents and not completed_checkpoint:
+                        if settle_subagents and canonical_trace:
+                            # A cold Trace continuation can only append the terminal
+                            # marker to an already complete, retained parent run.
+                            if not completed_checkpoint or not continuation or not isinstance(continuation[-1], ModelResponse):
+                                self._gap(key)
+                                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                            await self._require_completed_trace(
+                                key, continuation[-1], event_head=trace_event_base,
+                                request_head=trace_interaction_base,
+                            )
+                        elif settle_subagents and not completed_checkpoint:
                             if "delegate_task" not in pending.values():
                                 self._gap(key)
                                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -1763,6 +1772,41 @@ class _RegenerableTurnRunner:
             return discovered, not instruction_read
 
         return _RepositoryInstructionBoundary(check, initial, overlay, approved_frontiers=approved)
+
+    async def _require_completed_trace(
+        self, key: SessionTurnKey, response: ModelResponse, *, event_head: int, request_head: int,
+    ) -> None:
+        """Verify the final provider result under the fenced canonical Trace frontier."""
+        from ..persistence.contracts import ModelInteractionRecord
+
+        archive = self._trace_archive
+        if archive is None or event_head < 1 or request_head < 1:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        # The takeover fenced the previous producer before capturing these
+        # immutable frontiers; no provider or tool can append as this owner yet.
+        records = await archive.list_model_interactions(
+            agent_run_id=key.turn_id, after_model_request_seq=request_head - 1, limit=1,
+        )
+        if len(records) != 1:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        [record] = records
+        if (not isinstance(record, ModelInteractionRecord) or record.agent_run_id != key.turn_id
+                or record.model_request_seq != request_head or record.purpose != "agent"
+                or record.status != "SUCCEEDED" or record.finished_at is None or record.response_context is None):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        events = await archive.list_trace_events(
+            agent_run_id=key.turn_id, event_high_water=event_head, after_timestamp=None,
+            after_sequence=0, limit=3, model_request_seq=request_head,
+        )
+        if tuple(event.event_type for _, event in events) != ("MODEL_REQUEST_STARTED", "MODEL_REQUEST_SUCCEEDED"):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if any(event.agent_run_id != key.turn_id or event.agent_conversation_id != key.session_id
+               or event.step_index != record.step_index for _, event in events):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        _, retained, *_ = await archive.resolve_model_interaction(record)
+        if (retained is None or len(retained) != 1 or not isinstance(retained[0], ModelResponse)
+                or retained[0].parts != response.parts):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
     async def _terminal_trace(
         self, turn: _AdmittedTurn, agent_id: str | None, state: str, error_code: str | None = None,

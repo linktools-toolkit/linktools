@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import aclosing, AbstractAsyncContextManager, asynccontextmanager
+from contextlib import aclosing, AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
-from ..errors import AIError, ErrorCode
-from ..observe.stream import validate_timeout
+from ..core import ExecutionEventType, ExecutionLineageKind
+from ..errors import AIError, ErrorCode, ObservationError
+from ..execution import ExecutionStreamEvent, ExecutionTreeEvent
+from ..observe import WaitResult
+from ..observe.stream import ObservationSession, call_observer, validate_timeout
 from ..persistence.turns import SessionTurnKey
 from .turn_clients import TurnObserver, _END_STATES, _FINAL_STATES, _SessionOccupancy, _watch_turn_occupancy
 
@@ -27,6 +30,40 @@ if TYPE_CHECKING:
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
+
+
+class _NativeMetadataObserver(TurnObserver):
+    def __init__(self, runtime: Runtime, session_id: str, principal: Principal, *, local_workspace: bool) -> None:
+        super().__init__(runtime, session_id, principal, local_workspace=local_workspace)
+        # Reuse the same low-level subscription, not the callback's queue.
+        # Slow user callbacks cannot prevent the authority reader from waking.
+        self.authority = TurnObserver(runtime, session_id, principal, local_workspace=local_workspace, preview=False)
+
+    def __enter__(self) -> _NativeMetadataObserver:
+        self._unsubscribe = self._runtime.sessions.observe_turn_session(self._session_id, self._receive_both)
+        return self
+
+    def _receive_both(self, frame: dict[str, JsonValue]) -> None:
+        self.authority._receive(frame)
+        self._receive(frame)
+
+    def _receive(self, frame: dict[str, JsonValue]) -> None:
+        # Raw text and thinking are not part of the metadata callback. They
+        # must not evict tool events from its bounded observer queue.
+        if frame.get("type") not in {"delta", "preview_reset"}:
+            super()._receive(frame)
+
+    def finish_from_authority(self, turn_id: str, result: _NativeTurnResult) -> None:
+        live = self._terminal
+        if (live is not None and live.get("turn_id") == turn_id and live.get("type") == "terminal"
+                and str(live.get("state", "")).upper() in _FINAL_STATES):
+            return
+        # Use the same queue to preserve any tool frames already received.
+        # Only the terminal is proven by the result; live coverage is unknown.
+        super()._receive({
+            **result.view, "type": "terminal", "turn_id": turn_id,
+            "state": result.status.value.lower(), "_authority_fallback": True,
+        })
 
 
 class _NativeTurnResult(Protocol):
@@ -55,6 +92,7 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
     _read_result: Callable[[SessionTurnKey, Principal], Awaitable[ResultT]]
     _runtime: Runtime[AppT]
     _local_workspace: bool
+    _replayed: bool = False
 
     async def result(self) -> ResultT:
         return await self._read_result(self.key, self.principal)
@@ -94,13 +132,19 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
         async with asyncio.timeout(timeout_seconds):
             return await self._wait(final_only=True)
 
-    async def _wait(self, *, final_only: bool) -> ResultT:
+    async def _wait(
+        self, *, final_only: bool, on_initial: Callable[[ResultT], None] | None = None,
+        subscribed: TurnObserver | None = None,
+    ) -> ResultT:
         end_states = _FINAL_STATES if final_only else _END_STATES
-        with TurnObserver(
+        scope = (TurnObserver(
             self._runtime, self.key.session_id, self.principal,
             local_workspace=self._local_workspace, preview=False,
-        ) as observer:
+        ) if subscribed is None else nullcontext(subscribed))
+        with scope as observer:
             initial = await self.result()
+            if on_initial is not None:
+                on_initial(initial)
             if initial.status.value in end_states:
                 return initial
             events = observer.events(self.key.turn_id, final_only=final_only)
@@ -111,6 +155,87 @@ class _NativeSessionTurn(Generic[AppT, ResultT]):
             finally:
                 await events.aclose()
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+    async def _wait_observed(
+        self, observer: _NativeMetadataObserver, *, agent_id: str,
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]], timeout_seconds: float | None,
+        close_timeout_seconds: float, raise_on_stream_error: bool,
+    ) -> WaitResult[ResultT]:
+        """Deliver only authorized, live root metadata; no tree cursor or raw body."""
+        runtime = self._runtime
+        turn_id = self.key.turn_id
+        loop = asyncio.get_running_loop()
+        initial: asyncio.Future[ResultT] = loop.create_future()
+        drained: asyncio.Future[ResultT] = loop.create_future()
+        observation = ObservationSession(
+            "session-turn", turn_id, None, close_timeout_seconds, runtime._release_observation,
+            raise_on_stream_error=raise_on_stream_error,
+        )
+        runtime._register_observation(observation)
+
+        async def emit(frame: Mapping[str, JsonValue]) -> None:
+            kind = frame.get("type")
+            if kind == "gap":
+                observation.record_error(ObservationError(
+                    "stream", cursor=None, safe_details={"coverage_complete": False, "resource_id": turn_id},
+                ))
+                return
+            if kind == "tool" and isinstance(item := frame.get("item"), Mapping):
+                name, status, key = item.get("tool_name"), item.get("status"), item.get("key")
+                if not isinstance(name, str) or not isinstance(status, str) or not isinstance(key, str):
+                    return
+                event_type = (ExecutionEventType.TOOL_CALL_STARTED if status == "RUNNING"
+                              else ExecutionEventType.TOOL_CALL_FINISHED)
+                payload = {"tool_name": name, "status": status, "tool_call_id": key.removeprefix("tool:")}
+            elif kind == "terminal":
+                status = frame.get("state")
+                event_type = {
+                    "succeeded": ExecutionEventType.EXECUTION_SUCCEEDED,
+                    "failed": ExecutionEventType.EXECUTION_FAILED,
+                    "cancelled": ExecutionEventType.EXECUTION_CANCELLED,
+                    "recovery_required": ExecutionEventType.EXECUTION_RECOVERY_REQUIRED,
+                }.get(status if isinstance(status, str) else "")
+                if event_type is None:
+                    return
+                payload = {"status": status}
+                if isinstance(code := frame.get("error_code"), str):
+                    payload["error_code"] = code
+            else:
+                return
+            await call_observer(on_event, ExecutionTreeEvent(
+                execution_id=turn_id, agent_id=agent_id, lineage_kind=ExecutionLineageKind.SESSION_RESUME,
+                parent_execution_id=None, root_execution_id=turn_id, parent_invocation_id=None, depth=0,
+                event=ExecutionStreamEvent(turn_id, None, event_type.value, payload),
+            ), cursor=None)
+
+        async def watch() -> None:
+            result = await initial
+            if self._replayed and result.status.value in _FINAL_STATES:
+                await emit({**result.view, "type": "terminal", "state": result.status.value.lower()})
+                return
+
+            async def unblock_terminal() -> None:
+                confirmed = await asyncio.shield(drained)
+                observer.finish_from_authority(turn_id, confirmed)
+
+            unblock = asyncio.create_task(unblock_terminal(), name=f"native-turn-terminal-{turn_id}")
+            try:
+                async with aclosing(observer.events(turn_id, final_only=True)) as frames:
+                    async for frame in frames:
+                        await emit(frame)
+                        if frame.get("_authority_fallback") is True:
+                            # Report incomplete live coverage only after delivering
+                            # the already-authoritative terminal callback.
+                            await emit({"type": "gap"})
+            finally:
+                unblock.cancel()
+                await asyncio.gather(unblock, return_exceptions=True)
+
+        result, stream_error = await observation.wait(
+            watch(), self._wait(final_only=True, on_initial=initial.set_result, subscribed=observer.authority),
+            timeout_seconds, drained,
+        )
+        return WaitResult(result, None, stream_error)
 
     async def _replay_events(self) -> AsyncIterator[dict[str, JsonValue]]:
         result = await self.result()

@@ -406,11 +406,15 @@ function ordinaryTurnNode(turn, previous=null) {
     if(item.item_kind==='tool_call')appendTool(tools.get(`tool:${item.tool_call_id}`));
   }
   const parts=(turn.conversation_committed?turn.interruptedPreview:turn.liveParts) || [];
+  const disconnected=!turn.conversation_committed && turn.previewGap!=null;
   for(const part of parts){
-    if(part.tool){appendTool(part.tool);continue;}
+    if(part.tool){
+      appendTool(disconnected && part.tool.status==='RUNNING' ? {...part.tool,status:'UNCONFIRMED'} : part.tool);
+      continue;
+    }
     let body;
     if(part.kind==='thinking'){
-      body=appendThought(part,part.text,part.elapsedMs,!turn.conversation_committed && !part.done);
+      body=appendThought(part,part.text,part.elapsedMs,!turn.conversation_committed && !disconnected && !part.done);
     } else {
       body=previous?.livePartBodies?.get(part);
       if(body)updateMarkdownMessage(body,part.text);
@@ -632,7 +636,7 @@ function watchOrdinarySession(id) {
     const active=activeTurn();
     const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
     if(row?.liveGeneration && row.previewGap!==row.liveGeneration)
-      patchOrdinaryTurn({...row,liveParts:[],previewGap:row.liveGeneration});
+      patchOrdinaryTurn({...row,previewGap:row.liveGeneration});
     const read=watch.activeRead;
     if(read?.id===active && read.frames?.length){read.frames=[];read.overflow=true;}
     setDisabled();
