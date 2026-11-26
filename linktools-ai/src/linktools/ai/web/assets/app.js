@@ -1010,6 +1010,20 @@ function renderSessionHeader() {
 }
 const thinkingLevels=['low','medium','high','xhigh','max'];
 const thinkingLabels=['Low','Medium','High','Extra high','Maximum'];
+const thinkingPreferenceKey='linktools.ai-web.thinking';
+function restoreThinkingPreference() {
+  try {
+    const index=thinkingLevels.indexOf(localStorage.getItem(thinkingPreferenceKey));
+    if(index>=0)$('thinking').value=String(index);
+  } catch {
+    // The slider still works if this browser blocks local storage.
+  }
+  renderThinking();
+}
+function saveThinkingPreference() {
+  renderThinking();
+  try {localStorage.setItem(thinkingPreferenceKey,readThinking());} catch {}
+}
 function readThinking() {
   return thinkingLevels[Number($('thinking').value)] || 'low';
 }
@@ -1031,9 +1045,8 @@ function selectAttachments() {
   const picker=$('turn-files'), files=Array.from(picker.files);picker.value='';
   if(!files.length)return;
   const limit=state.config.attachment_upload;
-  const total=turnUploads.reduce((size,item)=>size+item.file.size,0)+files.reduce((size,file)=>size+file.size,0);
-  if(turnUploads.length+files.length>limit.max_files || total>limit.max_bytes || files.some(file=>!file.size)){
-    notice(`Choose up to ${limit.max_files} nonempty files, at most ${limit.max_bytes/1024} KiB total.`);return;
+  if(turnUploads.length+files.length>limit.max_files || files.some(file=>!file.size)){
+    notice(`Choose up to ${limit.max_files} nonempty files.`);return;
   }
   turnUploads=[...turnUploads,...files.map(file=>({file,id:shortAttemptId()}))];
   saveDraft();renderAttachments();
@@ -1048,12 +1061,12 @@ function readAttachment(file) {
 }
 function saveDraft() {
   if(!state.selectedSession)return;
-  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,planning:$('planning').checked,thinking:$('thinking').value,uploads:turnUploads});
+  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,planning:$('planning').checked,uploads:turnUploads});
 }
 function restoreDraft(sessionId) {
-  const draft=state.drafts.get(sessionId) || {prompt:'',planning:false,thinking:'0'};
+  const draft=state.drafts.get(sessionId) || {prompt:'',planning:false};
   $('prompt').value=draft.prompt;turnUploads=draft.uploads || [];renderAttachments();
-  $('planning').checked=draft.planning;$('thinking').value=draft.thinking ?? '0';renderThinking();
+  $('planning').checked=draft.planning;
 }
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
   const preserveObservation=Boolean(sessionId && sessionId===state.selectedSession);saveDraft();
@@ -2715,7 +2728,8 @@ async function openRecovery(active=false) {
 }
 $('open-recovery').onclick=()=>{ $('action-menu').open=false;return openRecovery(Boolean(state.session?.active_execution_id)).catch(showError); };
 $('recovery-shortcut').onclick=()=>openRecovery(true).catch(showError);
-$('thinking').oninput=renderThinking;
+restoreThinkingPreference();
+$('thinking').oninput=saveThinkingPreference;
 function nativeTurnInspector() {
   return state.view==='sessions' && state.config?.turn_sessions && state.config.turn_trace;
 }

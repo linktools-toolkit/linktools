@@ -60,7 +60,6 @@ _HEADERS = {
 _JSON_REQUEST_MAX_BYTES = 8 * 1024 * 1024
 # Transport bound, not the Runtime's canonical turn limit. Allow JSON escaping and the HTTP envelope.
 _TURN_JSON_REQUEST_MAX_BYTES = 512 * 1024
-_TURN_UPLOAD_MAX_BYTES = 512 * 1024
 _TURN_UPLOAD_MAX_FILES = 32
 _TURN_UPLOAD_JSON_MAX_BYTES = 2 * 1024 * 1024
 _TURN_SSE_LIMIT = 128
@@ -322,7 +321,6 @@ def _uploaded_prompt(prompt: str, value: object) -> str | tuple[str | BinaryCont
         raise invalid("attachment_count_invalid")
     if not value:
         return prompt
-    remaining = _TURN_UPLOAD_MAX_BYTES
     parts: list[str | BinaryContent] = [prompt]
     for item in value:
         if not isinstance(item, dict):
@@ -333,15 +331,12 @@ def _uploaded_prompt(prompt: str, value: object) -> str | tuple[str | BinaryCont
                 or len(media_type) > 128 or (media_type and not media_type.isprintable())
                 or not isinstance(encoded, str) or not encoded):
             raise invalid("attachment_invalid")
-        if len(encoded) > 4 * ((remaining + 2) // 3):
-            raise invalid("attachment_size_limit")
         try:
             data = base64.b64decode(encoded, validate=True)
         except ValueError as error:
             raise invalid("attachment_encoding_invalid") from error
-        if not data or len(data) > remaining:
-            raise invalid("attachment_size_limit")
-        remaining -= len(data)
+        if not data:
+            raise invalid("attachment_empty")
         media_type = media_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
         parts.append(BinaryContent(data, media_type=media_type, identifier=name))
     return tuple(parts)
@@ -455,7 +450,7 @@ class _Console:
             "runtime": self.runtime.status() if self.runtime is not None else None,
             "read_only": self.runtime is None,
             "turn_sessions": self.turn_sessions,
-            **({"attachment_upload": {"max_bytes": _TURN_UPLOAD_MAX_BYTES, "max_files": _TURN_UPLOAD_MAX_FILES}}
+            **({"attachment_upload": {"max_files": _TURN_UPLOAD_MAX_FILES}}
                if self.turn_sessions and self.runtime is not None else {}),
             **({"turn_trace": True} if self.turn_sessions and self.history is not None
                and self.history.has_turn_trace else {}),

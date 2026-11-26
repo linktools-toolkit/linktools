@@ -117,7 +117,7 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
         pass
 
     seen = []
-    binary = b"\x00browser upload\xff"
+    binary = bytes(range(256)) * 2304  # 576 KiB
 
     async def model(messages, _info):
         seen.extend(
@@ -138,7 +138,7 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
         client(create_app(runtime=runtime)) as http,
     ):
         config = (await http.get("/api/config")).json()
-        assert config["attachment_upload"]["max_bytes"] > len(binary)
+        assert config["attachment_upload"] == {"max_files": 32}
         created = await http.post("/api/sessions", headers=_HEADERS, json={
             "session_id": "chat", "request_id": "create",
         })

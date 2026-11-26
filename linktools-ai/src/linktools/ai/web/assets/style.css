@@ -309,3 +309,5 @@ dialog details>summary{font-size:12px;color:var(--muted);cursor:pointer}
 .turn-file-options .attachments:empty { display:none; }
 .turn-file-options .attachments li { margin-top:4px; overflow-wrap:anywhere; }
 .turn-file-options .attachments button { margin-left:6px; }
+
+#choose-attachments { display:inline-grid; place-items:center; min-width:36px; min-height:36px; }
