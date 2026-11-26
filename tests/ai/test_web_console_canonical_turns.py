@@ -251,3 +251,35 @@ async def test_web_send_reports_default_agent_feature_that_prevents_admission(tm
         }
         state_view = await runtime.history.turn_session_state("chat", principal=runtime.default_principal)
         assert state_view["active_turn_id"] is None
+
+
+def test_native_sse_projects_tool_updates_without_unused_or_empty_fields():
+    from linktools.ai.web._app import _native_turn_event_wire, _sse_frame
+
+    scope = {"turn_id": "turn", "turn_no": 9, "generation": 2, "revision": 15}
+    live = _native_turn_event_wire({
+        **scope, "type": "tool", "item": {
+            "kind": "tool", "key": "tool:1", "tool_name": "lookup", "status": "SUCCEEDED",
+            "position": [2, 0], "elapsed_ms": 0, "argument_preview": None, "error_message": None,
+        },
+    })
+    assert live == {
+        "turn_id": "turn", "generation": 2, "type": "tool",
+        "item": {"kind": "tool", "key": "tool:1", "tool_name": "lookup", "status": "SUCCEEDED", "elapsed_ms": 0},
+    }
+    assert _sse_frame("turn", live, compact=True) == (
+        'event: turn\ndata: {"turn_id":"turn","generation":2,"type":"tool",'
+        '"item":{"kind":"tool","key":"tool:1","tool_name":"lookup","status":"SUCCEEDED","elapsed_ms":0}}\n\n'
+    )
+    assert _native_turn_event_wire({
+        **scope, "type": "progress", "item": {"kind": "model", "key": "model:1:2", "status": "RUNNING"},
+    }) is None
+    terminal = _native_turn_event_wire({
+        **scope, "type": "terminal", "state": "succeeded", "prompt": "question",
+        "attachments": [], "items": [{"item_kind": "assistant", "content": "answer"}],
+        "output": {"text": "answer"}, "error_code": None,
+    })
+    assert terminal == {
+        **scope, "type": "terminal", "state": "succeeded", "prompt": "question",
+        "items": [{"item_kind": "assistant", "content": "answer"}],
+    }

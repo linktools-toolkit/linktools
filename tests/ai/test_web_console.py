@@ -1477,9 +1477,17 @@ async def test_local_chat_streams_public_progress_then_reads_committed_turn_afte
                 return
             body = message.get("body", b"")
             assert signature.encode() not in body
-            for line in body.splitlines():
+            lines = body.splitlines()
+            for line in lines:
                 if line.startswith(b"data: "):
-                    frames.put_nowait(json.loads(line[6:]))
+                    frame = json.loads(line[6:])
+                    if frame["type"] in ("delta", "tool", "progress", "preview_reset", "thinking_completed"):
+                        assert "turn_no" not in frame and "revision" not in frame
+                        assert not any(line.startswith(b"id: ") for line in lines)
+                    if frame["type"] == "progress":
+                        assert frame["item"]["status"] != "RUNNING"
+                        assert "elapsed_ms" not in frame["item"]
+                    frames.put_nowait(frame)
 
         async with client(app) as http:
             created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
@@ -1494,17 +1502,18 @@ async def test_local_chat_streams_public_progress_then_reads_committed_turn_afte
                     }, headers=_HEADERS)
                     assert started.status_code == 202, started.text
                     turn_id = started.json()["turn_id"]
-                    saw_running = False
+                    saw_thinking = False
                     while True:
                         frame = await frames.get()
                         assert frame["turn_id"] == turn_id
                         if frame["type"] == "terminal":
                             pytest.fail(f"Turn ended before first text delta: state={frame.get('state')}, "
                                         f"code={frame.get('error_code')}")
-                        if frame["type"] == "progress":
-                            saw_running |= frame["item"]["kind"] == "model" and frame["item"]["status"] == "RUNNING"
+                        if frame["type"] == "delta" and frame["delta_kind"] == "thinking":
+                            assert frame["text"] == "provider-internal reasoning"
+                            saw_thinking = True
                         if frame["type"] == "delta" and frame["delta_kind"] == "text":
-                            assert frame["text"] == answer and saw_running and not release.is_set()
+                            assert frame["text"] == answer and saw_thinking and not release.is_set()
                             break
                     release.set()
                     while (terminal := await frames.get())["type"] != "terminal":

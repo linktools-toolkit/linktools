@@ -156,6 +156,7 @@ _CHAT_PART_POSITION = ("agent_run_seq", "model_request_seq", "stream_attempt_seq
 
 _ExecutionFrame = tuple[str, dict[str, object], str | None]
 _MAX_CHAT_TURN_FRAME_BYTES = 256 * 1024
+_NATIVE_TURN_PREVIEWS = {"delta", "tool", "progress", "preview_reset", "thinking_completed"}
 
 
 def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
@@ -208,11 +209,12 @@ def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
     }}, cursor
 
 
-def _sse_frame(event: str, data: object, cursor: str | None = None) -> str:
+def _sse_frame(event: str, data: object, cursor: str | None = None, *, compact: bool = False) -> str:
     prefix = "" if cursor is None else f"id: {cursor}\n"
     if event != "message":
         prefix += f"event: {event}\n"
-    return prefix + "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+    separators = (",", ":") if compact else None
+    return prefix + "data: " + json.dumps(data, ensure_ascii=False, separators=separators) + "\n\n"
 
 
 def _session_execution_cursor(value: str | None) -> tuple[str | None, str | None]:
@@ -262,6 +264,39 @@ def _ordinary_turn_wire(turn: Mapping[str, object]) -> Mapping[str, object]:
                 return {key: value for key, value in turn.items() if key != "output"}
             break
     return turn
+
+
+def _native_turn_event_wire(value: Mapping[str, object]) -> Mapping[str, object] | None:
+    """Project native preview events to fields used by the browser."""
+    event_type = value.get("type")
+    if event_type in _NATIVE_TURN_PREVIEWS:
+        frame = {key: item for key, item in value.items() if key not in ("turn_no", "revision")}
+        if event_type in ("progress", "tool"):
+            item = value.get("item")
+            if not isinstance(item, Mapping):
+                return None
+            if event_type == "progress":
+                if item["status"] == "RUNNING":
+                    return None
+                fields = ("kind", "key", "status")
+            else:
+                fields = ("kind", "key", "tool_name", "status", "argument_preview", "elapsed_ms", "error_code")
+            frame["item"] = {key: item[key] for key in fields if item.get(key) is not None}
+        return frame
+    attachments = value.get("attachments")
+    if isinstance(attachments, list):
+        safe_attachments = [
+            {key: item[key] for key in ("attachment_id", "source", "media_type", "size", "position", "display_name")
+             if key in item}
+            for item in attachments if isinstance(item, Mapping)
+        ]
+        value = ({**value, "attachments": safe_attachments} if safe_attachments
+                 else {key: item for key, item in value.items() if key != "attachments"})
+    if event_type == "terminal":
+        value = _ordinary_turn_wire(value)
+        if value.get("error_code") is None:
+            value = {key: item for key, item in value.items() if key != "error_code"}
+    return value
 
 
 def _text(payload: Mapping[str, object], key: str, default: str | None = None) -> str:
@@ -678,20 +713,11 @@ class _Console:
                 nonlocal buffered, overflow
                 if overflow:
                     return
-                revision = value.get("revision")
-                attachments = value.get("attachments")
-                if isinstance(attachments, list):
-                    value = {
-                        **value,
-                        "attachments": [
-                            {key: item[key] for key in ("attachment_id", "source", "media_type", "size", "position", "display_name")
-                             if key in item}
-                            for item in attachments if isinstance(item, Mapping)
-                        ],
-                    }
-                if value.get("type") == "terminal":
-                    value = _ordinary_turn_wire(value)
-                frame = _sse_frame("turn", value, str(revision) if isinstance(revision, int) else None)
+                wire = _native_turn_event_wire(value)
+                if wire is None:
+                    return
+                revision = wire.get("revision")
+                frame = _sse_frame("turn", wire, str(revision) if isinstance(revision, int) else None, compact=True)
                 size = len(frame.encode("utf-8"))
                 if queue.full() or buffered + size > _TURN_SSE_BUFFER:
                     overflow = True
@@ -710,7 +736,7 @@ class _Console:
                 snapshot = await self.require_history().turn_session_state(
                     identity, principal=self.principal, local_workspace=self.local_turn_workspace,
                 )
-                yield _sse_frame("turn", {"type": "snapshot", "session": snapshot}, str(snapshot["revision"]))
+                yield _sse_frame("turn", {"type": "snapshot", "session": snapshot}, str(snapshot["revision"]), compact=True)
                 while True:
                     try:
                         async with asyncio.timeout(15):
