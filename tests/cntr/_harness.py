@@ -190,6 +190,8 @@ def configure_builtin_snapshot(manager: "ContainerManager") -> None:
     manager.config.set("NGINX_WILDCARD_DOMAIN", True)
     manager.config.set("NGINX_HTTPS_ENABLE", True)
     manager.config.set("AUTHELIA_OIDC_CLIENT_SECRET", "snapshot-oidc-secret")
+    manager.config.set("SAFELINE_DETECTOR_MGMT_TOKEN", "TEST-detector-token")
+    manager.config.set("SAFELINE_MGT_INTERNAL_TOKEN", "TEST-management-token")
 
 
 def configure_builtin_inputs(manager: "ContainerManager") -> None:

@@ -219,3 +219,24 @@ def test_bare_config_shows_help_and_never_executes_compose():
     assert "deprecated" not in result.stderr
     assert "deprecated" not in result.stdout
     assert "services:" not in result.stdout
+
+
+def test_safeline_internal_tokens_are_shared_and_persisted(fresh_manager, tmp_path):
+    from _harness import make_manager
+
+    def tokens(manager):
+        services = manager.containers["safeline"].docker_compose["services"]
+
+        def env(service, name):
+            return dict(item.split("=", 1) for item in services["safeline-" + service]["environment"])[name]
+
+        detector = env("detector", "DETECTOR_MGMT_TOKEN")
+        assert all(env(name, "DETECTOR_MGMT_TOKEN") == detector for name in ("luigi", "fvm"))
+        management = env("mgt", "MGT_INTERNAL_TOKEN")
+        assert env("tengine", "TCD_MGT_TOKEN") == management
+        assert detector != management
+        assert all(len(bytes.fromhex(token)) == 32 for token in (detector, management))
+        return detector, management
+
+    original = tokens(fresh_manager)
+    assert tokens(make_manager(tmp_path / "data", tmp_path / "temp")) == original

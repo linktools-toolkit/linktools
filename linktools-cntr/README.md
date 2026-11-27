@@ -336,4 +336,9 @@ Nginx 保留自己的应用网络，但 Tengine 不加入它。网段由 `SAFELI
 回源端口只走业务/认证路由，不再次进入 WAF，也不跳转 HTTPS。入口覆盖 `X-Forwarded-For` 为真实客户端地址；SafeLine 保留 Host 并按原生 `$proxy_add_x_forwarded_for` 追加代理地址。
 该端口不发布到宿主机，仍仅允许 Tengine 的精确 TCP 来源；realip 递归仅信任 `.253`、`.254` 两个代理，不信任整个网段。无需私有回源头，也不因缺少客户端身份直接返回 400；认证与业务按自身规则处理。
 不能把回源指向 Nginx 的公开入口，否则会形成循环。
+
+SafeLine 首次渲染时生成并保存两份独立的内部凭据：Detector、Luigi 和 FVM 共用
+`SAFELINE_DETECTOR_MGMT_TOKEN`，管理服务和 Tengine 共用
+`SAFELINE_MGT_INTERNAL_TOKEN`。它们不使用网页 API Token。升级时用更新后的 Compose
+重建相关 SafeLine 容器，单纯重启不会更新容器环境。
 详见 [网络与回源契约](docs/integrations.md#nginx-and-safeline-networks)。

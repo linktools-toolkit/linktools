@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SafeLine WAF container definition."""
+from secrets import token_hex
 from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
 from linktools.cntr import BaseContainer
 from linktools.cntr.ext import Flare, Nginx, endpoint, load_port_url
-from linktools.core import ConfigRef, ConfigLazy, ConfigField
+from linktools.core import ConfigRef, ConfigLazy, ConfigField, LazyProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
@@ -34,6 +35,12 @@ class Container(BaseContainer):
             SAFELINE_REGION="",
             SAFELINE_PORT=ConfigField(cast=int, default=9200),
             SAFELINE_API_TOKEN="",
+            SAFELINE_DETECTOR_MGMT_TOKEN=ConfigField(
+                secret=True, provider=LazyProvider(lambda r: token_hex(32), cached=True),
+            ),
+            SAFELINE_MGT_INTERNAL_TOKEN=ConfigField(
+                secret=True, provider=LazyProvider(lambda r: token_hex(32), cached=True),
+            ),
         )
 
     @cached_property
