@@ -333,6 +333,8 @@ class SqlSessionTurnReader:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
         async def read(group):
+            from sqlalchemy import select, tuple_
+
             owner = group.transaction(turn_store)
             if not isinstance(owner, SqlStateRowReader):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -358,11 +360,24 @@ class SqlSessionTurnReader:
                         continue
                     self._transcript_manifest(row["result_json"])
                     remaining -= row["result_json"]["terminal_text_bytes"]
+                    if row["stored_input"] is None and row["graph_execution"] is None:
+                        remaining -= row.get("omitted_prompt_chars") or 0
                     if remaining < 0:
                         # Keep the non-fitting witness to prove the archive cut and
                         # preserve the boundary across cached suffix extensions.
                         rows = rows[index:]
                         break
+            omitted = {(row["session_key"], row["turn_id"]) for row in rows if row.get("omitted_prompt_chars") is not None}
+            if omitted:
+                columns = self._turns.c
+                full = await owner.read_sql_rows(self._context, select(
+                    columns.session_key, columns.turn_id, columns.request_json["prompt"].as_string().label("prompt"),
+                ).where(columns.scope_key == self._scope, tuple_(columns.session_key, columns.turn_id).in_(sorted(omitted))))
+                restored = {(row["session_key"], row["turn_id"]): row["prompt"] for row in full}
+                if restored.keys() != omitted or any(not isinstance(value, str) for value in restored.values()):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The retained session prompts are incomplete")
+                rows = tuple({**row, "prompt": restored[(row["session_key"], row["turn_id"])]}
+                             if row.get("omitted_prompt_chars") is not None else row for row in rows)
             selected = rows[:body_limit]
             prompts = {}
             for position, row in enumerate(selected):
@@ -890,8 +905,9 @@ class SqlSessionTurnReader:
         """Read bounded candidates after the caller authorizes the current session head."""
         start = max(0, through - _CONTEXT_POSITIONS)
         cached = self._recent.get(session_id)
-        if (cached is not None and cached.max_context_bytes == max_context_bytes
-                and cached.after <= start <= cached.through <= through):
+        covered = (cached is not None and cached.max_context_bytes == max_context_bytes
+                   and cached.after <= start <= cached.through <= through)
+        if covered:
             if cached.through == through:
                 self._recent.move_to_end(session_id)
                 return cached.turns
@@ -907,6 +923,7 @@ class SqlSessionTurnReader:
             session_id, after=after, through=through, lineage=lineage,
             checkpoint=checkpoint if cached is None and not lineage else None,
             compacted_context=not lineage, _trim_reset=True, _context_budget=max_context_bytes,
+            _elide_wide_prompts=not covered,
         )
         for index in range(len(turns) - 1, -1, -1):
             if turns[index].reset_context:
@@ -925,9 +942,10 @@ class SqlSessionTurnReader:
         self, session_id: str, *, after: int, through: int, lineage: tuple[SessionTurnSegment, ...] = (),
         missing: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR, checkpoint: SqlStepStore | None = None,
         compacted_context: bool | str = False, _trim_reset: bool = False, _context_budget: int | None = None,
+        _elide_wide_prompts: bool = False,
     ) -> tuple[SessionContextTurn, ...]:
         """Read finalized input and only the confirmed conversation transcripts."""
-        from sqlalchemy import case, select, type_coerce
+        from sqlalchemy import LargeBinary, case, cast, func, select, type_coerce
 
         if not 0 <= through - after <= _CONTEXT_POSITIONS or after < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "The admitted context range is invalid")
@@ -936,12 +954,22 @@ class SqlSessionTurnReader:
 
         columns = self._turns.c
         succeeded = columns.state == "succeeded"
-        prompt = columns.request_json["prompt"].as_string().label("prompt")
+        text = columns.request_json["prompt"].as_string()
+        prompt_columns = (text.label("prompt"),)
+        if _elide_wide_prompts and through - after > 1:
+            # Character count never exceeds the runtime's UTF-8 byte charge.
+            # SQLite can stop counting at NUL, which only weakens the bound.
+            sqlite = self._context.engine.dialect.name == "sqlite"
+            chars = func.length(text) if sqlite else func.char_length(text)
+            byte_size = func.length(cast(text, LargeBinary)) if sqlite else func.octet_length(text)
+            wide = byte_size > 4096
+            prompt_columns = (case((~wide, text), else_=None).label("prompt"),
+                              case((wide, chars), else_=None).label("omitted_prompt_chars"))
         result = type_coerce(case((succeeded, columns.result_json)), columns.result_json.type).label("result_json")
         stored_input = columns.request_json["input"].label("stored_input")
         reset = (columns.request_json["session_context"].as_string() == "current_turn").label("reset_context")
         statement = select(
-            columns.turn_no, columns.state, prompt, stored_input, result, columns.binding_key, reset,
+            columns.turn_no, columns.state, *prompt_columns, stored_input, result, columns.binding_key, reset,
             columns.turn_id, columns.session_key, columns.generation, columns.split_source_receipt,
             columns.request_json["graph_execution"].as_string().label("graph_execution"),
         ).where(

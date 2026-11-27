@@ -81,3 +81,64 @@ async def test_cold_session_hydrates_only_roots_after_successful_reset(tmp_path)
             assert admitted_prompts[-1] == ["reset", "retained", "after-reopen"]
             assert loaded[0] == (old_roots[reset], old_roots[kept])
             assert before - hydrated_sizes[0] >= 192 * 1024
+
+
+@pytest.mark.asyncio
+async def test_cold_wide_prompts_project_then_restore_only_retained_exact_text(tmp_path):
+    from sqlalchemy import event
+    from .test_session_turn_sql import _BINDING
+    from linktools.ai.persistence.turns import SessionTurnKey
+
+    storage = PersistenceStorage.sqlite(tmp_path / "cold-wide.db")
+    early = "旧" * 4500
+    wide = "新" * 5000 + "\0" + "仍然保留"
+    plain = "small\0prompt"
+    leading_nul = "\0" + "零" * 6000
+    async with Persistence.open("cold-wide", storage=storage) as state:
+        turns = state.session_turns
+        for session in ("wide", "short", "reset", "leading"):
+            await turns.create(session, config={})
+            prompts = {"wide": (early, early, wide, plain), "short": (plain, "short"),
+                       "reset": (wide, "small reset"), "leading": (leading_nul, plain)}[session]
+            for no, prompt in enumerate(prompts, 1):
+                key = SessionTurnKey(session, f"{session}-{no}")
+                reset = session == "reset" and no == 2
+                request = {"prompt": prompt}
+                if reset:
+                    request["session_context"] = "current_turn"
+                assert await turns.accept(
+                    key, expected_revision=(no - 1) * 2, context_from=no if reset else 1, context_through=no - 1,
+                    request_key=key.turn_id, request=request, binding=_BINDING, lease_seconds=60,
+                )
+                assert await turns.finish(
+                    key, generation=1, turn_no=no, state="succeeded",
+                    transcript=(ModelRequest(parts=[UserPromptPart("")]), ModelResponse(parts=[TextPart("ok")])),
+                )
+    async with Persistence.open("cold-wide", storage=storage) as state:
+        turns = state.session_turns
+        exact = await turns.read_context_range("wide", after=0, through=4)
+        assert exact[-2].request["prompt"] == wide
+        assert exact[-1].request["prompt"] == plain
+        refills = []
+
+        def listen(_conn, _cursor, sql, parameters, *_rest):
+            if "ai_session_turns.session_key IN" in sql or "(ai_session_turns.session_key, ai_session_turns.turn_id) IN" in sql:
+                refills.append(parameters)
+
+        engine = turns._context.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", listen)
+        try:
+            cold = await turns.recent_context("wide", through=4, max_context_bytes=8000)
+            assert cold == exact[-3:]  # newest + wide predecessor + non-fitting older witness
+            assert len(refills) == 1
+            assert b"wide-2" in refills[0] and b"wide-3" in refills[0] and b"wide-1" not in refills[0]
+            await turns.recent_context("wide", through=4, max_context_bytes=8000)
+            await turns.recent_context("short", through=2, max_context_bytes=8000)
+            after_reset = await turns.recent_context("reset", through=2, max_context_bytes=8000)
+            assert [turn.request["prompt"] for turn in after_reset] == ["small reset"]
+            assert len(refills) == 1
+            leading = await turns.recent_context("leading", through=2, max_context_bytes=8000)
+            assert leading[0].request["prompt"] == leading_nul
+            assert len(refills) == 2 and b"leading-1" in refills[-1]
+        finally:
+            event.remove(engine, "before_cursor_execute", listen)
