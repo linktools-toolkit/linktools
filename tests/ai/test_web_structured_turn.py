@@ -6,6 +6,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.messages import CANONICAL_OUTPUT_TOOL_NAME
@@ -19,7 +20,9 @@ from .test_web_console import _HEADERS, client
 
 
 @pytest.mark.asyncio
-async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, caplog):
+@pytest.mark.parametrize("checkpoints", (False, True))
+@pytest.mark.parametrize("alternatives", (False, True))
+async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, caplog, alternatives, checkpoints):
     class Policy(TenantAuthorizationPolicy):
         pass
 
@@ -35,9 +38,18 @@ async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, c
         )))
         output_tool, = info.output_tools
         assert output_tool.name == CANONICAL_OUTPUT_TOOL_NAME
-        return ModelResponse(parts=[ToolCallPart(output_tool.name, expected, tool_call_id="output")])
+        accepted = ToolCallPart(output_tool.name, expected, tool_call_id="accepted")
+        parts = [accepted]
+        if alternatives:
+            parts = [
+                ToolCallPart(output_tool.name, {}, tool_call_id="invalid"),
+                accepted,
+                ToolCallPart(output_tool.name, {"count": 9}, tool_call_id="skipped"),
+            ]
+        return ModelResponse(parts=parts)
 
     features = _persistence_capabilities()
+    features.capability(SessionCapability(checkpoints=checkpoints), scope="runtime")
     features.agent(
         "default", output_schema={
             "type": "object", "properties": {"count": {"type": "integer"}}, "required": ["count"],

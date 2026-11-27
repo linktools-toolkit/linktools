@@ -48,6 +48,7 @@ TOOL_ARGUMENT_PREVIEWS_METADATA_KEY = "linktools.ai.tool_argument_previews"
 TOOL_ELAPSED_MS_METADATA_KEY = "linktools.ai.tool_elapsed_ms"
 
 CANONICAL_OUTPUT_TOOL_NAME = "linktools_final_output"
+_PYDANTIC_OUTPUT_ACCEPTED = "Final result processed."
 
 
 def canonical_structured_output_reference(messages: Sequence[ModelMessage]) -> tuple[int, int]:
@@ -56,11 +57,27 @@ def canonical_structured_output_reference(messages: Sequence[ModelMessage]) -> t
                            if isinstance(messages[position], ModelResponse)), -1)
     if response_index < 0:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    parts = [position for position, part in enumerate(messages[response_index].parts)
+    calls = [(position, part.tool_call_id) for position, part in enumerate(messages[response_index].parts)
              if isinstance(part, ToolCallPart) and part.tool_name == CANONICAL_OUTPUT_TOOL_NAME]
-    if len(parts) != 1:
+    if len(calls) == 1:
+        return response_index, calls[0][0]
+    if not calls:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return response_index, parts[0]
+
+    # The SDK acknowledges the selected call and also writes successful-looking
+    # receipts for skipped alternatives. Match its durable selection, not order.
+    acknowledged = [
+        part.tool_call_id
+        for request in messages[response_index + 1:] if isinstance(request, ModelRequest)
+        for part in request.parts
+        if isinstance(part, ToolReturnPart) and part.tool_name == CANONICAL_OUTPUT_TOOL_NAME
+        and part.outcome == "success" and part.content == _PYDANTIC_OUTPUT_ACCEPTED
+    ]
+    if len(acknowledged) == 1:
+        winners = [position for position, call_id in calls if call_id == acknowledged[0]]
+        if len(winners) == 1:
+            return response_index, winners[0]
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def canonical_structured_output(
