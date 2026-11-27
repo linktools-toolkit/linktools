@@ -142,40 +142,6 @@ jobs:
           GROUP: ${{ matrix.check.group }}
           TEST_TIER: ${{ needs.discover.outputs.test-tier }}
         run: |
-          check_log=
-          finish_check_log() {
-            if [ -z "$check_log" ]; then
-              return
-            fi
-            if [ "$(wc -c < "$check_log")" -le 40960 ]; then
-              cat "$check_log"
-            else
-              head -c 8192 "$check_log"
-              printf '\n[Log exceeds 40 KiB; showing its start and final diagnostics.]\n'
-              tail -c 32768 "$check_log"
-            fi
-            rm -f "$check_log"
-            check_log=
-          }
-          run_check() {
-            case " $PYTEST_ADDOPTS " in
-              *" --test-shard=1/5 "*)
-                # The runner can kill the shell before its exit trap flushes.
-                # Show bounded progress without changing the check or its result.
-                python manage.py check "$1" --skip-compatibility --test-tier "$TEST_TIER" 2>&1 |
-                  tee "$check_log" |
-                  LC_ALL=C awk 'used < 8192 {
-                    line = substr($0, 1, 256)
-                    if (used + length(line) + 1 <= 8192) { print line; fflush() }
-                    used += length(line) + 1
-                  }'
-                ;;
-              *)
-                python manage.py check "$1" --skip-compatibility --test-tier "$TEST_TIER" >"$check_log" 2>&1
-                ;;
-            esac
-          }
-          trap finish_check_log EXIT
           trap 'exit 130' INT
           trap 'exit 143' TERM
           read -r -a packages <<< "$PACKAGES"
@@ -183,8 +149,7 @@ jobs:
           status=0
           for package in "${packages[@]}"; do
             echo "::group::$package"
-            check_log=$(mktemp)
-            if run_check "$package"; then
+            if python manage.py check "$package" --skip-compatibility --test-tier "$TEST_TIER"; then
               code=0
               result=success
             else
@@ -192,7 +157,6 @@ jobs:
               result=failure
               status=1
             fi
-            finish_check_log
             echo '::endgroup::'
             printf '%s / Python %s / %s / %s: %s\n' "$package" "$PYTHON" "$GROUP" "$TEST_TIER" "$result" >> "$GITHUB_STEP_SUMMARY"
             if [ "$code" -ge 128 ]; then
