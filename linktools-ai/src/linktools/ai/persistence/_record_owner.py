@@ -8,18 +8,19 @@ from typing import TYPE_CHECKING
 from ..core import (
     AGENT_RUN_ID_MAX_BYTES, EXECUTION_ID_MAX_BYTES, EXECUTION_REQUEST_KEY_MAX_BYTES,
     PERSISTENCE_NAMESPACE_MAX_BYTES, RESOURCE_ID_MAX_BYTES,
-    TENANT_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, validate_lease_owner,
+    TENANT_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, TaskStatus, validate_lease_owner,
 )
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
 
-from ._task_state import GRAPH_RECOVERY_STATES
-
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
     from sqlalchemy.sql.selectable import FromClause
     from sqlalchemy.sql.elements import ColumnElement
+
+
+GRAPH_RECOVERY_STATES = frozenset({TaskStatus.PENDING.value, TaskStatus.RUNNING.value})
 
 
 EXECUTION_SCAN_STATES = frozenset((
@@ -256,5 +257,5 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
 
 
 
-__all__ = ["EXECUTION_SHELL_KIND", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RUN_ADMISSION_KEY_MAX_BYTES", "is_run_admission_address", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["EXECUTION_SHELL_KIND", "GRAPH_RECOVERY_STATES", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RUN_ADMISSION_KEY_MAX_BYTES", "is_run_admission_address", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
 

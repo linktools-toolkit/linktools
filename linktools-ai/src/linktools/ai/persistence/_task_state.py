@@ -10,9 +10,6 @@ from ..task import TaskGraphView, TaskNode, TaskNodeView
 from ._task_summary import _TaskSummary
 
 
-GRAPH_RECOVERY_STATES = frozenset({TaskStatus.PENDING.value, TaskStatus.RUNNING.value})
-
-
 def _is_sha256(value: object) -> bool:
     return (
         isinstance(value, str)

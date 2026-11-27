@@ -34,6 +34,7 @@ from ..task import (
 )
 from .durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._plan import PersistenceDomain
+from ._record_owner import GRAPH_RECOVERY_STATES
 from .repositories import (
     RepositoryBase,
     append_operation,
@@ -62,7 +63,6 @@ from ._task_events import (
 )
 from ._task_summary import _TaskSummary
 from ._task_state import (
-    GRAPH_RECOVERY_STATES,
     _effective_graph_status,
     _is_sha256,
     _isolated_graph_status,
